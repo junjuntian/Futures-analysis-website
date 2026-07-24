@@ -4,7 +4,7 @@
 
 阶段 1：工程基础建设。
 
-状态：剩余 P0 技术决策已写入 `docs/DECISIONS.md`；Phase 0 文档审查已使用 `ce-doc-review` 完成并修正发现的问题；Phase 1 计划已创建；Git 仓库、Rust/Vue/Docker/Nginx/CI 基础工程骨架已落地。本地 Rust 与前端验证已通过；Docker/Compose 在本机不可用，`futures` VPS 也未安装 Docker，因此容器部署验证暂时阻塞。原始 Word 设计方案不得修改。
+状态：剩余 P0 技术决策已写入 `docs/DECISIONS.md`；Phase 0 文档审查已使用 `ce-doc-review` 完成并修正发现的问题；Phase 1 计划已创建；Git 仓库、Rust/Vue/Docker/Nginx/CI 基础工程骨架已落地。本地 Rust 与前端验证已通过；`futures` VPS 已安装 Docker/Compose 并完成 Phase 1 部署验证；Phase 1 Evaluator 审查最终 PASS。原始 Word 设计方案不得修改。
 
 ## 本阶段任务状态
 
@@ -22,12 +22,13 @@
 | 上下文交接机制 | 已完成 | `docs/handoffs/README.md` 与 `docs/handoffs/LATEST.md` |
 | Phase 0 文档审查 | 已完成 | `docs/reviews/DOC_REVIEW_PHASE_0.md` |
 | Phase 1 计划 | 已完成 | `docs/phases/PHASE_01_FOUNDATION.md` |
-| Phase 1 工程实现 | 基本完成 | 已创建 Git、Rust/Vue/Docker/Nginx/CI 基础文件；Rust 与前端验证通过；Docker 配置因本机无 Docker 未验证 |
-| futures VPS 部署验证 | 阻塞 | 已通过 MCP SSH 核对；`futures` VPS 未安装 Docker/Compose，无法执行容器部署验证 |
+| Phase 1 工程实现 | 已完成 | 已创建 Git、Rust/Vue/Docker/Nginx/CI 基础文件；Rust 与前端验证通过；远端 Compose 配置通过 |
+| futures VPS 部署验证 | 已完成 | 已通过 MCP SSH 安装 Docker/Compose、部署容器、执行迁移并完成健康检查 |
+| Phase 1 Evaluator 审查 | 已完成 | `docs/reviews/PHASE_01_EVALUATION.md`，最终状态 PASS |
 
 ## 本地验证结果
 
-验证时间：2026-07-24 20:59 +08:00。
+最近验证时间：2026-07-24 21:50 +08:00。
 
 | 命令 | 结果 | 备注 |
 | --- | --- | --- |
@@ -39,24 +40,24 @@
 | `pnpm test` | 通过 | 沙箱内被 esbuild 上级目录读取权限拦截；使用真实文件系统权限重跑通过 |
 | `pnpm build` | 通过 | 沙箱内同样受 esbuild 权限拦截；使用真实文件系统权限重跑通过；存在大 chunk 提示，Phase 1 可接受 |
 | `docker --version` | 未通过 | 本机未安装 Docker 或未加入 PATH |
-| `docker compose config` | 未通过 | 同上，无法校验 Compose 配置 |
+| `docker compose config` | 本机未通过；VPS 通过 | 本机无 Docker；`futures` VPS 已执行 `docker compose --profile dev config --quiet` |
 
 ## futures VPS 核对结果
 
-核对时间：2026-07-24 20:59 +08:00。
+最近核对时间：2026-07-24 21:48 +08:00。
 
 | 项目 | 结果 |
 | --- | --- |
 | SSH 别名 | `futures` |
 | 系统 | Ubuntu/Linux `7.0.0-22-generic`，x86_64 |
-| Docker | 未安装：`docker: command not found` |
-| Docker Compose | 未安装：`docker-compose: command not found` |
-| 当前容器 | 无法查询；Docker 不可用 |
-| 监听端口 | 仅观察到 SSH 22、DNS stub 53、chrony 323 等基础端口 |
-| 根分区 | 25G，总用量约 2.7G，约 21G 可用 |
-| 内存 | 约 956MiB，总可用约 762MiB |
+| Docker | Docker 29.1.3 |
+| Docker Compose | Docker Compose 2.40.3 |
+| 当前容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行 |
+| 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
+| 根分区 | 25G，部署后约 14G 可用 |
+| 内存 | 约 956MiB；已启用项目 swapfile 2GiB |
 
-部署状态：尚未部署。阻塞原因是 VPS 缺少 Docker/Compose；是否安装 Docker 或改用其他部署方式需要用户确认。
+部署状态：已部署。访问地址：`http://172.238.11.174:8088`。
 
 ## 验证限制
 
@@ -64,10 +65,9 @@
 
 ## 后续步骤
 
-1. 等待用户确认是否允许在 `futures` VPS 安装 Docker/Compose，或指定其他部署方式。
-2. 用户确认后，执行容器部署验证并更新 `docs/deployments/FUTURES_VPS_PHASE_01.md`。
-3. 在容器验证完成后，进行 Phase 1 审查与修复。
-4. 若需要切换上下文，按 `docs/handoffs/README.md` 创建交接文档。
+1. 提交 Phase 1 部署修复、部署记录和审查报告。
+2. 按 `docs/handoffs/README.md` 创建新的阶段收口交接文档。
+3. 下一阶段开始前，先确认 Phase 2 范围和仍开放的非阻塞事项。
 
 ## 变更规则
 

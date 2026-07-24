@@ -69,7 +69,7 @@ services:
     working_dir: /app
     command: ["sh", "-lc", "corepack enable && pnpm install --frozen-lockfile && pnpm --dir frontend dev"]
     volumes:
-      - ./:/app:ro
+      - ./:/app
       - frontend_node_modules:/app/frontend/node_modules
       - root_node_modules:/app/node_modules
     networks:

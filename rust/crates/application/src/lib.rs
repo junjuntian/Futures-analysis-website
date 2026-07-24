@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct HealthStatus {
     pub status: &'static str,
+    #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, example = "2026-07-24T00:00:00Z")]
     pub checked_at: OffsetDateTime,
 }
