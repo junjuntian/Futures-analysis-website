@@ -1,0 +1,10 @@
+{
+  "name": "futures-analysis-platform",
+  "private": true,
+  "scripts": {
+    "lint": "pnpm --dir frontend lint",
+    "test": "pnpm --dir frontend test",
+    "build": "pnpm --dir frontend build"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

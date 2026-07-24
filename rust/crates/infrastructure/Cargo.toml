@@ -1,0 +1,9 @@
+[package]
+name = "infrastructure"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+tracing-subscriber.workspace = true

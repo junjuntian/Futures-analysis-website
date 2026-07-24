@@ -1,0 +1,51 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*cookie*
+*storage-state*
+storage_state*
+master-key*
+
+# Rust
+target/
+rust/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+coverage/
+frontend/coverage/
+
+# Databases and local storage
+pgdata/
+postgres-data/
+data/
+storage/
+uploads/
+tmp/
+temp/
+
+# Logs and generated evidence
+*.log
+logs/
+screenshots/
+playwright-report/
+test-results/
+
+# IDE and OS
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Graphify generated root output
+graphify-out/
