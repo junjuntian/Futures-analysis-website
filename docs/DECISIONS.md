@@ -181,10 +181,10 @@
 状态：已确认。
 
 - 系统中不存在用户时，允许访问一次性初始化接口或初始化页面。
-- 初始化必须校验环境变量 `BOOTSTRAP_TOKEN`。
+- 初始化必须校验一次性 bootstrap token。生产与 VPS 环境使用 `BOOTSTRAP_TOKEN_FILE` 指向只读挂载文件，当前 futures VPS 约定宿主路径为 `/etc/futures-platform/secrets/bootstrap-token`，`root:root` 且权限 `0400`；不得写入 Git、数据库、镜像、日志或普通 `.env`。开发环境可使用等价临时文件；环境变量 `BOOTSTRAP_TOKEN` 仅允许非生产本地调试。
 - 初始化在单个数据库事务中创建首个管理员用户、个人 Workspace 和 Workspace Owner 成员关系。
 - 初始化不自动创建虚构交易账户。
-- 首个用户创建成功后，初始化入口永久关闭。
+- 首个用户创建成功后，初始化入口永久关闭，并立即使 token 失效；文件来源的 token 必须删除。
 - 并发初始化只能有一个请求成功，必须通过集成测试验证。
 
 ### `DEC-027` 成交纠错和计算版本

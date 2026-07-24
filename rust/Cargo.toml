@@ -19,14 +19,19 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1.0"
 application = { path = "crates/application" }
+argon2 = "0.5"
 axum = "0.8"
+base64 = "0.22"
 common = { path = "crates/common" }
 database = { path = "crates/database" }
 domain = { path = "crates/domain" }
 infrastructure = { path = "crates/infrastructure" }
+rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "uuid", "time"] }
+subtle = "2.6"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros", "serde", "serde-well-known"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time", "net"] }

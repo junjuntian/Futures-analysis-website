@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.secrets/
 *.pem
 *.key
 *.p12
@@ -32,6 +33,8 @@ storage/
 uploads/
 tmp/
 temp/
+.tmp/
+.codex-tmp/
 
 # Logs and generated evidence
 *.log

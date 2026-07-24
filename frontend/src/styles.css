@@ -29,9 +29,22 @@ body {
   height: 64px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   background: #fff;
   border-bottom: 1px solid #e5eaf3;
   font-weight: 600;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.identity-chip {
+  color: #394551;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .page {
@@ -70,4 +83,22 @@ body {
 .status-alert,
 .descriptions {
   margin-top: 20px;
+}
+
+.auth-page {
+  min-height: calc(100vh - 120px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-panel {
+  width: min(440px, 100%);
+}
+
+.auth-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }

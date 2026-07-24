@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::{env, net::SocketAddr};
+use std::{env, fs, net::SocketAddr};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -30,8 +30,20 @@ impl AppConfig {
             .unwrap_or_else(|_| format!("0.0.0.0:{default_port}"))
             .parse()
             .map_err(|err| AppError::InvalidConfig(format!("BIND_ADDR: {err}")))?;
-        let database_url =
-            env::var("DATABASE_URL").map_err(|_| AppError::MissingConfig("DATABASE_URL"))?;
+        let database_url_file = env::var("DATABASE_URL_FILE").ok();
+        if env::var("APP_ENV").is_ok_and(|value| value.eq_ignore_ascii_case("production"))
+            && database_url_file.is_none()
+        {
+            return Err(AppError::InvalidConfig(
+                "DATABASE_URL_FILE is required in production".into(),
+            ));
+        }
+        let database_url = database_url_file
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| env::var("DATABASE_URL").ok())
+            .ok_or(AppError::MissingConfig("DATABASE_URL"))?;
 
         Ok(Self {
             app_name,

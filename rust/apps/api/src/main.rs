@@ -1,26 +1,70 @@
+mod auth;
+
 use application::{HealthStatus, VersionInfo};
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use auth::{AuthConfig, AuthState, LoginLimiter};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{delete, get, post},
+};
 use common::{ApiResponse, AppConfig};
-use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::{ServiceBuilderExt, request_id::MakeRequestUuid, trace::TraceLayer};
 use tracing::info;
-use utoipa::OpenApi;
+use utoipa::{
+    OpenApi,
+    openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
+};
 use uuid::Uuid;
-
-#[derive(Clone)]
-struct AppState {
-    pool: PgPool,
-    version: VersionInfo,
-}
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(live, ready, version, openapi),
-    components(schemas(HealthStatus, VersionInfo))
+    paths(
+        live,
+        ready,
+        version,
+        openapi,
+        auth::bootstrap,
+        auth::login,
+        auth::logout,
+        auth::me,
+        auth::csrf,
+        auth::workspace,
+        auth::sessions,
+        auth::revoke_session
+    ),
+    components(schemas(
+        HealthStatus,
+        VersionInfo,
+        auth::BootstrapRequest,
+        auth::LoginRequest,
+        auth::UserSummary,
+        auth::WorkspaceSummary,
+        auth::MeResponse,
+        auth::CsrfResponse,
+        auth::SessionSummary,
+        auth::SessionsQuery,
+        auth::ErrorBody
+    )),
+    modifiers(&SecurityAddon)
 )]
 struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "session_cookie",
+                SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("futures_session"))),
+            );
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
     infrastructure::init_tracing();
     let config = AppConfig::from_env(8080)?;
+    let auth_config = AuthConfig::from_env()?;
     info!(
         bind_addr = %config.bind_addr,
         database_url = config.redacted_database_url(),
@@ -37,9 +82,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pool = database::connect(&config.database_url).await?;
-    let state = Arc::new(AppState {
+    let state = Arc::new(AuthState {
         pool,
         version: VersionInfo::new(config.app_name.clone(), config.app_version.clone()),
+        config: auth_config,
+        limiter: Arc::new(LoginLimiter::default()),
     });
 
     let app = router(state);
@@ -50,12 +97,27 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn router(state: Arc<AppState>) -> Router {
+fn router(state: Arc<AuthState>) -> Router {
+    let auth_routes = Router::new()
+        .route("/api/v1/auth/bootstrap", post(auth::bootstrap))
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .route("/api/v1/auth/me", get(auth::me))
+        .route("/api/v1/auth/csrf", get(auth::csrf))
+        .route("/api/v1/workspace", get(auth::workspace))
+        .route("/api/v1/sessions", get(auth::sessions))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            delete(auth::revoke_session),
+        )
+        .with_state(state.clone());
+
     Router::new()
         .route("/api/v1/health/live", get(live))
         .route("/api/v1/health/ready", get(ready))
         .route("/api/v1/version", get(version))
         .route("/api-docs/openapi.json", get(openapi))
+        .merge(auth_routes)
         .with_state(state)
         .layer(
             ServiceBuilder::new()
@@ -71,7 +133,7 @@ async fn live() -> impl IntoResponse {
 }
 
 #[utoipa::path(get, path = "/api/v1/health/ready", responses((status = 200, body = HealthStatus), (status = 503)))]
-async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn ready(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     let is_ready = database::check_ready(&state.pool).await;
     let status = if is_ready {
         StatusCode::OK
@@ -88,7 +150,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 #[utoipa::path(get, path = "/api/v1/version", responses((status = 200, body = VersionInfo)))]
-async fn version(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn version(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     Json(ApiResponse::new(state.version.clone(), Uuid::now_v7()))
 }
 

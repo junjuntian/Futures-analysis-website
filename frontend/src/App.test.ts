@@ -1,16 +1,24 @@
 import { mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
-import { createPinia } from 'pinia'
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { router } from './router'
 
 describe('App', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = input.toString()
+        if (url.includes('/auth/me') || url.includes('/workspace')) {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({})
+          } as Response
+        }
         const data = url.includes('/version')
           ? { name: 'futures-analysis-platform', version: 'test', git_sha: null }
           : { status: url.includes('/ready') ? 'ready' : 'ok' }
@@ -24,11 +32,13 @@ describe('App', () => {
   })
 
   it('renders the product title', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
     router.push('/')
     await router.isReady()
     const wrapper = mount(App, {
       global: {
-        plugins: [createPinia(), router, ElementPlus]
+        plugins: [pinia, router, ElementPlus]
       }
     })
 
