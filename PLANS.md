@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；当前只授权 Phase 3A 实施。
+阶段 3：导入基础；Phase 3A 已完成，等待 Phase 3B 单独授权。
 
-状态：Phase 1 工程基础建设已完成，Evaluator 最终 PASS。Phase 2 已按 `docs/phases/PHASE_02_IDENTITY_WORKSPACE_SECURITY.md` 实施、测试、部署到 `futures` VPS，并经最终 Evaluator 审查 PASS。Phase 3 已拆为 3A、3B、3C、3D，避免再次一次性交付完整 Phase 3。当前只允许 Generator 实施 Phase 3A；Phase 3B、3C、3D 均未授权，不得提前实现，也不得修改已经 PASS 的 Phase 1、Phase 2 行为。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 已完成实现、本地测试、`futures` VPS Docker 验证和独立 Evaluator 复核，以 `1b089f7 feat: complete phase 3a import upload foundation` 提交收口。Phase 3B、3C、3D 均未授权且未实现；下一步只能单独授权 Phase 3B。
 
 ## 本阶段任务状态
 
@@ -34,52 +34,51 @@
 | Phase 2 版本收口 | 已完成 | `main`、`phase/01-foundation` 和标签 `phase-2-pass-20260725` 均指向 Phase 2 PASS 提交 `6dfea78` |
 | Phase 3 分支创建 | 已完成 | 当前分支为 `phase/03-import-foundation`，从 `main` 创建 |
 | Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
-| Phase 3A：上传与批次基础 | 已授权，待实现 | 仅实现上传、文件存储抽象、文件哈希、`import_batches` 状态机；完成本地测试、VPS Docker 验证和 Evaluator PASS 后提交 |
-| Phase 3B：解析、预览与映射 | 未授权 | 3A PASS 并提交后再单独授权；本轮禁止实现 |
-| Phase 3C：校验与异步确认 | 未授权 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
-| Phase 3D：回滚与完整流程 | 未授权 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
+| Phase 3B：解析、预览与映射 | 未授权、未实现 | 只能由 Planner 单独授权后实施 |
+| Phase 3C：校验与异步确认 | 未授权、未实现 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3D：回滚与完整流程 | 未授权、未实现 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
 
-## 本轮接管核验
+## Phase 3A 收口核验
 
 核验日期：2026-07-25。
 
 | 项目 | 实际结果 |
 | --- | --- |
 | Git 分支 | `phase/03-import-foundation` |
-| Git 工作区 | 接管核验时干净；Planner 本轮只修改 `PLANS.md` 与 Phase 3 计划文档 |
-| Git HEAD | `cde16ee docs: plan phase three import foundation` |
-| 最近提交 | `cde16ee`、`6dfea78`、`95ed601`、`146a614`、`81308ed` |
-| 版本关系 | 当前分支 `phase/03-import-foundation` 指向 `cde16ee`；`main`、`phase/01-foundation` 和标签 `phase-2-pass-20260725` 的 Phase 2 收口提交为 `6dfea78` |
+| Git 工作区 | Phase 3A 提交后干净；本轮仅更新 `PLANS.md` |
+| Phase 3A 实现提交 | `1b089f7 feat: complete phase 3a import upload foundation` |
+| 实现基线 | Phase 3A 实现收口为 `1b089f7`；Phase 2 收口为 `6dfea78` |
 | Phase 1 结论 | Evaluator 最终 PASS |
 | Phase 2 结论 | Evaluator 最终 PASS |
+| Phase 3A 结论 | Evaluator 最终 PASS；`BLOCKER=0`、`HIGH=0` |
 | VPS 容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行 |
 | VPS 健康 | API/PostgreSQL healthy；live/ready/version/首页/Nginx 代理 HTTP 200 |
 | 当前部署版本 | `0.1.0`；`git_sha=local` |
-| 数据库迁移 | `202607240001`：`phase 1 foundation`；`202607240002`：`phase 2 identity workspace security` |
-| RLS 基础 | `audit_logs` 已启用并强制 RLS；运行时角色为 `NOSUPERUSER`、`NOBYPASSRLS` |
+| Phase 3A 数据库迁移 | `202607250001`、`202607250002` 已执行 |
+| Phase 3A RLS | 上传域 RLS 与跨 Workspace 拒绝验证通过 |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-接管结论：分支、HEAD 和干净工作区符合接管预期；`cde16ee` 只包含 Phase 3 规划，尚无 Phase 3 业务实现。现授权进入 Phase 3A，禁止一次性实施完整 Phase 3。
+收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。当前没有 3B、3C、3D 实施授权。
 
 ## 本地验证结果
 
-最近验证时间：2026-07-25 01:13 +08:00。
+最近验证时间：2026-07-25，Phase 3A 收口验证。
 
 | 命令 | 结果 | 备注 |
 | --- | --- | --- |
 | `cargo +stable fmt --check` | 通过 | 在 `rust/` 目录执行 |
 | `cargo +stable clippy --workspace --all-targets -- -D warnings` | 通过 | 无 warning |
-| `cargo +stable test --workspace` | 通过 | 包含 Phase 2 认证基础单元测试和登录限速阈值测试 |
-| `pnpm install --frozen-lockfile` | 通过 | 锁文件已生成并校验 |
+| `cargo +stable test --workspace` | 通过 | 16/16 |
 | `pnpm lint` | 通过 | `vue-tsc --noEmit` |
-| `pnpm test` | 通过 | 沙箱内被 esbuild 上级目录读取权限拦截；使用真实文件系统权限重跑通过 |
-| `pnpm build` | 通过 | 沙箱内同样受 esbuild 权限拦截；使用真实文件系统权限重跑通过；存在 Vite 大 chunk 提示，作为 LOW 记录 |
+| `pnpm test` | 通过 | 1/1 |
+| `pnpm build` | 通过 | 生产构建完成 |
 | `docker --version` | 未通过 | 本机未安装 Docker 或未加入 PATH |
-| `docker compose config` | 本机未通过；VPS 通过 | 本机无 Docker；`futures` VPS 已执行 `docker compose --profile dev config --quiet` |
+| `docker compose config/build/up` | 本机未执行；VPS 通过 | 本机无 Docker；Docker 门禁在 `futures` VPS 完成 |
 
 ## futures VPS 核对结果
 
-最近核对时间：2026-07-25 11:35 +08:00。
+最近核对时间：2026-07-25，Phase 3A 部署验收。
 
 | 项目 | 结果 |
 | --- | --- |
@@ -89,22 +88,20 @@
 | Docker Compose | Docker Compose 2.40.3 |
 | 当前容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行；API/PostgreSQL healthy |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | 25G，部署后约 14G 可用 |
+| 根分区 | 25G 总量、21G 已用、2.2G 可用，使用率 91% |
 | 内存 | 约 956MiB；已启用项目 swapfile 2GiB |
 
-部署状态：Phase 2 已部署。访问地址：`http://172.238.11.174:8088`。
+部署状态：Phase 3A 已部署并验证。访问地址：`http://172.238.11.174:8088`。
 
-Phase 2 VPS 证据：
+Phase 3A VPS 证据：
 
-- `docker compose --profile dev config --quiet`、build、`up -d --force-recreate` 通过。
-- `/api/v1/health/live`、`/api/v1/health/ready`、`/api/v1/version`、`/api-docs/openapi.json` 返回 HTTP 200。
-- `schema_versions` 记录 `202607240001` 和 `202607240002`。
-- `futures_runtime` 为 `NOSUPERUSER`、`NOBYPASSRLS`、`CANLOGIN`。
-- `audit_logs` 启用并强制 RLS；跨 Workspace 读取/写入破坏性验证通过。
-- 认证 E2E 覆盖 login、me、workspace、csrf、logout、Session 上限和跨用户撤销拒绝。
-- 登录限速审计已验证：10 次失败写入 `failure`，第 11 次 429 写入 `denied`。
-- bootstrap token 宿主文件已删除；secret 日志扫描未发现敏感值。
-- 最新部署包本地与远端 SHA-256 均为 `52c0577d2aef38bf2126f6b78d004e13af183683ac72daf7c45b16dd3e805230`。
+- Compose config/build/up 通过，PostgreSQL、API、Worker、Frontend、Nginx 五个服务运行，API/PostgreSQL healthy。
+- `schema_versions` 包含 Phase 3A 迁移 `202607250001`、`202607250002`。
+- 30 MiB 上传返回 201；大于 50 MiB 返回 413。
+- viewer 权限不足、CSRF 缺失和 Origin 不匹配均被拒绝并形成审计记录；未认证请求也验证为拒绝，但不计入 Workspace 审计。
+- RLS 与跨 Workspace API/数据库隔离验证通过。
+- 五轮上传的数据库记录、对象文件和 SHA-256 均为 5/5/5 一致。
+- 原子写入临时文件残留 `.tmp=0`；日志秘密扫描命中数为 0。
 
 ## 验证限制
 
@@ -123,11 +120,10 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 
 ## 后续步骤
 
-1. 实际调用 Generator，但只实施 Phase 3A 的精确文件范围和最大任务边界。
-2. Phase 3A 按 Generator → 本地测试 → `futures` VPS Docker 验证 → Evaluator → 修复 BLOCKER/HIGH → Evaluator PASS → Git 提交 → 更新 `PLANS.md` 收口。
-3. Generator 若再次卡住，可新建 Generator 重做同一 Phase 3A，但任务边界不得扩大。
-4. Phase 3A PASS 前不得调用 Generator 实施 3B、3C 或 3D。
-5. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
+1. 保留 Evaluator 的 MEDIUM/LOW 发现为非阻断后续项，不回退 Phase 3A PASS。
+2. 若继续 Phase 3，必须先由 Planner 单独授权 Phase 3B；授权前不得调用 Generator 实施解析、预览或字段映射。
+3. Phase 3C、3D 继续保持未授权、未实现，不得与 3B 合并实施。
+4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则
 
