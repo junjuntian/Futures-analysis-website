@@ -1,10 +1,11 @@
 mod auth;
+mod imports;
 
 use application::{HealthStatus, VersionInfo};
 use auth::{AuthConfig, AuthState, LoginLimiter};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -34,7 +35,9 @@ use uuid::Uuid;
         auth::csrf,
         auth::workspace,
         auth::sessions,
-        auth::revoke_session
+        auth::revoke_session,
+        imports::upload,
+        imports::get
     ),
     components(schemas(
         HealthStatus,
@@ -47,7 +50,11 @@ use uuid::Uuid;
         auth::CsrfResponse,
         auth::SessionSummary,
         auth::SessionsQuery,
-        auth::ErrorBody
+        auth::ErrorBody,
+        imports::ImportErrorBody,
+        imports::ImportFileResponse,
+        imports::ImportResponse,
+        domain::import::ImportBatchStatus
     )),
     modifiers(&SecurityAddon)
 )]
@@ -82,14 +89,25 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pool = database::connect(&config.database_url).await?;
+    let upload_policy = application::imports::UploadPolicy::from_env()
+        .map_err(|_| anyhow::anyhow!("invalid IMPORT_MAX_BYTES"))?;
+    let storage_root =
+        std::env::var("OBJECT_STORAGE_ROOT").unwrap_or_else(|_| "./data/object-storage".into());
+    let storage =
+        Arc::new(infrastructure::object_storage::LocalObjectStorage::new(storage_root).await?);
     let state = Arc::new(AuthState {
         pool,
         version: VersionInfo::new(config.app_name.clone(), config.app_version.clone()),
         config: auth_config,
         limiter: Arc::new(LoginLimiter::default()),
     });
+    let import_state = Arc::new(imports::ImportState {
+        auth: state.clone(),
+        storage,
+        upload_policy,
+    });
 
-    let app = router(state);
+    let app = router(state, import_state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -97,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn router(state: Arc<AuthState>) -> Router {
+fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Router {
     let auth_routes = Router::new()
         .route("/api/v1/auth/bootstrap", post(auth::bootstrap))
         .route("/api/v1/auth/login", post(auth::login))
@@ -111,6 +129,14 @@ fn router(state: Arc<AuthState>) -> Router {
             delete(auth::revoke_session),
         )
         .with_state(state.clone());
+    let import_body_limit = usize::try_from(import_state.upload_policy.max_bytes)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1024 * 1024);
+    let import_routes = Router::new()
+        .route("/api/v1/imports", post(imports::upload))
+        .route("/api/v1/imports/{import_id}", get(imports::get))
+        .layer(DefaultBodyLimit::max(import_body_limit))
+        .with_state(import_state);
 
     Router::new()
         .route("/api/v1/health/live", get(live))
@@ -118,6 +144,7 @@ fn router(state: Arc<AuthState>) -> Router {
         .route("/api/v1/version", get(version))
         .route("/api-docs/openapi.json", get(openapi))
         .merge(auth_routes)
+        .merge(import_routes)
         .with_state(state)
         .layer(
             ServiceBuilder::new()

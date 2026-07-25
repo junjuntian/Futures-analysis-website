@@ -2,7 +2,7 @@
 
 计划日期：2026-07-25
 
-当前状态：计划已制定，等待项目所有者确认；尚未开始实现。
+当前状态：已拆分为 Phase 3A/3B/3C/3D；当前只授权 Phase 3A 待实现，Phase 3B/3C/3D 未授权。
 
 ## 1. 背景与目标
 
@@ -267,70 +267,119 @@ Phase 3 明确排除以下能力：
 - 前端不得允许用户输入 `workspace_id`。
 - 前端测试覆盖主要状态切换、错误展示、CSRF 失败提示和 SSE 断线提示。
 
-## 8. 任务拆分
+## 8. 分段实施计划与授权边界
 
-### P3-01 计划与契约冻结
+四个子阶段必须依次独立完成 Generator 实施、本地测试、适用的 VPS 验证、Evaluator 审查、BLOCKER/HIGH 修复、Evaluator PASS 和 Git 提交。前一子阶段 PASS 不自动授权后一子阶段；未授权能力不得以“预留实现”“顺手补齐”或测试夹具名义提前落地。
 
-- 确认 Phase 3 范围、非目标和验收口径。
-- 更新 Phase 3 计划、PLANS、API/OpenAPI 契约草案。
-- 明确样例文件目录和证据格式。
+### 8.1 Phase 3A：上传、文件存储抽象、文件哈希、批次状态机
 
-### P3-02 数据库迁移与 RLS
+**授权状态：当前唯一获准实施的子阶段。**
 
-- 新增存储对象和导入域表。
-- 添加状态枚举、唯一约束、外键、索引和 RLS policy。
-- 编写跨 Workspace RLS 测试。
+范围：
 
-### P3-03 ObjectStorage 本地适配器
+- 新增 `ObjectStorage` 接口和本地文件系统适配器；对象键必须不可猜测、不可由原始文件名构造，并限制在配置的存储根目录内。
+- 以流式写入计算 SHA-256 和大小，使用临时文件加原子重命名完成持久化；失败时不得留下已登记但不可读的对象。
+- 上传入口只接收 TXT、CSV、XLS、XLSX，校验大小、扩展名、基础 magic bytes/MIME 一致性和危险文件名；本阶段只验证可接收性，不解析表格内容。
+- 仅新增 `stored_objects`、`import_batches`、`import_files` 三张表，包含 Workspace 约束、索引、外键、强制 RLS 和必要审计字段。
+- 建立 `import_batches` 状态枚举及集中式合法转换规则；3A 只产生 `uploaded` 初始状态，并允许为测试验证状态机本身，不开放 inspect、confirm、导入任务或回滚业务入口。
+- 只开放 `POST /api/v1/imports` 和 `GET /api/v1/imports/{import_id}`；复用 Phase 2 Session、CSRF、Workspace 解析、统一不可见错误和审计基础。
+- OpenAPI 只描述上述两个接口、上传限制、响应模型和状态枚举。
 
-- 实现本地对象存储接口、对象键生成、SHA-256 校验和文件限制。
-- 验证路径穿越、重复哈希和删除/保留策略。
+Generator 精确文件范围：
 
-### P3-04 文件识别与 inspect
+- 可新增迁移：`rust/migrations/*_phase_3a_import_upload.sql`，不得在本阶段创建其他导入域表。
+- 可新增并接线：`rust/crates/domain/src/import.rs`、`rust/crates/application/src/imports.rs`、`rust/crates/database/src/imports.rs`、`rust/crates/infrastructure/src/object_storage.rs`、`rust/apps/api/src/imports.rs`，以及这些 crate 现有 `lib.rs`/`main.rs` 中的最小模块声明和路由接线。
+- 仅为上述代码所需时可修改相应 `Cargo.toml`、工作区 `rust/Cargo.toml` 与 `rust/Cargo.lock`；不得引入 CSV、Excel、任务队列或 SSE 依赖。
+- 仅为配置本地对象存储根目录和容器持久卷所需时可修改 `.env.example`、`docker-compose.yml`；不得改变已有认证、数据库或反向代理语义。
+- 测试必须与上述模块同目录，或放在既有 Rust 测试结构内；可以新增最小的 TXT/CSV/XLS/XLSX 上传夹具，但不得新增解析预期。
+- 不得修改 `frontend/`、`rust/apps/worker/`、Phase 1/2 迁移、`docs/DECISIONS.md`，也不得创建映射、staging、错误、变更日志、任务或 SSE 表。
 
-- 实现 TXT/CSV 编码与分隔符检测。
-- 实现 XLS/XLSX 工作表、表头和危险内容识别。
-- 输出候选项、置信度和可人工覆盖参数。
+最大任务边界：
 
-### P3-05 映射模板与预览
+- 一次 HTTP 请求只完成“鉴权与 CSRF → 受限上传 → 对象持久化与哈希 → 三表元数据事务登记 → 返回 `uploaded` 批次”；不读取行列、编码、分隔符、工作表、表头或公式。
+- 不实现 `/inspect`、`/mapping`、`/preview`、`/confirm`、`/cancel`、`/rollback`、`/errors`、`/events` 或模板接口。
+- 不实现字段映射、数据校验、去重、冲突策略、幂等确认、PostgreSQL 任务队列、SSE、正式目标表写入、回滚、补偿批次或任何导入前端。
+- 若现有架构阻止在上述范围内完成，Generator 必须报告阻塞，不得自行扩大边界。
 
-- 实现字段映射模板版本化。
-- 实现前 50 行预览、规范化、错误和警告展示。
-- 实现全文件轻量扫描统计。
+验收标准：
 
-### P3-06 后台导入任务与 SSE
+- 四种允许扩展名的最小文件均可上传并形成同一 Workspace 下相互关联的三表记录；数据库和磁盘记录的 SHA-256、大小一致。
+- 超限、空文件、扩展名/MIME 或 magic bytes 明显冲突、路径穿越文件名及中断写入被安全拒绝，且无越界文件、孤儿元数据或敏感日志。
+- 对象键不包含原始文件名和 `workspace_id` 明文；同内容重复上传可以拥有独立批次，但哈希必须一致。
+- 当前 Workspace 可查询自己的批次；跨 Workspace API 返回统一不可见错误，运行时数据库角色也无法跨 Workspace 读写三张表。
+- 状态机单元测试覆盖全部允许转换和代表性非法转换；非法转换不得更新 `status` 或 `updated_at`。
+- 服务/容器重启后已上传对象和元数据仍可查询；Phase 1/2 认证、健康和 RLS 基线不回归。
 
-- 复用或扩展 Phase 1/2 Worker 基础。
-- 实现导入任务状态、事件、进度、取消安全点和 SSE 查询。
-- 保证任务查询与事件流按 Workspace 隔离。
+测试门禁：
 
-### P3-07 校验、冲突和幂等
+- 本地：`git diff --check`、`cargo +stable fmt --check`、`cargo +stable test --workspace`、`cargo +stable clippy --workspace --all-targets -- -D warnings`；前端虽不得修改，仍运行 `pnpm lint`、`pnpm test`、`pnpm build` 作为回归门禁。
+- `futures` VPS Docker：`docker compose --profile dev config --quiet`、build、`up -d --force-recreate`、容器健康、迁移记录、四类上传烟测、哈希与持久化核对、跨 Workspace API/RLS 破坏性测试、重启恢复和日志秘密扫描。
+- Evaluator 必须实际独立审查 Phase 3A；所有 BLOCKER/HIGH 由 Generator 修复并复核至 PASS。
 
-- 实现文件内重复、数据库冲突和允许策略。
-- 实现 `skip`、`overwrite`、`abort` 的受控语义。
-- 实现 `Idempotency-Key` 重试不重复写入。
+退出条件：
 
-### P3-08 回滚与补偿批次
+- 上述本地与 VPS 门禁证据齐全，Evaluator 最终 PASS 且无剩余 BLOCKER/HIGH。
+- Phase 3A 单独 Git 提交完成，`PLANS.md` 更新为 3A 已完成、3B 待授权。
+- 不以 3B/3C/3D 尚未实现作为 3A 失败理由；但发现任何越界实现必须在 3A 收口前移除。
 
-- 实现整批回滚检查、冲突清单、逆序回滚和 `rolled_back` 状态。
-- 实现补偿批次元数据引用。
-- 明确不提供部分回滚入口。
+### 8.2 Phase 3B：解析、识别、预览与字段映射
 
-### P3-09 前端导入中心
+**授权状态：未授权；Phase 3A PASS 并提交后方可重新授权。**
 
-- 实现上传、inspect、mapping、preview、confirm、进度、错误报告、回滚页面。
-- 加入前端状态测试和失败路径提示。
+范围：
 
-### P3-10 本地与 VPS 验收
+- TXT/CSV/XLS/XLSX 安全解析；编码、分隔符、工作表和表头识别及人工覆盖。
+- Excel 宏、公式、外部链接、嵌入对象和异常压缩结构只识别并安全失败/警告，不执行。
+- 新增模板、模板不可变版本、批次映射和必要 staging 模型；提供 `/inspect`、`/mapping`、`/preview` 与模板读写接口。
+- 生成前 50 行原始值/规范值/目标字段预览与全文件轻量扫描基础统计；不得写入正式目标表。
 
-- 本地跑完整 Rust/前端验证。
-- 通过源码包传输部署到 `futures` VPS。
-- 在 VPS 执行 compose config/build/up、迁移、健康、导入 E2E、RLS、SSE、回滚、日志秘密扫描。
-- 调用 Evaluator 独立审查，修复 BLOCKER/HIGH 后复核至 PASS。
+模块边界：解析器、映射和预览代码限于 domain/application/infrastructure/database/API 对应新模块及必要迁移；除新增导入入口的最小页面外，完整前端流程留给 3D。
 
-## 9. 验收标准
+非目标：不做正式确认导入、数据冲突落库、PostgreSQL 任务队列、SSE、回滚或补偿。
 
-Phase 3 只有同时满足以下条件才能标记完成：
+验收与测试门禁：四种格式的正常/边界/恶意夹具，编码与分隔符人工覆盖，工作表/表头选择，前 50 行上限，模板版本不可变，跨 Workspace RLS；完整 Rust/前端回归通过，Evaluator PASS。
+
+退出条件：3B 功能和证据单独提交，`PLANS.md` 更新为 3B 已完成、3C 待授权，且仓库不存在 3C/3D 越界实现。
+
+### 8.3 Phase 3C：校验、去重、冲突、确认任务与 SSE
+
+**授权状态：未授权；Phase 3B PASS 并提交后方可重新授权。**
+
+范围：
+
+- 字段、跨字段、唯一键和引用校验；文件内重复与数据库冲突分别统计。
+- 在数据集允许范围内实现 `skip`、`overwrite`、`abort`，并用 `Idempotency-Key` 保证确认重试不重复写入。
+- 新增 staging/error/目标变更预备记录和 PostgreSQL 任务表，扩展 Worker 完成 `/confirm`、安全取消与后台任务处理。
+- 实现按 Workspace 隔离、可重连的 SSE 进度与错误分页查询。
+
+模块边界：可修改 API、Worker、database/application/domain 与必要迁移；只提供验证完整链路所需的最小 UI，不在本阶段实现完整导入中心。
+
+非目标：不实现原子回滚、补偿批次、完整前端导入中心或最终 VPS 全流程收口。
+
+验收与测试门禁：校验/重复/冲突矩阵、幂等重试、任务恢复与死信、取消安全点、SSE 断线重连、跨 Workspace API/RLS/SSE 隔离；完整本地回归和适用 VPS Docker 集成验证通过，Evaluator PASS。
+
+退出条件：3C 功能和证据单独提交，`PLANS.md` 更新为 3C 已完成、3D 待授权，且无 3D 越界实现。
+
+### 8.4 Phase 3D：原子回滚、补偿批次、完整前端与部署验收
+
+**授权状态：未授权；Phase 3C PASS 并提交后方可重新授权。**
+
+范围：
+
+- 实现整批原子回滚检查、逆序变更、零变更冲突语义和完整冲突清单；不提供部分回滚。
+- 实现通过 `compensates_batch_id` 追溯的补偿批次。
+- 完成上传、inspect、mapping、preview、confirm、SSE、错误报告、回滚的前端完整流程和失败状态。
+- 执行完整本地回归、`futures` VPS Docker 部署/E2E/RLS/SSE/回滚/恢复/秘密扫描及最终 Evaluator 收口。
+
+模块边界：只补齐回滚/补偿所需后端、迁移和完整 `frontend/` 导入中心；不得扩展到行情、交易、套利、外部采集、OCR、AI 或回测。
+
+验收与测试门禁：无后续修改时整批回滚成功；任一行冲突或下游依赖时整批零变更；补偿链可追溯；前端主流程和故障流程有测试；第 9、10、11 节全部验收项通过，Evaluator PASS。
+
+退出条件：完整 Phase 3 在 VPS 验收通过，Evaluator 最终 PASS 且无 BLOCKER/HIGH，3D 单独提交并更新 `PLANS.md` 与 handoff。
+
+## 9. Phase 3 总体验收标准
+
+以下是 Phase 3D 最终收口时的总体验收标准，不得用尚未授权的 3B/3C/3D 条件阻塞当前 Phase 3A 的独立验收：
 
 - TXT、CSV、XLS、XLSX 至少各有正常、边界和恶意样例。
 - UTF-8 与批准的中文编码可正确预览；检测失败时可人工选择。
@@ -391,6 +440,8 @@ docker compose --profile dev ps
 
 ## 11. 本地与 futures VPS 验收流程
 
+本节是 Phase 3D 的最终全流程。Phase 3A 只执行第 8.1 节规定的 VPS 子集，不得为满足本节而提前实现 inspect、mapping、preview、confirm、SSE 或 rollback。
+
 1. 本地只从 Git 工作树打包源码，排除 `.git`、`node_modules`、`target`、`dist`、`.env`、`secrets`、上传文件和临时文件。
 2. 通过已配置 SSH/SFTP 上传到 `futures` VPS 的 `/tmp`，校验本地与远端 SHA-256。
 3. 部署前备份 `/opt/futures-platform` 当前版本。
@@ -425,7 +476,7 @@ docker compose --profile dev ps
 
 ## 13. Generator 边界
 
-Generator 在收到明确实施授权前不得开始编码。
+当前 Generator 只收到 Phase 3A 实施授权，精确文件范围和最大任务边界以第 8.1 节为准；3B、3C、3D 仍视为未收到授权。
 
 获得实施授权后，Generator 仍必须遵守：
 
@@ -436,3 +487,4 @@ Generator 在收到明确实施授权前不得开始编码。
 - 任何新增业务表必须包含 `workspace_id`、RLS、索引、审计和跨 Workspace 测试。
 - 所有新接口必须更新 OpenAPI、前端客户端和测试夹具。
 - BLOCKER/HIGH 必须由 Generator 修复，并由 Evaluator 复核至 PASS 后才能提交。
+- Generator 若再次卡住，允许创建新的 Generator 重做同一个 Phase 3A；新任务必须逐项引用第 8.1 节的文件范围、验收标准和最大边界，且不得由主 Agent 代替实现或评估。

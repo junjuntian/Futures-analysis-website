@@ -232,7 +232,7 @@ pub(crate) enum AuthError {
 }
 
 impl AuthError {
-    fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::BadRequest(code) | Self::Forbidden(code) | Self::Conflict(code) => code,
             Self::Unauthorized => "auth_required",
@@ -241,7 +241,7 @@ impl AuthError {
         }
     }
 
-    fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
@@ -252,7 +252,7 @@ impl AuthError {
         }
     }
 
-    fn message(&self) -> &'static str {
+    pub(crate) fn message(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "request is invalid",
             Self::Unauthorized => "authentication required",
@@ -276,13 +276,46 @@ impl IntoResponse for AuthError {
 }
 
 #[derive(Debug, Clone)]
-struct AuthContext {
+pub(crate) struct AuthContext {
     session_id: Uuid,
     user_id: Uuid,
     username: String,
     workspace_id: Uuid,
     workspace_name: String,
     roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Permission {
+    ImportRead,
+    ImportUpload,
+}
+
+impl Permission {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportRead => "import.read",
+            Self::ImportUpload => "import.upload",
+        }
+    }
+}
+
+impl AuthContext {
+    pub(crate) fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    pub(crate) fn workspace_id(&self) -> Uuid {
+        self.workspace_id
+    }
+
+    pub(crate) fn require_permission(&self, permission: Permission) -> Result<(), AuthError> {
+        if roles_allow_permission(&self.roles, permission) {
+            Ok(())
+        } else {
+            Err(AuthError::Forbidden("permission_denied"))
+        }
+    }
 }
 
 pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
@@ -296,9 +329,25 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         permissions.push("session.any.read".to_string());
         permissions.push("session.any.revoke".to_string());
     }
+    for permission in [Permission::ImportRead, Permission::ImportUpload] {
+        if roles_allow_permission(roles, permission) {
+            permissions.push(permission.as_str().to_string());
+        }
+    }
     permissions.sort();
     permissions.dedup();
     permissions
+}
+
+fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
+    match permission {
+        Permission::ImportRead => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst" | "viewer")),
+        Permission::ImportUpload => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst")),
+    }
 }
 
 #[utoipa::path(
@@ -1053,7 +1102,10 @@ async fn roles_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<String>, Aut
     Ok(rows.into_iter().map(|row| row.get("role_name")).collect())
 }
 
-async fn current_context(state: &AuthState, headers: &HeaderMap) -> Result<AuthContext, AuthError> {
+pub(crate) async fn current_context(
+    state: &AuthState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, AuthError> {
     let token = cookie_value(headers, &state.config.cookie_name).ok_or(AuthError::Unauthorized)?;
     let token_hash = digest_token(&token);
     let now = OffsetDateTime::now_utc();
@@ -1109,7 +1161,7 @@ async fn session_id_from_cookie(
         .flatten()
 }
 
-async fn ensure_csrf(state: &AuthState, headers: &HeaderMap) -> Result<(), AuthError> {
+pub(crate) async fn ensure_csrf(state: &AuthState, headers: &HeaderMap) -> Result<(), AuthError> {
     let token = cookie_value(headers, &state.config.cookie_name).ok_or(AuthError::Unauthorized)?;
     let csrf = headers
         .get(CSRF_HEADER)
@@ -1132,7 +1184,10 @@ async fn ensure_csrf(state: &AuthState, headers: &HeaderMap) -> Result<(), AuthE
     Ok(())
 }
 
-fn ensure_allowed_origin(config: &AuthConfig, headers: &HeaderMap) -> Result<(), AuthError> {
+pub(crate) fn ensure_allowed_origin(
+    config: &AuthConfig,
+    headers: &HeaderMap,
+) -> Result<(), AuthError> {
     let Some(expected) = config.public_origin.as_deref() else {
         return Ok(());
     };
@@ -1211,6 +1266,35 @@ mod tests {
         let permissions = permissions_for_roles(&["admin".to_string()]);
         assert!(permissions.contains(&"session.any.read".to_string()));
         assert!(!permissions.contains(&"workspace.any.business.read".to_string()));
+    }
+
+    #[test]
+    fn import_permission_matrix_is_centralized_by_role() {
+        let admin = permissions_for_roles(&["admin".to_string()]);
+        assert!(admin.contains(&"import.read".to_string()));
+        assert!(admin.contains(&"import.upload".to_string()));
+
+        let analyst = permissions_for_roles(&["analyst".to_string()]);
+        assert!(analyst.contains(&"import.read".to_string()));
+        assert!(analyst.contains(&"import.upload".to_string()));
+
+        let viewer = permissions_for_roles(&["viewer".to_string()]);
+        assert!(viewer.contains(&"import.read".to_string()));
+        assert!(!viewer.contains(&"import.upload".to_string()));
+    }
+
+    #[test]
+    fn unknown_or_empty_roles_receive_no_import_permissions() {
+        assert!(
+            permissions_for_roles(&["unknown".to_string()])
+                .iter()
+                .all(|permission| !permission.starts_with("import."))
+        );
+        assert!(
+            permissions_for_roles(&[])
+                .iter()
+                .all(|permission| !permission.starts_with("import."))
+        );
     }
 
     #[test]

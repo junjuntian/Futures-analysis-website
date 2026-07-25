@@ -7,4 +7,5 @@ version.workspace = true
 
 [dependencies]
 serde.workspace = true
+utoipa.workspace = true
 uuid.workspace = true

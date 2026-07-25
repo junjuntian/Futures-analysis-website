@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础（计划待确认）。
+阶段 3：导入基础；当前只授权 Phase 3A 实施。
 
-状态：Phase 1 工程基础建设已完成，Evaluator 最终 PASS。Phase 2 已按 `docs/phases/PHASE_02_IDENTITY_WORKSPACE_SECURITY.md` 实施、测试、部署到 `futures` VPS，并经最终 Evaluator 审查 PASS。版本收口已完成：`phase/01-foundation` 合并到 `main`，标签 `phase-2-pass-20260725` 已创建，并已从 `main` 创建当前分支 `phase/03-import-foundation`。本轮只制定 Phase 3 导入基础计划，不开始实现，不调用 Generator，不修改已经 PASS 的 Phase 1、Phase 2 实现。
+状态：Phase 1 工程基础建设已完成，Evaluator 最终 PASS。Phase 2 已按 `docs/phases/PHASE_02_IDENTITY_WORKSPACE_SECURITY.md` 实施、测试、部署到 `futures` VPS，并经最终 Evaluator 审查 PASS。Phase 3 已拆为 3A、3B、3C、3D，避免再次一次性交付完整 Phase 3。当前只允许 Generator 实施 Phase 3A；Phase 3B、3C、3D 均未授权，不得提前实现，也不得修改已经 PASS 的 Phase 1、Phase 2 行为。
 
 ## 本阶段任务状态
 
@@ -33,7 +33,11 @@
 | Phase 2 Evaluator 审查 | 已完成 | `docs/reviews/PHASE_02_EVALUATION.md`，最终状态 PASS |
 | Phase 2 版本收口 | 已完成 | `main`、`phase/01-foundation` 和标签 `phase-2-pass-20260725` 均指向 Phase 2 PASS 提交 `6dfea78` |
 | Phase 3 分支创建 | 已完成 | 当前分支为 `phase/03-import-foundation`，从 `main` 创建 |
-| Phase 3 Planner 计划 | 待确认 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`；仅规划导入基础，不实现业务代码 |
+| Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
+| Phase 3A：上传与批次基础 | 已授权，待实现 | 仅实现上传、文件存储抽象、文件哈希、`import_batches` 状态机；完成本地测试、VPS Docker 验证和 Evaluator PASS 后提交 |
+| Phase 3B：解析、预览与映射 | 未授权 | 3A PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3C：校验与异步确认 | 未授权 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3D：回滚与完整流程 | 未授权 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
 
 ## 本轮接管核验
 
@@ -42,10 +46,10 @@
 | 项目 | 实际结果 |
 | --- | --- |
 | Git 分支 | `phase/03-import-foundation` |
-| Git 工作区 | 接管核验时干净；本轮仅允许新增 Phase 3 计划文档并同步计划状态 |
-| Git HEAD | `6dfea78 feat: complete phase two identity foundation` |
-| 最近提交 | `6dfea78`、`95ed601`、`146a614`、`81308ed`、`0ee8671` |
-| 版本收口 | `main`、`phase/01-foundation`、`phase/03-import-foundation` 和标签 `phase-2-pass-20260725` 均指向 `6dfea78` |
+| Git 工作区 | 接管核验时干净；Planner 本轮只修改 `PLANS.md` 与 Phase 3 计划文档 |
+| Git HEAD | `cde16ee docs: plan phase three import foundation` |
+| 最近提交 | `cde16ee`、`6dfea78`、`95ed601`、`146a614`、`81308ed` |
+| 版本关系 | 当前分支 `phase/03-import-foundation` 指向 `cde16ee`；`main`、`phase/01-foundation` 和标签 `phase-2-pass-20260725` 的 Phase 2 收口提交为 `6dfea78` |
 | Phase 1 结论 | Evaluator 最终 PASS |
 | Phase 2 结论 | Evaluator 最终 PASS |
 | VPS 容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行 |
@@ -55,7 +59,7 @@
 | RLS 基础 | `audit_logs` 已启用并强制 RLS；运行时角色为 `NOSUPERUSER`、`NOBYPASSRLS` |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-接管结论：Phase 2 PASS 交接事实与 Git、迁移和 VPS 实态一致；可以进入 Phase 3 规划确认，但尚未开始 Phase 3 实现。
+接管结论：分支、HEAD 和干净工作区符合接管预期；`cde16ee` 只包含 Phase 3 规划，尚无 Phase 3 业务实现。现授权进入 Phase 3A，禁止一次性实施完整 Phase 3。
 
 ## 本地验证结果
 
@@ -108,27 +112,22 @@ Phase 2 VPS 证据：
 
 ## Phase 3 计划摘要
 
-Phase 3 建议范围详见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`。核心交付为：
+Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下顺序独立准入和收口：
 
-- TXT、CSV、XLS、XLSX 上传。
-- 原始文件本地 `ObjectStorage` 抽象。
-- `import_batches`、文件、模板、映射、staging、错误和变更日志。
-- 编码、分隔符、工作表、表头识别。
-- 字段映射模板和前 50 行预览。
-- 数据校验、错误报告、去重和冲突策略。
-- 整批原子回滚和补偿批次。
-- Workspace 隔离、PostgreSQL RLS、审计。
-- SSE 导入进度。
-- 本地测试与 `futures` VPS 验收流程。
+- Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
+- Phase 3B：TXT/CSV/XLS/XLSX 解析，编码、分隔符、工作表识别，前 50 行预览，字段映射。
+- Phase 3C：校验、去重、冲突策略、确认导入、PostgreSQL 任务队列、SSE。
+- Phase 3D：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
 
 明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
 
 ## 后续步骤
 
-1. 等待项目所有者确认 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`。
-2. 确认后再按 Planner → Generator → 本地测试 → futures VPS 验收 → Evaluator → 修复 → 复核 PASS → Git 提交 → handoff 的流程实施。
-3. 实施前不得调用 Generator，不得编写导入业务代码。
-4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
+1. 实际调用 Generator，但只实施 Phase 3A 的精确文件范围和最大任务边界。
+2. Phase 3A 按 Generator → 本地测试 → `futures` VPS Docker 验证 → Evaluator → 修复 BLOCKER/HIGH → Evaluator PASS → Git 提交 → 更新 `PLANS.md` 收口。
+3. Generator 若再次卡住，可新建 Generator 重做同一 Phase 3A，但任务边界不得扩大。
+4. Phase 3A PASS 前不得调用 Generator 实施 3B、3C 或 3D。
+5. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则
 
