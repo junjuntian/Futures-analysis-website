@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；Phase 3A 已完成，Phase 3B 本轮授权实施，Phase 3C/3D 继续未授权。
+阶段 3：导入基础；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS，Phase 3C/3D 继续未授权。
 
-状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 已完成实现、本地测试、`futures` VPS Docker 验证和独立 Evaluator 复核，以 `1b089f7 feat: complete phase 3a import upload foundation` 提交收口。Phase 3B 本轮已由 Planner 单独授权实施；Phase 3C、3D 均未授权且未实现，本轮禁止合并实施。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 已完成实现、本地测试、`futures` VPS Docker/E2E 验证和独立顶层 Evaluator 复核，以 `150194c feat: complete phase 3b import parsing preview mapping` 提交；最终 `BLOCKER=0`、`HIGH=0`。Phase 3C、3D 均未授权且未实现，进入下一子阶段前必须重新授权。
 
 ## 本阶段任务状态
 
@@ -35,7 +35,7 @@
 | Phase 3 分支创建 | 已完成 | 当前分支为 `phase/03-import-foundation`，从 `main` 创建 |
 | Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
 | Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
-| Phase 3B：解析、预览与映射 | 本轮授权实施、待 Generator 完成 | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与模板、错误展示、OpenAPI multipart schema 契约修复 |
+| Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3C：校验与异步确认 | 未授权、未实现 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
 | Phase 3D：回滚与完整流程 | 未授权、未实现 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
 
@@ -59,26 +59,45 @@
 | Phase 3A RLS | 上传域 RLS 与跨 Workspace 拒绝验证通过 |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。当前已授权 Phase 3B；Phase 3C、3D 继续未授权。
+收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。Phase 3B 随后已单独授权并完成；Phase 3C、3D 继续未授权。
+
+## Phase 3B 收口核验
+
+核验日期：2026-07-25。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| Git 分支 | `phase/03-import-foundation` |
+| Phase 3B 实现提交 | `150194c feat: complete phase 3b import parsing preview mapping` |
+| Phase 3B 结论 | 独立顶层 Evaluator 最终 PASS；`BLOCKER=0`、`HIGH=0` |
+| 支持格式 | TXT、CSV、XLS、XLSX |
+| 解析与预览 | 编码/分隔符识别及人工覆盖、Excel 工作表/表头选择、前 50 行预览、解析错误展示 |
+| 字段映射 | 服务端数据集字段/转换定义、映射保存、可复用且版本不可变的映射模板 |
+| 数据库不变量 | 模板版本配置和数据集冻结；批次/Workspace 身份不可移动；预览失效与映射变更保持同一事务 |
+| OpenAPI | multipart 文件字段为必填 binary，契约与实现一致 |
+| Phase 3B 数据库迁移 | `202607250003` 至 `202607250007` 已在 `futures` VPS 执行 |
+| 越界核验 | 未新增 confirm/events/rollback/cancel、任务队列、SSE、正式入库或 `import_row_changes` |
+
+非阻断 MEDIUM 已记录到 `docs/reviews/PHASE_03B_EVALUATION.md`：同参数 inspect 的前端预览状态处理、errors API 分页、数据库回滚/冻结竞争测试补强及测试脚本前置注释更新。它们不回退 Phase 3B PASS，后续必须在适当阶段显式排期。
 
 ## 本地验证结果
 
-最近验证时间：2026-07-25，Phase 3A 收口验证。
+最近验证时间：2026-07-25，Phase 3B 收口验证。
 
 | 命令 | 结果 | 备注 |
 | --- | --- | --- |
 | `cargo +stable fmt --check` | 通过 | 在 `rust/` 目录执行 |
 | `cargo +stable clippy --workspace --all-targets -- -D warnings` | 通过 | 无 warning |
-| `cargo +stable test --workspace` | 通过 | 16/16 |
+| `cargo +stable test --workspace` | 通过 | 25 项测试通过 |
 | `pnpm lint` | 通过 | `vue-tsc --noEmit` |
-| `pnpm test` | 通过 | 1/1 |
+| `pnpm test` | 通过 | 前端测试通过 |
 | `pnpm build` | 通过 | 生产构建完成 |
 | `docker --version` | 未通过 | 本机未安装 Docker 或未加入 PATH |
 | `docker compose config/build/up` | 本机未执行；VPS 通过 | 本机无 Docker；Docker 门禁在 `futures` VPS 完成 |
 
 ## futures VPS 核对结果
 
-最近核对时间：2026-07-25，Phase 3A 部署验收。
+最近核对时间：2026-07-25，Phase 3B 部署验收。
 
 | 项目 | 结果 |
 | --- | --- |
@@ -88,10 +107,10 @@
 | Docker Compose | Docker Compose 2.40.3 |
 | 当前容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行；API/PostgreSQL healthy |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | 容量治理后：25G 总量、9.1G 已用、14G 可用，使用率 40% |
+| 根分区 | Phase 3B 最终验收时：25G 总量、约 11G 已用、13G 可用，使用率 45% |
 | 内存 | 约 956MiB；已启用项目 swapfile 2GiB |
 
-部署状态：Phase 3A 已部署并验证。访问地址：`http://172.238.11.174:8088`。
+部署状态：Phase 3B 已部署并验证。访问地址：`http://172.238.11.174:8088`。
 
 Phase 3A VPS 证据：
 
@@ -102,6 +121,14 @@ Phase 3A VPS 证据：
 - RLS 与跨 Workspace API/数据库隔离验证通过。
 - 五轮上传的数据库记录、对象文件和 SHA-256 均为 5/5/5 一致。
 - 原子写入临时文件残留 `.tmp=0`；日志秘密扫描命中数为 0。
+
+Phase 3B VPS 证据：
+
+- 最新 API 镜像构建完成，PostgreSQL、API、Worker、Frontend、Nginx 均运行；API/PostgreSQL healthy。
+- `schema_versions` 包含 `202607250003` 至 `202607250007`。
+- Phase 3B HTTP E2E 返回 `PHASE3B_E2E_PASS`。
+- 映射数据库不变量 SQL 测试和双连接模板首次绑定并发测试通过。
+- 最终四个映射/模板不变量触发器存在，模板版本 `dataset_type` 为 NOT NULL，测试夹具残留为 0。
 
 本轮 VPS 容量治理：
 
@@ -119,7 +146,7 @@ Phase 3A VPS 证据：
 Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下顺序独立准入和收口：
 
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
-- Phase 3B（本轮授权）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
+- Phase 3B（已完成并 PASS）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
 - Phase 3C（未授权）：校验、去重、冲突策略、确认导入、PostgreSQL 任务队列、SSE。
 - Phase 3D（未授权）：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
 
@@ -136,9 +163,9 @@ Phase 3B 实施边界：
 
 ## 后续步骤
 
-1. 保留 Evaluator 的 MEDIUM/LOW 发现为非阻断后续项，不回退 Phase 3A PASS。
-2. 调用 Generator 只能实施 Phase 3B：解析、识别、预览、字段映射、映射模板、错误展示和 OpenAPI multipart schema 契约修复。
-3. Phase 3C、3D 继续保持未授权、未实现，不得与 3B 合并实施；不得新增 confirm/events/rollback/cancel、任务队列、SSE、正式入库或冲突策略。
+1. 保留 Phase 3B Evaluator 的 MEDIUM 发现为非阻断后续项，不回退 Phase 3B PASS。
+2. Phase 3C 仍未授权；如需继续，必须先由 Planner 单独确认校验、去重、冲突策略、确认导入、PostgreSQL 任务队列和 SSE 的范围。
+3. Phase 3D 继续未授权、未实现；不得提前新增回滚、补偿批次或完整前端流程。
 4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则

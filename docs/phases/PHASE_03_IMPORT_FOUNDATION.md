@@ -2,7 +2,7 @@
 
 计划日期：2026-07-25
 
-当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A 已 PASS；本轮授权实施 Phase 3B，Phase 3C/3D 继续未授权。
+当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS；Phase 3C/3D 继续未授权。
 
 ## 1. 背景与目标
 
@@ -332,7 +332,7 @@ Generator 精确文件范围：
 
 ### 8.2 Phase 3B：解析、识别、预览与字段映射
 
-**授权状态：本轮已授权实施；Phase 3C/3D 仍未授权。**
+**授权状态：已完成并经独立 Evaluator PASS；Phase 3C/3D 仍未授权。**
 
 范围：
 
@@ -398,6 +398,14 @@ frontend 边界：
 - Evaluator 必须独立审查 Phase 3B；所有 BLOCKER/HIGH 由 Generator 修复并复核至 PASS。
 
 退出条件：3B 功能和证据单独提交，`PLANS.md` 更新为 3B 已完成、3C 待授权，且仓库不存在 3C/3D 越界实现。
+
+收口结果（2026-07-25）：
+
+- 实现提交：`150194c feat: complete phase 3b import parsing preview mapping`。
+- 本地 Rust fmt/test/clippy、前端 lint/test/build 和 `git diff --check` 通过。
+- `futures` VPS 已完成容量治理、迁移 `202607250003` 至 `202607250007`、API 镜像重建、健康检查、Phase 3B E2E、数据库不变量及并发绑定测试。
+- 独立顶层 Evaluator 最终结论为 PASS，`BLOCKER=0`、`HIGH=0`；非阻断 MEDIUM 记录于 `docs/reviews/PHASE_03B_EVALUATION.md`。
+- 未发现 confirm/events/rollback/cancel、任务队列、SSE、正式确认入库、冲突策略或 `import_row_changes` 等 3C/3D 越界实现。
 
 ### 8.3 Phase 3C：校验、去重、冲突、确认任务与 SSE
 
@@ -534,7 +542,7 @@ docker compose --profile dev ps
 
 ## 13. Generator 边界
 
-当前 Generator 收到 Phase 3B 实施授权，精确文件范围和最大任务边界以第 8.2 节为准；Phase 3C/3D 仍视为未收到授权。
+Phase 3B Generator 工作已完成并收口；Phase 3C/3D 仍视为未收到授权。后续如进入 Phase 3C，必须重新由 Planner 明确范围，不得沿用 Phase 3B 授权。
 
 获得实施授权后，Generator 仍必须遵守：
 
