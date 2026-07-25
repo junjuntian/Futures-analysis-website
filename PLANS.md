@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 2：身份、个人 Workspace 与隔离基础（完成收口）。
+阶段 3：导入基础（计划待确认）。
 
-状态：Phase 1 工程基础建设已完成，Evaluator 最终 PASS。Phase 2 已按 `docs/phases/PHASE_02_IDENTITY_WORKSPACE_SECURITY.md` 实施、测试并部署到 `futures` VPS，最终 Evaluator 审查 PASS。本阶段只建设首次用户初始化、个人 Workspace、Cookie Session、CSRF、权限基础、审计与 PostgreSQL RLS 双层隔离，未进入目录、导入、行情、交易、AI、OCR 或外部数据采集。原始 Word 设计方案未修改。
+状态：Phase 1 工程基础建设已完成，Evaluator 最终 PASS。Phase 2 已按 `docs/phases/PHASE_02_IDENTITY_WORKSPACE_SECURITY.md` 实施、测试、部署到 `futures` VPS，并经最终 Evaluator 审查 PASS。版本收口已完成：`phase/01-foundation` 合并到 `main`，标签 `phase-2-pass-20260725` 已创建，并已从 `main` 创建当前分支 `phase/03-import-foundation`。本轮只制定 Phase 3 导入基础计划，不开始实现，不调用 Generator，不修改已经 PASS 的 Phase 1、Phase 2 实现。
 
 ## 本阶段任务状态
 
@@ -31,26 +31,31 @@
 | Phase 2 本地验证 | 已完成 | Rust fmt/test/clippy 通过；前端 lint/test/build 通过 |
 | Phase 2 VPS 部署验证 | 已完成 | 容器重建并启动；健康、迁移、RLS、认证 E2E、日志秘密扫描和重启恢复均通过 |
 | Phase 2 Evaluator 审查 | 已完成 | `docs/reviews/PHASE_02_EVALUATION.md`，最终状态 PASS |
+| Phase 2 版本收口 | 已完成 | `main`、`phase/01-foundation` 和标签 `phase-2-pass-20260725` 均指向 Phase 2 PASS 提交 `6dfea78` |
+| Phase 3 分支创建 | 已完成 | 当前分支为 `phase/03-import-foundation`，从 `main` 创建 |
+| Phase 3 Planner 计划 | 待确认 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`；仅规划导入基础，不实现业务代码 |
 
 ## 本轮接管核验
 
-核验日期：2026-07-24。
+核验日期：2026-07-25。
 
 | 项目 | 实际结果 |
 | --- | --- |
-| Git 分支 | `phase/01-foundation` |
-| Git 工作区 | 接管核验时干净；Phase 2 实施产生代码、配置、迁移、文档和前端变更 |
-| Git HEAD | `95ed601 docs: add agent handoff checkpoint` |
-| 最近提交 | `95ed601`、`146a614`、`81308ed`、`0ee8671` |
+| Git 分支 | `phase/03-import-foundation` |
+| Git 工作区 | 接管核验时干净；本轮仅允许新增 Phase 3 计划文档并同步计划状态 |
+| Git HEAD | `6dfea78 feat: complete phase two identity foundation` |
+| 最近提交 | `6dfea78`、`95ed601`、`146a614`、`81308ed`、`0ee8671` |
+| 版本收口 | `main`、`phase/01-foundation`、`phase/03-import-foundation` 和标签 `phase-2-pass-20260725` 均指向 `6dfea78` |
 | Phase 1 结论 | Evaluator 最终 PASS |
+| Phase 2 结论 | Evaluator 最终 PASS |
 | VPS 容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行 |
 | VPS 健康 | API/PostgreSQL healthy；live/ready/version/首页/Nginx 代理 HTTP 200 |
 | 当前部署版本 | `0.1.0`；`git_sha=local` |
-| 数据库迁移 | 接管时仅 `202607240001`：`phase 1 foundation` |
-| RLS 基础 | 接管时 `app.current_workspace_id()` 存在；尚无正式业务表 |
-| 源码一致性 | 关键部署文件哈希与本地一致 |
+| 数据库迁移 | `202607240001`：`phase 1 foundation`；`202607240002`：`phase 2 identity workspace security` |
+| RLS 基础 | `audit_logs` 已启用并强制 RLS；运行时角色为 `NOSUPERUSER`、`NOBYPASSRLS` |
+| 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-接管结论：Phase 1 交接事实与 Git、迁移和 VPS 实态一致，可以进入 Phase 2 实施。
+接管结论：Phase 2 PASS 交接事实与 Git、迁移和 VPS 实态一致；可以进入 Phase 3 规划确认，但尚未开始 Phase 3 实现。
 
 ## 本地验证结果
 
@@ -70,7 +75,7 @@
 
 ## futures VPS 核对结果
 
-最近核对时间：2026-07-25 01:13 +08:00。
+最近核对时间：2026-07-25 11:35 +08:00。
 
 | 项目 | 结果 |
 | --- | --- |
@@ -101,11 +106,29 @@ Phase 2 VPS 证据：
 
 已完成 Word 文本、标题、表格、内嵌图片、批注和修订结构检查。当前环境缺少 LibreOffice，未能将 Word 文件逐页渲染为 PNG，因此未对分页、字体替换和表格跨页进行视觉验收；原文件未被修改。
 
+## Phase 3 计划摘要
+
+Phase 3 建议范围详见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`。核心交付为：
+
+- TXT、CSV、XLS、XLSX 上传。
+- 原始文件本地 `ObjectStorage` 抽象。
+- `import_batches`、文件、模板、映射、staging、错误和变更日志。
+- 编码、分隔符、工作表、表头识别。
+- 字段映射模板和前 50 行预览。
+- 数据校验、错误报告、去重和冲突策略。
+- 整批原子回滚和补偿批次。
+- Workspace 隔离、PostgreSQL RLS、审计。
+- SSE 导入进度。
+- 本地测试与 `futures` VPS 验收流程。
+
+明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
+
 ## 后续步骤
 
-1. 提交 Phase 2 收口变更。
-2. 后续 Phase 3 前必须重新由 Planner 明确范围，不得直接进入行情、导入、交易、AI、OCR 或外部数据采集。
-3. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
+1. 等待项目所有者确认 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`。
+2. 确认后再按 Planner → Generator → 本地测试 → futures VPS 验收 → Evaluator → 修复 → 复核 PASS → Git 提交 → handoff 的流程实施。
+3. 实施前不得调用 Generator，不得编写导入业务代码。
+4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则
 
