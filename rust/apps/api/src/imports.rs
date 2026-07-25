@@ -1,5 +1,5 @@
 use crate::auth::{self, AuthError, AuthState, Permission};
-use application::imports::{UploadValidationError, UploadValidator};
+use application::imports::{ImportParseError, UploadValidationError, UploadValidator};
 use axum::{
     Json,
     extract::{Multipart, Path, State},
@@ -7,8 +7,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use common::ApiResponse;
-use database::imports::{ImportRepositoryError, ImportUploadRecord, NewImportUpload};
-use domain::import::ImportBatchStatus;
+use database::imports::{
+    ImportRepositoryError, ImportUploadRecord, InspectionUpdate, NewImportUpload,
+    PreviewInputSnapshot, PreviewSave,
+};
+use domain::import::{
+    ImportBatchStatus, ImportDatasetDefinition, ImportErrorsResponse, ImportInspectRequest,
+    ImportInspectResponse, ImportMappingRequest, ImportMappingResponse, ImportPreviewRequest,
+    ImportTemplateCreateRequest, ImportTemplateSummary, ImportTemplateVersionResponse,
+    import_dataset_definitions,
+};
 use infrastructure::object_storage::{ObjectStorage, ObjectStorageError};
 use serde::Serialize;
 use std::sync::Arc;
@@ -27,6 +35,13 @@ pub struct ImportState {
 pub struct ImportErrorBody {
     code: &'static str,
     message: &'static str,
+}
+
+#[derive(Debug, ToSchema)]
+#[allow(dead_code)]
+pub struct ImportUploadRequest {
+    #[schema(value_type = String, format = Binary)]
+    pub file: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -50,6 +65,16 @@ pub struct ImportResponse {
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String)]
     pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportTemplatesResponse {
+    pub items: Vec<ImportTemplateSummary>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportDatasetsResponse {
+    pub items: Vec<ImportDatasetDefinition>,
 }
 
 impl From<ImportUploadRecord> for ImportResponse {
@@ -159,7 +184,7 @@ impl IntoResponse for ImportApiError {
         ("Origin" = String, Header, description = "Expected public origin")
     ),
     request_body(
-        content = String,
+        content = ImportUploadRequest,
         content_type = "multipart/form-data",
         description = "One file field. TXT, CSV, XLS and XLSX are accepted up to IMPORT_MAX_BYTES."
     ),
@@ -346,6 +371,313 @@ pub async fn get(
     Ok(Json(ApiResponse::new(ImportResponse::from(record), request_id)).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/inspect",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("x-csrf-token" = String, Header, description = "Session-bound CSRF token"),
+        ("Origin" = String, Header, description = "Expected public origin")
+    ),
+    request_body = ImportInspectRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportInspectResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn inspect(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ImportInspectRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+    let bytes = state
+        .storage
+        .read(&record.object_key, state.upload_policy.max_bytes)
+        .await
+        .map_err(|_| ImportApiError::internal(request_id))?;
+    let mapping =
+        database::imports::get_mapping_fields(&state.auth.pool, context.workspace_id(), import_id)
+            .await
+            .map_err(|_| ImportApiError::internal(request_id))?;
+    let mut parsed = application::imports::inspect_content(
+        import_id,
+        record.status,
+        &record.detected_format,
+        &bytes,
+        request,
+        &mapping,
+    )
+    .map_err(|error| map_parse_error(error, request_id))?;
+    let saved = database::imports::save_inspection(
+        &state.auth.pool,
+        InspectionUpdate {
+            workspace_id: context.workspace_id(),
+            actor_user_id: context.user_id(),
+            import_id,
+            detected_encoding: parsed.encoding.value.as_deref(),
+            detected_delimiter: parsed.delimiter.value.as_deref(),
+            selected_sheet: parsed.selected_sheet.as_deref(),
+            header_row: parsed.header_row as i32,
+        },
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    parsed.status = saved.status;
+    parsed.preview_invalidated = saved.preview_invalidated;
+    Ok(Json(ApiResponse::new(parsed, request_id)).into_response())
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/imports/{import_id}/mapping",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("x-csrf-token" = String, Header, description = "Session-bound CSRF token"),
+        ("Origin" = String, Header, description = "Expected public origin")
+    ),
+    request_body = ImportMappingRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportMappingResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn save_mapping(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ImportMappingRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let response = database::imports::save_mapping(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        import_id,
+        &request.dataset_type,
+        request.template_version_id,
+        &request.fields,
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    Ok(Json(ApiResponse::new(response, request_id)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/preview",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("x-csrf-token" = String, Header, description = "Session-bound CSRF token"),
+        ("Origin" = String, Header, description = "Expected public origin")
+    ),
+    request_body = ImportPreviewRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportInspectResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn preview(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ImportPreviewRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+    let bytes = state
+        .storage
+        .read(&record.object_key, state.upload_policy.max_bytes)
+        .await
+        .map_err(|_| ImportApiError::internal(request_id))?;
+    let mapping =
+        database::imports::get_mapping_fields(&state.auth.pool, context.workspace_id(), import_id)
+            .await
+            .map_err(|_| ImportApiError::internal(request_id))?;
+    let mut parsed = application::imports::preview_content(
+        import_id,
+        record.status,
+        &record.detected_format,
+        &bytes,
+        request,
+        &mapping,
+    )
+    .map_err(|error| map_parse_error(error, request_id))?;
+    database::imports::save_preview(
+        &state.auth.pool,
+        PreviewSave {
+            workspace_id: context.workspace_id(),
+            actor_user_id: context.user_id(),
+            import_id,
+            snapshot: PreviewInputSnapshot {
+                detected_encoding: parsed.encoding.value.as_deref(),
+                detected_delimiter: parsed.delimiter.value.as_deref(),
+                selected_sheet: parsed.selected_sheet.as_deref(),
+                header_row: parsed.header_row as i32,
+                fields: &mapping,
+            },
+            rows: &parsed.preview_rows,
+            errors: &parsed.errors,
+            warnings: &parsed.warnings,
+        },
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    if record.status == ImportBatchStatus::Mapped {
+        parsed.status = ImportBatchStatus::PreviewReady;
+    }
+    Ok(Json(ApiResponse::new(parsed, request_id)).into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/imports/{import_id}/errors",
+    params(("import_id" = Uuid, Path, description = "Import batch id")),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportErrorsResponse),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn errors(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ImportRead)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let items = database::imports::list_errors(&state.auth.pool, context.workspace_id(), import_id)
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+    Ok(Json(ApiResponse::new(
+        ImportErrorsResponse { import_id, items },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/import-templates",
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportTemplatesResponse),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody)
+    )
+)]
+pub async fn list_templates(
+    State(state): State<Arc<ImportState>>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ImportRead)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let items = database::imports::list_templates(&state.auth.pool, context.workspace_id())
+        .await
+        .map_err(|_| ImportApiError::internal(request_id))?;
+    Ok(Json(ApiResponse::new(
+        ImportTemplatesResponse { items },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/import-datasets",
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportDatasetsResponse),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody)
+    )
+)]
+pub async fn list_datasets(
+    State(state): State<Arc<ImportState>>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ImportRead)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    Ok(Json(ApiResponse::new(
+        ImportDatasetsResponse {
+            items: import_dataset_definitions(),
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/import-templates",
+    params(
+        ("x-csrf-token" = String, Header, description = "Session-bound CSRF token"),
+        ("Origin" = String, Header, description = "Expected public origin")
+    ),
+    request_body = ImportTemplateCreateRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 201, body = ImportTemplateVersionResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody)
+    )
+)]
+pub async fn create_template(
+    State(state): State<Arc<ImportState>>,
+    headers: HeaderMap,
+    Json(request): Json<ImportTemplateCreateRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let response = database::imports::create_template(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        &request.dataset_type,
+        &request.name,
+        request.description.as_deref(),
+        &request.fields,
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiResponse::new(response, request_id)),
+    )
+        .into_response())
+}
+
 fn map_validation_error(error: UploadValidationError, request_id: Uuid) -> ImportApiError {
     match error {
         UploadValidationError::InvalidConfiguration => ImportApiError::internal(request_id),
@@ -368,6 +700,84 @@ fn map_validation_error(error: UploadValidationError, request_id: Uuid) -> Impor
 
 fn map_storage_error(_: ObjectStorageError, request_id: Uuid) -> ImportApiError {
     ImportApiError::internal(request_id)
+}
+
+fn map_parse_error(error: ImportParseError, request_id: Uuid) -> ImportApiError {
+    match error {
+        ImportParseError::UnsupportedFormat => {
+            ImportApiError::unsupported("unsupported_format", request_id)
+        }
+        ImportParseError::InvalidEncoding => {
+            ImportApiError::bad_request("invalid_encoding", request_id)
+        }
+        ImportParseError::InvalidDelimiter => {
+            ImportApiError::bad_request("invalid_delimiter", request_id)
+        }
+        ImportParseError::InvalidSheet => ImportApiError::bad_request("invalid_sheet", request_id),
+        ImportParseError::SpreadsheetReadFailed => {
+            ImportApiError::bad_request("spreadsheet_read_failed", request_id)
+        }
+    }
+}
+
+fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> ImportApiError {
+    match error {
+        ImportRepositoryError::NotFound => ImportApiError::not_found(request_id),
+        ImportRepositoryError::InvalidTransition => {
+            ImportApiError::bad_request("invalid_import_status", request_id)
+        }
+        ImportRepositoryError::InvalidMappingDefinition(error) => match error {
+            domain::import::ImportMappingDefinitionError::UnknownDatasetType => {
+                ImportApiError::bad_request("unknown_dataset_type", request_id)
+            }
+            domain::import::ImportMappingDefinitionError::UnknownTargetField => {
+                ImportApiError::bad_request("unknown_target_field", request_id)
+            }
+            domain::import::ImportMappingDefinitionError::UnsupportedTransform => {
+                ImportApiError::bad_request("unsupported_transform", request_id)
+            }
+        },
+        ImportRepositoryError::TemplateVersionNotFound => {
+            ImportApiError::bad_request("template_version_not_found", request_id)
+        }
+        ImportRepositoryError::TemplateVersionMismatch => {
+            ImportApiError::bad_request("template_version_mismatch", request_id)
+        }
+        ImportRepositoryError::PreviewInputsChanged => {
+            ImportApiError::bad_request("preview_inputs_changed", request_id)
+        }
+        _ => ImportApiError::internal(request_id),
+    }
+}
+
+async fn require_import_write(
+    state: &ImportState,
+    headers: &HeaderMap,
+) -> Result<(Uuid, auth::AuthContext), ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    auth::ensure_allowed_origin(&state.auth.config, headers)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    auth::ensure_csrf(&state.auth, headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ImportUpload)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    Ok((request_id, context))
+}
+
+async fn load_import_object(
+    state: &ImportState,
+    workspace_id: Uuid,
+    import_id: Uuid,
+    request_id: Uuid,
+) -> Result<ImportUploadRecord, ImportApiError> {
+    database::imports::get_import(&state.auth.pool, workspace_id, import_id)
+        .await
+        .map_err(|error| map_repository_error(error, request_id))
 }
 
 async fn audit_upload_denial(

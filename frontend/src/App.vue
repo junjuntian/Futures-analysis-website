@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Cpu, HomeFilled, Key, SwitchButton, User } from '@element-plus/icons-vue'
+import { Cpu, HomeFilled, Key, SwitchButton, UploadFilled, User } from '@element-plus/icons-vue'
 import { useAuthStore } from './stores/auth'
 
 const auth = useAuthStore()
@@ -17,6 +17,10 @@ const auth = useAuthStore()
         <el-menu-item index="/auth">
           <el-icon><Key /></el-icon>
           <span>身份认证</span>
+        </el-menu-item>
+        <el-menu-item index="/imports">
+          <el-icon><UploadFilled /></el-icon>
+          <span>导入中心</span>
         </el-menu-item>
         <el-menu-item index="/sessions">
           <el-icon><User /></el-icon>

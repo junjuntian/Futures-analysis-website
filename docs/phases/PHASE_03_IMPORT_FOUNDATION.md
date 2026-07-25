@@ -2,7 +2,7 @@
 
 计划日期：2026-07-25
 
-当前状态：已拆分为 Phase 3A/3B/3C/3D；当前只授权 Phase 3A 待实现，Phase 3B/3C/3D 未授权。
+当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A 已 PASS；本轮授权实施 Phase 3B，Phase 3C/3D 继续未授权。
 
 ## 1. 背景与目标
 
@@ -115,6 +115,14 @@ Phase 3 的目标是建设 MVP 的第一个业务入口：导入中心基础能�
 - 本地完成 Rust fmt/test/clippy、前端 lint/test/build、迁移检查和导入域单元/集成测试。
 - 本机没有 Docker 不作为阻塞；Docker Compose config、镜像构建、容器启动和部署测试在 `futures` VPS 执行。
 - VPS 验收必须覆盖上传、inspect、mapping、preview、confirm、SSE、错误报告、幂等、回滚、跨 Workspace 越权、RLS 和日志秘密扫描。
+
+### 2.12 本轮 VPS 容量治理记录
+
+- 清理前根分区：`/` 25G 总量、21G 已用、2.0G 可用、92% 使用率。
+- 清理后根分区：`/` 25G 总量、9.1G 已用、14G 可用、40% 使用率。
+- 清理范围仅限本项目 `/tmp` 临时部署包和 Docker build cache。
+- 未删除 PostgreSQL 数据卷、对象存储卷或当前运行镜像。
+- 本轮 Phase 3B 实施不得以容量治理为由改变业务语义；如需调整 multipart/body limit，只允许在契约要求内最小修改。
 
 ## 3. 非目标
 
@@ -324,20 +332,70 @@ Generator 精确文件范围：
 
 ### 8.2 Phase 3B：解析、识别、预览与字段映射
 
-**授权状态：未授权；Phase 3A PASS 并提交后方可重新授权。**
+**授权状态：本轮已授权实施；Phase 3C/3D 仍未授权。**
 
 范围：
 
-- TXT/CSV/XLS/XLSX 安全解析；编码、分隔符、工作表和表头识别及人工覆盖。
+- TXT/CSV/XLS/XLSX 安全解析。
+- TXT/CSV 编码、分隔符自动识别，支持人工覆盖；分隔符候选包含逗号、制表符、分号、竖线、空格和用户指定值。
+- Excel 支持工作表列表、工作表选择、表头行选择和前 50 行预览。
 - Excel 宏、公式、外部链接、嵌入对象和异常压缩结构只识别并安全失败/警告，不执行。
-- 新增模板、模板不可变版本、批次映射和必要 staging 模型；提供 `/inspect`、`/mapping`、`/preview` 与模板读写接口。
-- 生成前 50 行原始值/规范值/目标字段预览与全文件轻量扫描基础统计；不得写入正式目标表。
+- 字段映射、字段映射模板、模板不可变版本和批次映射。
+- 生成前 50 行原始值、规范值、目标字段、字段错误、行级错误和警告预览；可做全文件轻量扫描元数据统计，但不得写入正式业务表。
+- 解析错误展示和只读错误查询。
+- 将 Phase 3A 遗留 OpenAPI multipart schema 问题纳入本轮 3B 契约修复，确保 `POST /api/v1/imports` 的 `multipart/form-data` 上传字段、文件字段 schema、错误体和前端客户端契约一致。
 
-模块边界：解析器、映射和预览代码限于 domain/application/infrastructure/database/API 对应新模块及必要迁移；除新增导入入口的最小页面外，完整前端流程留给 3D。
+禁止范围：
 
-非目标：不做正式确认导入、数据冲突落库、PostgreSQL 任务队列、SSE、回滚或补偿。
+- 不做正式确认入库。
+- 不实现冲突策略落库、冲突策略写入或正式业务目标表写入。
+- 不实现 SSE、PostgreSQL 任务队列、后台 job semantics、取消任务语义、回滚或补偿批次。
+- 不实现套利、交易、AI、OCR、外部采集、行情分析、自动回测或图表能力。
 
-验收与测试门禁：四种格式的正常/边界/恶意夹具，编码与分隔符人工覆盖，工作表/表头选择，前 50 行上限，模板版本不可变，跨 Workspace RLS；完整 Rust/前端回归通过，Evaluator PASS。
+Generator 文件范围：
+
+- `docs/` 可更新。
+- Rust 仅限 `domain`、`application`、`database`、`infrastructure`、`api` 中 import 相关模块，以及必要的 `Cargo.toml`、`Cargo.lock`。
+- 可新增 Phase 3B migration，用于模板、模板版本、映射、staging preview 和 errors metadata。
+- `frontend/` 仅允许导入中心 3B 最小页面、API 客户端和测试；不得实现 confirm、SSE、rollback 或完整 3D 流程。
+- `deploy/nginx` 仅在 multipart/body limit 契约需要时可最小调整，不得语义扩张。
+
+API 边界：
+
+- 保留 Phase 3A 已有 `POST /api/v1/imports` 与 `GET /api/v1/imports/{import_id}`。
+- 可按需新增 `inspect`、`mapping`、`preview`、`import-templates` 和只读 `errors` 接口。
+- 不得新增 `/confirm`、`/events`、`/rollback`、`/cancel`，也不得引入 job semantics。
+- OpenAPI 必须与实现一致，尤其是 multipart 上传 schema、CSRF/error 契约、3B 新增接口请求/响应和状态枚举。
+
+DB 边界：
+
+- 允许新增 `import_templates`、`import_template_versions`、`import_mappings`、staging preview 和 errors metadata。
+- 新增表必须包含 Workspace 隔离、RLS、索引、审计字段和跨 Workspace 测试。
+- 不得新增 `import_row_changes`、jobs、正式业务目标表写入、冲突策略写入或正式导入结果表。
+
+frontend 边界：
+
+- 只允许最小导入中心页面展示上传后 inspect、mapping、preview、模板和错误展示能力。
+- 不得暴露确认导入、任务进度、SSE、取消、回滚、补偿或正式业务数据入口。
+- 前端不得允许用户输入或切换 `workspace_id`。
+
+验收标准：
+
+- TXT、CSV、XLS、XLSX 均有正常、边界和恶意样例覆盖。
+- 编码与分隔符自动识别和人工覆盖有效。
+- Excel 工作表选择、表头行选择、公式/宏/外链/嵌入对象安全处理有效。
+- 前 50 行预览严格限流，展示原始值、规范值、目标字段、错误和警告。
+- 字段映射模板版本不可变，旧批次引用旧版本。
+- 解析错误可展示、可分页只读查询，且错误消息脱敏。
+- OpenAPI multipart schema 修复通过契约检查，前端客户端与后端实现一致。
+- 跨 Workspace API/RLS 隔离通过；不得出现 3C/3D 越界接口、表或 UI。
+
+测试门禁：
+
+- 本地必须通过 `git diff --check`、`cargo +stable fmt --check`、`cargo +stable test --workspace`、`cargo +stable clippy --workspace --all-targets -- -D warnings`。
+- 前端若有变更，必须通过 `pnpm lint`、`pnpm test`、`pnpm build`。
+- `futures` VPS 执行适用于 3B 的 Docker config/build/up、迁移记录、OpenAPI 契约、四类文件 inspect/mapping/preview、错误展示、跨 Workspace API/RLS 和日志秘密扫描。
+- Evaluator 必须独立审查 Phase 3B；所有 BLOCKER/HIGH 由 Generator 修复并复核至 PASS。
 
 退出条件：3B 功能和证据单独提交，`PLANS.md` 更新为 3B 已完成、3C 待授权，且仓库不存在 3C/3D 越界实现。
 
@@ -379,7 +437,7 @@ Generator 精确文件范围：
 
 ## 9. Phase 3 总体验收标准
 
-以下是 Phase 3D 最终收口时的总体验收标准，不得用尚未授权的 3B/3C/3D 条件阻塞当前 Phase 3A 的独立验收：
+以下是 Phase 3D 最终收口时的总体验收标准，不得用尚未授权的 3C/3D 条件阻塞当前 Phase 3B 的独立验收：
 
 - TXT、CSV、XLS、XLSX 至少各有正常、边界和恶意样例。
 - UTF-8 与批准的中文编码可正确预览；检测失败时可人工选择。
@@ -476,7 +534,7 @@ docker compose --profile dev ps
 
 ## 13. Generator 边界
 
-当前 Generator 只收到 Phase 3A 实施授权，精确文件范围和最大任务边界以第 8.1 节为准；3B、3C、3D 仍视为未收到授权。
+当前 Generator 收到 Phase 3B 实施授权，精确文件范围和最大任务边界以第 8.2 节为准；Phase 3C/3D 仍视为未收到授权。
 
 获得实施授权后，Generator 仍必须遵守：
 
@@ -487,4 +545,4 @@ docker compose --profile dev ps
 - 任何新增业务表必须包含 `workspace_id`、RLS、索引、审计和跨 Workspace 测试。
 - 所有新接口必须更新 OpenAPI、前端客户端和测试夹具。
 - BLOCKER/HIGH 必须由 Generator 修复，并由 Evaluator 复核至 PASS 后才能提交。
-- Generator 若再次卡住，允许创建新的 Generator 重做同一个 Phase 3A；新任务必须逐项引用第 8.1 节的文件范围、验收标准和最大边界，且不得由主 Agent 代替实现或评估。
+- Generator 若再次卡住，允许创建新的 Generator 重做同一个 Phase 3B；新任务必须逐项引用第 8.2 节的文件范围、API/DB/frontend 边界、验收标准和最大边界，且不得由主 Agent 代替实现或评估。

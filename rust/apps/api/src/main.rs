@@ -8,7 +8,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use common::{ApiResponse, AppConfig};
 use std::sync::Arc;
@@ -37,7 +37,14 @@ use uuid::Uuid;
         auth::sessions,
         auth::revoke_session,
         imports::upload,
-        imports::get
+        imports::get,
+        imports::inspect,
+        imports::save_mapping,
+        imports::preview,
+        imports::errors,
+        imports::list_templates,
+        imports::list_datasets,
+        imports::create_template
     ),
     components(schemas(
         HealthStatus,
@@ -52,9 +59,31 @@ use uuid::Uuid;
         auth::SessionsQuery,
         auth::ErrorBody,
         imports::ImportErrorBody,
+        imports::ImportUploadRequest,
         imports::ImportFileResponse,
         imports::ImportResponse,
-        domain::import::ImportBatchStatus
+        imports::ImportTemplatesResponse,
+        imports::ImportDatasetsResponse,
+        domain::import::ImportBatchStatus,
+        domain::import::ImportErrorSeverity,
+        domain::import::ImportInspectRequest,
+        domain::import::ImportPreviewRequest,
+        domain::import::ImportDetection,
+        domain::import::ImportSheetInfo,
+        domain::import::ImportColumnPreview,
+        domain::import::ImportPreviewCell,
+        domain::import::ImportPreviewRow,
+        domain::import::ImportErrorPreview,
+        domain::import::ImportInspectResponse,
+        domain::import::ImportMappingField,
+        domain::import::ImportDatasetDefinition,
+        domain::import::ImportDatasetFieldDefinition,
+        domain::import::ImportMappingRequest,
+        domain::import::ImportMappingResponse,
+        domain::import::ImportTemplateCreateRequest,
+        domain::import::ImportTemplateSummary,
+        domain::import::ImportTemplateVersionResponse,
+        domain::import::ImportErrorsResponse
     )),
     modifiers(&SecurityAddon)
 )]
@@ -135,6 +164,24 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
     let import_routes = Router::new()
         .route("/api/v1/imports", post(imports::upload))
         .route("/api/v1/imports/{import_id}", get(imports::get))
+        .route(
+            "/api/v1/imports/{import_id}/inspect",
+            post(imports::inspect),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/mapping",
+            put(imports::save_mapping),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/preview",
+            post(imports::preview),
+        )
+        .route("/api/v1/imports/{import_id}/errors", get(imports::errors))
+        .route(
+            "/api/v1/import-templates",
+            get(imports::list_templates).post(imports::create_template),
+        )
+        .route("/api/v1/import-datasets", get(imports::list_datasets))
         .layer(DefaultBodyLimit::max(import_body_limit))
         .with_state(import_state);
 

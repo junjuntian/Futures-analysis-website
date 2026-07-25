@@ -23,9 +23,11 @@ argon2 = "0.5"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
+calamine = "0.26"
 common = { path = "crates/common" }
 database = { path = "crates/database" }
 domain = { path = "crates/domain" }
+encoding_rs = "0.8"
 infrastructure = { path = "crates/infrastructure" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0", features = ["derive"] }

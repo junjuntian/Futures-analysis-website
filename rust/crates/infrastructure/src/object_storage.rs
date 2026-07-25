@@ -36,6 +36,7 @@ pub trait ObjectUpload: Send {
 #[async_trait]
 pub trait ObjectStorage: Send + Sync {
     async fn begin_upload(&self) -> Result<Box<dyn ObjectUpload>, ObjectStorageError>;
+    async fn read(&self, object_key: &str, max_bytes: u64) -> Result<Vec<u8>, ObjectStorageError>;
     async fn delete(&self, object_key: &str) -> Result<(), ObjectStorageError>;
 }
 
@@ -93,6 +94,17 @@ impl ObjectStorage for LocalObjectStorage {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn read(&self, object_key: &str, max_bytes: u64) -> Result<Vec<u8>, ObjectStorageError> {
+        let path = self.object_path(object_key)?;
+        let metadata = fs::metadata(&path).await?;
+        if metadata.len() > max_bytes {
+            return Err(ObjectStorageError::Io(io::Error::other(
+                "object exceeds read limit",
+            )));
+        }
+        Ok(fs::read(path).await?)
     }
 }
 
@@ -265,6 +277,19 @@ mod tests {
         assert_ne!(first.object_key, second.object_key);
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.size_bytes, second.size_bytes);
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn reads_persisted_object_with_size_guard() {
+        let root = test_root();
+        let storage = LocalObjectStorage::new(&root).await.unwrap();
+        let mut upload = storage.begin_upload().await.unwrap();
+        upload.write_chunk(b"abc").await.unwrap();
+        let stored = upload.commit().await.unwrap();
+
+        assert_eq!(storage.read(&stored.object_key, 3).await.unwrap(), b"abc");
+        assert!(storage.read(&stored.object_key, 2).await.is_err());
         let _ = fs::remove_dir_all(root).await;
     }
 

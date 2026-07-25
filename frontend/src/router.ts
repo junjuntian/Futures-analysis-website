@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AuthView from './views/AuthView.vue'
 import HomeView from './views/HomeView.vue'
+import ImportCenterView from './views/ImportCenterView.vue'
 import NotFoundView from './views/NotFoundView.vue'
 import SessionsView from './views/SessionsView.vue'
 import SystemView from './views/SystemView.vue'
@@ -11,6 +12,7 @@ export const router = createRouter({
   routes: [
     { path: '/', component: HomeView },
     { path: '/auth', component: AuthView },
+    { path: '/imports', component: ImportCenterView },
     { path: '/sessions', component: SessionsView },
     { path: '/system', component: SystemView },
     { path: '/:pathMatch(.*)*', component: NotFoundView }

@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；Phase 3A 已完成，等待 Phase 3B 单独授权。
+阶段 3：导入基础；Phase 3A 已完成，Phase 3B 本轮授权实施，Phase 3C/3D 继续未授权。
 
-状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 已完成实现、本地测试、`futures` VPS Docker 验证和独立 Evaluator 复核，以 `1b089f7 feat: complete phase 3a import upload foundation` 提交收口。Phase 3B、3C、3D 均未授权且未实现；下一步只能单独授权 Phase 3B。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 已完成实现、本地测试、`futures` VPS Docker 验证和独立 Evaluator 复核，以 `1b089f7 feat: complete phase 3a import upload foundation` 提交收口。Phase 3B 本轮已由 Planner 单独授权实施；Phase 3C、3D 均未授权且未实现，本轮禁止合并实施。
 
 ## 本阶段任务状态
 
@@ -35,7 +35,7 @@
 | Phase 3 分支创建 | 已完成 | 当前分支为 `phase/03-import-foundation`，从 `main` 创建 |
 | Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
 | Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
-| Phase 3B：解析、预览与映射 | 未授权、未实现 | 只能由 Planner 单独授权后实施 |
+| Phase 3B：解析、预览与映射 | 本轮授权实施、待 Generator 完成 | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与模板、错误展示、OpenAPI multipart schema 契约修复 |
 | Phase 3C：校验与异步确认 | 未授权、未实现 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
 | Phase 3D：回滚与完整流程 | 未授权、未实现 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
 
@@ -59,7 +59,7 @@
 | Phase 3A RLS | 上传域 RLS 与跨 Workspace 拒绝验证通过 |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。当前没有 3B、3C、3D 实施授权。
+收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。当前已授权 Phase 3B；Phase 3C、3D 继续未授权。
 
 ## 本地验证结果
 
@@ -88,7 +88,7 @@
 | Docker Compose | Docker Compose 2.40.3 |
 | 当前容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行；API/PostgreSQL healthy |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | 25G 总量、21G 已用、2.2G 可用，使用率 91% |
+| 根分区 | 容量治理后：25G 总量、9.1G 已用、14G 可用，使用率 40% |
 | 内存 | 约 956MiB；已启用项目 swapfile 2GiB |
 
 部署状态：Phase 3A 已部署并验证。访问地址：`http://172.238.11.174:8088`。
@@ -103,6 +103,13 @@ Phase 3A VPS 证据：
 - 五轮上传的数据库记录、对象文件和 SHA-256 均为 5/5/5 一致。
 - 原子写入临时文件残留 `.tmp=0`；日志秘密扫描命中数为 0。
 
+本轮 VPS 容量治理：
+
+- 清理前 `/`：25G 总量、21G 已用、2.0G 可用、92% 使用率。
+- 清理后 `/`：25G 总量、9.1G 已用、14G 可用、40% 使用率。
+- 清理范围：本项目 `/tmp` 临时部署包和 Docker build cache。
+- 未删除 PostgreSQL 数据卷、对象存储卷或当前运行镜像。
+
 ## 验证限制
 
 已完成 Word 文本、标题、表格、内嵌图片、批注和修订结构检查。当前环境缺少 LibreOffice，未能将 Word 文件逐页渲染为 PNG，因此未对分页、字体替换和表格跨页进行视觉验收；原文件未被修改。
@@ -112,17 +119,26 @@ Phase 3A VPS 证据：
 Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下顺序独立准入和收口：
 
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
-- Phase 3B：TXT/CSV/XLS/XLSX 解析，编码、分隔符、工作表识别，前 50 行预览，字段映射。
-- Phase 3C：校验、去重、冲突策略、确认导入、PostgreSQL 任务队列、SSE。
-- Phase 3D：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
+- Phase 3B（本轮授权）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
+- Phase 3C（未授权）：校验、去重、冲突策略、确认导入、PostgreSQL 任务队列、SSE。
+- Phase 3D（未授权）：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
 
 明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
+
+Phase 3B 实施边界：
+
+- 允许文件范围：`docs/` 可更新；Rust 仅限 `domain`、`application`、`database`、`infrastructure`、`api` import 相关模块；必要 `Cargo.toml`、`Cargo.lock`；新增 Phase 3B migration；`frontend/` 仅限导入中心 3B 最小页面/API/测试；`deploy/nginx` 仅在 multipart/body limit 契约需要时最小调整。
+- API 边界：保留 `POST /api/v1/imports` 和 `GET /api/v1/imports/{import_id}`；可按需新增 `inspect`、`mapping`、`preview`、`import-templates`、只读 `errors`；不得新增 `confirm`、`events`、`rollback`、`cancel` 或 job semantics。
+- DB 边界：允许 templates、template_versions、mappings、staging preview、errors metadata；不得新增 row_changes、jobs、正式业务目标表写入或冲突策略写入。
+- frontend 边界：仅展示 3B inspect/mapping/preview/template/errors 最小流程；不得暴露确认导入、任务进度、SSE、取消、回滚或补偿。
+- 验收标准：四类文件正常/边界/恶意样例、编码/分隔符人工覆盖、Excel 工作表/表头选择、前 50 行上限、模板版本不可变、错误脱敏展示、OpenAPI multipart 契约一致、跨 Workspace API/RLS 隔离、无 3C/3D 越界实现。
+- 测试门槛：本地 Rust fmt/test/clippy 和前端 lint/test/build 通过；VPS 完成适用 Docker、迁移、OpenAPI、四类文件 inspect/mapping/preview、错误展示、跨 Workspace API/RLS、日志秘密扫描；Evaluator PASS 且无 BLOCKER/HIGH。
 
 ## 后续步骤
 
 1. 保留 Evaluator 的 MEDIUM/LOW 发现为非阻断后续项，不回退 Phase 3A PASS。
-2. 若继续 Phase 3，必须先由 Planner 单独授权 Phase 3B；授权前不得调用 Generator 实施解析、预览或字段映射。
-3. Phase 3C、3D 继续保持未授权、未实现，不得与 3B 合并实施。
+2. 调用 Generator 只能实施 Phase 3B：解析、识别、预览、字段映射、映射模板、错误展示和 OpenAPI multipart schema 契约修复。
+3. Phase 3C、3D 继续保持未授权、未实现，不得与 3B 合并实施；不得新增 confirm/events/rollback/cancel、任务队列、SSE、正式入库或冲突策略。
 4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则
