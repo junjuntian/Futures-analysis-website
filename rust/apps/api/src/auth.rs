@@ -291,6 +291,7 @@ pub(crate) enum Permission {
     Upload,
     Rollback,
     Compensate,
+    GovernObjects,
 }
 
 impl Permission {
@@ -300,6 +301,7 @@ impl Permission {
             Self::Upload => "import.upload",
             Self::Rollback => "import.rollback",
             Self::Compensate => "import.compensate",
+            Self::GovernObjects => "object.govern",
         }
     }
 }
@@ -338,6 +340,7 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         Permission::Upload,
         Permission::Rollback,
         Permission::Compensate,
+        Permission::GovernObjects,
     ] {
         if roles_allow_permission(roles, permission) {
             permissions.push(permission.as_str().to_string());
@@ -362,6 +365,7 @@ fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
         Permission::Compensate => roles
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst")),
+        Permission::GovernObjects => roles.iter().any(|role| role == "admin"),
     }
 }
 
@@ -1290,18 +1294,21 @@ mod tests {
         assert!(admin.contains(&"import.upload".to_string()));
         assert!(admin.contains(&"import.rollback".to_string()));
         assert!(admin.contains(&"import.compensate".to_string()));
+        assert!(admin.contains(&"object.govern".to_string()));
 
         let analyst = permissions_for_roles(&["analyst".to_string()]);
         assert!(analyst.contains(&"import.read".to_string()));
         assert!(analyst.contains(&"import.upload".to_string()));
         assert!(analyst.contains(&"import.rollback".to_string()));
         assert!(analyst.contains(&"import.compensate".to_string()));
+        assert!(!analyst.contains(&"object.govern".to_string()));
 
         let viewer = permissions_for_roles(&["viewer".to_string()]);
         assert!(viewer.contains(&"import.read".to_string()));
         assert!(!viewer.contains(&"import.upload".to_string()));
         assert!(!viewer.contains(&"import.rollback".to_string()));
         assert!(!viewer.contains(&"import.compensate".to_string()));
+        assert!(!viewer.contains(&"object.govern".to_string()));
     }
 
     #[test]

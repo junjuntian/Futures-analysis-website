@@ -25,6 +25,9 @@ use domain::import::{
     ImportRollbackResponse, ImportTemplateCreateRequest, ImportTemplateSummary,
     ImportTemplateVersionResponse, RollbackCapability, import_dataset_definitions,
 };
+use domain::object_governance::{
+    ObjectConsistencyReport, ObjectConsistencyRun, ObjectQuarantineResponse,
+};
 use infrastructure::object_storage::{ObjectStorage, ObjectStorageError, ObjectUpload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -220,6 +223,24 @@ impl ImportApiError {
         }
     }
 
+    fn object_consistency_not_found(request_id: Uuid) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "object_consistency_not_found",
+            message: "object consistency resource is not visible",
+            request_id,
+        }
+    }
+
+    fn object_consistency_error(request_id: Uuid) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "object_consistency_error",
+            message: "object consistency operation failed",
+            request_id,
+        }
+    }
+
     fn conflict(code: &'static str, request_id: Uuid) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -358,7 +379,7 @@ pub async fn upload(
     .map_err(|error| map_validation_error(error, request_id))?;
     let mut object_upload = state
         .storage
-        .begin_upload()
+        .begin_upload(context.workspace_id())
         .await
         .map_err(|error| map_storage_error(error, request_id))?;
 
@@ -408,15 +429,11 @@ pub async fn upload(
         .await
         .map_err(|error| map_storage_error(error, request_id))?;
     if stored.size_bytes != validated.size_bytes {
-        let _ = state.storage.delete(&stored.object_key).await;
         return Err(ImportApiError::internal(request_id));
     }
     let size_bytes = match i64::try_from(stored.size_bytes) {
         Ok(size) => size,
-        Err(_) => {
-            let _ = state.storage.delete(&stored.object_key).await;
-            return Err(ImportApiError::too_large(request_id));
-        }
+        Err(_) => return Err(ImportApiError::too_large(request_id)),
     };
     let record = NewImportUpload {
         object_id: Uuid::now_v7(),
@@ -443,7 +460,6 @@ pub async fn upload(
         {
             Ok(committed) => committed,
             Err(ImportRepositoryError::NotFound) => {
-                let _ = state.storage.delete(&stored.object_key).await;
                 return Err(ImportApiError::internal(request_id));
             }
             Err(_) => return Err(ImportApiError::internal(request_id)),
@@ -543,7 +559,7 @@ pub async fn create_compensation(
                     .map_err(|error| map_validation_error(error, request_id))?;
                     let mut object_upload = state
                         .storage
-                        .begin_upload()
+                        .begin_upload(context.workspace_id())
                         .await
                         .map_err(|error| map_storage_error(error, request_id))?;
                     while let Some(chunk) = field.chunk().await.map_err(|_| {
@@ -691,6 +707,176 @@ pub async fn lineage(
             .await
             .map_err(|error| map_compensation_error(error, request_id))?;
     Ok(Json(ApiResponse::new(response, request_id)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/object-consistency/scans",
+    params(
+        ("Idempotency-Key" = String, Header),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 202, body = ObjectConsistencyRun),
+        (status = 200, body = ObjectConsistencyRun),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody)
+    )
+)]
+pub async fn queue_object_scan(
+    State(state): State<Arc<ImportState>>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_object_governance_write(&state, &headers).await?;
+    let raw_key = require_idempotency_key(&headers, request_id)?;
+    let root_fingerprint = state.storage.root_fingerprint();
+    let key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+    let request_hash = digest(&[
+        &context.workspace_id().to_string(),
+        "object_consistency_scan:v1",
+        &root_fingerprint,
+    ]);
+    let response = database::object_governance::queue_scan(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        &key_hash,
+        &request_hash,
+        &root_fingerprint,
+        request_id,
+    )
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let code = error.code();
+            database::imports::record_import_audit(
+                &state.auth.pool,
+                context.workspace_id(),
+                context.user_id(),
+                request_id,
+                None,
+                "object.scan",
+                "failure",
+                code,
+            )
+            .await
+            .map_err(|_| ImportApiError::internal(request_id))?;
+            return Err(map_object_governance_error(error, request_id));
+        }
+    };
+    let status = if response.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(ApiResponse::new(response, request_id))).into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/object-consistency/scans/{run_id}",
+    params(("run_id" = Uuid, Path)),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ObjectConsistencyReport),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn object_scan_report(
+    State(state): State<Arc<ImportState>>,
+    Path(run_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::GovernObjects)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let report =
+        database::object_governance::get_report(&state.auth.pool, context.workspace_id(), run_id)
+            .await
+            .map_err(|error| map_object_governance_error(error, request_id))?;
+    Ok(Json(ApiResponse::new(report, request_id)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/object-consistency/findings/{finding_id}/quarantine",
+    params(
+        ("finding_id" = Uuid, Path),
+        ("Idempotency-Key" = String, Header),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 202, body = ObjectQuarantineResponse),
+        (status = 200, body = ObjectQuarantineResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody)
+    )
+)]
+pub async fn queue_object_quarantine(
+    State(state): State<Arc<ImportState>>,
+    Path(finding_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_object_governance_write(&state, &headers).await?;
+    let raw_key = require_idempotency_key(&headers, request_id)?;
+    let key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+    let request_hash = digest(&[
+        &context.workspace_id().to_string(),
+        "object_quarantine:v1",
+        &finding_id.to_string(),
+        &context.user_id().to_string(),
+    ]);
+    let response = database::object_governance::queue_quarantine(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        finding_id,
+        &key_hash,
+        &request_hash,
+        request_id,
+    )
+    .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            let code = error.code();
+            database::imports::record_import_audit(
+                &state.auth.pool,
+                context.workspace_id(),
+                context.user_id(),
+                request_id,
+                None,
+                "object.quarantine",
+                "failure",
+                code,
+            )
+            .await
+            .map_err(|_| ImportApiError::internal(request_id))?;
+            return Err(map_object_governance_error(error, request_id));
+        }
+    };
+    let status = if response.replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(ApiResponse::new(response, request_id))).into_response())
 }
 
 #[utoipa::path(
@@ -1736,6 +1922,34 @@ fn map_compensation_error(error: CompensationRepositoryError, request_id: Uuid) 
     }
 }
 
+fn map_object_governance_error(
+    error: database::object_governance::ObjectGovernanceError,
+    request_id: Uuid,
+) -> ImportApiError {
+    use database::object_governance::ObjectGovernanceError;
+    match error {
+        ObjectGovernanceError::NotFound => ImportApiError::object_consistency_not_found(request_id),
+        ObjectGovernanceError::IdempotencyKeyReused => {
+            ImportApiError::conflict("idempotency_key_reused", request_id)
+        }
+        ObjectGovernanceError::QuarantineNotAllowed => {
+            ImportApiError::conflict("object_quarantine_not_allowed", request_id)
+        }
+        ObjectGovernanceError::FindingStale => {
+            ImportApiError::conflict("object_finding_stale", request_id)
+        }
+        _ => ImportApiError::object_consistency_error(request_id),
+    }
+}
+
+fn require_idempotency_key(headers: &HeaderMap, request_id: Uuid) -> Result<&str, ImportApiError> {
+    headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| (16..=200).contains(&value.len()))
+        .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))
+}
+
 async fn require_import_write(
     state: &ImportState,
     headers: &HeaderMap,
@@ -1791,6 +2005,26 @@ async fn require_import_compensation_write(
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     if let Err(error) = context.require_permission(Permission::Compensate) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    Ok((request_id, context))
+}
+
+async fn require_object_governance_write(
+    state: &ImportState,
+    headers: &HeaderMap,
+) -> Result<(Uuid, auth::AuthContext), ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    if let Err(error) = auth::ensure_allowed_origin(&state.auth.config, headers) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = auth::ensure_csrf(&state.auth, headers).await {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = context.require_permission(Permission::GovernObjects) {
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     Ok((request_id, context))
@@ -1890,6 +2124,9 @@ fn digest(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod phase_3d_compensation_contract {
+    use super::{Uuid, map_object_governance_error};
+    use database::object_governance::ObjectGovernanceError;
+
     const SOURCE: &str = include_str!("imports.rs");
 
     #[test]
@@ -1917,5 +2154,29 @@ mod phase_3d_compensation_contract {
         assert!(compensation.contains("UploadValidator::new"));
         assert!(compensation.contains("begin_upload"));
         assert!(compensation.contains("NewCompensationUpload"));
+    }
+
+    #[test]
+    fn ordinary_upload_never_deletes_a_committed_object() {
+        let upload = SOURCE
+            .split("pub async fn upload")
+            .nth(1)
+            .expect("upload handler")
+            .split("pub async fn create_compensation")
+            .next()
+            .expect("upload handler end");
+        assert!(upload.contains(".commit()"));
+        assert!(!upload.contains(".delete("));
+        assert!(upload.contains(".abort()"));
+    }
+
+    #[test]
+    fn object_governance_errors_have_dedicated_stable_codes() {
+        let request_id = Uuid::now_v7();
+        let not_found = map_object_governance_error(ObjectGovernanceError::NotFound, request_id);
+        assert_eq!(not_found.code, "object_consistency_not_found");
+        let internal =
+            map_object_governance_error(ObjectGovernanceError::InvalidStoredState, request_id);
+        assert_eq!(internal.code, "object_consistency_error");
     }
 }

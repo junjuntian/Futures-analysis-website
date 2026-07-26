@@ -1,4 +1,5 @@
 mod import_jobs;
+mod object_governance;
 
 use common::AppConfig;
 use tracing::info;
@@ -14,9 +15,14 @@ async fn main() -> anyhow::Result<()> {
         "worker connected to database"
     );
     let worker_config = import_jobs::ImportWorkerConfig::from_env()?;
+    let storage_root =
+        std::env::var("OBJECT_STORAGE_ROOT").unwrap_or_else(|_| "./data/object-storage".into());
+    let storage = std::sync::Arc::new(
+        infrastructure::object_storage::LocalObjectStorage::new(storage_root).await?,
+    );
     let worker_id = format!("worker-{}", Uuid::now_v7());
     tokio::select! {
-        result = import_jobs::run(pool, worker_id, worker_config) => result?,
+        result = import_jobs::run(pool, storage, worker_id, worker_config) => result?,
         _ = shutdown_signal() => info!("worker shutdown requested"),
     }
 

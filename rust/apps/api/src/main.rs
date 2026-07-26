@@ -48,6 +48,9 @@ use uuid::Uuid;
         imports::rollback,
         imports::create_compensation,
         imports::lineage,
+        imports::queue_object_scan,
+        imports::object_scan_report,
+        imports::queue_object_quarantine,
         imports::events,
         imports::errors,
         imports::list_templates,
@@ -124,6 +127,10 @@ use uuid::Uuid;
         domain::import::ImportProgress,
         domain::import::ImportJobSummary,
         domain::import::ImportJobEvent
+        ,domain::object_governance::ObjectConsistencyRun
+        ,domain::object_governance::ObjectConsistencyFinding
+        ,domain::object_governance::ObjectConsistencyReport
+        ,domain::object_governance::ObjectQuarantineResponse
     )),
     modifiers(&SecurityAddon)
 )]
@@ -278,6 +285,18 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
             get(imports::list_templates).post(imports::create_template),
         )
         .route("/api/v1/import-datasets", get(imports::list_datasets))
+        .route(
+            "/api/v1/object-consistency/scans",
+            post(imports::queue_object_scan),
+        )
+        .route(
+            "/api/v1/object-consistency/scans/{run_id}",
+            get(imports::object_scan_report),
+        )
+        .route(
+            "/api/v1/object-consistency/findings/{finding_id}/quarantine",
+            post(imports::queue_object_quarantine),
+        )
         .layer(DefaultBodyLimit::max(import_body_limit))
         .with_state(import_state);
 
@@ -440,5 +459,40 @@ mod tests {
         assert!(lineage["responses"]["200"].is_object());
         assert!(document["components"]["schemas"]["ImportCompensationResponse"].is_object());
         assert!(document["components"]["schemas"]["ImportLineageResponse"].is_object());
+    }
+
+    #[test]
+    fn openapi_exposes_explicit_object_scan_and_quarantine_without_delete() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let paths = document["paths"].as_object().expect("OpenAPI paths");
+        let scan = &paths["/api/v1/object-consistency/scans"]["post"];
+        let report = &paths["/api/v1/object-consistency/scans/{run_id}"]["get"];
+        let quarantine =
+            &paths["/api/v1/object-consistency/findings/{finding_id}/quarantine"]["post"];
+        for operation in [scan, report, quarantine] {
+            assert_eq!(
+                operation["security"][0]["session_cookie"],
+                serde_json::json!([])
+            );
+            assert!(operation["responses"]["401"].is_object());
+            assert!(operation["responses"]["403"].is_object());
+        }
+        for operation in [scan, quarantine] {
+            let parameters = operation["parameters"].as_array().expect("parameters");
+            for header in ["Idempotency-Key", "x-csrf-token", "Origin"] {
+                assert!(
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter["name"] == header)
+                );
+            }
+            assert!(operation["responses"]["202"].is_object());
+            assert!(operation["responses"]["409"].is_object());
+        }
+        assert!(
+            !paths
+                .keys()
+                .any(|path| path.contains("delete") || path.contains("purge"))
+        );
     }
 }

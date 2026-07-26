@@ -1,6 +1,7 @@
 pub mod compensations;
 pub mod imports;
 pub mod job_queue;
+pub mod object_governance;
 pub mod rollback_jobs;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -45,6 +46,8 @@ mod phase_3d_schema_contract {
             "import_data_invalidations",
             "object_consistency_runs",
             "object_consistency_findings",
+            "object_quarantine_requests",
+            "object_governance_jobs",
             "object_quarantines",
         ] {
             assert!(
@@ -161,8 +164,18 @@ mod phase_3d_schema_contract {
         assert!(MIGRATION.contains("'quarantined'"));
         assert!(MIGRATION.contains("object_quarantines_immutable"));
         assert!(MIGRATION.contains("revoke delete on stored_objects from futures_runtime"));
-        assert!(MIGRATION.contains("Phase 3D does not permit physical object deletion"));
         assert!(!MIGRATION.contains("delete from stored_objects"));
+        assert!(!MIGRATION.contains("'deleted'"));
+        assert!(!MIGRATION.contains("'deleting'"));
+        assert!(MIGRATION.contains("stored_objects_validate_quarantine_metadata"));
+        assert!(MIGRATION.contains("object_quarantines_validate_stored_object"));
+        assert!(MIGRATION.contains("new.object_key ~ ("));
+        assert!(MIGRATION.contains("object_governance_jobs_scan_fk"));
+        assert!(MIGRATION.contains("object_governance_jobs_quarantine_fk"));
+        assert!(!MIGRATION.contains("drop constraint job_queue_import_batch_fk"));
+        assert!(MIGRATION.contains("import_files_validate_no_quarantine_reference"));
+        assert!(MIGRATION.contains("stored_objects_prevent_quarantine_registration"));
+        assert!(MIGRATION.contains("':object-key:'"));
     }
 
     #[test]

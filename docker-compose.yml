@@ -66,9 +66,12 @@ services:
       APP_VERSION: ${APP_VERSION:-0.1.0}
       BIND_ADDR: 0.0.0.0:8081
       DATABASE_URL_FILE: ${DATABASE_URL_FILE:-/run/secrets/database-url}
+      OBJECT_STORAGE_ROOT: ${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
+      OBJECT_STALE_SECONDS: ${OBJECT_STALE_SECONDS:-3600}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ${FUTURES_SECRETS_HOST_DIR:-/etc/futures-platform/secrets}:/run/secrets:ro
+      - object_storage_data:/var/lib/futures-platform/objects
     depends_on:
       postgres:
         condition: service_healthy

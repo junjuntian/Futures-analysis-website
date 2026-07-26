@@ -3,7 +3,9 @@ use database::job_queue::{
     renew_lease,
 };
 use database::rollback_jobs::execute_rollback_job;
+use infrastructure::object_storage::LocalObjectStorage;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::time::{Duration, interval};
 use tracing::{error, info, warn};
 
@@ -12,6 +14,7 @@ pub struct ImportWorkerConfig {
     pub lease_seconds: i64,
     pub renew_seconds: u64,
     pub idle_millis: u64,
+    pub object_stale_seconds: i64,
 }
 
 impl ImportWorkerConfig {
@@ -19,10 +22,12 @@ impl ImportWorkerConfig {
         let lease_seconds = parse_env("IMPORT_JOB_LEASE_SECONDS", 30_i64)?;
         let renew_seconds = parse_env("IMPORT_JOB_RENEW_SECONDS", 10_u64)?;
         let idle_millis = parse_env("IMPORT_JOB_IDLE_MILLIS", 500_u64)?;
+        let object_stale_seconds = parse_env("OBJECT_STALE_SECONDS", 3600_i64)?;
         if lease_seconds <= 0
             || renew_seconds == 0
             || renew_seconds >= lease_seconds as u64
             || idle_millis == 0
+            || object_stale_seconds <= 0
         {
             anyhow::bail!("invalid import worker timing configuration");
         }
@@ -30,23 +35,133 @@ impl ImportWorkerConfig {
             lease_seconds,
             renew_seconds,
             idle_millis,
+            object_stale_seconds,
         })
     }
 }
 
 pub async fn run(
     pool: PgPool,
+    storage: Arc<LocalObjectStorage>,
     worker_id: String,
     config: ImportWorkerConfig,
 ) -> anyhow::Result<()> {
     loop {
         match claim_next_import_job(&pool, &worker_id, config.lease_seconds).await {
             Ok(Some(job)) => process_claimed(&pool, &worker_id, &config, job).await,
-            Ok(None) => tokio::time::sleep(Duration::from_millis(config.idle_millis)).await,
+            Ok(None) => {
+                match database::object_governance::claim_next_job(
+                    &pool,
+                    &worker_id,
+                    config.lease_seconds,
+                )
+                .await
+                {
+                    Ok(Some(job)) => {
+                        process_governance_job(&pool, &storage, &worker_id, &config, job).await
+                    }
+                    Ok(None) => tokio::time::sleep(Duration::from_millis(config.idle_millis)).await,
+                    Err(error) => {
+                        warn!(
+                            error_code = error.code(),
+                            "failed to claim object governance job"
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
             Err(error) => {
                 warn!(error_code = error.code(), "failed to claim import job");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
+        }
+    }
+}
+
+async fn process_governance_job(
+    pool: &PgPool,
+    storage: &Arc<LocalObjectStorage>,
+    worker_id: &str,
+    config: &ImportWorkerConfig,
+    job: database::object_governance::ClaimedGovernanceJob,
+) {
+    let execute_pool = pool.clone();
+    let execute_storage = storage.clone();
+    let execute_job = job.clone();
+    let execute_worker = worker_id.to_string();
+    let stale_seconds = config.object_stale_seconds;
+    let task = tokio::spawn(async move {
+        match execute_job.job_type.as_str() {
+            "object_consistency_scan" => {
+                crate::object_governance::execute_scan(
+                    &execute_pool,
+                    &execute_storage,
+                    &execute_job,
+                    &execute_worker,
+                    stale_seconds,
+                )
+                .await
+            }
+            "object_quarantine" => {
+                crate::object_governance::execute_quarantine(
+                    &execute_pool,
+                    &execute_storage,
+                    &execute_job,
+                    &execute_worker,
+                )
+                .await
+            }
+            _ => Err(database::object_governance::ObjectGovernanceError::InvalidStoredState),
+        }
+    });
+    tokio::pin!(task);
+    let mut renewals = interval(Duration::from_secs(config.renew_seconds));
+    renewals.tick().await;
+    let result = loop {
+        tokio::select! {
+            result = &mut task => {
+                break result.unwrap_or(Err(
+                    database::object_governance::ObjectGovernanceError::InvalidStoredState
+                ));
+            }
+            _ = renewals.tick() => {
+                if let Err(error) = database::object_governance::renew_job(
+                    pool,
+                    &job,
+                    worker_id,
+                    config.lease_seconds,
+                )
+                .await
+                {
+                    warn!(
+                        job_id = %job.id,
+                        error_code = error.code(),
+                        "object governance lease renewal failed"
+                    );
+                }
+            }
+        }
+    };
+    if let Err(error) = result {
+        warn!(
+            job_id = %job.id,
+            error_code = error.code(),
+            "object governance job failed"
+        );
+        if let Err(record_error) = database::object_governance::record_job_failure(
+            pool,
+            &job,
+            worker_id,
+            error.code(),
+            error.retryable(),
+        )
+        .await
+        {
+            error!(
+                job_id = %job.id,
+                error_code = record_error.code(),
+                "failed to persist object governance job failure"
+            );
         }
     }
 }
@@ -138,6 +253,7 @@ mod tests {
             lease_seconds: 30,
             renew_seconds: 10,
             idle_millis: 500,
+            object_stale_seconds: 3600,
         };
         assert!(config.renew_seconds < config.lease_seconds as u64);
     }

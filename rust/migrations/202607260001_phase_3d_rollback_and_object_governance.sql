@@ -359,23 +359,32 @@ create index import_data_invalidations_workspace_batch_idx
 create table object_consistency_runs (
     id uuid primary key,
     workspace_id uuid not null references workspaces(id) on delete restrict,
-    status text not null default 'running',
+    status text not null default 'queued',
     requested_by uuid not null references users(id) on delete restrict,
     root_fingerprint char(64) not null,
+    idempotency_key_hash char(64) not null,
+    request_hash char(64) not null,
     scanned_object_count bigint not null default 0,
     finding_count bigint not null default 0,
     started_at timestamptz not null default now(),
     finished_at timestamptz,
     constraint object_consistency_runs_workspace_identity unique (workspace_id, id),
+    constraint object_consistency_runs_idempotency_identity
+        unique (workspace_id, idempotency_key_hash),
     constraint object_consistency_runs_status_allowed
-        check (status in ('running', 'completed', 'failed')),
+        check (status in ('queued', 'running', 'completed', 'failed')),
     constraint object_consistency_runs_root_fingerprint_hex
         check (root_fingerprint ~ '^[0-9a-f]{64}$'),
+    constraint object_consistency_runs_hashes_hex
+        check (
+            idempotency_key_hash ~ '^[0-9a-f]{64}$'
+            and request_hash ~ '^[0-9a-f]{64}$'
+        ),
     constraint object_consistency_runs_counts_nonnegative
         check (scanned_object_count >= 0 and finding_count >= 0),
     constraint object_consistency_runs_finished_binding
         check (
-            (status = 'running' and finished_at is null)
+            (status in ('queued', 'running') and finished_at is null)
             or (status in ('completed', 'failed') and finished_at is not null)
         )
 );
@@ -447,6 +456,121 @@ create index object_consistency_findings_workspace_object_idx
     on object_consistency_findings (workspace_id, stored_object_id, detected_at desc)
     where stored_object_id is not null;
 
+create unique index object_consistency_findings_scan_identity
+    on object_consistency_findings (
+        workspace_id,
+        run_id,
+        finding_type,
+        coalesce(stored_object_id, '00000000-0000-0000-0000-000000000000'::uuid),
+        coalesce(observed_object_key, '')
+    );
+
+create table object_quarantine_requests (
+    id uuid primary key,
+    workspace_id uuid not null references workspaces(id) on delete restrict,
+    finding_id uuid not null,
+    status text not null default 'queued',
+    requested_by uuid not null references users(id) on delete restrict,
+    idempotency_key_hash char(64) not null,
+    request_hash char(64) not null,
+    created_at timestamptz not null default now(),
+    finished_at timestamptz,
+    constraint object_quarantine_requests_workspace_identity unique (workspace_id, id),
+    constraint object_quarantine_requests_finding_identity unique (workspace_id, finding_id),
+    constraint object_quarantine_requests_idempotency_identity
+        unique (workspace_id, idempotency_key_hash),
+    constraint object_quarantine_requests_finding_fk
+        foreign key (workspace_id, finding_id)
+        references object_consistency_findings(workspace_id, id) on delete restrict,
+    constraint object_quarantine_requests_status_allowed
+        check (status in ('queued', 'running', 'succeeded', 'failed')),
+    constraint object_quarantine_requests_hashes_hex
+        check (
+            idempotency_key_hash ~ '^[0-9a-f]{64}$'
+            and request_hash ~ '^[0-9a-f]{64}$'
+        ),
+    constraint object_quarantine_requests_finished_binding
+        check (
+            (status in ('queued', 'running') and finished_at is null)
+            or (status in ('succeeded', 'failed') and finished_at is not null)
+        )
+);
+
+create index object_quarantine_requests_workspace_created_idx
+    on object_quarantine_requests (workspace_id, created_at desc, id);
+
+create table object_governance_jobs (
+    id uuid primary key,
+    workspace_id uuid not null references workspaces(id) on delete restrict,
+    job_type text not null,
+    scan_run_id uuid,
+    quarantine_request_id uuid,
+    status text not null default 'queued',
+    attempt_count integer not null default 0,
+    max_attempts integer not null default 5,
+    available_at timestamptz not null default now(),
+    leased_by text,
+    lease_expires_at timestamptz,
+    lease_generation bigint not null default 0,
+    last_error_code text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    finished_at timestamptz,
+    constraint object_governance_jobs_workspace_identity unique (workspace_id, id),
+    constraint object_governance_jobs_scan_identity unique (workspace_id, scan_run_id),
+    constraint object_governance_jobs_quarantine_identity
+        unique (workspace_id, quarantine_request_id),
+    constraint object_governance_jobs_scan_fk
+        foreign key (workspace_id, scan_run_id)
+        references object_consistency_runs(workspace_id, id) on delete restrict,
+    constraint object_governance_jobs_quarantine_fk
+        foreign key (workspace_id, quarantine_request_id)
+        references object_quarantine_requests(workspace_id, id) on delete restrict,
+    constraint object_governance_jobs_type_binding
+        check (
+            (
+                job_type = 'object_consistency_scan'
+                and scan_run_id is not null
+                and quarantine_request_id is null
+            )
+            or (
+                job_type = 'object_quarantine'
+                and scan_run_id is null
+                and quarantine_request_id is not null
+            )
+        ),
+    constraint object_governance_jobs_status_allowed
+        check (status in ('queued', 'running', 'succeeded', 'failed', 'dead_letter')),
+    constraint object_governance_jobs_attempts_valid
+        check (
+            attempt_count >= 0
+            and max_attempts > 0
+            and attempt_count <= max_attempts
+        ),
+    constraint object_governance_jobs_lease_generation_nonnegative
+        check (lease_generation >= 0),
+    constraint object_governance_jobs_lease_pair
+        check (
+            (leased_by is null and lease_expires_at is null)
+            or (leased_by is not null and lease_expires_at is not null)
+        ),
+    constraint object_governance_jobs_running_has_lease
+        check (
+            status <> 'running'
+            or (leased_by is not null and lease_expires_at is not null)
+        )
+);
+
+create index object_governance_jobs_workspace_claim_idx
+    on object_governance_jobs (
+        workspace_id,
+        status,
+        available_at,
+        lease_expires_at,
+        created_at,
+        id
+    );
+
 create table object_quarantines (
     id uuid primary key,
     workspace_id uuid not null references workspaces(id) on delete restrict,
@@ -473,6 +597,16 @@ create table object_quarantines (
         check (length(trim(quarantine_object_key)) > 0),
     constraint object_quarantines_distinct_keys
         check (source_object_key <> quarantine_object_key),
+    constraint object_quarantines_source_workspace_prefix
+        check (
+            source_object_key like 'objects/' || workspace_id::text || '/%'
+            or source_object_key like '.tmp/' || workspace_id::text || '/%'
+        ),
+    constraint object_quarantines_target_binding
+        check (
+            quarantine_object_key =
+                'quarantine/' || workspace_id::text || '/' || finding_id::text
+        ),
     constraint object_quarantines_sha256_hex check (sha256 ~ '^[0-9a-f]{64}$'),
     constraint object_quarantines_size_nonnegative check (size_bytes >= 0),
     constraint object_quarantines_disposition_allowed
@@ -485,7 +619,7 @@ create index object_quarantines_workspace_created_idx
 alter table stored_objects
     drop constraint stored_objects_state,
     add constraint stored_objects_state
-        check (state in ('pending', 'available', 'quarantined', 'deleting', 'deleted'));
+        check (state in ('pending', 'available', 'quarantined'));
 
 create or replace function app.prevent_phase_3d_immutable_row_change()
 returns trigger
@@ -719,14 +853,162 @@ begin
 end;
 $$;
 
-create or replace function app.prevent_stored_object_delete_state()
+create or replace function app.enforce_stored_object_quarantine_transition()
 returns trigger
 language plpgsql
 as $$
 begin
-    if new.state is distinct from old.state
-       and new.state in ('deleting', 'deleted') then
-        raise exception 'Phase 3D does not permit physical object deletion'
+    if new.object_key is distinct from old.object_key
+       or new.state is distinct from old.state then
+        if not (
+            old.state in ('pending', 'available')
+            and new.state = 'quarantined'
+            and new.object_key is distinct from old.object_key
+            and new.object_key ~ (
+                '^quarantine/'
+                || new.workspace_id::text
+                || '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
+        ) then
+            raise exception 'stored object key and state may only change together for quarantine'
+                using errcode = '23514';
+        end if;
+    end if;
+    return new;
+end;
+$$;
+
+create or replace function app.enforce_stored_object_quarantine_metadata()
+returns trigger
+language plpgsql
+as $$
+begin
+    if new.state = 'quarantined'
+       and not exists (
+            select 1 from object_quarantines quarantine
+             where quarantine.workspace_id = new.workspace_id
+               and quarantine.stored_object_id = new.id
+               and quarantine.quarantine_object_key = new.object_key
+               and quarantine.sha256 = new.sha256
+               and quarantine.size_bytes = new.size_bytes
+       ) then
+        raise exception 'quarantined stored object must have matching quarantine metadata'
+            using errcode = '23514';
+    end if;
+    return new;
+end;
+$$;
+
+create or replace function app.enforce_object_quarantine_stored_object()
+returns trigger
+language plpgsql
+as $$
+begin
+    if new.stored_object_id is not null
+       and not exists (
+            select 1 from stored_objects object
+             where object.workspace_id = new.workspace_id
+               and object.id = new.stored_object_id
+               and object.state = 'quarantined'
+               and object.object_key = new.quarantine_object_key
+               and object.sha256 = new.sha256
+               and object.size_bytes = new.size_bytes
+       ) then
+        raise exception 'quarantine metadata must match the stored object final state'
+            using errcode = '23514';
+    end if;
+    return new;
+end;
+$$;
+
+create or replace function app.enforce_object_governance_job_state()
+returns trigger
+language plpgsql
+as $$
+begin
+    if new.job_type = 'object_consistency_scan'
+       and not exists (
+            select 1 from object_consistency_runs run
+             where run.workspace_id = new.workspace_id
+               and run.id = new.scan_run_id
+               and (
+                    (new.status = 'queued' and run.status = 'queued')
+                    or (new.status = 'running' and run.status = 'running')
+                    or (new.status = 'succeeded' and run.status = 'completed')
+                    or (new.status in ('failed', 'dead_letter') and run.status = 'failed')
+               )
+       ) then
+        raise exception 'object scan job and run states must agree'
+            using errcode = '23514';
+    elsif new.job_type = 'object_quarantine'
+       and not exists (
+            select 1 from object_quarantine_requests request
+             where request.workspace_id = new.workspace_id
+               and request.id = new.quarantine_request_id
+               and (
+                    (new.status = 'queued' and request.status = 'queued')
+                    or (new.status = 'running' and request.status = 'running')
+                    or (new.status = 'succeeded' and request.status = 'succeeded')
+                    or (new.status in ('failed', 'dead_letter') and request.status = 'failed')
+               )
+       ) then
+        raise exception 'object quarantine job and request states must agree'
+            using errcode = '23514';
+    end if;
+    return null;
+end;
+$$;
+
+create or replace function app.prevent_reference_to_quarantine_candidate()
+returns trigger
+language plpgsql
+as $$
+begin
+    if exists (
+        select 1 from stored_objects object
+         where object.workspace_id = new.workspace_id
+           and object.id = new.stored_object_id
+           and object.state = 'quarantined'
+    )
+    or exists (
+        select 1
+          from object_consistency_findings finding
+          join object_quarantine_requests request
+            on request.workspace_id = finding.workspace_id
+           and request.finding_id = finding.id
+         where finding.workspace_id = new.workspace_id
+           and finding.stored_object_id = new.stored_object_id
+           and request.status in ('queued', 'running')
+    ) then
+        raise exception 'object has an active quarantine request'
+            using errcode = '23514';
+    end if;
+    return new;
+end;
+$$;
+
+create or replace function app.prevent_registration_of_quarantine_candidate()
+returns trigger
+language plpgsql
+as $$
+begin
+    perform pg_advisory_xact_lock(
+        hashtextextended(
+            new.workspace_id::text || ':object-key:' || new.object_key,
+            0
+        )
+    );
+    if exists (
+        select 1
+          from object_consistency_findings finding
+          join object_quarantine_requests request
+            on request.workspace_id = finding.workspace_id
+           and request.finding_id = finding.id
+         where finding.workspace_id = new.workspace_id
+           and finding.observed_object_key = new.object_key
+           and request.status in ('queued', 'running')
+    ) then
+        raise exception 'object key has an active quarantine request'
             using errcode = '23514';
     end if;
     return new;
@@ -803,10 +1085,44 @@ deferrable initially deferred
 for each row
 execute function app.enforce_direct_rollback_change_log();
 
-create trigger stored_objects_prevent_delete_state
-before update of state on stored_objects
+create trigger stored_objects_enforce_quarantine_state
+before update of object_key, state on stored_objects
 for each row
-execute function app.prevent_stored_object_delete_state();
+execute function app.enforce_stored_object_quarantine_transition();
+
+create constraint trigger stored_objects_validate_quarantine_metadata
+after update of object_key, state on stored_objects
+deferrable initially deferred
+for each row
+execute function app.enforce_stored_object_quarantine_metadata();
+
+create constraint trigger object_quarantines_validate_stored_object
+after insert on object_quarantines
+deferrable initially deferred
+for each row
+execute function app.enforce_object_quarantine_stored_object();
+
+create constraint trigger object_governance_jobs_validate_state
+after insert or update of status on object_governance_jobs
+deferrable initially deferred
+for each row
+execute function app.enforce_object_governance_job_state();
+
+create trigger import_files_prevent_quarantine_reference
+before insert or update of workspace_id, stored_object_id on import_files
+for each row
+execute function app.prevent_reference_to_quarantine_candidate();
+
+create constraint trigger import_files_validate_no_quarantine_reference
+after insert or update on import_files
+deferrable initially deferred
+for each row
+execute function app.prevent_reference_to_quarantine_candidate();
+
+create trigger stored_objects_prevent_quarantine_registration
+before insert or update of workspace_id, object_key on stored_objects
+for each row
+execute function app.prevent_registration_of_quarantine_candidate();
 
 alter table import_job_events
     drop constraint import_job_events_type_allowed,
@@ -841,6 +1157,10 @@ alter table object_consistency_runs enable row level security;
 alter table object_consistency_runs force row level security;
 alter table object_consistency_findings enable row level security;
 alter table object_consistency_findings force row level security;
+alter table object_quarantine_requests enable row level security;
+alter table object_quarantine_requests force row level security;
+alter table object_governance_jobs enable row level security;
+alter table object_governance_jobs force row level security;
 alter table object_quarantines enable row level security;
 alter table object_quarantines force row level security;
 
@@ -872,6 +1192,14 @@ create policy object_consistency_findings_workspace_isolation on object_consiste
     using (workspace_id = app.current_workspace_id())
     with check (workspace_id = app.current_workspace_id());
 
+create policy object_quarantine_requests_workspace_isolation on object_quarantine_requests
+    using (workspace_id = app.current_workspace_id())
+    with check (workspace_id = app.current_workspace_id());
+
+create policy object_governance_jobs_workspace_isolation on object_governance_jobs
+    using (workspace_id = app.current_workspace_id())
+    with check (workspace_id = app.current_workspace_id());
+
 create policy object_quarantines_workspace_isolation on object_quarantines
     using (workspace_id = app.current_workspace_id())
     with check (workspace_id = app.current_workspace_id());
@@ -882,10 +1210,16 @@ grant select, insert, update on import_rollback_requests to futures_runtime;
 grant select, insert on import_rollback_conflicts to futures_runtime;
 grant select, insert on import_data_invalidations to futures_runtime;
 grant delete on imported_records to futures_runtime;
-grant select, insert, update on object_consistency_runs to futures_runtime;
-grant select, insert, update on object_consistency_findings to futures_runtime;
+grant select, insert on object_consistency_runs to futures_runtime;
+grant update (status, scanned_object_count, finding_count, finished_at)
+    on object_consistency_runs to futures_runtime;
+grant select, insert on object_consistency_findings to futures_runtime;
+grant update (disposition_status) on object_consistency_findings to futures_runtime;
+grant select, insert on object_quarantine_requests to futures_runtime;
+grant update (status, finished_at) on object_quarantine_requests to futures_runtime;
+grant select, insert, update on object_governance_jobs to futures_runtime;
 grant select, insert on object_quarantines to futures_runtime;
-grant update (state, updated_at) on stored_objects to futures_runtime;
+grant update (object_key, state, updated_at) on stored_objects to futures_runtime;
 revoke delete on stored_objects from futures_runtime;
 
 insert into schema_versions (version, description)

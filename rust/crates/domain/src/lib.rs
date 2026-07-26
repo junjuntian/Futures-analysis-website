@@ -1,4 +1,5 @@
 pub mod import;
+pub mod object_governance;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

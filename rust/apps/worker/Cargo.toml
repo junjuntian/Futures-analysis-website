@@ -13,4 +13,5 @@ infrastructure.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+time.workspace = true
 uuid.workspace = true
