@@ -409,7 +409,7 @@ frontend 边界：
 
 ### 8.3 Phase 3C：校验、去重、冲突、确认任务与 SSE
 
-**授权状态：已授权、实施中；仅限本节明确列出的 Phase 3C 能力。Phase 3D 继续未授权。**
+**授权状态：已完成并经独立 Evaluator PASS；Phase 3D 继续未授权。**
 
 #### 8.3.1 本轮目标、状态与硬边界
 
@@ -694,6 +694,16 @@ VPS 必须完成：
 - 将所有 BLOCKER/HIGH 交回 Generator 修复，并复核至最终 PASS；3C 未 PASS 前不得授权 3D。
 
 退出条件：3C 功能、测试和 VPS/Evaluator 证据单独提交，`PLANS.md` 更新为 3C 已完成且 Evaluator PASS；Phase 3D 仍为未授权，仓库不存在任何 3D 或其他业务域越界实现。
+
+收口结果（2026-07-26）：
+
+- 实现提交：`04011ed feat: complete phase 3c validation and async import`。
+- 本地 Rust fmt、47 项 workspace tests、clippy `-D warnings`、前端 lint、5 项测试、生产 build 和 `git diff --check` 通过。
+- `futures` VPS 已部署最终 API/Worker 镜像，迁移 `202607250008`、`202607250009` 已执行；最终版本化 E2E 输出 `PHASE3C_E2E_PASS`，证据目录为 `/tmp/phase3c-e2e-559842`。
+- E2E 覆盖 75 行正式导入、20 路并发确认、幂等四组合及跨批次竞争、4 策略 × 3 冲突来源矩阵、双 Worker、续租、SIGKILL 恢复、generation fence、瞬时重试、永久失败、第五次 dead-letter、SSE 重放/拒绝、5/5 RLS 读写、审计和秘密扫描。
+- 独立 Evaluator 最终结论为 PASS，`BLOCKER=0`、`HIGH=0`；报告见 `docs/reviews/PHASE_03C_EVALUATION.md`。
+- 4 项非阻断 MEDIUM 明确延期：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板与断线重连组件级测试。
+- 未实现 cancel、dead-letter replay、回滚、补偿批次、`import_row_changes`、行情、交易、套利、图表、OCR、AI 或外部网站采集。
 
 ### 8.4 Phase 3D：原子回滚、补偿批次、完整前端与部署验收
 

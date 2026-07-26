@@ -147,7 +147,7 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
 - Phase 3B（已完成并 PASS）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
-- Phase 3C（已授权、实施中）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
+- Phase 3C（已完成并 PASS）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
 - Phase 3D（未授权）：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
 
 明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
@@ -162,8 +162,8 @@ Phase 3C 实施边界：
 
 ## 后续步骤
 
-1. Generator 严格按 Phase 3 文档第 8.3 节实施 Phase 3C，并逐项关闭五个 Phase 3B MEDIUM；不回退 Phase 3B PASS。
-2. 完成本地回归与 `futures` VPS Docker/E2E/RLS/SSE/恢复/秘密扫描，再交由独立 Evaluator 复核；BLOCKER/HIGH 清零并 PASS 后单独提交。
+1. Phase 3C 实现提交为 `04011ed feat: complete phase 3c validation and async import`；本地 Rust 47 项、前端 5 项及 VPS 完整 E2E 已通过，独立 Evaluator 最终 `PASS`、`BLOCKER=0`、`HIGH=0`。
+2. Phase 3C 的 4 项非阻断 MEDIUM 明确延期：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板/断线重连组件级测试；后续必须经单独授权排期。
 3. Phase 3D 继续未授权、未实现；不得提前新增 cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决或完整前端流程。
 4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
