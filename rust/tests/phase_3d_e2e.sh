@@ -651,11 +651,14 @@ wait_batch "$TOKEN1" "$CONFLICT_ID" succeeded
 psqlq "update imported_records set record_data=jsonb_set(record_data,'{value}','\"changed\"'),row_version=row_version+1 where workspace_id='$WS1' and source_import_batch_id='$CONFLICT_ID'" >/dev/null
 CONFLICT_BEFORE=$(database_snapshot "$CONFLICT_ID")
 assert_eq "$(rollback_check "$CONFLICT_ID" "$WORK/conflict-check.json")" 200 "conflict precheck"
-assert_json "$WORK/conflict-check.json" '.data.can_rollback == false and .data.conflict_count == 105 and (.data.conflicts|length) == 100 and (.data.next_cursor|type) == "string"' "conflict precheck page one"
+assert_json "$WORK/conflict-check.json" '.data.can_rollback == false and .data.affected_count == 105 and .data.conflict_count == 210 and (.data.conflicts|length) == 100 and (.data.next_cursor|type) == "string"' "conflict precheck page one"
 PRECHECK_ID=$(jq -r '.data.precheck_request_id' "$WORK/conflict-check.json")
 CURSOR=$(jq -r '.data.next_cursor' "$WORK/conflict-check.json")
 assert_eq "$(api_get "$TOKEN1" "/api/v1/imports/$CONFLICT_ID/rollback-conflicts?precheck_request_id=$PRECHECK_ID&cursor=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$CURSOR")" "$WORK/conflict-page-2.json")" 200 "conflict page two"
-assert_json "$WORK/conflict-page-2.json" '(.data.items|length) == 5 and .data.next_cursor == null' "conflict page two complete"
+assert_json "$WORK/conflict-page-2.json" '(.data.items|length) == 100 and (.data.next_cursor|type) == "string"' "conflict page two"
+CURSOR=$(jq -r '.data.next_cursor' "$WORK/conflict-page-2.json")
+assert_eq "$(api_get "$TOKEN1" "/api/v1/imports/$CONFLICT_ID/rollback-conflicts?precheck_request_id=$PRECHECK_ID&cursor=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$CURSOR")" "$WORK/conflict-page-3.json")" 200 "conflict page three"
+assert_json "$WORK/conflict-page-3.json" '(.data.items|length) == 10 and .data.next_cursor == null' "conflict page three complete"
 assert_eq "$(rollback_request "$CONFLICT_ID" "$WORK/conflict-check.json" "phase3d-rollback-$RUN_MARK-conflict" "$WORK/conflict-rollback.json")" 409 "conflicted rollback rejected"
 assert_json "$WORK/conflict-rollback.json" '.data.code == "rollback_conflict"' "conflicted rollback code"
 assert_eq "$(database_snapshot "$CONFLICT_ID")" "$CONFLICT_BEFORE" "later modification zero business change"
