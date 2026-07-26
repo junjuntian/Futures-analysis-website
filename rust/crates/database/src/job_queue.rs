@@ -40,6 +40,16 @@ struct ImportCounters {
     conflicts: i64,
 }
 
+#[derive(Debug, Default)]
+struct ChangeSequence(i64);
+
+impl ChangeSequence {
+    fn next(&mut self) -> i64 {
+        self.0 += 1;
+        self.0
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum JobQueueError {
     #[error("database operation failed")]
@@ -313,7 +323,14 @@ pub async fn execute_import_job(
 
     let batch = sqlx::query(
         "select status::text as status, dataset_type, conflict_policy, validation_version,
-                validated_mapping_id, validated_staging_version, staging_version, confirmed_by
+                validated_mapping_id, validated_staging_version, staging_version, confirmed_by,
+                rollback_capability, change_log_version,
+                (
+                    select file.id
+                      from import_files file
+                     where file.workspace_id = import_batches.workspace_id
+                       and file.import_batch_id = import_batches.id
+                ) as source_file_id
          from import_batches
          where workspace_id = $1 and id = $2",
     )
@@ -329,12 +346,17 @@ pub async fn execute_import_job(
     let validated_staging_version: Option<i64> = batch.get("validated_staging_version");
     let staging_version: i64 = batch.get("staging_version");
     let actor_user_id = confirmed_actor(batch.get("confirmed_by"))?;
+    let source_file_id = batch
+        .get::<Option<Uuid>, _>("source_file_id")
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
     if batch.get::<String, _>("status") != "importing"
         || dataset_type != "generic"
         || policy.is_none()
         || validation_version.is_none()
         || validated_mapping_id.is_none()
         || validated_staging_version != Some(staging_version)
+        || batch.get::<String, _>("rollback_capability") != "compensation_only"
+        || batch.get::<Option<i32>, _>("change_log_version").is_some()
     {
         return Err(JobQueueError::InvalidFrozenImport);
     }
@@ -356,6 +378,7 @@ pub async fn execute_import_job(
         total: rows.len() as i64,
         ..Default::default()
     };
+    let mut change_sequence = ChangeSequence::default();
 
     if policy == "abort" {
         let duplicate = rows
@@ -411,8 +434,9 @@ pub async fn execute_import_job(
             candidates.first().expect("group is not empty")
         };
         counters.skipped += (candidates.len() - 1) as i64;
-        let existing = sqlx::query_scalar::<_, Uuid>(
-            "select id from imported_records
+        let existing = sqlx::query(
+            "select id, record_data, source_import_batch_id, source_row_number, row_version
+             from imported_records
              where workspace_id = $1 and dataset_type = $2 and business_key = $3
              for update",
         )
@@ -430,26 +454,42 @@ pub async fn execute_import_job(
                     &dataset_type,
                     &business_key,
                     candidate,
-                    Some(existing_id),
+                    Some(existing_id.get("id")),
                     "database_conflict",
                 )
                 .await?;
                 counters.conflicts += 1;
             }
             ("overwrite", Some(existing_id)) => {
-                sqlx::query(
+                let before = imported_record_snapshot(&existing_id);
+                let updated = sqlx::query(
                     "update imported_records
                      set record_data = $1, source_import_batch_id = $2,
                          source_row_number = $3, row_version = row_version + 1,
                          updated_at = now()
-                     where workspace_id = $4 and id = $5",
+                     where workspace_id = $4 and id = $5
+                     returning id, record_data, source_import_batch_id,
+                               source_row_number, row_version",
                 )
                 .bind(candidate.get::<Value, _>("record_data"))
                 .bind(job.aggregate_id)
                 .bind(candidate.get::<i32, _>("row_number"))
                 .bind(job.workspace_id)
-                .bind(existing_id)
-                .execute(&mut *tx)
+                .bind(existing_id.get::<Uuid, _>("id"))
+                .fetch_one(&mut *tx)
+                .await?;
+                append_row_change(
+                    &mut tx,
+                    job,
+                    change_sequence.next(),
+                    updated.get("id"),
+                    "update",
+                    Some(before),
+                    imported_record_snapshot(&updated),
+                    updated.get("row_version"),
+                    source_file_id,
+                    candidate.get("row_number"),
+                )
                 .await?;
                 counters.updated += 1;
             }
@@ -457,19 +497,15 @@ pub async fn execute_import_job(
                 let record_data = candidate.get::<Value, _>("record_data");
                 let row_number = candidate.get::<i32, _>("row_number");
                 if policy == "overwrite" {
-                    let inserted = sqlx::query_scalar::<_, bool>(
+                    let inserted = sqlx::query(
                         "insert into imported_records
                            (id, workspace_id, dataset_type, business_key, record_data,
                             source_import_batch_id, source_row_number, row_version, created_by)
                          values ($1, $2, $3, $4, $5, $6, $7, 1, $8)
                          on conflict (workspace_id, dataset_type, business_key)
-                         do update set
-                           record_data = excluded.record_data,
-                           source_import_batch_id = excluded.source_import_batch_id,
-                           source_row_number = excluded.source_row_number,
-                           row_version = imported_records.row_version + 1,
-                           updated_at = now()
-                         returning xmax = 0",
+                         do nothing
+                         returning id, record_data, source_import_batch_id,
+                                   source_row_number, row_version",
                     )
                     .bind(Uuid::now_v7())
                     .bind(job.workspace_id)
@@ -479,11 +515,70 @@ pub async fn execute_import_job(
                     .bind(job.aggregate_id)
                     .bind(row_number)
                     .bind(actor_user_id)
-                    .fetch_one(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await?;
-                    if inserted {
+                    if let Some(inserted) = inserted {
+                        append_row_change(
+                            &mut tx,
+                            job,
+                            change_sequence.next(),
+                            inserted.get("id"),
+                            "insert",
+                            None,
+                            imported_record_snapshot(&inserted),
+                            inserted.get("row_version"),
+                            source_file_id,
+                            row_number,
+                        )
+                        .await?;
                         counters.inserted += 1;
                     } else {
+                        // INSERT ... DO NOTHING waits for a concurrent winner.
+                        // Lock and read that exact committed row before updating
+                        // it so the change log never guesses the overwritten state.
+                        let existing = sqlx::query(
+                            "select id, record_data, source_import_batch_id,
+                                    source_row_number, row_version
+                             from imported_records
+                             where workspace_id = $1 and dataset_type = $2
+                               and business_key = $3
+                             for update",
+                        )
+                        .bind(job.workspace_id)
+                        .bind(&dataset_type)
+                        .bind(&business_key)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        let before = imported_record_snapshot(&existing);
+                        let updated = sqlx::query(
+                            "update imported_records
+                             set record_data = $1, source_import_batch_id = $2,
+                                 source_row_number = $3, row_version = row_version + 1,
+                                 updated_at = now()
+                             where workspace_id = $4 and id = $5
+                             returning id, record_data, source_import_batch_id,
+                                       source_row_number, row_version",
+                        )
+                        .bind(&record_data)
+                        .bind(job.aggregate_id)
+                        .bind(row_number)
+                        .bind(job.workspace_id)
+                        .bind(existing.get::<Uuid, _>("id"))
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        append_row_change(
+                            &mut tx,
+                            job,
+                            change_sequence.next(),
+                            updated.get("id"),
+                            "update",
+                            Some(before),
+                            imported_record_snapshot(&updated),
+                            updated.get("row_version"),
+                            source_file_id,
+                            row_number,
+                        )
+                        .await?;
                         counters.updated += 1;
                     }
                 } else {
@@ -492,7 +587,9 @@ pub async fn execute_import_job(
                            (id, workspace_id, dataset_type, business_key, record_data,
                             source_import_batch_id, source_row_number, row_version, created_by)
                          values ($1, $2, $3, $4, $5, $6, $7, 1, $8)
-                         on conflict (workspace_id, dataset_type, business_key) do nothing",
+                         on conflict (workspace_id, dataset_type, business_key) do nothing
+                         returning id, record_data, source_import_batch_id,
+                                   source_row_number, row_version",
                     )
                     .bind(Uuid::now_v7())
                     .bind(job.workspace_id)
@@ -502,11 +599,22 @@ pub async fn execute_import_job(
                     .bind(job.aggregate_id)
                     .bind(row_number)
                     .bind(actor_user_id)
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected()
-                        == 1;
-                    if inserted {
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    if let Some(inserted) = inserted {
+                        append_row_change(
+                            &mut tx,
+                            job,
+                            change_sequence.next(),
+                            inserted.get("id"),
+                            "insert",
+                            None,
+                            imported_record_snapshot(&inserted),
+                            inserted.get("row_version"),
+                            source_file_id,
+                            row_number,
+                        )
+                        .await?;
                         counters.inserted += 1;
                     } else if policy == "skip" {
                         counters.skipped += 1;
@@ -574,7 +682,8 @@ pub async fn execute_import_job(
     let final_batch = sqlx::query(
         "select status::text as status, dataset_type, conflict_policy,
                 validation_version, validated_mapping_id,
-                validated_staging_version, staging_version, confirmed_by
+                validated_staging_version, staging_version, confirmed_by,
+                rollback_capability, change_log_version
          from import_batches
          where workspace_id = $1 and id = $2
          for update",
@@ -596,6 +705,10 @@ pub async fn execute_import_job(
             != validated_staging_version
         || final_batch.get::<i64, _>("staging_version") != staging_version
         || final_batch.get::<Option<Uuid>, _>("confirmed_by") != Some(actor_user_id)
+        || final_batch.get::<String, _>("rollback_capability") != "compensation_only"
+        || final_batch
+            .get::<Option<i32>, _>("change_log_version")
+            .is_some()
     {
         return Err(JobQueueError::InvalidFrozenImport);
     }
@@ -604,6 +717,7 @@ pub async fn execute_import_job(
         "update import_batches
          set status = 'succeeded', processed_count = $1, imported_count = $2,
              skipped_count = $3, overwritten_count = $4, conflict_result_count = $5,
+             rollback_capability = 'direct', change_log_version = 1,
              committed_at = now(), updated_at = now()
          where workspace_id = $6 and id = $7 and status = 'importing'",
     )
@@ -872,6 +986,65 @@ pub async fn list_events_after(
         .collect()
 }
 
+fn imported_record_snapshot(row: &sqlx::postgres::PgRow) -> Value {
+    imported_record_snapshot_values(
+        row.get("record_data"),
+        row.get("source_import_batch_id"),
+        row.get("source_row_number"),
+        row.get("row_version"),
+    )
+}
+
+fn imported_record_snapshot_values(
+    record_data: Value,
+    source_import_batch_id: Uuid,
+    source_row_number: i32,
+    row_version: i64,
+) -> Value {
+    json!({
+        "record_data": record_data,
+        "source_import_batch_id": source_import_batch_id,
+        "source_row_number": source_row_number,
+        "row_version": row_version,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_row_change(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    sequence_no: i64,
+    target_id: Uuid,
+    operation: &str,
+    before_json: Option<Value>,
+    after_json: Value,
+    target_row_version: i64,
+    source_file_id: Uuid,
+    source_row_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into import_row_changes
+           (id, workspace_id, import_batch_id, sequence_no, target_kind, target_id,
+            operation, before_json, after_json, target_row_version, source_file_id,
+            source_row_number)
+         values ($1, $2, $3, $4, 'imported_record', $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(sequence_no)
+    .bind(target_id)
+    .bind(operation)
+    .bind(before_json)
+    .bind(after_json)
+    .bind(target_row_version)
+    .bind(source_file_id)
+    .bind(source_row_number)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn insert_conflict_candidate(
     tx: &mut Transaction<'_, Postgres>,
     job: &ClaimedJob,
@@ -1038,6 +1211,8 @@ async fn set_workspace(
 mod tests {
     use super::*;
 
+    const WORKER_SOURCE: &str = include_str!("job_queue.rs");
+
     #[test]
     fn retry_allowlist_is_deny_by_default_for_business_failures() {
         assert!(!JobQueueError::AbortConflict.retryable());
@@ -1128,5 +1303,124 @@ mod tests {
             confirmed_actor(None),
             Err(JobQueueError::InvalidFrozenImport)
         ));
+    }
+
+    #[test]
+    fn change_sequence_is_contiguous_and_only_advances_when_requested() {
+        let mut sequence = ChangeSequence::default();
+        assert_eq!(sequence.next(), 1);
+        assert_eq!(sequence.next(), 2);
+        assert_eq!(sequence.next(), 3);
+    }
+
+    #[test]
+    fn rollback_snapshot_contains_only_restorable_record_state() {
+        let source_batch_id = Uuid::now_v7();
+        let snapshot = imported_record_snapshot_values(
+            json!({"code": "A", "value": "12.50"}),
+            source_batch_id,
+            17,
+            4,
+        );
+        assert_eq!(
+            snapshot,
+            json!({
+                "record_data": {"code": "A", "value": "12.50"},
+                "source_import_batch_id": source_batch_id,
+                "source_row_number": 17,
+                "row_version": 4,
+            })
+        );
+        for forbidden in ["created_by", "business_key", "cookie", "token", "password"] {
+            assert!(snapshot.get(forbidden).is_none());
+        }
+    }
+
+    #[test]
+    fn overwrite_race_reads_the_exact_winner_before_updating() {
+        assert!(WORKER_SOURCE.contains("on conflict (workspace_id, dataset_type, business_key)\n                         do nothing\n                         returning id, record_data"));
+        assert!(WORKER_SOURCE.contains("INSERT ... DO NOTHING waits for a concurrent winner."));
+        let race_path = WORKER_SOURCE
+            .split("INSERT ... DO NOTHING waits for a concurrent winner.")
+            .nth(1)
+            .expect("race path");
+        let locked_read = race_path.find("for update").expect("locked winner read");
+        let before_snapshot = race_path
+            .find("let before = imported_record_snapshot(&existing)")
+            .expect("exact before snapshot");
+        let update = race_path
+            .find("update imported_records")
+            .expect("controlled overwrite");
+        let returning = race_path
+            .find("returning id, record_data")
+            .expect("exact after snapshot");
+        assert!(locked_read < before_snapshot);
+        assert!(before_snapshot < update);
+        assert!(update < returning);
+    }
+
+    #[test]
+    fn skip_conflict_and_abort_paths_do_not_append_change_rows() {
+        let duplicate_conflicts = WORKER_SOURCE
+            .split("if policy == \"keep_conflict\" && candidates.len() > 1")
+            .nth(1)
+            .expect("duplicate conflict branch")
+            .split("let candidate =")
+            .next()
+            .expect("duplicate conflict branch end");
+        assert!(!duplicate_conflicts.contains("append_row_change"));
+
+        let existing_conflict = WORKER_SOURCE
+            .split("(\"keep_conflict\", Some(existing_id))")
+            .nth(1)
+            .expect("database conflict branch")
+            .split("(\"overwrite\", Some(existing_id))")
+            .next()
+            .expect("database conflict branch end");
+        assert!(!existing_conflict.contains("append_row_change"));
+
+        assert!(WORKER_SOURCE.contains("(\"skip\", Some(_)) => counters.skipped += 1"));
+        assert!(WORKER_SOURCE.contains("return Err(JobQueueError::AbortConflict)"));
+        let execute_body = WORKER_SOURCE
+            .split("pub async fn execute_import_job")
+            .nth(1)
+            .expect("execute function")
+            .split("pub async fn record_job_failure")
+            .next()
+            .expect("execute function end");
+        assert_eq!(
+            execute_body.matches("append_row_change(").count(),
+            4,
+            "only the four actual insert/update branches append changes"
+        );
+    }
+
+    #[test]
+    fn changes_capability_terminal_state_event_and_audit_share_one_commit() {
+        let execute_body = WORKER_SOURCE
+            .split("pub async fn execute_import_job")
+            .nth(1)
+            .expect("execute function")
+            .split("pub async fn record_job_failure")
+            .next()
+            .expect("execute function end");
+        assert_eq!(execute_body.matches("tx.commit().await?").count(), 1);
+        let change = execute_body
+            .find("append_row_change(")
+            .expect("change append");
+        let capability = execute_body
+            .find("rollback_capability = 'direct', change_log_version = 1")
+            .expect("capability activation");
+        let event = execute_body.rfind("\"succeeded\"").expect("terminal event");
+        let audit = execute_body
+            .find("\"import.worker_succeeded\"")
+            .expect("terminal audit");
+        let commit = execute_body
+            .find("tx.commit().await?")
+            .expect("single commit");
+        assert!(change < capability);
+        assert!(capability < event);
+        assert!(event < audit);
+        assert!(audit < commit);
     }
 }

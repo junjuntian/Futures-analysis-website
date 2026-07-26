@@ -666,9 +666,9 @@ begin
     end if;
     select count(*)
       into change_count
-      from import_row_changes change
-     where change.workspace_id = new.workspace_id
-       and change.import_batch_id = new.id;
+      from import_row_changes change_row
+     where change_row.workspace_id = new.workspace_id
+       and change_row.import_batch_id = new.id;
     if change_count <> (new.imported_count::bigint + new.overwritten_count::bigint) then
         raise exception 'direct rollback requires a complete change log'
             using errcode = '23514';
