@@ -18,7 +18,9 @@ alter table import_batches
         check (compensates_batch_id is null or compensates_batch_id <> id),
     add constraint import_batches_compensation_workspace_fk
         foreign key (workspace_id, compensates_batch_id)
-        references import_batches(workspace_id, id) on delete restrict;
+        references import_batches(workspace_id, id) on delete restrict,
+    add constraint import_batches_compensation_lineage_identity
+        unique (workspace_id, id, compensates_batch_id);
 
 -- Existing Phase 3C batches do not have a complete change log. The default
 -- above deliberately marks every existing row as compensation-only; this
@@ -33,6 +35,46 @@ create index import_batches_workspace_compensation_idx
 
 create index import_batches_workspace_rollback_capability_idx
     on import_batches (workspace_id, rollback_capability, status, committed_at);
+
+create table import_compensations (
+    id uuid primary key,
+    workspace_id uuid not null references workspaces(id) on delete restrict,
+    original_import_batch_id uuid not null,
+    compensation_import_batch_id uuid not null,
+    reason text not null,
+    requested_by uuid not null references users(id) on delete restrict,
+    idempotency_key_hash char(64) not null,
+    request_hash char(64) not null,
+    created_at timestamptz not null default now(),
+    constraint import_compensations_workspace_identity unique (workspace_id, id),
+    constraint import_compensations_batch_identity
+        unique (workspace_id, compensation_import_batch_id),
+    constraint import_compensations_idempotency_identity
+        unique (workspace_id, idempotency_key_hash),
+    constraint import_compensations_original_batch_fk
+        foreign key (workspace_id, original_import_batch_id)
+        references import_batches(workspace_id, id) on delete restrict,
+    constraint import_compensations_compensation_batch_fk
+        foreign key (
+            workspace_id,
+            compensation_import_batch_id,
+            original_import_batch_id
+        )
+        references import_batches(workspace_id, id, compensates_batch_id)
+        on delete restrict,
+    constraint import_compensations_not_self
+        check (original_import_batch_id <> compensation_import_batch_id),
+    constraint import_compensations_reason_length
+        check (length(trim(reason)) between 1 and 1000),
+    constraint import_compensations_hashes_hex
+        check (
+            idempotency_key_hash ~ '^[0-9a-f]{64}$'
+            and request_hash ~ '^[0-9a-f]{64}$'
+        )
+);
+
+create index import_compensations_workspace_original_idx
+    on import_compensations (workspace_id, original_import_batch_id, created_at, id);
 
 alter table import_files
     add constraint import_files_workspace_file_batch_identity
@@ -511,9 +553,8 @@ begin
     end if;
 
     if tg_op = 'UPDATE'
-       and old.status not in ('uploaded', 'inspected', 'mapped', 'preview_ready')
        and new.compensates_batch_id is distinct from old.compensates_batch_id then
-        raise exception 'compensation lineage is immutable after confirmation'
+        raise exception 'compensation lineage is immutable once established'
             using errcode = '23514';
     end if;
 
@@ -708,6 +749,11 @@ deferrable initially deferred
 for each row
 execute function app.enforce_import_change_sequence();
 
+create trigger import_compensations_immutable
+before update or delete on import_compensations
+for each row
+execute function app.prevent_phase_3d_immutable_row_change();
+
 create trigger import_rollback_conflicts_immutable
 before update or delete on import_rollback_conflicts
 for each row
@@ -783,6 +829,8 @@ alter table import_job_events
 
 alter table import_row_changes enable row level security;
 alter table import_row_changes force row level security;
+alter table import_compensations enable row level security;
+alter table import_compensations force row level security;
 alter table import_rollback_requests enable row level security;
 alter table import_rollback_requests force row level security;
 alter table import_rollback_conflicts enable row level security;
@@ -797,6 +845,10 @@ alter table object_quarantines enable row level security;
 alter table object_quarantines force row level security;
 
 create policy import_row_changes_workspace_isolation on import_row_changes
+    using (workspace_id = app.current_workspace_id())
+    with check (workspace_id = app.current_workspace_id());
+
+create policy import_compensations_workspace_isolation on import_compensations
     using (workspace_id = app.current_workspace_id())
     with check (workspace_id = app.current_workspace_id());
 
@@ -825,6 +877,7 @@ create policy object_quarantines_workspace_isolation on object_quarantines
     with check (workspace_id = app.current_workspace_id());
 
 grant select, insert on import_row_changes to futures_runtime;
+grant select, insert on import_compensations to futures_runtime;
 grant select, insert, update on import_rollback_requests to futures_runtime;
 grant select, insert on import_rollback_conflicts to futures_runtime;
 grant select, insert on import_data_invalidations to futures_runtime;

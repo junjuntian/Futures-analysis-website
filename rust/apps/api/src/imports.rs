@@ -1,5 +1,7 @@
 use crate::auth::{self, AuthError, AuthState, Permission};
-use application::imports::{ImportParseError, UploadValidationError, UploadValidator};
+use application::imports::{
+    ImportParseError, UploadValidationError, UploadValidator, ValidatedUpload,
+};
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State},
@@ -10,19 +12,20 @@ use axum::{
     },
 };
 use common::ApiResponse;
+use database::compensations::{CompensationRepositoryError, NewCompensationUpload};
 use database::imports::{
     ImportRepositoryError, ImportUploadRecord, InspectionUpdate, NewImportUpload,
     PreviewInputSnapshot, PreviewSave, QueueRollbackResult, RollbackPrecheck,
 };
 use domain::import::{
-    ImportBatchStatus, ImportConfirmRequest, ImportConflictPolicy, ImportDatasetDefinition,
-    ImportErrorsResponse, ImportInspectRequest, ImportInspectResponse, ImportMappingRequest,
-    ImportMappingResponse, ImportPreviewRequest, ImportRollbackCheckResponse,
-    ImportRollbackConflictsResponse, ImportRollbackRequest, ImportRollbackResponse,
-    ImportTemplateCreateRequest, ImportTemplateSummary, ImportTemplateVersionResponse,
-    RollbackCapability, import_dataset_definitions,
+    ImportBatchStatus, ImportCompensationResponse, ImportConfirmRequest, ImportConflictPolicy,
+    ImportDatasetDefinition, ImportErrorsResponse, ImportInspectRequest, ImportInspectResponse,
+    ImportLineageResponse, ImportMappingRequest, ImportMappingResponse, ImportPreviewRequest,
+    ImportRollbackCheckResponse, ImportRollbackConflictsResponse, ImportRollbackRequest,
+    ImportRollbackResponse, ImportTemplateCreateRequest, ImportTemplateSummary,
+    ImportTemplateVersionResponse, RollbackCapability, import_dataset_definitions,
 };
-use infrastructure::object_storage::{ObjectStorage, ObjectStorageError};
+use infrastructure::object_storage::{ObjectStorage, ObjectStorageError, ObjectUpload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
@@ -57,6 +60,14 @@ pub enum ImportRollbackConflictApiResponse {
 pub struct ImportUploadRequest {
     #[schema(value_type = String, format = Binary)]
     pub file: Vec<u8>,
+}
+
+#[derive(Debug, ToSchema)]
+#[allow(dead_code)]
+pub struct ImportCompensationUploadRequest {
+    #[schema(value_type = String, format = Binary)]
+    pub file: Vec<u8>,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -443,6 +454,243 @@ pub async fn upload(
         Json(ApiResponse::new(ImportResponse::from(result), request_id)),
     )
         .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/compensations",
+    params(
+        ("import_id" = Uuid, Path, description = "Original ended import batch id"),
+        ("Idempotency-Key" = String, Header, description = "Stable key for this compensation upload"),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    request_body(
+        content = ImportCompensationUploadRequest,
+        content_type = "multipart/form-data",
+        description = "Exactly one corrective file and one reason field."
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 201, body = ImportCompensationResponse),
+        (status = 200, body = ImportCompensationResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody),
+        (status = 413, body = ImportErrorBody),
+        (status = 415, body = ImportErrorBody)
+    )
+)]
+pub async fn create_compensation(
+    State(state): State<Arc<ImportState>>,
+    Path(original_import_id): Path<Uuid>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_compensation_write(&state, &headers).await?;
+    let result: Result<Response, ImportApiError> = async {
+        let raw_key = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| (16..=200).contains(&value.len()))
+            .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))?;
+        let mut reason: Option<String> = None;
+        let mut pending_upload: Option<(Box<dyn ObjectUpload>, ValidatedUpload, String)> = None;
+        while let Some(mut field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| ImportApiError::bad_request("invalid_multipart", request_id))?
+        {
+            match field.name() {
+                Some("reason") if reason.is_none() => {
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = field
+                        .chunk()
+                        .await
+                        .map_err(|_| ImportApiError::bad_request("invalid_reason", request_id))?
+                    {
+                        if bytes.len().saturating_add(chunk.len()) > 1000 {
+                            return Err(ImportApiError::bad_request(
+                                "compensation_reason_invalid",
+                                request_id,
+                            ));
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    let value = String::from_utf8(bytes)
+                        .map_err(|_| ImportApiError::bad_request("invalid_reason", request_id))?;
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err(ImportApiError::bad_request(
+                            "compensation_reason_invalid",
+                            request_id,
+                        ));
+                    }
+                    reason = Some(value.to_string());
+                }
+                Some("file") if pending_upload.is_none() => {
+                    let filename = field.file_name().map(str::to_string).ok_or_else(|| {
+                        ImportApiError::bad_request("filename_required", request_id)
+                    })?;
+                    let declared_mime = field.content_type().map(str::to_string);
+                    let mut validator = UploadValidator::new(
+                        state.upload_policy.clone(),
+                        &filename,
+                        declared_mime.as_deref(),
+                    )
+                    .map_err(|error| map_validation_error(error, request_id))?;
+                    let mut object_upload = state
+                        .storage
+                        .begin_upload()
+                        .await
+                        .map_err(|error| map_storage_error(error, request_id))?;
+                    while let Some(chunk) = field.chunk().await.map_err(|_| {
+                        ImportApiError::bad_request("upload_interrupted", request_id)
+                    })? {
+                        validator
+                            .observe(&chunk)
+                            .map_err(|error| map_validation_error(error, request_id))?;
+                        object_upload
+                            .write_chunk(&chunk)
+                            .await
+                            .map_err(|error| map_storage_error(error, request_id))?;
+                    }
+                    let validated = validator
+                        .finish()
+                        .map_err(|error| map_validation_error(error, request_id))?;
+                    pending_upload = Some((object_upload, validated, filename));
+                }
+                _ => {
+                    return Err(ImportApiError::bad_request(
+                        "compensation_multipart_invalid",
+                        request_id,
+                    ));
+                }
+            }
+        }
+        let reason = reason.ok_or_else(|| {
+            ImportApiError::bad_request("compensation_reason_required", request_id)
+        })?;
+        let (object_upload, validated, filename) = pending_upload
+            .ok_or_else(|| ImportApiError::bad_request("single_file_required", request_id))?;
+        let stored = object_upload
+            .commit()
+            .await
+            .map_err(|error| map_storage_error(error, request_id))?;
+        // A committed object is never physically deleted by the import path. If registration
+        // fails or this upload replays an existing request, object governance will detect and
+        // quarantine the unreferenced object.
+        if stored.size_bytes != validated.size_bytes {
+            return Err(ImportApiError::internal(request_id));
+        }
+        let size_bytes = match i64::try_from(stored.size_bytes) {
+            Ok(size_bytes) => size_bytes,
+            Err(_) => return Err(ImportApiError::too_large(request_id)),
+        };
+        let idempotency_key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+        let request_hash = digest(&[
+            &context.workspace_id().to_string(),
+            &original_import_id.to_string(),
+            &reason,
+            &stored.sha256,
+            &filename,
+            &validated.declared_mime_type,
+            &context.user_id().to_string(),
+        ]);
+        let upload = NewCompensationUpload {
+            object_id: Uuid::now_v7(),
+            compensation_import_id: Uuid::now_v7(),
+            file_id: Uuid::now_v7(),
+            workspace_id: context.workspace_id(),
+            actor_user_id: context.user_id(),
+            original_import_id,
+            reason,
+            object_key: stored.object_key.clone(),
+            sha256: stored.sha256,
+            size_bytes,
+            original_filename: filename,
+            declared_mime_type: validated.declared_mime_type,
+            detected_format: validated.format.as_str().to_string(),
+            idempotency_key_hash: idempotency_key_hash.clone(),
+            request_hash: request_hash.clone(),
+            audit_request_id: request_id,
+        };
+        let response =
+            match database::compensations::create_compensation_upload(&state.auth.pool, &upload)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    match database::compensations::recover_compensation(
+                        &state.auth.pool,
+                        context.workspace_id(),
+                        original_import_id,
+                        &idempotency_key_hash,
+                        &request_hash,
+                    )
+                    .await
+                    {
+                        Ok(Some(response)) => response,
+                        Ok(None) => return Err(map_compensation_error(error, request_id)),
+                        Err(recovery_error) => {
+                            return Err(map_compensation_error(recovery_error, request_id));
+                        }
+                    }
+                }
+            };
+        let status = if response.replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        };
+        Ok((status, Json(ApiResponse::new(response, request_id))).into_response())
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Err(audit_import_failure(
+            &state,
+            &context,
+            request_id,
+            original_import_id,
+            "import.compensation",
+            error,
+        )
+        .await),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/imports/{import_id}/lineage",
+    params(("import_id" = Uuid, Path, description = "Any import batch in the lineage")),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportLineageResponse),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn lineage(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ReadImports)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let response =
+        database::compensations::get_lineage(&state.auth.pool, context.workspace_id(), import_id)
+            .await
+            .map_err(|error| map_compensation_error(error, request_id))?;
+    Ok(Json(ApiResponse::new(response, request_id)).into_response())
 }
 
 #[utoipa::path(
@@ -1472,6 +1720,22 @@ fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> Impor
     }
 }
 
+fn map_compensation_error(error: CompensationRepositoryError, request_id: Uuid) -> ImportApiError {
+    match error {
+        CompensationRepositoryError::NotFound => ImportApiError::not_found(request_id),
+        CompensationRepositoryError::NotAllowed => {
+            ImportApiError::conflict("compensation_not_allowed", request_id)
+        }
+        CompensationRepositoryError::Cycle => {
+            ImportApiError::conflict("compensation_cycle", request_id)
+        }
+        CompensationRepositoryError::IdempotencyKeyReused => {
+            ImportApiError::conflict("idempotency_key_reused", request_id)
+        }
+        _ => ImportApiError::internal(request_id),
+    }
+}
+
 async fn require_import_write(
     state: &ImportState,
     headers: &HeaderMap,
@@ -1507,6 +1771,26 @@ async fn require_import_rollback_write(
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     if let Err(error) = context.require_permission(Permission::Rollback) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    Ok((request_id, context))
+}
+
+async fn require_import_compensation_write(
+    state: &ImportState,
+    headers: &HeaderMap,
+) -> Result<(Uuid, auth::AuthContext), ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    if let Err(error) = auth::ensure_allowed_origin(&state.auth.config, headers) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = auth::ensure_csrf(&state.auth, headers).await {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = context.require_permission(Permission::Compensate) {
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     Ok((request_id, context))
@@ -1602,4 +1886,36 @@ fn digest(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
     }
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod phase_3d_compensation_contract {
+    const SOURCE: &str = include_str!("imports.rs");
+
+    #[test]
+    fn committed_compensation_objects_are_never_physically_deleted() {
+        let compensation = SOURCE
+            .split("pub async fn create_compensation")
+            .nth(1)
+            .expect("compensation handler")
+            .split("pub async fn lineage")
+            .next()
+            .expect("compensation handler end");
+        assert!(compensation.contains(".commit()"));
+        assert!(!compensation.contains(".delete(&stored.object_key)"));
+    }
+
+    #[test]
+    fn compensation_reuses_the_full_import_entry_state() {
+        let compensation = SOURCE
+            .split("pub async fn create_compensation")
+            .nth(1)
+            .expect("compensation handler")
+            .split("pub async fn lineage")
+            .next()
+            .expect("compensation handler end");
+        assert!(compensation.contains("UploadValidator::new"));
+        assert!(compensation.contains("begin_upload"));
+        assert!(compensation.contains("NewCompensationUpload"));
+    }
 }

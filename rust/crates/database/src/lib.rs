@@ -1,3 +1,4 @@
+pub mod compensations;
 pub mod imports;
 pub mod job_queue;
 pub mod rollback_jobs;
@@ -37,6 +38,7 @@ mod phase_3d_schema_contract {
     #[test]
     fn phase_3d_tables_are_workspace_scoped_and_force_rls() {
         for table in [
+            "import_compensations",
             "import_row_changes",
             "import_rollback_requests",
             "import_rollback_conflicts",
@@ -73,11 +75,51 @@ mod phase_3d_schema_contract {
 
     #[test]
     fn compensation_and_rollback_links_cannot_cross_workspaces() {
+        assert!(MIGRATION.contains("import_compensations_original_batch_fk"));
+        assert!(MIGRATION.contains("import_compensations_compensation_batch_fk"));
+        assert!(MIGRATION.contains("import_compensations_immutable"));
+        assert!(MIGRATION.contains("import_batches_compensation_lineage_identity"));
+        assert!(MIGRATION.contains(
+            "foreign key (\n            workspace_id,\n            compensation_import_batch_id,\n            original_import_batch_id\n        )"
+        ));
+        assert!(
+            MIGRATION.contains("references import_batches(workspace_id, id, compensates_batch_id)")
+        );
         assert!(MIGRATION.contains("import_batches_compensation_workspace_fk"));
         assert!(MIGRATION.contains("references import_batches(workspace_id, id)"));
         assert!(MIGRATION.contains("import_rollback_requests_job_batch_fk"));
         assert!(MIGRATION.contains("references job_queue(workspace_id, id, aggregate_id)"));
         assert!(MIGRATION.contains("compensation lineage cannot contain a cycle"));
+    }
+
+    #[test]
+    fn compensation_lineage_is_bound_on_insert_and_immutable_afterward() {
+        let invariant = MIGRATION
+            .split("create or replace function app.enforce_import_batch_phase_3d_invariants()")
+            .nth(1)
+            .expect("batch invariant trigger")
+            .split("create or replace function app.enforce_rollback_request_job()")
+            .next()
+            .expect("batch invariant trigger end");
+        assert!(
+            invariant.contains(
+                "if tg_op = 'UPDATE'\n       and new.compensates_batch_id is distinct from old.compensates_batch_id then"
+            ),
+            "NULL-to-parent, parent-to-NULL, and parent-to-other updates must all be rejected"
+        );
+        assert!(invariant.contains("compensation lineage is immutable once established"));
+
+        let repository = include_str!("compensations.rs");
+        let create = repository
+            .split("pub async fn create_compensation_upload")
+            .nth(1)
+            .expect("compensation creation")
+            .split("pub async fn recover_compensation")
+            .next()
+            .expect("compensation creation end");
+        assert!(create.contains(
+            "insert into import_batches\n            (id, workspace_id, status, dataset_type, created_by, compensates_batch_id)"
+        ));
     }
 
     #[test]

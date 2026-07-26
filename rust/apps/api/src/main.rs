@@ -46,6 +46,8 @@ use uuid::Uuid;
         imports::rollback_check,
         imports::rollback_conflicts,
         imports::rollback,
+        imports::create_compensation,
+        imports::lineage,
         imports::events,
         imports::errors,
         imports::list_templates,
@@ -67,6 +69,7 @@ use uuid::Uuid;
         imports::ImportErrorBody,
         imports::ImportRollbackConflictApiResponse,
         imports::ImportUploadRequest,
+        imports::ImportCompensationUploadRequest,
         imports::ImportFileResponse,
         imports::ImportResponse,
         imports::ImportTemplatesResponse,
@@ -110,6 +113,14 @@ use uuid::Uuid;
         domain::import::ImportRollbackCheckResponse,
         domain::import::ImportRollbackConflictsResponse,
         domain::import::ImportRollbackResponse,
+        domain::import::ImportCompensationFile,
+        domain::import::ImportCompensationResponse,
+        domain::import::ImportLineageFile,
+        domain::import::ImportLineageJob,
+        domain::import::ImportLineageRollback,
+        domain::import::ImportLineageNode,
+        domain::import::ImportLineageAudit,
+        domain::import::ImportLineageResponse,
         domain::import::ImportProgress,
         domain::import::ImportJobSummary,
         domain::import::ImportJobEvent
@@ -255,6 +266,11 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
             "/api/v1/imports/{import_id}/rollback",
             post(imports::rollback),
         )
+        .route(
+            "/api/v1/imports/{import_id}/compensations",
+            post(imports::create_compensation),
+        )
+        .route("/api/v1/imports/{import_id}/lineage", get(imports::lineage))
         .route("/api/v1/imports/{import_id}/events", get(imports::events))
         .route("/api/v1/imports/{import_id}/errors", get(imports::errors))
         .route(
@@ -387,5 +403,42 @@ mod tests {
             response_schema_ref,
             "#/components/schemas/ImportRollbackConflictApiResponse"
         );
+    }
+
+    #[test]
+    fn openapi_exposes_compensation_upload_and_lineage() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let paths = document["paths"].as_object().expect("OpenAPI paths");
+        let compensation = &paths["/api/v1/imports/{import_id}/compensations"]["post"];
+        let lineage = &paths["/api/v1/imports/{import_id}/lineage"]["get"];
+        for operation in [compensation, lineage] {
+            assert_eq!(
+                operation["security"][0]["session_cookie"],
+                serde_json::json!([])
+            );
+            assert!(operation["responses"]["401"].is_object());
+            assert!(operation["responses"]["403"].is_object());
+            assert!(operation["responses"]["404"].is_object());
+        }
+        let parameters = compensation["parameters"]
+            .as_array()
+            .expect("compensation parameters");
+        for required_header in ["Idempotency-Key", "x-csrf-token", "Origin"] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == required_header),
+                "missing {required_header}"
+            );
+        }
+        assert!(
+            compensation["requestBody"]["content"]["multipart/form-data"]["schema"].is_object()
+        );
+        assert!(compensation["responses"]["200"].is_object());
+        assert!(compensation["responses"]["201"].is_object());
+        assert!(compensation["responses"]["409"].is_object());
+        assert!(lineage["responses"]["200"].is_object());
+        assert!(document["components"]["schemas"]["ImportCompensationResponse"].is_object());
+        assert!(document["components"]["schemas"]["ImportLineageResponse"].is_object());
     }
 }

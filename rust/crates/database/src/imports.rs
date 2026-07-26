@@ -1737,6 +1737,20 @@ pub(crate) async fn evaluate_rollback(
     fingerprint_material.push(json!({
         "active_rollback_exists": active_rollback_exists,
     }));
+    let compensation_batch_exists = sqlx::query_scalar::<_, bool>(
+        "select exists(
+            select 1 from import_compensations compensation
+             where compensation.workspace_id = $1
+               and compensation.original_import_batch_id = $2
+         )",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    fingerprint_material.push(json!({
+        "compensation_batch_exists": compensation_batch_exists,
+    }));
 
     if batch_status != expected_batch_status {
         push_rollback_conflict(
@@ -1760,6 +1774,18 @@ pub(crate) async fn evaluate_rollback(
             None,
             None,
             "rollback_request_in_progress",
+        );
+    }
+    if compensation_batch_exists {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::DownstreamDependency,
+            None,
+            None,
+            None,
+            None,
+            Some("compensation_batch"),
+            "compensation_batch_exists",
         );
     }
     if rollback_capability != RollbackCapability::Direct {
@@ -3174,7 +3200,34 @@ mod tests {
         assert!(evaluation.contains("unsupported_change_operation"));
         assert!(evaluation.contains("import_conflict_candidates candidate"));
         assert!(evaluation.contains("downstream_import_conflict_candidate"));
+        assert!(evaluation.contains("from import_compensations compensation"));
+        assert!(evaluation.contains("compensation_batch_exists"));
+        assert!(evaluation.contains("Some(\"compensation_batch\")"));
         assert!(evaluation.contains("for update"));
+    }
+
+    #[test]
+    fn rollback_checks_compensation_dependency_after_locking_original_batch() {
+        let evaluation = IMPORTS_SOURCE
+            .split("async fn evaluate_rollback")
+            .nth(1)
+            .expect("evaluation")
+            .split("fn finalize_rollback_evaluation")
+            .next()
+            .expect("evaluation end");
+        let original_lock = evaluation
+            .find("from import_batches")
+            .expect("original batch query");
+        let for_update = evaluation[original_lock..]
+            .find("for update")
+            .map(|offset| original_lock + offset)
+            .expect("original batch lock");
+        let compensation_dependency = evaluation
+            .find("from import_compensations compensation")
+            .expect("compensation dependency query");
+        assert!(for_update < compensation_dependency);
+        assert!(evaluation.contains("ImportRollbackConflictType::DownstreamDependency"));
+        assert!(evaluation.contains("\"compensation_batch_exists\""));
     }
 
     #[test]

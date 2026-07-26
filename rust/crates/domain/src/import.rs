@@ -660,6 +660,90 @@ pub struct ImportRollbackResponse {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportCompensationFile {
+    pub file_id: uuid::Uuid,
+    pub original_filename: String,
+    pub detected_format: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportCompensationResponse {
+    pub original_import_id: uuid::Uuid,
+    pub compensation_import_id: uuid::Uuid,
+    pub status: ImportBatchStatus,
+    pub reason: String,
+    pub requested_by: uuid::Uuid,
+    pub file: ImportCompensationFile,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageFile {
+    pub file_id: uuid::Uuid,
+    pub object_id: uuid::Uuid,
+    pub original_filename: String,
+    pub detected_format: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub object_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageJob {
+    pub job_id: uuid::Uuid,
+    pub job_type: String,
+    pub status: String,
+    pub attempt_count: u32,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageRollback {
+    pub rollback_request_id: uuid::Uuid,
+    pub status: ImportRollbackRequestStatus,
+    pub conflict_count: u32,
+    pub requested_by: uuid::Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageNode {
+    pub import_id: uuid::Uuid,
+    pub status: ImportBatchStatus,
+    pub compensates_import_id: Option<uuid::Uuid>,
+    pub compensation_reason: Option<String>,
+    pub created_by: uuid::Uuid,
+    pub confirmed_by: Option<uuid::Uuid>,
+    pub rollback_capability: RollbackCapability,
+    pub mapping_id: Option<uuid::Uuid>,
+    pub created_at: String,
+    pub confirmed_at: Option<String>,
+    pub rolled_back_at: Option<String>,
+    pub file: ImportLineageFile,
+    pub jobs: Vec<ImportLineageJob>,
+    pub rollbacks: Vec<ImportLineageRollback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageAudit {
+    pub audit_id: uuid::Uuid,
+    pub import_id: uuid::Uuid,
+    pub event_type: String,
+    pub outcome: String,
+    pub actor_user_id: Option<uuid::Uuid>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportLineageResponse {
+    pub requested_import_id: uuid::Uuid,
+    pub root_import_id: uuid::Uuid,
+    pub nodes: Vec<ImportLineageNode>,
+    pub audits: Vec<ImportLineageAudit>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ImportProgress {
     pub processed_count: u32,
