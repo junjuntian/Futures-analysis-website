@@ -65,6 +65,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ inputs.git_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify checked out candidate
@@ -104,7 +105,10 @@ jobs:
             rust/migrations/202607260002_phase_3d_worker_fairness.sql \
             "${RELEASE_BUNDLE}/migrations/"
           install -m 700 rust/tests/phase_3c_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_3c_e2e.sh"
-          install -m 700 rust/tests/phase_3d_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
+          git cat-file -e "${GITHUB_SHA}^{commit}"
+          git show "${GITHUB_SHA}:rust/tests/phase_3d_e2e.sh" \
+            >"${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
+          chmod 700 "${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
           install -m 600 rust/tests/phase_3d_schema_invariants.sql \
             "${RELEASE_BUNDLE}/e2e/phase_3d_schema_invariants.sql"
           install -m 600 rust/tests/fixtures/phase3d_sample.xls \
