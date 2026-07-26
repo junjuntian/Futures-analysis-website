@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { confirmImport, streamImportEvents } from './api'
-import type { ImportJobEvent } from './api'
+import { ApiError, confirmImport, getJson, requestRollback, streamImportEvents } from './api'
+import type { ImportJobEvent, ImportRollbackCheck } from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('Phase 3C import API', () => {
+describe('Phase 3D import API', () => {
   it('sends the caller-owned idempotency key unchanged when confirming', async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({
       ok: true,
@@ -70,5 +70,50 @@ describe('Phase 3C import API', () => {
       'Last-Event-ID': '7'
     })
     expect(received).toEqual([expected])
+  })
+
+  it('preserves stable API error codes and authorization status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: { code: 'permission_denied', message: 'forbidden' },
+      meta: { request_id: 'request-2' }
+    }), { status: 403, headers: { 'content-type': 'application/json' } })))
+
+    await expect(getJson('/api/v1/imports/batch')).rejects.toMatchObject({
+      status: 403,
+      code: 'permission_denied',
+      requestId: 'request-2'
+    })
+  })
+
+  it('returns a changed rollback precheck as structured conflict data', async () => {
+    const changed: ImportRollbackCheck = {
+      import_id: 'batch',
+      precheck_request_id: 'new-check',
+      precheck_fingerprint: 'b'.repeat(64),
+      rollback_capability: 'direct',
+      change_log_version: 2,
+      can_rollback: false,
+      compensation_recommended: true,
+      affected_count: 2,
+      conflict_count: 1,
+      conflicts: [{ conflict_seq: 1, conflict_type: 'later_modification',
+        detail_code: 'target_data_changed' }],
+      next_cursor: null
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: changed,
+      meta: { request_id: 'request-3' }
+    }), { status: 409, headers: { 'content-type': 'application/json' } })))
+
+    const original = { ...changed, precheck_request_id: 'old-check', can_rollback: true,
+      conflict_count: 0, conflicts: [] }
+    let caught: unknown
+    try {
+      await requestRollback('batch', original, 'csrf', 'stable-key')
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(ApiError)
+    expect(caught).toMatchObject({ code: 'rollback_conflict', data: changed })
   })
 })
