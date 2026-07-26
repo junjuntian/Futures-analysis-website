@@ -63,6 +63,7 @@ impl ImportBatchStatus {
                 | (Self::RollbackCheck, Self::RollingBack)
                 | (Self::RollbackCheck, Self::RollbackConflict)
                 | (Self::RollingBack, Self::RolledBack)
+                | (Self::RollingBack, Self::RollbackConflict)
                 | (Self::RollingBack, Self::RollbackFailed)
         )
     }
@@ -208,6 +209,11 @@ pub enum ImportJobEventType {
     Succeeded,
     Failed,
     DeadLetter,
+    RollbackQueued,
+    RollbackRunning,
+    RollbackConflict,
+    RolledBack,
+    RollbackFailed,
 }
 
 impl ImportJobEventType {
@@ -219,6 +225,11 @@ impl ImportJobEventType {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::DeadLetter => "dead_letter",
+            Self::RollbackQueued => "rollback_queued",
+            Self::RollbackRunning => "rollback_running",
+            Self::RollbackConflict => "rollback_conflict",
+            Self::RolledBack => "rolled_back",
+            Self::RollbackFailed => "rollback_failed",
         }
     }
 
@@ -230,8 +241,290 @@ impl ImportJobEventType {
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "dead_letter" => Self::DeadLetter,
+            "rollback_queued" => Self::RollbackQueued,
+            "rollback_running" => Self::RollbackRunning,
+            "rollback_conflict" => Self::RollbackConflict,
+            "rolled_back" => Self::RolledBack,
+            "rollback_failed" => Self::RollbackFailed,
             _ => return None,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportJobType {
+    ImportConfirm,
+    ImportRollback,
+    ObjectConsistencyScan,
+    ObjectQuarantine,
+}
+
+impl ImportJobType {
+    pub const ALL: [Self; 4] = [
+        Self::ImportConfirm,
+        Self::ImportRollback,
+        Self::ObjectConsistencyScan,
+        Self::ObjectQuarantine,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImportConfirm => "import_confirm",
+            Self::ImportRollback => "import_rollback",
+            Self::ObjectConsistencyScan => "object_consistency_scan",
+            Self::ObjectQuarantine => "object_quarantine",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackCapability {
+    CompensationOnly,
+    Direct,
+}
+
+impl RollbackCapability {
+    pub const ALL: [Self; 2] = [Self::CompensationOnly, Self::Direct];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompensationOnly => "compensation_only",
+            Self::Direct => "direct",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportChangeOperation {
+    Insert,
+    Update,
+    SoftDelete,
+}
+
+impl ImportChangeOperation {
+    pub const ALL: [Self; 3] = [Self::Insert, Self::Update, Self::SoftDelete];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::SoftDelete => "soft_delete",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRollbackRequestStatus {
+    Prechecked,
+    PrecheckConflict,
+    Queued,
+    Running,
+    Succeeded,
+    WorkerConflict,
+    Failed,
+}
+
+impl ImportRollbackRequestStatus {
+    pub const ALL: [Self; 7] = [
+        Self::Prechecked,
+        Self::PrecheckConflict,
+        Self::Queued,
+        Self::Running,
+        Self::Succeeded,
+        Self::WorkerConflict,
+        Self::Failed,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prechecked => "prechecked",
+            Self::PrecheckConflict => "precheck_conflict",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::WorkerConflict => "worker_conflict",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::PrecheckConflict | Self::Succeeded | Self::WorkerConflict | Self::Failed
+        )
+    }
+
+    pub const fn requires_job(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Running | Self::Succeeded | Self::WorkerConflict | Self::Failed
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRollbackConflictType {
+    RollbackNotAvailable,
+    TargetMissing,
+    TargetVersionChanged,
+    TargetDataChanged,
+    LaterImport,
+    LaterModification,
+    DownstreamDependency,
+    ChangeLogIncomplete,
+    SourceChainBroken,
+    IllegalChange,
+}
+
+impl ImportRollbackConflictType {
+    pub const ALL: [Self; 10] = [
+        Self::RollbackNotAvailable,
+        Self::TargetMissing,
+        Self::TargetVersionChanged,
+        Self::TargetDataChanged,
+        Self::LaterImport,
+        Self::LaterModification,
+        Self::DownstreamDependency,
+        Self::ChangeLogIncomplete,
+        Self::SourceChainBroken,
+        Self::IllegalChange,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RollbackNotAvailable => "rollback_not_available",
+            Self::TargetMissing => "target_missing",
+            Self::TargetVersionChanged => "target_version_changed",
+            Self::TargetDataChanged => "target_data_changed",
+            Self::LaterImport => "later_import",
+            Self::LaterModification => "later_modification",
+            Self::DownstreamDependency => "downstream_dependency",
+            Self::ChangeLogIncomplete => "change_log_incomplete",
+            Self::SourceChainBroken => "source_chain_broken",
+            Self::IllegalChange => "illegal_change",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectConsistencyRunStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ObjectConsistencyRunStatus {
+    pub const ALL: [Self; 3] = [Self::Running, Self::Completed, Self::Failed];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectConsistencyFindingType {
+    DatabaseObjectMissing,
+    OrphanObject,
+    SizeMismatch,
+    Sha256Mismatch,
+    BackendMismatch,
+    StateMismatch,
+    WorkspacePathMismatch,
+    StaleTemporaryObject,
+    StalePendingObject,
+    CommitOutcomeUnknown,
+}
+
+impl ObjectConsistencyFindingType {
+    pub const ALL: [Self; 10] = [
+        Self::DatabaseObjectMissing,
+        Self::OrphanObject,
+        Self::SizeMismatch,
+        Self::Sha256Mismatch,
+        Self::BackendMismatch,
+        Self::StateMismatch,
+        Self::WorkspacePathMismatch,
+        Self::StaleTemporaryObject,
+        Self::StalePendingObject,
+        Self::CommitOutcomeUnknown,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DatabaseObjectMissing => "database_object_missing",
+            Self::OrphanObject => "orphan_object",
+            Self::SizeMismatch => "size_mismatch",
+            Self::Sha256Mismatch => "sha256_mismatch",
+            Self::BackendMismatch => "backend_mismatch",
+            Self::StateMismatch => "state_mismatch",
+            Self::WorkspacePathMismatch => "workspace_path_mismatch",
+            Self::StaleTemporaryObject => "stale_temporary_object",
+            Self::StalePendingObject => "stale_pending_object",
+            Self::CommitOutcomeUnknown => "commit_outcome_unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectDispositionStatus {
+    Detected,
+    Quarantined,
+    Acknowledged,
+}
+
+impl ObjectDispositionStatus {
+    pub const ALL: [Self; 3] = [Self::Detected, Self::Quarantined, Self::Acknowledged];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::Quarantined => "quarantined",
+            Self::Acknowledged => "acknowledged",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
     }
 }
 
@@ -247,6 +540,16 @@ pub enum ImportWorkflowErrorCode {
     ConfirmationConflict,
     EventIdInvalid,
     EventNotVisible,
+    RollbackNotAllowed,
+    RollbackNotAvailable,
+    RollbackPreconditionStale,
+    RollbackConflict,
+    RollbackAlreadyCompleted,
+    RollbackInProgress,
+    RollbackIdempotencyKeyReused,
+    CompensationNotAllowed,
+    CompensationCycle,
+    ObjectConsistencyError,
 }
 
 impl ImportWorkflowErrorCode {
@@ -261,6 +564,16 @@ impl ImportWorkflowErrorCode {
             Self::ConfirmationConflict => "confirmation_conflict",
             Self::EventIdInvalid => "event_id_invalid",
             Self::EventNotVisible => "event_not_visible",
+            Self::RollbackNotAllowed => "rollback_not_allowed",
+            Self::RollbackNotAvailable => "rollback_not_available",
+            Self::RollbackPreconditionStale => "rollback_precondition_stale",
+            Self::RollbackConflict => "rollback_conflict",
+            Self::RollbackAlreadyCompleted => "rollback_already_completed",
+            Self::RollbackInProgress => "rollback_in_progress",
+            Self::RollbackIdempotencyKeyReused => "rollback_idempotency_key_reused",
+            Self::CompensationNotAllowed => "compensation_not_allowed",
+            Self::CompensationCycle => "compensation_cycle",
+            Self::ObjectConsistencyError => "object_consistency_error",
         }
     }
 }
@@ -640,6 +953,10 @@ mod tests {
             ),
             (
                 ImportBatchStatus::RollingBack,
+                ImportBatchStatus::RollbackConflict,
+            ),
+            (
+                ImportBatchStatus::RollingBack,
                 ImportBatchStatus::RollbackFailed,
             ),
         ];
@@ -796,11 +1113,136 @@ mod tests {
             ImportJobEventType::Succeeded,
             ImportJobEventType::Failed,
             ImportJobEventType::DeadLetter,
+            ImportJobEventType::RollbackQueued,
+            ImportJobEventType::RollbackRunning,
+            ImportJobEventType::RollbackConflict,
+            ImportJobEventType::RolledBack,
+            ImportJobEventType::RollbackFailed,
         ] {
             assert_eq!(
                 ImportJobEventType::parse(event_type.as_str()),
                 Some(event_type)
             );
+        }
+    }
+
+    #[test]
+    fn phase_3d_contract_enums_round_trip_database_values() {
+        for job_type in ImportJobType::ALL {
+            assert_eq!(ImportJobType::parse(job_type.as_str()), Some(job_type));
+        }
+        for capability in RollbackCapability::ALL {
+            assert_eq!(
+                RollbackCapability::parse(capability.as_str()),
+                Some(capability)
+            );
+        }
+        for operation in ImportChangeOperation::ALL {
+            assert_eq!(
+                ImportChangeOperation::parse(operation.as_str()),
+                Some(operation)
+            );
+        }
+        for status in ImportRollbackRequestStatus::ALL {
+            assert_eq!(
+                ImportRollbackRequestStatus::parse(status.as_str()),
+                Some(status)
+            );
+        }
+        for conflict in ImportRollbackConflictType::ALL {
+            assert_eq!(
+                ImportRollbackConflictType::parse(conflict.as_str()),
+                Some(conflict)
+            );
+        }
+        for status in ObjectConsistencyRunStatus::ALL {
+            assert_eq!(
+                ObjectConsistencyRunStatus::parse(status.as_str()),
+                Some(status)
+            );
+        }
+        for finding in ObjectConsistencyFindingType::ALL {
+            assert_eq!(
+                ObjectConsistencyFindingType::parse(finding.as_str()),
+                Some(finding)
+            );
+        }
+        for disposition in ObjectDispositionStatus::ALL {
+            assert_eq!(
+                ObjectDispositionStatus::parse(disposition.as_str()),
+                Some(disposition)
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_request_terminal_states_are_explicit() {
+        assert!(!ImportRollbackRequestStatus::Prechecked.is_terminal());
+        assert!(ImportRollbackRequestStatus::PrecheckConflict.is_terminal());
+        assert!(!ImportRollbackRequestStatus::Queued.is_terminal());
+        assert!(!ImportRollbackRequestStatus::Running.is_terminal());
+        assert!(ImportRollbackRequestStatus::Succeeded.is_terminal());
+        assert!(ImportRollbackRequestStatus::WorkerConflict.is_terminal());
+        assert!(ImportRollbackRequestStatus::Failed.is_terminal());
+    }
+
+    #[test]
+    fn only_async_rollback_states_require_a_job() {
+        assert!(!ImportRollbackRequestStatus::Prechecked.requires_job());
+        assert!(!ImportRollbackRequestStatus::PrecheckConflict.requires_job());
+        assert!(ImportRollbackRequestStatus::Queued.requires_job());
+        assert!(ImportRollbackRequestStatus::Running.requires_job());
+        assert!(ImportRollbackRequestStatus::Succeeded.requires_job());
+        assert!(ImportRollbackRequestStatus::WorkerConflict.requires_job());
+        assert!(ImportRollbackRequestStatus::Failed.requires_job());
+    }
+
+    #[test]
+    fn phase_3d_errors_have_stable_external_codes() {
+        let cases = [
+            (
+                ImportWorkflowErrorCode::RollbackNotAllowed,
+                "rollback_not_allowed",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackNotAvailable,
+                "rollback_not_available",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackPreconditionStale,
+                "rollback_precondition_stale",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackConflict,
+                "rollback_conflict",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackAlreadyCompleted,
+                "rollback_already_completed",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackInProgress,
+                "rollback_in_progress",
+            ),
+            (
+                ImportWorkflowErrorCode::RollbackIdempotencyKeyReused,
+                "rollback_idempotency_key_reused",
+            ),
+            (
+                ImportWorkflowErrorCode::CompensationNotAllowed,
+                "compensation_not_allowed",
+            ),
+            (
+                ImportWorkflowErrorCode::CompensationCycle,
+                "compensation_cycle",
+            ),
+            (
+                ImportWorkflowErrorCode::ObjectConsistencyError,
+                "object_consistency_error",
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.as_str(), code);
         }
     }
 
