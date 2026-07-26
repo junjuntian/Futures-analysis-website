@@ -770,8 +770,9 @@ fi
 wait "$SSE_PID" || true
 assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' and event_type='import.events_access_terminated' and metadata->>'reason_code'='auth_required'")" 1 "SSE revocation audit"
 
-# Create a real orphan under the test workspace only, scan it, and quarantine it.
-# The governance implementation must move it and must never physically delete it.
+# Create an untracked object under the test workspace only. A fresh object must
+# remain protected as commit_outcome_unknown; once stale it becomes an orphan
+# that the governance implementation may move but must never physically delete.
 "${COMPOSE_CMD[@]}" exec -T -e E2E_WORKSPACE="$WS1" api sh -ceu '
   case "$E2E_WORKSPACE" in
     ????????-????-????-????-????????????) ;;
@@ -783,6 +784,22 @@ assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' an
   printf "phase3d orphan fixture\n" >"$target"
 '
 OBJECT_COUNT_BEFORE_SCAN=$(object_file_count "$WS1")
+UNCERTAIN_SCAN_KEY="phase3d-object-scan-$RUN_MARK-uncertain"
+assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$UNCERTAIN_SCAN_KEY" "$WORK/object-uncertain-scan.json")" 202 "uncertain object scan queued"
+UNCERTAIN_SCAN_RUN=$(jq -r '.data.run_id' "$WORK/object-uncertain-scan.json")
+UNCERTAIN_SCAN_JOB=$(jq -r '.data.job_id' "$WORK/object-uncertain-scan.json")
+wait_governance_job "$UNCERTAIN_SCAN_JOB" succeeded
+assert_eq "$(api_get "$TOKEN1" "/api/v1/object-consistency/scans/$UNCERTAIN_SCAN_RUN" "$WORK/object-uncertain-report.json")" 200 "uncertain object scan report"
+assert_json "$WORK/object-uncertain-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="commit_outcome_unknown" and .quarantine_eligible==false)]|length) == 1' "fresh object grace period"
+"${COMPOSE_CMD[@]}" exec -T -e E2E_WORKSPACE="$WS1" api sh -ceu '
+  case "$E2E_WORKSPACE" in
+    ????????-????-????-????-????????????) ;;
+    *) exit 64 ;;
+  esac
+  root=${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
+  target="$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-e2e-orphan"
+  touch -t 200001010000 "$target"
+'
 SCAN_KEY="phase3d-object-scan-$RUN_MARK"
 assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$SCAN_KEY" "$WORK/object-scan.json")" 202 "object scan queued"
 SCAN_RUN=$(jq -r '.data.run_id' "$WORK/object-scan.json")
@@ -819,7 +836,7 @@ assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' an
 assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$WS1' and event_type in ('rollback_queued','rollback_running','rolled_back')")" 3 "rollback event chain"
 "${COMPOSE_CMD[@]}" logs --no-color --since 30m api worker nginx >"$WORK/service.log"
 for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
-  "$ROLLBACK_KEY" "$COMP_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
+  "$ROLLBACK_KEY" "$COMP_KEY" "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2
     exit 1
