@@ -1,0 +1,690 @@
+name: Deploy futures
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: Exact 40-character Git SHA already validated by CI and GHCR
+        required: true
+        type: string
+      api_digest:
+        description: Immutable API sha256 digest
+        required: true
+        type: string
+      worker_digest:
+        description: Immutable Worker sha256 digest
+        required: true
+        type: string
+      frontend_digest:
+        description: Immutable Frontend sha256 digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: futures-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy and accept production candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: production
+    env:
+      SSH_KEY_FILE: ${{ runner.temp }}/futures-deploy-key
+      SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/futures-known-hosts
+      RELEASE_BUNDLE: ${{ runner.temp }}/futures-release
+      REMOTE_RELEASE: /opt/futures-platform-releases/${{ inputs.git_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      FUTURES_SSH_HOST: ${{ secrets.FUTURES_SSH_HOST }}
+      FUTURES_SSH_PORT: ${{ secrets.FUTURES_SSH_PORT }}
+      FUTURES_SSH_USER: ${{ secrets.FUTURES_SSH_USER }}
+    steps:
+      - name: Validate immutable release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.git_sha }}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${{ inputs.api_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.worker_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.frontend_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${FUTURES_SSH_PORT}" =~ ^[0-9]{1,5}$ ]]
+          [[ "${FUTURES_SSH_HOST}" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "${FUTURES_SSH_USER}" =~ ^[A-Za-z0-9._-]+$ ]]
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.git_sha }}
+          persist-credentials: false
+
+      - name: Verify checked out candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ inputs.git_sha }}"
+
+      - name: Install strict SSH identity
+        shell: bash
+        env:
+          FUTURES_SSH_PRIVATE_KEY: ${{ secrets.FUTURES_SSH_PRIVATE_KEY }}
+          FUTURES_SSH_KNOWN_HOSTS: ${{ secrets.FUTURES_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "${FUTURES_SSH_PRIVATE_KEY}" >"${SSH_KEY_FILE}"
+          printf '%s\n' "${FUTURES_SSH_KNOWN_HOSTS}" >"${SSH_KNOWN_HOSTS_FILE}"
+          chmod 600 "${SSH_KEY_FILE}" "${SSH_KNOWN_HOSTS_FILE}"
+          ssh-keygen -y -f "${SSH_KEY_FILE}" >/dev/null
+          ssh-keygen -F "${FUTURES_SSH_HOST}" -f "${SSH_KNOWN_HOSTS_FILE}" >/dev/null
+
+      - name: Prepare release bundle and deployment program
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          install -d -m 700 \
+            "${RELEASE_BUNDLE}/deploy/nginx" \
+            "${RELEASE_BUNDLE}/migrations" \
+            "${RELEASE_BUNDLE}/e2e/fixtures"
+          install -m 600 docker-compose.yml "${RELEASE_BUNDLE}/docker-compose.yml"
+          install -m 600 docker-compose.production.yml "${RELEASE_BUNDLE}/docker-compose.production.yml"
+          install -m 600 deploy/nginx/nginx.conf "${RELEASE_BUNDLE}/deploy/nginx/nginx.conf"
+          install -m 600 \
+            rust/migrations/202607260001_phase_3d_rollback_and_object_governance.sql \
+            rust/migrations/202607260002_phase_3d_worker_fairness.sql \
+            "${RELEASE_BUNDLE}/migrations/"
+          install -m 700 rust/tests/phase_3c_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_3c_e2e.sh"
+          install -m 700 rust/tests/phase_3d_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
+          install -m 600 rust/tests/phase_3d_schema_invariants.sql \
+            "${RELEASE_BUNDLE}/e2e/phase_3d_schema_invariants.sql"
+          install -m 600 rust/tests/fixtures/phase3d_sample.xls \
+            "${RELEASE_BUNDLE}/e2e/fixtures/phase3d_sample.xls"
+
+          cat >"${RELEASE_BUNDLE}/deploy-futures-remote.sh" <<'REMOTE_SCRIPT'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+
+          SOURCE_SHA=$1
+          API_DIGEST=$2
+          WORKER_DIGEST=$3
+          FRONTEND_DIGEST=$4
+          GHCR_USER=$5
+          RUN_URL=$6
+          RELEASE_DIR=$7
+          LEGACY_ROOT=/opt/futures-platform
+          RELEASES_ROOT=/opt/futures-platform-releases
+          BACKUP_ROOT=/opt/futures-platform-backups
+          STATE_ROOT=/var/lib/futures-platform/deployments
+          EVIDENCE_ROOT=/var/lib/futures-platform/deployment-evidence
+          API_IMAGE=ghcr.io/junjuntian/futures-analysis-website-api
+          WORKER_IMAGE=ghcr.io/junjuntian/futures-analysis-website-worker
+          FRONTEND_IMAGE=ghcr.io/junjuntian/futures-analysis-website-frontend
+          API_REF="${API_IMAGE}@${API_DIGEST}"
+          WORKER_REF="${WORKER_IMAGE}@${WORKER_DIGEST}"
+          FRONTEND_REF="${FRONTEND_IMAGE}@${FRONTEND_DIGEST}"
+          SUCCESS=0
+          SWITCH_STARTED=0
+          MIGRATION_STARTED=0
+          REGISTRY_CLEANED=0
+          BACKUP_PATH=
+          PREVIOUS_STABLE=
+          PREVIOUS_RUNTIME=
+
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+          [[ "$GHCR_USER" =~ ^[A-Za-z0-9-]+$ ]]
+          [[ "$RUN_URL" =~ ^https://github.com/junjuntian/Futures-analysis-website/actions/runs/[0-9]+$ ]]
+          case "$RELEASE_DIR" in
+            "$RELEASES_ROOT"/*) ;;
+            *) echo "DEPLOY_FAIL unsafe_release_dir" >&2; exit 1 ;;
+          esac
+
+          IFS= read -r GHCR_TOKEN || test -n "${GHCR_TOKEN:-}"
+          test -n "${GHCR_TOKEN:-}" || {
+            echo "DEPLOY_FAIL empty_github_token" >&2
+            exit 1
+          }
+
+          install -d -m 700 "$BACKUP_ROOT" "$STATE_ROOT" "$EVIDENCE_ROOT"
+          cd "$RELEASE_DIR"
+          sha256sum -c SHA256SUMS >/dev/null
+
+          DOCKER_CONFIG=$(mktemp -d /tmp/futures-ghcr.XXXXXX)
+          chmod 700 "$DOCKER_CONFIG"
+          DEFAULT_GHCR_AUTH_BEFORE=absent
+          if test -f /root/.docker/config.json &&
+             jq -e '.auths["ghcr.io"] // empty' /root/.docker/config.json >/dev/null 2>&1; then
+            DEFAULT_GHCR_AUTH_BEFORE=present
+          fi
+          cleanup_registry() {
+            if test "$REGISTRY_CLEANED" -eq 0; then
+              docker --config "$DOCKER_CONFIG" logout ghcr.io >/dev/null 2>&1 || true
+              case "$DOCKER_CONFIG" in
+                /tmp/futures-ghcr.*) rm -rf -- "$DOCKER_CONFIG" ;;
+                *) echo "DEPLOY_FAIL unsafe_docker_config_path" >&2 ;;
+              esac
+              unset GHCR_TOKEN
+              REGISTRY_CLEANED=1
+            fi
+          }
+
+          registry_http_probe() {
+            local image=$1 digest=$2 repository auth_status manifest_status bearer
+            repository=${image#ghcr.io/}
+            printf 'user = "%s:%s"\n' "$GHCR_USER" "$GHCR_TOKEN" \
+              >"$DOCKER_CONFIG/curl-auth.conf"
+            chmod 600 "$DOCKER_CONFIG/curl-auth.conf"
+            auth_status=$(curl -sS --config "$DOCKER_CONFIG/curl-auth.conf" \
+              -o "$DOCKER_CONFIG/token.json" -w '%{http_code}' \
+              "https://ghcr.io/token?scope=repository:${repository}:pull" || true)
+            manifest_status=not_requested
+            if test "$auth_status" = 200; then
+              bearer=$(jq -r '.token // .access_token // empty' "$DOCKER_CONFIG/token.json")
+              if test -n "$bearer"; then
+                printf 'header = "Authorization: Bearer %s"\n' "$bearer" \
+                  >"$DOCKER_CONFIG/curl-bearer.conf"
+                chmod 600 "$DOCKER_CONFIG/curl-bearer.conf"
+                manifest_status=$(curl -sS --config "$DOCKER_CONFIG/curl-bearer.conf" \
+                  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+                  -o /dev/null -w '%{http_code}' \
+                  "https://ghcr.io/v2/${repository}/manifests/${digest}" || true)
+                unset bearer
+              fi
+            fi
+            echo "GHCR_ACCESS_DIAGNOSTIC image=${image} token_http=${auth_status} manifest_http=${manifest_status}" >&2
+          }
+
+          pull_exact() {
+            local image=$1 digest=$2
+            if ! docker --config "$DOCKER_CONFIG" pull "${image}@${digest}" \
+              >"$DOCKER_CONFIG/pull.stdout" 2>"$DOCKER_CONFIG/pull.stderr"; then
+              registry_http_probe "$image" "$digest"
+              echo "DEPLOY_FAIL ghcr_pull_failed image=${image}" >&2
+              return 1
+            fi
+            test "$(docker image inspect --format '{{.Architecture}}' "${image}@${digest}")" = amd64
+          }
+
+          rollback_deployment() {
+            local rollback_status=0
+            set +e
+            echo "ROLLBACK_STARTED"
+            if test -n "$BACKUP_PATH" && test -f "$BACKUP_PATH"; then
+              docker compose \
+                -f "$RELEASE_DIR/docker-compose.yml" \
+                -f "$RELEASE_DIR/docker-compose.production.yml" \
+                -f "$RELEASE_DIR/docker-compose.release.yml" \
+                stop api worker frontend nginx >/dev/null 2>&1
+              docker compose -f "$RELEASE_DIR/docker-compose.yml" \
+                exec -T postgres psql -X -U futures_app -d futures_platform \
+                -Atq -c "select pg_terminate_backend(pid) from pg_stat_activity where datname='futures_platform' and pid <> pg_backend_pid()" \
+                >/dev/null 2>&1
+              if ! docker compose -f "$RELEASE_DIR/docker-compose.yml" \
+                exec -T postgres pg_restore -U futures_app -d futures_platform \
+                --clean --if-exists --no-owner <"$BACKUP_PATH" >/dev/null; then
+                rollback_status=1
+              fi
+              docker compose -f "$RELEASE_DIR/docker-compose.yml" \
+                exec -T postgres psql -X -U futures_app -d futures_platform \
+                -v ON_ERROR_STOP=1 -q <<'ROLLBACK_SQL' >/dev/null || rollback_status=1
+          alter database futures_platform owner to futures_app;
+          alter schema public owner to futures_app;
+          alter schema app owner to futures_app;
+          alter role futures_migrator nologin;
+          ROLLBACK_SQL
+            fi
+
+            if test -n "$PREVIOUS_STABLE" && test -f "$PREVIOUS_STABLE"; then
+              # shellcheck disable=SC1090
+              . "$PREVIOUS_STABLE"
+              if ! docker compose \
+                -f "$previous_release_dir/docker-compose.yml" \
+                -f "$previous_release_dir/docker-compose.production.yml" \
+                -f "$previous_release_dir/docker-compose.release.yml" \
+                up -d --no-build --remove-orphans >/dev/null; then
+                rollback_status=1
+              fi
+            else
+              if ! docker compose -f "$LEGACY_ROOT/docker-compose.yml" \
+                --profile dev up -d --no-build --remove-orphans >/dev/null; then
+                rollback_status=1
+              fi
+              if test -f "$PREVIOUS_RUNTIME"; then
+                # shellcheck disable=SC1090
+                . "$PREVIOUS_RUNTIME"
+                for spec in "api:$previous_api_id" "worker:$previous_worker_id" "frontend:$previous_frontend_id"; do
+                  service=${spec%%:*}
+                  expected=${spec#*:}
+                  cid=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" \
+                    --profile dev ps -q "$service" | head -n1)
+                  test -n "$cid" &&
+                    test "$(docker inspect --format '{{.Image}}' "$cid")" = "$expected" ||
+                    rollback_status=1
+                done
+              fi
+            fi
+            if test "$rollback_status" -eq 0; then
+              echo "ROLLBACK_PASS"
+            else
+              echo "ROLLBACK_FAIL" >&2
+            fi
+            set -e
+            return "$rollback_status"
+          }
+
+          on_exit() {
+            local status=$?
+            trap - EXIT
+            if test "$status" -ne 0 && test "$SWITCH_STARTED" -eq 1; then
+              rollback_deployment || status=1
+            fi
+            cleanup_registry
+            exit "$status"
+          }
+          trap on_exit EXIT
+          if test "$DEFAULT_GHCR_AUTH_BEFORE" = present; then
+            echo "DEPLOY_FAIL persistent_ghcr_auth_preexists" >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$GHCR_TOKEN" |
+            docker --config "$DOCKER_CONFIG" login ghcr.io \
+              --username "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
+            registry_http_probe "$API_IMAGE" "$API_DIGEST"
+            echo "DEPLOY_FAIL ghcr_login_failed" >&2
+            exit 1
+          fi
+
+          pull_exact "$API_IMAGE" "$API_DIGEST"
+          pull_exact "$WORKER_IMAGE" "$WORKER_DIGEST"
+          pull_exact "$FRONTEND_IMAGE" "$FRONTEND_DIGEST"
+
+          PREVIOUS_RUNTIME="$STATE_ROOT/previous-runtime-${SOURCE_SHA}-${GITHUB_RUN_ID:-manual}.env"
+          {
+            for service in api worker frontend; do
+              cid=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" --profile dev ps -q "$service" | head -n1)
+              test -n "$cid"
+              image_id=$(docker inspect --format '{{.Image}}' "$cid")
+              printf 'previous_%s_id=%q\n' "$service" "$image_id"
+            done
+          } >"$PREVIOUS_RUNTIME"
+          chmod 600 "$PREVIOUS_RUNTIME"
+
+          if test -f "$STATE_ROOT/stable.env"; then
+            PREVIOUS_STABLE="$STATE_ROOT/previous-stable-${SOURCE_SHA}.env"
+            cp "$STATE_ROOT/stable.env" "$PREVIOUS_STABLE"
+            chmod 600 "$PREVIOUS_STABLE"
+            # shellcheck disable=SC1090
+            . "$PREVIOUS_STABLE"
+            for ref in "$previous_api_ref" "$previous_worker_ref" "$previous_frontend_ref"; do
+              docker image inspect "$ref" >/dev/null
+            done
+          fi
+          cleanup_registry
+
+          cat >"$RELEASE_DIR/docker-compose.release.yml" <<EOF
+          services:
+            api:
+              image: ${API_REF}
+            worker:
+              image: ${WORKER_REF}
+            frontend:
+              image: ${FRONTEND_REF}
+          EOF
+          chmod 600 "$RELEASE_DIR/docker-compose.release.yml"
+          COMPOSE=(
+            docker compose
+            -f "$RELEASE_DIR/docker-compose.yml"
+            -f "$RELEASE_DIR/docker-compose.production.yml"
+            -f "$RELEASE_DIR/docker-compose.release.yml"
+          )
+          "${COMPOSE[@]}" config --quiet
+          "${COMPOSE[@]}" config >"$RELEASE_DIR/rendered-compose.yml"
+          if grep -Eq '^[[:space:]]+build:|:latest([[:space:]]|$)' "$RELEASE_DIR/rendered-compose.yml"; then
+            echo "DEPLOY_FAIL mutable_or_build_compose" >&2
+            exit 1
+          fi
+
+          ensure_legacy_secret() {
+            local target=$1 key=$2 line value tmp
+            if test -s "$target"; then
+              chown root:root "$target"
+              chmod 400 "$target"
+              return
+            fi
+            line=$(grep -m1 "^${key}=" "$LEGACY_ROOT/.env")
+            value=${line#*=}
+            case "$value" in
+              \"*\") value=${value#\"}; value=${value%\"} ;;
+              \'*\') value=${value#\'}; value=${value%\'} ;;
+            esac
+            test -n "$value"
+            tmp=$(mktemp /etc/futures-platform/secrets/.migrate.XXXXXX)
+            printf '%s' "$value" >"$tmp"
+            chown root:root "$tmp"
+            chmod 400 "$tmp"
+            mv "$tmp" "$target"
+            unset line value
+          }
+          ensure_legacy_secret /etc/futures-platform/secrets/postgres-password POSTGRES_PASSWORD
+          ensure_legacy_secret /etc/futures-platform/secrets/bootstrap-token BOOTSTRAP_TOKEN
+          for required in database-url import-idempotency-pepper master-key-v1 postgres-password bootstrap-token; do
+            test -s "/etc/futures-platform/secrets/$required"
+            test "$(stat -c %a "/etc/futures-platform/secrets/$required")" = 400
+          done
+
+          timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+          BACKUP_PATH="$BACKUP_ROOT/database-before-${SOURCE_SHA}-${timestamp}.dump"
+          backup_tmp="${BACKUP_PATH}.tmp"
+          docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            pg_dump -U futures_app -d futures_platform -Fc >"$backup_tmp"
+          chmod 600 "$backup_tmp"
+          docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            pg_restore --list <"$backup_tmp" >/dev/null
+          mv "$backup_tmp" "$BACKUP_PATH"
+          BACKUP_SHA256=$(sha256sum "$BACKUP_PATH" | awk '{print $1}')
+          SWITCH_STARTED=1
+          MIGRATION_STARTED=1
+
+          docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            psql -X -U futures_app -d futures_platform -v ON_ERROR_STOP=1 -q \
+            <<'OWNER_SQL' >/dev/null
+          alter role futures_migrator login nosuperuser nocreatedb nocreaterole
+            noinherit noreplication nobypassrls;
+          alter database futures_platform owner to futures_migrator;
+          alter schema public owner to futures_migrator;
+          alter schema app owner to futures_migrator;
+          do $$
+          declare item record;
+          begin
+            for item in
+              select n.nspname, c.relname, c.relkind
+                from pg_class c join pg_namespace n on n.oid=c.relnamespace
+               where n.nspname in ('public','app')
+                 and c.relkind in ('r','p','v','m','f','S')
+            loop
+              if item.relkind = 'S' then
+                execute format('alter sequence %I.%I owner to futures_migrator',
+                  item.nspname, item.relname);
+              else
+                execute format('alter table %I.%I owner to futures_migrator',
+                  item.nspname, item.relname);
+              end if;
+            end loop;
+            for item in
+              select n.nspname, p.proname,
+                     pg_get_function_identity_arguments(p.oid) args,
+                     p.prokind
+                from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+               where n.nspname in ('public','app')
+            loop
+              if item.prokind = 'p' then
+                execute format('alter procedure %I.%I(%s) owner to futures_migrator',
+                  item.nspname, item.proname, item.args);
+              else
+                execute format('alter function %I.%I(%s) owner to futures_migrator',
+                  item.nspname, item.proname, item.args);
+              end if;
+            end loop;
+          end $$;
+          OWNER_SQL
+
+          for migration in \
+            202607260001_phase_3d_rollback_and_object_governance.sql \
+            202607260002_phase_3d_worker_fairness.sql
+          do
+            version=${migration%%_*}
+            applied=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+              psql -X -U futures_migrator -d futures_platform -Atq \
+              -c "select count(*) from schema_versions where version='${version}'")
+            if test "$applied" = 0; then
+              docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+                psql -X -U futures_migrator -d futures_platform -v ON_ERROR_STOP=1 \
+                <"$RELEASE_DIR/migrations/$migration" >/dev/null
+            fi
+          done
+          test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            psql -X -U futures_app -d futures_platform -Atq \
+            -c "select count(*) from schema_versions where version in ('202607260001','202607260002')")" = 2
+
+          "${COMPOSE[@]}" up -d --no-build --remove-orphans
+          timeout 240 bash -c "until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null; do sleep 3; done"
+          VERSION_JSON=$(mktemp)
+          curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON"
+          jq -e --arg sha "$SOURCE_SHA" '.data.git_sha == $sha and .data.git_sha != "local"' \
+            "$VERSION_JSON" >/dev/null
+          rm -f "$VERSION_JSON"
+
+          for spec in "api:$API_REF" "worker:$WORKER_REF" "frontend:$FRONTEND_REF"; do
+            service=${spec%%:*}
+            ref=${spec#*:}
+            expected=$(docker image inspect --format '{{.Id}}' "$ref")
+            cid=$("${COMPOSE[@]}" ps -q "$service" | head -n1)
+            test -n "$cid"
+            test "$(docker inspect --format '{{.Image}}' "$cid")" = "$expected"
+          done
+
+          EVIDENCE_DIR="$EVIDENCE_ROOT/${SOURCE_SHA}-${timestamp}"
+          install -d -m 700 "$EVIDENCE_DIR"
+          COMPOSE_TEXT="${COMPOSE[*]}"
+          set -o pipefail
+          PHASE3C_ROOT="$LEGACY_ROOT" \
+          PHASE3C_BASE_URL=http://127.0.0.1:8088 \
+          PHASE3C_ORIGIN=http://localhost:8088 \
+          PHASE3C_COMPOSE="$COMPOSE_TEXT" \
+          PHASE3C_DB_USER=futures_app \
+          PHASE3C_WORK_DIR="$EVIDENCE_DIR/phase3c-work" \
+            bash "$RELEASE_DIR/e2e/phase_3c_e2e.sh" |
+            tee "$EVIDENCE_DIR/phase3c-stdout.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -qx PHASE3C_E2E_PASS "$EVIDENCE_DIR/phase3c-stdout.txt"
+          {
+            echo PHASE3C_E2E_PASS
+            echo "source_sha=$SOURCE_SHA"
+            echo "script_sha256=$(sha256sum "$RELEASE_DIR/e2e/phase_3c_e2e.sh" | awk '{print $1}')"
+            echo "stdout_sha256=$(sha256sum "$EVIDENCE_DIR/phase3c-stdout.txt" | awk '{print $1}')"
+            echo "result_env_sha256=$(sha256sum "$EVIDENCE_DIR/phase3c-work/result.env" | awk '{print $1}')"
+            echo "completed_at_epoch=$(date +%s)"
+          } >"$EVIDENCE_DIR/phase3c-attestation.txt"
+
+          PHASE3D_ROOT="$LEGACY_ROOT" \
+          PHASE3D_BASE_URL=http://127.0.0.1:8088 \
+          PHASE3D_ORIGIN=http://localhost:8088 \
+          PHASE3D_COMPOSE="$COMPOSE_TEXT" \
+          PHASE3D_DB_ADMIN_USER=futures_app \
+          PHASE3D_SOURCE_SHA="$SOURCE_SHA" \
+          PHASE3D_API_IMAGE="$API_IMAGE" \
+          PHASE3D_API_DIGEST="$API_DIGEST" \
+          PHASE3D_WORKER_IMAGE="$WORKER_IMAGE" \
+          PHASE3D_WORKER_DIGEST="$WORKER_DIGEST" \
+          PHASE3D_FRONTEND_IMAGE="$FRONTEND_IMAGE" \
+          PHASE3D_FRONTEND_DIGEST="$FRONTEND_DIGEST" \
+          PHASE3D_ALLOW_SERVICE_RESTART=1 \
+          PHASE3D_PHASE3C_ATTESTATION="$EVIDENCE_DIR/phase3c-attestation.txt" \
+          PHASE3D_PHASE3C_STDOUT="$EVIDENCE_DIR/phase3c-stdout.txt" \
+          PHASE3D_PHASE3C_RESULT_ENV="$EVIDENCE_DIR/phase3c-work/result.env" \
+          PHASE3D_EVIDENCE_DIR="$EVIDENCE_DIR/phase3d-work" \
+            bash "$RELEASE_DIR/e2e/phase_3d_e2e.sh" |
+            tee "$EVIDENCE_DIR/phase3d-stdout.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -qx PHASE3D_E2E_PASS "$EVIDENCE_DIR/phase3d-stdout.txt"
+
+          "${COMPOSE[@]}" logs --no-color --since 4h >"$EVIDENCE_DIR/service-logs.txt"
+          if grep -Eiq \
+            'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|authorization:[[:space:]]*bearer|BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY' \
+            "$EVIDENCE_DIR/service-logs.txt"; then
+            echo "DEPLOY_FAIL credential_pattern_in_service_logs" >&2
+            exit 1
+          fi
+          if test -f /root/.docker/config.json &&
+             jq -e '.auths["ghcr.io"] // empty' /root/.docker/config.json >/dev/null 2>&1; then
+            echo "DEPLOY_FAIL persistent_ghcr_auth_after_deploy" >&2
+            exit 1
+          fi
+          test -z "$(find /tmp -maxdepth 1 -type d -name 'futures-ghcr.*' -print -quit)"
+
+          # Retire legacy plaintext copies only after the candidate has passed.
+          if test -f "$LEGACY_ROOT/.env"; then
+            sanitized=$(mktemp "$LEGACY_ROOT/.env.sanitized.XXXXXX")
+            awk '!/^(POSTGRES_PASSWORD|DATABASE_URL|BOOTSTRAP_TOKEN)=/' \
+              "$LEGACY_ROOT/.env" >"$sanitized"
+            chmod 600 "$sanitized"
+            mv "$sanitized" "$LEGACY_ROOT/.env"
+          fi
+
+          DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if test -f "$STATE_ROOT/stable.env"; then
+            cp "$STATE_ROOT/stable.env" "$STATE_ROOT/stable.previous.env"
+          fi
+          {
+            printf 'previous_git_sha=%q\n' "$SOURCE_SHA"
+            printf 'previous_api_ref=%q\n' "$API_REF"
+            printf 'previous_worker_ref=%q\n' "$WORKER_REF"
+            printf 'previous_frontend_ref=%q\n' "$FRONTEND_REF"
+            printf 'previous_release_dir=%q\n' "$RELEASE_DIR"
+            printf 'previous_backup_path=%q\n' "$BACKUP_PATH"
+            printf 'previous_deployed_at=%q\n' "$DEPLOYED_AT"
+          } >"$STATE_ROOT/stable.env"
+          chmod 600 "$STATE_ROOT/stable.env"
+
+          REPORT="$EVIDENCE_DIR/deployment-report.txt"
+          {
+            echo "status=PASS"
+            echo "run_url=$RUN_URL"
+            echo "git_sha=$SOURCE_SHA"
+            echo "deployed_at=$DEPLOYED_AT"
+            echo "backup_path=$BACKUP_PATH"
+            echo "backup_sha256=$BACKUP_SHA256"
+            echo "api_ref=$API_REF"
+            echo "worker_ref=$WORKER_REF"
+            echo "frontend_ref=$FRONTEND_REF"
+            echo "migrations=202607260001,202607260002"
+            echo "phase3c_e2e=PASS"
+            echo "phase3d_e2e=PASS"
+            echo "version_git_sha=$SOURCE_SHA"
+            echo "runtime_digest_match=PASS"
+            echo "registry_auth_cleanup=PASS"
+            echo "service_log_secret_scan=PASS"
+            echo "evidence_dir=$EVIDENCE_DIR"
+          } >"$REPORT"
+          cp "$REPORT" "$STATE_ROOT/latest-deployment-report.txt"
+          chmod 600 "$STATE_ROOT/latest-deployment-report.txt"
+          SUCCESS=1
+          echo "DEPLOYMENT_PASS"
+          cat "$REPORT"
+          REMOTE_SCRIPT
+          chmod 700 "${RELEASE_BUNDLE}/deploy-futures-remote.sh"
+          (
+            cd "${RELEASE_BUNDLE}"
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum >SHA256SUMS
+          )
+
+      - name: Transfer release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_TARGET="${FUTURES_SSH_USER}@${FUTURES_SSH_HOST}"
+          SSH_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -p "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          SCP_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -P "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
+            "install -d -m 700 '${REMOTE_RELEASE}'"
+          scp "${SCP_OPTIONS[@]}" -r "${RELEASE_BUNDLE}/." \
+            "${SSH_TARGET}:${REMOTE_RELEASE}/"
+
+      - name: Deploy, migrate, and run VPS acceptance
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          SSH_TARGET="${FUTURES_SSH_USER}@${FUTURES_SSH_HOST}"
+          SSH_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -p "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          printf '%s' "${GHCR_TOKEN}" |
+            ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}'"
+          unset GHCR_TOKEN
+
+      - name: Verify temporary registry authentication was removed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_TARGET="${FUTURES_SSH_USER}@${FUTURES_SSH_HOST}"
+          SSH_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -p "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
+            "test -z \"\$(find /tmp -maxdepth 1 -type d -name 'futures-ghcr.*' -print -quit)\" && { test ! -f /root/.docker/config.json || ! jq -e '.auths[\"ghcr.io\"] // empty' /root/.docker/config.json >/dev/null 2>&1; }"
+
+      - name: Record deployment evidence
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          SSH_TARGET="${FUTURES_SSH_USER}@${FUTURES_SSH_HOST}"
+          SSH_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -p "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          SCP_OPTIONS=(
+            -i "${SSH_KEY_FILE}"
+            -P "${FUTURES_SSH_PORT}"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+          )
+          scp "${SCP_OPTIONS[@]}" \
+            "${SSH_TARGET}:/var/lib/futures-platform/deployments/latest-deployment-report.txt" \
+            "${RUNNER_TEMP}/deployment-report.txt"
+          {
+            echo '### futures production deployment'
+            echo
+            sed 's/^/- /' "${RUNNER_TEMP}/deployment-report.txt"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Remove runner SSH material
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- "${SSH_KEY_FILE}" "${SSH_KNOWN_HOSTS_FILE}"
