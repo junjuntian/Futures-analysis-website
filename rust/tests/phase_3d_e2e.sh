@@ -552,7 +552,7 @@ assert_json "$WORK/version.json" ".data.git_sha == \"$SOURCE_SHA\" and .data.git
 assert_eq "$(service_database_user api)" "$RUNTIME_DB_ROLE" "API runtime database account"
 assert_eq "$(service_database_user worker)" "$RUNTIME_DB_ROLE" "Worker runtime database account"
 assert_eq "$(psqlq "select count(*) from pg_roles where rolname in ('$MIGRATION_DB_ROLE','$RUNTIME_DB_ROLE') and rolcanlogin and not rolsuper and not rolbypassrls")" 2 "database accounts non privileged"
-psql_admin -Atq -f "$SCRIPT_DIR/phase_3d_schema_invariants.sql" >"$WORK/schema-invariants.txt"
+psql_admin -Atq <"$SCRIPT_DIR/phase_3d_schema_invariants.sql" >"$WORK/schema-invariants.txt"
 grep -qx 'PHASE3D_SCHEMA_INVARIANTS_PASS' "$WORK/schema-invariants.txt"
 psql_admin -Atq -c "select version || ' ' || description from schema_versions order by version" >"$WORK/migrations.txt"
 grep -q '^202607260001 ' "$WORK/migrations.txt"
