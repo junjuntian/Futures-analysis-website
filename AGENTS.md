@@ -7,6 +7,8 @@
 - 原始文件、导入批次、计算公式和分类规则必须版本化；批量写入必须可审计、可回滚。
 - 本地 Git 仓库是唯一源码源头；VPS 上不得手工编辑业务源码。
 - 任何文档、日志、提交和回复都不得包含密码、API Key、Cookie、Token、主密钥或数据库明文凭据。
+- GitHub 操作统一使用 `github-codex` SSH 别名；除非用户明确要求，不得改用 Deploy Key、HTTPS 或临时 PAT。
+- 推送前按 `docs/ENVIRONMENT.md` 检查连接；未经用户明确要求，不得修改或删除 `origin`。
 - 上下文不足或阶段完成需要交接时，按 `docs/handoffs/README.md` 创建不可覆盖的交接文档，并更新 `docs/handoffs/LATEST.md`。
 
 ## Codex Cloud 与多环境职责
@@ -24,4 +26,5 @@
 - 专项设计：`docs/SECURITY_DESIGN.md`、`docs/IMPORT_DESIGN.md`、`docs/AI_DESIGN.md`
 - 计划与验收：`PLANS.md`、`docs/DEVELOPMENT_PLAN.md`、`docs/phases/PHASE_01_FOUNDATION.md`、`docs/ACCEPTANCE_CRITERIA.md`
 - 审查与交接：`docs/reviews/`、`docs/handoffs/`
+- 环境与 GitHub 接入：`docs/ENVIRONMENT.md`
 - 待确认事项：`docs/OPEN_QUESTIONS.md`
