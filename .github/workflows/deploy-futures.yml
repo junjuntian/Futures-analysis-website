@@ -362,8 +362,12 @@ jobs:
           services:
             api:
               image: ${API_REF}
+              environment:
+                APP_ENV: acceptance
             worker:
               image: ${WORKER_REF}
+              environment:
+                APP_ENV: acceptance
             frontend:
               image: ${FRONTEND_REF}
           EOF
