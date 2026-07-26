@@ -53,6 +53,18 @@ Actions 或 Codex Cloud 的通过结果不能替代 VPS 上的真实数据库迁
 
 私钥内容绝不得写入项目、Git、聊天、日志或文档。
 
+## GitHub CLI 与 Windows 凭据
+
+- GitHub CLI 的现有凭据有效，存储于 `HUASHAO\a6366` 的 Windows Credential
+  Manager；不得输出、复制或重新生成现有 OAuth Token。
+- Codex 沙箱命令进程使用 `HUASHAO\CodexSandboxOffline` 身份，无法读取
+  `HUASHAO\a6366` 的 Windows Credential Manager。沙箱内 `gh auth status`
+  失败不表示现有凭据失效，禁止因此执行 `gh auth login`。
+- `gh auth status`、`gh run`、`gh workflow` 以及其他 GitHub API/Actions 操作
+  必须以宿主身份 `HUASHAO\a6366` 执行并复用现有凭据。
+- Git 仓库的读取、拉取和推送继续通过 `github-codex` SSH 别名完成；GitHub CLI
+  凭据仅用于 GitHub API/Actions，不得借此把仓库远端改为 HTTPS。
+
 ## 长期操作规则
 
 - 本项目所有 GitHub 操作统一使用 `github-codex` SSH 别名。

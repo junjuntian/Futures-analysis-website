@@ -12,6 +12,9 @@
 - 任何文档、日志、提交和回复都不得包含密码、API Key、Cookie、Token、主密钥或数据库明文凭据。
 - 密钥不得进入 Git、镜像层、构建日志或普通环境变量文件；生产秘密只通过受控只读文件或等价秘密挂载提供。
 - GitHub 操作统一使用 `github-codex` SSH 别名；除非用户明确要求，不得改用 Deploy Key、HTTPS 或临时 PAT。
+- Git 仓库读写继续使用 `github-codex` SSH 别名；`gh auth status`、`gh run`、`gh workflow` 等 GitHub API/Actions 命令必须以宿主身份 `HUASHAO\a6366` 执行。
+- 有效的 GitHub CLI 凭据存储在 `HUASHAO\a6366` 的 Windows Credential Manager；沙箱身份 `HUASHAO\CodexSandboxOffline` 无法读取该凭据库。不得因沙箱内 `gh auth status` 失败而执行 `gh auth login`。
+- 不得输出、复制或重新生成现有 OAuth Token。
 - 推送前按 `docs/ENVIRONMENT.md` 检查连接；未经用户明确要求，不得修改或删除 `origin`。
 - 上下文不足或阶段完成需要交接时，按 `docs/handoffs/README.md` 创建不可覆盖的交接文档，并更新 `docs/handoffs/LATEST.md`。
 
