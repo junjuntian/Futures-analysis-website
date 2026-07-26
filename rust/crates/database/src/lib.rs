@@ -1,5 +1,6 @@
 pub mod imports;
 pub mod job_queue;
+pub mod rollback_jobs;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
@@ -120,5 +121,12 @@ mod phase_3d_schema_contract {
         assert!(MIGRATION.contains("revoke delete on stored_objects from futures_runtime"));
         assert!(MIGRATION.contains("Phase 3D does not permit physical object deletion"));
         assert!(!MIGRATION.contains("delete from stored_objects"));
+    }
+
+    #[test]
+    fn runtime_delete_is_granted_only_for_controlled_import_rollback() {
+        assert!(MIGRATION.contains("grant delete on imported_records to futures_runtime;"));
+        assert!(MIGRATION.contains("revoke delete on stored_objects from futures_runtime;"));
+        assert!(!MIGRATION.contains("grant delete on stored_objects"));
     }
 }

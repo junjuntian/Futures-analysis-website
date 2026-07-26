@@ -90,7 +90,7 @@ const CLAIM_CANDIDATE_SQL: &str = "select id, job_type, aggregate_id, status::te
         attempt_count, max_attempts, available_at, lease_expires_at, lease_generation
     from job_queue
     where workspace_id = $1
-      and job_type = 'import_confirm'
+      and job_type in ('import_confirm', 'import_rollback')
       and (
            (status = 'queued' and available_at <= now() and attempt_count < max_attempts)
            or (status = 'running' and lease_expires_at < now())
@@ -111,9 +111,9 @@ pub async fn claim_next_import_job(
         let mut tx = pool.begin().await?;
         set_workspace(&mut tx, workspace_id).await?;
         // Claims and reclaims are short job-first transactions. SKIP LOCKED
-        // lets multiple workers select different jobs. The executor takes
-        // neither the job nor batch lock during its long formal-write phase,
-        // and uses the same job-first order only at its commit fence.
+        // lets multiple workers select different jobs. Import confirmation
+        // keeps its existing commit fence; rollback holds the same job-first
+        // order for its intentionally atomic inverse transaction.
         let row = sqlx::query(CLAIM_CANDIDATE_SQL)
             .bind(workspace_id)
             .fetch_optional(&mut *tx)
@@ -188,6 +188,8 @@ pub async fn claim_next_import_job(
                     )
                     .await?;
                 }
+            } else if exhausted_job.job_type == "import_rollback" {
+                fail_exhausted_rollback(&mut tx, &exhausted_job).await?;
             }
             tx.commit().await?;
             return Ok(None);
@@ -242,6 +244,55 @@ pub async fn claim_next_import_job(
                 None,
             )
             .await?;
+        } else if job_type == "import_rollback" {
+            let batch_updated = sqlx::query(
+                "update import_batches
+                    set status = case
+                        when status = 'succeeded' then 'rollback_check'::import_batch_status
+                        else status
+                    end,
+                        updated_at = now()
+                  where workspace_id = $1 and id = $2
+                    and status in ('succeeded', 'rollback_check', 'rolling_back')",
+            )
+            .bind(workspace_id)
+            .bind(aggregate_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if batch_updated != 1 {
+                return Err(JobQueueError::InvalidFrozenImport);
+            }
+            let rolling = sqlx::query(
+                "update import_batches
+                    set status = 'rolling_back', updated_at = now()
+                  where workspace_id = $1 and id = $2
+                    and status in ('rollback_check', 'rolling_back')",
+            )
+            .bind(workspace_id)
+            .bind(aggregate_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if rolling != 1 {
+                return Err(JobQueueError::InvalidFrozenImport);
+            }
+            let request_updated = sqlx::query(
+                "update import_rollback_requests
+                    set status = case when status = 'queued' then 'running' else status end,
+                        updated_at = now()
+                  where workspace_id = $1 and import_batch_id = $2 and job_id = $3
+                    and status in ('queued', 'running')",
+            )
+            .bind(workspace_id)
+            .bind(aggregate_id)
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if request_updated != 1 {
+                return Err(JobQueueError::InvalidFrozenImport);
+            }
         }
         tx.commit().await?;
         return Ok(Some(ClaimedJob {
@@ -256,6 +307,59 @@ pub async fn claim_next_import_job(
         }));
     }
     Ok(None)
+}
+
+async fn fail_exhausted_rollback(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+) -> Result<(), JobQueueError> {
+    let batch_updated = sqlx::query(
+        "update import_batches
+            set status = 'rollback_failed', updated_at = now()
+          where workspace_id = $1 and id = $2 and status = 'rolling_back'",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    require_single_fenced_update(batch_updated)?;
+    let actor_user_id = sqlx::query_scalar::<_, Uuid>(
+        "update import_rollback_requests
+            set status = 'failed', finished_at = now(), updated_at = now()
+          where workspace_id = $1 and import_batch_id = $2 and job_id = $3
+            and status = 'running'
+          returning requested_by",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(job.id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    append_event(
+        tx,
+        job.workspace_id,
+        job.aggregate_id,
+        job.id,
+        "rollback_failed",
+        "rollback_failed",
+        ImportCounters::default(),
+        Some("lease_attempts_exhausted"),
+    )
+    .await?;
+    insert_audit(
+        tx,
+        job,
+        actor_user_id,
+        "import.rollback_worker_failed",
+        "failure",
+        ImportCounters::default(),
+        Some("lease_attempts_exhausted"),
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn renew_lease(
@@ -914,6 +1018,53 @@ pub async fn record_job_failure(
                 None,
             )
             .await?;
+        } else if job.job_type == "import_rollback" {
+            let batch_updated = sqlx::query(
+                "update import_batches
+                    set status = 'rollback_failed', updated_at = now()
+                  where workspace_id = $1 and id = $2 and status = 'rolling_back'",
+            )
+            .bind(job.workspace_id)
+            .bind(job.aggregate_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            require_single_fenced_update(batch_updated)?;
+            let actor_user_id = sqlx::query_scalar::<_, Uuid>(
+                "update import_rollback_requests
+                    set status = 'failed', finished_at = now(), updated_at = now()
+                  where workspace_id = $1 and import_batch_id = $2 and job_id = $3
+                    and status = 'running'
+                  returning requested_by",
+            )
+            .bind(job.workspace_id)
+            .bind(job.aggregate_id)
+            .bind(job.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(JobQueueError::InvalidFrozenImport)?;
+            append_event(
+                &mut tx,
+                job.workspace_id,
+                job.aggregate_id,
+                job.id,
+                "rollback_failed",
+                "rollback_failed",
+                ImportCounters::default(),
+                Some(error.code()),
+            )
+            .await?;
+            insert_audit(
+                &mut tx,
+                job,
+                actor_user_id,
+                "import.rollback_worker_failed",
+                "failure",
+                ImportCounters::default(),
+                Some(error.code()),
+                None,
+            )
+            .await?;
         }
     }
     tx.commit().await?;
@@ -1170,7 +1321,7 @@ fn number(payload: &Value, key: &str) -> i64 {
     payload.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
-fn lease_allows_execution(
+pub(crate) fn lease_allows_execution(
     status: &str,
     leased_by: Option<&str>,
     lease_expires_at: Option<OffsetDateTime>,
@@ -1185,7 +1336,7 @@ fn lease_allows_execution(
         && lease_expires_at.is_some_and(|expires_at| expires_at > now)
 }
 
-fn require_single_fenced_update(rows_affected: u64) -> Result<(), JobQueueError> {
+pub(crate) fn require_single_fenced_update(rows_affected: u64) -> Result<(), JobQueueError> {
     if rows_affected == 1 {
         Ok(())
     } else {
@@ -1222,8 +1373,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_3c_worker_does_not_claim_phase_3d_rollback_jobs() {
-        assert!(CLAIM_CANDIDATE_SQL.contains("job_type = 'import_confirm'"));
+    fn worker_claim_allowlist_contains_only_confirm_and_rollback() {
+        assert!(CLAIM_CANDIDATE_SQL.contains("job_type in ('import_confirm', 'import_rollback')"));
+        assert!(!CLAIM_CANDIDATE_SQL.contains("object_consistency_scan"));
+        assert!(!CLAIM_CANDIDATE_SQL.contains("object_quarantine"));
     }
 
     #[test]

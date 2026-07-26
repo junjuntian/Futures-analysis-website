@@ -828,6 +828,7 @@ grant select, insert on import_row_changes to futures_runtime;
 grant select, insert, update on import_rollback_requests to futures_runtime;
 grant select, insert on import_rollback_conflicts to futures_runtime;
 grant select, insert on import_data_invalidations to futures_runtime;
+grant delete on imported_records to futures_runtime;
 grant select, insert, update on object_consistency_runs to futures_runtime;
 grant select, insert, update on object_consistency_findings to futures_runtime;
 grant select, insert on object_quarantines to futures_runtime;

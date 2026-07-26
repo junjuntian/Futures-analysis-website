@@ -241,13 +241,13 @@ pub enum QueueRollbackResult {
 }
 
 #[derive(Debug)]
-struct EvaluatedRollback {
-    import_id: Uuid,
-    fingerprint: String,
-    rollback_capability: RollbackCapability,
-    change_log_version: Option<i32>,
-    affected_count: u32,
-    conflicts: Vec<ImportRollbackConflict>,
+pub(crate) struct EvaluatedRollback {
+    pub(crate) import_id: Uuid,
+    pub(crate) fingerprint: String,
+    pub(crate) rollback_capability: RollbackCapability,
+    pub(crate) change_log_version: Option<i32>,
+    pub(crate) affected_count: u32,
+    pub(crate) conflicts: Vec<ImportRollbackConflict>,
 }
 
 pub async fn register_upload(
@@ -1344,7 +1344,7 @@ pub async fn create_rollback_check(
 ) -> Result<RollbackPrecheck, ImportRepositoryError> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id).await?;
+    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id, "succeeded", None).await?;
     let rollback_request_id = Uuid::now_v7();
     persist_rollback_precheck(
         &mut tx,
@@ -1462,7 +1462,7 @@ pub async fn queue_rollback(
         });
     }
 
-    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id).await?;
+    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id, "succeeded", None).await?;
     if !evaluated.conflicts.is_empty() {
         sqlx::query(
             "update import_rollback_requests
@@ -1688,10 +1688,12 @@ pub async fn list_rollback_conflicts(
     Ok(RollbackConflictPage { items, next_cursor })
 }
 
-async fn evaluate_rollback(
+pub(crate) async fn evaluate_rollback(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: Uuid,
     import_id: Uuid,
+    expected_batch_status: &str,
+    excluded_rollback_request_id: Option<Uuid>,
 ) -> Result<EvaluatedRollback, ImportRepositoryError> {
     let batch = sqlx::query(
         "select status::text, rollback_capability, change_log_version,
@@ -1715,7 +1717,6 @@ async fn evaluate_rollback(
     let mut conflicts = Vec::new();
     let mut fingerprint_material = vec![json!({
         "import_id": import_id,
-        "batch_status": batch_status,
         "rollback_capability": rollback_capability.as_str(),
         "change_log_version": change_log_version,
         "expected_change_count": expected_change_count,
@@ -1725,17 +1726,19 @@ async fn evaluate_rollback(
             select 1 from import_rollback_requests
              where workspace_id = $1 and import_batch_id = $2
                and status in ('queued', 'running')
+               and ($3::uuid is null or id <> $3)
          )",
     )
     .bind(workspace_id)
     .bind(import_id)
+    .bind(excluded_rollback_request_id)
     .fetch_one(&mut **tx)
     .await?;
     fingerprint_material.push(json!({
         "active_rollback_exists": active_rollback_exists,
     }));
 
-    if batch_status != ImportBatchStatus::Succeeded.as_str() {
+    if batch_status != expected_batch_status {
         push_rollback_conflict(
             &mut conflicts,
             ImportRollbackConflictType::IllegalChange,
@@ -1806,7 +1809,8 @@ async fn evaluate_rollback(
                 ) as source_valid
            from import_row_changes change_row
           where change_row.workspace_id = $1 and change_row.import_batch_id = $2
-          order by change_row.sequence_no, change_row.id",
+          order by change_row.target_kind, change_row.target_id,
+                   change_row.sequence_no, change_row.id",
     )
     .bind(workspace_id)
     .bind(import_id)
@@ -1824,9 +1828,30 @@ async fn evaluate_rollback(
             "change_count_mismatch",
         );
     }
+    let mut sequence_numbers = change_rows
+        .iter()
+        .map(|row| row.get::<i64, _>("sequence_no"))
+        .collect::<Vec<_>>();
+    sequence_numbers.sort_unstable();
+    if sequence_numbers
+        .iter()
+        .enumerate()
+        .any(|(index, sequence)| *sequence != index as i64 + 1)
+    {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::ChangeLogIncomplete,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "non_contiguous_change_sequence",
+        );
+    }
 
     let mut seen_targets = HashSet::new();
-    for (index, change) in change_rows.iter().enumerate() {
+    for change in &change_rows {
         let sequence_no = change.get::<i64, _>("sequence_no");
         let target_kind = change.get::<String, _>("target_kind");
         let target_id = change.get::<Uuid, _>("target_id");
@@ -1852,18 +1877,6 @@ async fn evaluate_rollback(
             "source_valid": source_valid,
         }));
 
-        if sequence_no != (index as i64) + 1 {
-            push_rollback_conflict(
-                &mut conflicts,
-                ImportRollbackConflictType::ChangeLogIncomplete,
-                target_label,
-                Some(target_id),
-                expected_version,
-                None,
-                None,
-                "non_contiguous_change_sequence",
-            );
-        }
         if !seen_targets.insert((target_kind.clone(), target_id)) {
             push_rollback_conflict(
                 &mut conflicts,
@@ -2100,7 +2113,7 @@ fn finalize_rollback_evaluation(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_rollback_conflict(
+pub(crate) fn push_rollback_conflict(
     conflicts: &mut Vec<ImportRollbackConflict>,
     conflict_type: ImportRollbackConflictType,
     target_kind: Option<&str>,
@@ -2178,7 +2191,7 @@ async fn persist_rollback_precheck(
     .await
 }
 
-async fn insert_rollback_conflicts(
+pub(crate) async fn insert_rollback_conflicts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace_id: Uuid,
     import_id: Uuid,

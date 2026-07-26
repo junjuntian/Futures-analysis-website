@@ -2,6 +2,7 @@ use database::job_queue::{
     ClaimedJob, JobQueueError, claim_next_import_job, execute_import_job, record_job_failure,
     renew_lease,
 };
+use database::rollback_jobs::execute_rollback_job;
 use sqlx::PgPool;
 use tokio::time::{Duration, interval};
 use tracing::{error, info, warn};
@@ -65,9 +66,10 @@ async fn process_claimed(
     let execute_pool = pool.clone();
     let execute_job = job.clone();
     let execute_worker = worker_id.to_string();
-    let task = tokio::spawn(async move {
-        execute_import_job(&execute_pool, &execute_job, &execute_worker).await
-    });
+    let task =
+        tokio::spawn(
+            async move { dispatch_job(&execute_pool, &execute_job, &execute_worker).await },
+        );
     tokio::pin!(task);
     let mut renewals = interval(Duration::from_secs(config.renew_seconds));
     renewals.tick().await;
@@ -104,6 +106,18 @@ async fn process_claimed(
     }
 }
 
+async fn dispatch_job(
+    pool: &PgPool,
+    job: &ClaimedJob,
+    worker_id: &str,
+) -> Result<(), JobQueueError> {
+    match job.job_type.as_str() {
+        "import_confirm" => execute_import_job(pool, job, worker_id).await,
+        "import_rollback" => execute_rollback_job(pool, job, worker_id).await,
+        _ => Err(JobQueueError::UnsupportedJobType),
+    }
+}
+
 fn parse_env<T>(name: &str, default: T) -> anyhow::Result<T>
 where
     T: std::str::FromStr,
@@ -126,5 +140,20 @@ mod tests {
             idle_millis: 500,
         };
         assert!(config.renew_seconds < config.lease_seconds as u64);
+    }
+
+    #[test]
+    fn dispatch_allowlist_is_deny_by_default() {
+        let source = include_str!("import_jobs.rs");
+        let dispatch = source
+            .split("async fn dispatch_job")
+            .nth(1)
+            .expect("dispatch function")
+            .split("fn parse_env")
+            .next()
+            .expect("dispatch end");
+        assert!(dispatch.contains("\"import_confirm\" =>"));
+        assert!(dispatch.contains("\"import_rollback\" =>"));
+        assert!(dispatch.contains("_ => Err(JobQueueError::UnsupportedJobType)"));
     }
 }
