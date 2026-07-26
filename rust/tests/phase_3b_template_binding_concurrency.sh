@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run after migrations 202607250004, 202607250005 and 202607250006.
+# Run after migrations 202607250004 through 202607250007.
 # It creates only the fixed phase3b-concurrency-test UUIDs below and removes them on exit.
 set -euo pipefail
 
@@ -24,8 +24,8 @@ cleanup() {
   run_psql -v ON_ERROR_STOP=1 -q <<'SQL' >/dev/null
 delete from import_mappings where id = '31000000-0000-7000-8000-000000000051';
 delete from import_batches where id = '31000000-0000-7000-8000-000000000041';
-delete from import_template_versions where id in ('31000000-0000-7000-8000-000000000031', '31000000-0000-7000-8000-000000000032');
-delete from import_templates where id in ('31000000-0000-7000-8000-000000000021', '31000000-0000-7000-8000-000000000022');
+delete from import_template_versions where id in ('31000000-0000-7000-8000-000000000031', '31000000-0000-7000-8000-000000000032', '31000000-0000-7000-8000-000000000033');
+delete from import_templates where id in ('31000000-0000-7000-8000-000000000021', '31000000-0000-7000-8000-000000000022', '31000000-0000-7000-8000-000000000023');
 delete from workspaces where id = '31000000-0000-7000-8000-000000000011';
 delete from users where id = '31000000-0000-7000-8000-000000000001';
 SQL
@@ -43,7 +43,8 @@ set local app.current_workspace_id = '31000000-0000-7000-8000-000000000011';
 insert into import_templates (id, workspace_id, dataset_type, name, created_by)
 values
   ('31000000-0000-7000-8000-000000000021', '31000000-0000-7000-8000-000000000011', 'generic', 'phase3b-concurrency-one', '31000000-0000-7000-8000-000000000001'),
-  ('31000000-0000-7000-8000-000000000022', '31000000-0000-7000-8000-000000000011', 'generic', 'phase3b-concurrency-two', '31000000-0000-7000-8000-000000000001');
+  ('31000000-0000-7000-8000-000000000022', '31000000-0000-7000-8000-000000000011', 'generic', 'phase3b-concurrency-two', '31000000-0000-7000-8000-000000000001'),
+  ('31000000-0000-7000-8000-000000000023', '31000000-0000-7000-8000-000000000011', 'generic', 'phase3b-freeze-race', '31000000-0000-7000-8000-000000000001');
 insert into import_template_versions
   (id, workspace_id, template_id, version_number, dataset_type, configuration_json, created_by)
 values
@@ -96,4 +97,34 @@ fi
 
 bound_version="$(run_psql -tA -c "select template_version_id from import_mappings where id = '31000000-0000-7000-8000-000000000051'")"
 [[ "$bound_version" == '31000000-0000-7000-8000-000000000031' ]]
+
+run_psql -v ON_ERROR_STOP=1 -q <<'SQL' &
+begin;
+set local app.current_workspace_id = '31000000-0000-7000-8000-000000000011';
+insert into import_template_versions
+  (id, workspace_id, template_id, version_number, dataset_type, configuration_json, created_by)
+values
+  ('31000000-0000-7000-8000-000000000033', '31000000-0000-7000-8000-000000000011', '31000000-0000-7000-8000-000000000023', 1, 'generic', '{"fields":[{"source_column":"date","target_field":"trade_date","transform":"date_ymd"}]}'::jsonb, '31000000-0000-7000-8000-000000000001');
+select pg_sleep(1);
+commit;
+SQL
+freeze_insert_pid=$!
+sleep 0.2
+
+if run_psql -v ON_ERROR_STOP=1 -q <<'SQL'
+begin;
+set local app.current_workspace_id = '31000000-0000-7000-8000-000000000011';
+update import_templates
+   set dataset_type = 'changed'
+ where id = '31000000-0000-7000-8000-000000000023';
+commit;
+SQL
+then
+  echo 'expected concurrent parent dataset_type update to fail after version insertion' >&2
+  exit 1
+fi
+wait "$freeze_insert_pid"
+
+freeze_state="$(run_psql -tA -c "select t.dataset_type || '|' || v.dataset_type from import_templates t join import_template_versions v on v.workspace_id = t.workspace_id and v.template_id = t.id where t.id = '31000000-0000-7000-8000-000000000023'")"
+[[ "$freeze_state" == 'generic|generic' ]]
 echo 'PHASE3B_TEMPLATE_BINDING_CONCURRENCY_PASS'

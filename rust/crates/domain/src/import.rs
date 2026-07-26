@@ -130,6 +130,210 @@ impl ImportErrorSeverity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportConflictPolicy {
+    Skip,
+    Overwrite,
+    KeepConflict,
+    Abort,
+}
+
+impl ImportConflictPolicy {
+    pub const ALL: [Self; 4] = [Self::Skip, Self::Overwrite, Self::KeepConflict, Self::Abort];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Overwrite => "overwrite",
+            Self::KeepConflict => "keep_conflict",
+            Self::Abort => "abort",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "skip" => Self::Skip,
+            "overwrite" => Self::Overwrite,
+            "keep_conflict" => Self::KeepConflict,
+            "abort" => Self::Abort,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportJobStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    DeadLetter,
+}
+
+impl ImportJobStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::DeadLetter => "dead_letter",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            "dead_letter" => Self::DeadLetter,
+            _ => return None,
+        })
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::DeadLetter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportJobEventType {
+    Queued,
+    Running,
+    Progress,
+    Succeeded,
+    Failed,
+    DeadLetter,
+}
+
+impl ImportJobEventType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Progress => "progress",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::DeadLetter => "dead_letter",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "queued" => Self::Queued,
+            "running" => Self::Running,
+            "progress" => Self::Progress,
+            "succeeded" => Self::Succeeded,
+            "failed" => Self::Failed,
+            "dead_letter" => Self::DeadLetter,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportWorkflowErrorCode {
+    DatasetNotConfirmable,
+    ValidationRequired,
+    ValidationStale,
+    BlockingErrorsPresent,
+    ConflictPolicyNotAllowed,
+    IdempotencyKeyReused,
+    ConfirmationConflict,
+    EventIdInvalid,
+    EventNotVisible,
+}
+
+impl ImportWorkflowErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DatasetNotConfirmable => "dataset_not_confirmable",
+            Self::ValidationRequired => "validation_required",
+            Self::ValidationStale => "validation_stale",
+            Self::BlockingErrorsPresent => "blocking_errors_present",
+            Self::ConflictPolicyNotAllowed => "conflict_policy_not_allowed",
+            Self::IdempotencyKeyReused => "idempotency_key_reused",
+            Self::ConfirmationConflict => "confirmation_conflict",
+            Self::EventIdInvalid => "event_id_invalid",
+            Self::EventNotVisible => "event_not_visible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportValidationSummary {
+    pub validation_version: u32,
+    pub staging_version: u64,
+    pub blocking_error_count: u32,
+    pub warning_count: u32,
+    pub duplicate_count: u32,
+    pub conflict_count: u32,
+    pub allowed_conflict_policies: Vec<ImportConflictPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportValidateResponse {
+    pub import_id: uuid::Uuid,
+    pub status: ImportBatchStatus,
+    pub validation: ImportValidationSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportConfirmRequest {
+    pub conflict_policy: ImportConflictPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportConfirmResponse {
+    pub import_id: uuid::Uuid,
+    pub job_id: uuid::Uuid,
+    pub batch_status: ImportBatchStatus,
+    pub job_status: ImportJobStatus,
+    pub conflict_policy: ImportConflictPolicy,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ImportProgress {
+    pub processed_count: u32,
+    pub total_count: u32,
+    pub imported_count: u32,
+    pub skipped_count: u32,
+    pub overwritten_count: u32,
+    pub conflict_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportJobSummary {
+    pub job_id: uuid::Uuid,
+    pub status: ImportJobStatus,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub progress: ImportProgress,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportJobEvent {
+    pub event_seq: u64,
+    pub event_type: ImportJobEventType,
+    pub payload: ImportProgress,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportErrorCursor {
+    pub workspace_id: uuid::Uuid,
+    pub import_id: uuid::Uuid,
+    pub row_number: Option<u32>,
+    pub created_at: String,
+    pub id: uuid::Uuid,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ImportInspectRequest {
     pub encoding: Option<String>,
@@ -168,17 +372,17 @@ pub struct ImportColumnPreview {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ImportPreviewCell {
     pub column: String,
     pub raw_value: String,
-    pub normalized_value: String,
+    pub normalized_value: Option<String>,
     pub target_field: Option<String>,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ImportPreviewRow {
     pub row_number: u32,
     pub cells: Vec<ImportPreviewCell>,
@@ -273,12 +477,12 @@ const GENERIC_DATASET_FIELDS: &[DatasetFieldRule] = &[
     DatasetFieldRule {
         code: "value",
         label: "数值",
-        transforms: &["trim", "decimal", "empty_to_null", "unit_placeholder"],
+        transforms: &["trim", "decimal", "empty_to_null"],
     },
     DatasetFieldRule {
         code: "price",
         label: "价格",
-        transforms: &["trim", "decimal", "empty_to_null", "unit_placeholder"],
+        transforms: &["trim", "decimal", "empty_to_null"],
     },
     DatasetFieldRule {
         code: "quantity",
@@ -288,12 +492,17 @@ const GENERIC_DATASET_FIELDS: &[DatasetFieldRule] = &[
     DatasetFieldRule {
         code: "amount",
         label: "金额",
-        transforms: &["trim", "decimal", "empty_to_null", "unit_placeholder"],
+        transforms: &["trim", "decimal", "empty_to_null"],
     },
     DatasetFieldRule {
         code: "note",
         label: "备注",
-        transforms: &["trim", "empty_to_null", "enum_map"],
+        transforms: &["trim", "empty_to_null"],
+    },
+    DatasetFieldRule {
+        code: "reference_type",
+        label: "引用类型",
+        transforms: &["trim", "empty_to_null"],
     },
 ];
 
@@ -387,6 +596,7 @@ pub struct ImportTemplateVersionResponse {
 pub struct ImportErrorsResponse {
     pub import_id: uuid::Uuid,
     pub items: Vec<ImportErrorPreview>,
+    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]
@@ -520,6 +730,30 @@ mod tests {
     }
 
     #[test]
+    fn parameterized_transforms_are_not_advertised_or_accepted() {
+        let definition = import_dataset_definitions().pop().unwrap();
+        assert!(definition.fields.iter().all(|field| {
+            !field
+                .transforms
+                .iter()
+                .any(|transform| matches!(transform.as_str(), "enum_map" | "unit_placeholder"))
+        }));
+        for transform in ["enum_map", "unit_placeholder"] {
+            assert_eq!(
+                validate_mapping_fields(
+                    "generic",
+                    &[ImportMappingField {
+                        source_column: "source".into(),
+                        target_field: "note".into(),
+                        transform: Some(transform.into()),
+                    }],
+                ),
+                Err(ImportMappingDefinitionError::UnsupportedTransform)
+            );
+        }
+    }
+
+    #[test]
     fn generic_definition_keeps_existing_phase_3b_trade_date_and_price_contract() {
         let existing_e2e_mapping = [
             ImportMappingField {
@@ -537,5 +771,45 @@ mod tests {
         let fields = import_dataset_definitions().remove(0).fields;
         assert!(fields.iter().any(|field| field.code == "trade_date"));
         assert!(fields.iter().any(|field| field.code == "price"));
+    }
+
+    #[test]
+    fn phase_3c_contract_enums_round_trip_database_values() {
+        for policy in ImportConflictPolicy::ALL {
+            assert_eq!(ImportConflictPolicy::parse(policy.as_str()), Some(policy));
+        }
+
+        for status in [
+            ImportJobStatus::Queued,
+            ImportJobStatus::Running,
+            ImportJobStatus::Succeeded,
+            ImportJobStatus::Failed,
+            ImportJobStatus::DeadLetter,
+        ] {
+            assert_eq!(ImportJobStatus::parse(status.as_str()), Some(status));
+        }
+
+        for event_type in [
+            ImportJobEventType::Queued,
+            ImportJobEventType::Running,
+            ImportJobEventType::Progress,
+            ImportJobEventType::Succeeded,
+            ImportJobEventType::Failed,
+            ImportJobEventType::DeadLetter,
+        ] {
+            assert_eq!(
+                ImportJobEventType::parse(event_type.as_str()),
+                Some(event_type)
+            );
+        }
+    }
+
+    #[test]
+    fn only_final_job_states_are_terminal() {
+        assert!(!ImportJobStatus::Queued.is_terminal());
+        assert!(!ImportJobStatus::Running.is_terminal());
+        assert!(ImportJobStatus::Succeeded.is_terminal());
+        assert!(ImportJobStatus::Failed.is_terminal());
+        assert!(ImportJobStatus::DeadLetter.is_terminal());
     }
 }

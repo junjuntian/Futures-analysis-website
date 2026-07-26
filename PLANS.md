@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS，Phase 3C/3D 继续未授权。
+阶段 3：导入基础；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS，Phase 3C 已授权并进入实施中，Phase 3D 继续未授权。
 
-状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 已完成实现、本地测试、`futures` VPS Docker/E2E 验证和独立顶层 Evaluator 复核，以 `150194c feat: complete phase 3b import parsing preview mapping` 提交；最终 `BLOCKER=0`、`HIGH=0`。Phase 3C、3D 均未授权且未实现，进入下一子阶段前必须重新授权。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 已完成实现、本地测试、`futures` VPS Docker/E2E 验证和独立顶层 Evaluator 复核，以 `150194c feat: complete phase 3b import parsing preview mapping` 提交；最终 `BLOCKER=0`、`HIGH=0`。Phase 3C 已获得独立授权并进入实施中；Phase 3D 未授权且未实现。
 
 ## 本阶段任务状态
 
@@ -36,7 +36,7 @@
 | Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
 | Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
-| Phase 3C：校验与异步确认 | 未授权、未实现 | 3B PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3C：校验与异步确认 | 已授权、实施中 | 按第 8.3 节仅实施校验、业务唯一性、四种冲突策略、正式确认入库、PostgreSQL `job_queue`、Worker、SSE、幂等/并发、Workspace/RLS/审计及最小确认进度 UI |
 | Phase 3D：回滚与完整流程 | 未授权、未实现 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
 
 ## Phase 3A 收口核验
@@ -78,7 +78,7 @@
 | Phase 3B 数据库迁移 | `202607250003` 至 `202607250007` 已在 `futures` VPS 执行 |
 | 越界核验 | 未新增 confirm/events/rollback/cancel、任务队列、SSE、正式入库或 `import_row_changes` |
 
-非阻断 MEDIUM 已记录到 `docs/reviews/PHASE_03B_EVALUATION.md`：同参数 inspect 的前端预览状态处理、errors API 分页、数据库回滚/冻结竞争测试补强及测试脚本前置注释更新。它们不回退 Phase 3B PASS，后续必须在适当阶段显式排期。
+非阻断 MEDIUM 已记录到 `docs/reviews/PHASE_03B_EVALUATION.md`，实际共五项而非三项；它们不回退 Phase 3B PASS，并全部纳入 Phase 3C：①同参数 inspect 的前端预览/errors 状态为前端前置修复；②errors API 固定 500 条改为稳定游标分页；③映射写入失败后的 staging/errors/status 一致性为普通数据库事务回归测试，不是批次回滚功能；④模板 `dataset_type` 冻结竞争为并发数据库回归测试；⑤两份脚本的迁移前置注释由 006 更新为实际依赖的 007。
 
 ## 本地验证结果
 
@@ -147,25 +147,24 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
 - Phase 3B（已完成并 PASS）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
-- Phase 3C（未授权）：校验、去重、冲突策略、确认导入、PostgreSQL 任务队列、SSE。
+- Phase 3C（已授权、实施中）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
 - Phase 3D（未授权）：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
 
 明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
 
-Phase 3B 实施边界：
+Phase 3C 实施边界：
 
-- 允许文件范围：`docs/` 可更新；Rust 仅限 `domain`、`application`、`database`、`infrastructure`、`api` import 相关模块；必要 `Cargo.toml`、`Cargo.lock`；新增 Phase 3B migration；`frontend/` 仅限导入中心 3B 最小页面/API/测试；`deploy/nginx` 仅在 multipart/body limit 契约需要时最小调整。
-- API 边界：保留 `POST /api/v1/imports` 和 `GET /api/v1/imports/{import_id}`；可按需新增 `inspect`、`mapping`、`preview`、`import-templates`、只读 `errors`；不得新增 `confirm`、`events`、`rollback`、`cancel` 或 job semantics。
-- DB 边界：允许 templates、template_versions、mappings、staging preview、errors metadata；不得新增 row_changes、jobs、正式业务目标表写入或冲突策略写入。
-- frontend 边界：仅展示 3B inspect/mapping/preview/template/errors 最小流程；不得暴露确认导入、任务进度、SSE、取消、回滚或补偿。
-- 验收标准：四类文件正常/边界/恶意样例、编码/分隔符人工覆盖、Excel 工作表/表头选择、前 50 行上限、模板版本不可变、错误脱敏展示、OpenAPI multipart 契约一致、跨 Workspace API/RLS 隔离、无 3C/3D 越界实现。
-- 测试门槛：本地 Rust fmt/test/clippy 和前端 lint/test/build 通过；VPS 完成适用 Docker、迁移、OpenAPI、四类文件 inspect/mapping/preview、错误展示、跨 Workspace API/RLS、日志秘密扫描；Evaluator PASS 且无 BLOCKER/HIGH。
+- 以 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 第 8.3 节为唯一详细实施契约；正式目标仅为导入域通用 `imported_records`，`keep_conflict` 只把候选保存在 `import_conflict_candidates`，不是 `keep_both`。
+- `/confirm` 必须在单事务内冻结参数、记录幂等请求、唯一入队、写首事件和审计；同键重试返回原结果，并发确认收敛到同一 job。
+- Worker 使用 PostgreSQL `FOR UPDATE SKIP LOCKED`、30 秒租约/10 秒续租、最多 5 次指数退避重试和终态 dead-letter；SSE 使用持久化批次序号与 `Last-Event-ID` 精确重放。
+- cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决和完整前端继续延期；行情、交易、套利、图表、外部采集、OCR、AI 与回测继续禁止。
+- 本地完整回归、VPS Docker/迁移/四策略 E2E/并发确认/Worker 恢复/SSE 重放/跨 Workspace RLS/审计秘密扫描及独立 Evaluator PASS 均为退出门禁。
 
 ## 后续步骤
 
-1. 保留 Phase 3B Evaluator 的 MEDIUM 发现为非阻断后续项，不回退 Phase 3B PASS。
-2. Phase 3C 仍未授权；如需继续，必须先由 Planner 单独确认校验、去重、冲突策略、确认导入、PostgreSQL 任务队列和 SSE 的范围。
-3. Phase 3D 继续未授权、未实现；不得提前新增回滚、补偿批次或完整前端流程。
+1. Generator 严格按 Phase 3 文档第 8.3 节实施 Phase 3C，并逐项关闭五个 Phase 3B MEDIUM；不回退 Phase 3B PASS。
+2. 完成本地回归与 `futures` VPS Docker/E2E/RLS/SSE/恢复/秘密扫描，再交由独立 Evaluator 复核；BLOCKER/HIGH 清零并 PASS 后单独提交。
+3. Phase 3D 继续未授权、未实现；不得提前新增 cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决或完整前端流程。
 4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
 
 ## 变更规则

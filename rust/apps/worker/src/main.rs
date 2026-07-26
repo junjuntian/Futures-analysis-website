@@ -1,6 +1,8 @@
+mod import_jobs;
+
 use common::AppConfig;
-use tokio::time::{Duration, interval};
-use tracing::{info, warn};
+use tracing::info;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,20 +13,11 @@ async fn main() -> anyhow::Result<()> {
         database_url = config.redacted_database_url(),
         "worker connected to database"
     );
-
-    let mut ticks = interval(Duration::from_secs(5));
-    loop {
-        tokio::select! {
-            _ = ticks.tick() => {
-                if !database::check_ready(&pool).await {
-                    warn!("database readiness check failed");
-                }
-            }
-            _ = shutdown_signal() => {
-                info!("worker shutdown requested");
-                break;
-            }
-        }
+    let worker_config = import_jobs::ImportWorkerConfig::from_env()?;
+    let worker_id = format!("worker-{}", Uuid::now_v7());
+    tokio::select! {
+        result = import_jobs::run(pool, worker_id, worker_config) => result?,
+        _ = shutdown_signal() => info!("worker shutdown requested"),
     }
 
     Ok(())

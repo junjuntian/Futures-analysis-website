@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, env, io::Cursor, path::Path};
 use uuid::Uuid;
 
 pub const DEFAULT_IMPORT_MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const DEFAULT_IMPORT_MAX_ROWS: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct UploadPolicy {
@@ -145,6 +146,8 @@ pub enum ImportParseError {
     InvalidDelimiter,
     InvalidSheet,
     SpreadsheetReadFailed,
+    TooManyRows,
+    UnsupportedTransform,
 }
 
 pub fn inspect_content(
@@ -187,6 +190,72 @@ pub fn preview_content(
     )
 }
 
+pub fn parse_all_content(
+    detected_format: &str,
+    bytes: &[u8],
+    request: ImportPreviewRequest,
+    mapping: &[ImportMappingField],
+    max_rows: usize,
+) -> Result<Vec<ImportPreviewRow>, ImportParseError> {
+    Ok(parse_all_content_with_warnings(detected_format, bytes, request, mapping, max_rows)?.rows)
+}
+
+pub struct FullImportParse {
+    pub rows: Vec<ImportPreviewRow>,
+    pub warnings: Vec<ImportErrorPreview>,
+}
+
+pub fn parse_all_content_with_warnings(
+    detected_format: &str,
+    bytes: &[u8],
+    request: ImportPreviewRequest,
+    mapping: &[ImportMappingField],
+    max_rows: usize,
+) -> Result<FullImportParse, ImportParseError> {
+    let header_row = request.header_row.unwrap_or(1).max(1);
+    let (records, warnings) = match detected_format {
+        "txt" | "csv" => {
+            let decoded = decode_text(bytes, request.encoding.as_deref())?;
+            let delimiter = detect_delimiter(&decoded.text, request.delimiter.as_deref())?;
+            (
+                parse_delimited(&decoded.text, delimiter.value.as_deref().unwrap_or(",")),
+                Vec::new(),
+            )
+        }
+        "xls" | "xlsx" => {
+            let cursor = Cursor::new(bytes.to_vec());
+            let mut workbook = open_workbook_auto_from_rs(cursor)
+                .map_err(|_| ImportParseError::SpreadsheetReadFailed)?;
+            let sheet_names = workbook.sheet_names();
+            let selected_sheet = request
+                .selected_sheet
+                .or_else(|| sheet_names.first().cloned())
+                .ok_or(ImportParseError::InvalidSheet)?;
+            if !sheet_names.iter().any(|name| name == &selected_sheet) {
+                return Err(ImportParseError::InvalidSheet);
+            }
+            let warnings = collect_formula_warnings(&mut workbook, &selected_sheet);
+            let records = workbook
+                .worksheet_range(&selected_sheet)
+                .map_err(|_| ImportParseError::SpreadsheetReadFailed)?
+                .rows()
+                .map(|row| row.iter().map(cell_to_string).collect::<Vec<_>>())
+                .collect();
+            (records, warnings)
+        }
+        _ => return Err(ImportParseError::UnsupportedFormat),
+    };
+    let total_rows = records.len().saturating_sub(header_row as usize);
+    if total_rows > max_rows {
+        return Err(ImportParseError::TooManyRows);
+    }
+    let columns = columns_from_records(&records, header_row);
+    Ok(FullImportParse {
+        rows: rows_from_records(&records, header_row, &columns, mapping, None)?,
+        warnings,
+    })
+}
+
 fn inspect_text(
     import_id: Uuid,
     status: ImportBatchStatus,
@@ -200,7 +269,7 @@ fn inspect_text(
     let records = parse_delimited(&decoded.text, delimiter.value.as_deref().unwrap_or(","));
     let header_row = request.header_row.unwrap_or(1).max(1);
     let columns = columns_from_records(&records, header_row);
-    let rows = preview_rows_from_records(&records, header_row, &columns, mapping);
+    let rows = preview_rows_from_records(&records, header_row, &columns, mapping)?;
     let errors = if records.is_empty() {
         vec![parse_message(
             None,
@@ -304,7 +373,7 @@ fn inspect_spreadsheet(
         .collect::<Vec<_>>();
     let header_row = request.header_row.unwrap_or(1).max(1);
     let columns = columns_from_records(&records, header_row);
-    let rows = preview_rows_from_records(&records, header_row, &columns, mapping);
+    let rows = preview_rows_from_records(&records, header_row, &columns, mapping)?;
     Ok(ImportInspectResponse {
         import_id,
         status,
@@ -332,6 +401,39 @@ fn inspect_spreadsheet(
         warnings: formula_warnings,
         errors: Vec::new(),
     })
+}
+
+fn collect_formula_warnings<R>(workbook: &mut R, selected_sheet: &str) -> Vec<ImportErrorPreview>
+where
+    R: Reader<Cursor<Vec<u8>>>,
+{
+    workbook
+        .worksheet_formula(selected_sheet)
+        .map(|formula_range| {
+            formula_range
+                .rows()
+                .enumerate()
+                .flat_map(|(row_index, row)| {
+                    row.iter()
+                        .enumerate()
+                        .filter_map(move |(column_index, formula)| {
+                            if formula.trim().is_empty() {
+                                None
+                            } else {
+                                Some(parse_message(
+                                    Some((row_index + 1) as u32),
+                                    Some(format!("column_{}", column_index + 1)),
+                                    ImportErrorSeverity::Warning,
+                                    "formula_detected",
+                                    None,
+                                    "检测到电子表格公式；仅导入缓存值，不执行公式。",
+                                ))
+                            }
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 struct DecodedText {
@@ -465,13 +567,12 @@ fn parse_record(line: &str, delimiter: char) -> Vec<String> {
             }
             '"' => quoted = !quoted,
             value if value == delimiter && !quoted => {
-                cells.push(current.trim().to_string());
-                current.clear();
+                cells.push(std::mem::take(&mut current));
             }
             value => current.push(value),
         }
     }
-    cells.push(current.trim().to_string());
+    cells.push(current);
     cells
 }
 
@@ -499,41 +600,172 @@ fn preview_rows_from_records(
     header_row: u32,
     columns: &[ImportColumnPreview],
     mapping: &[ImportMappingField],
-) -> Vec<ImportPreviewRow> {
+) -> Result<Vec<ImportPreviewRow>, ImportParseError> {
+    rows_from_records(records, header_row, columns, mapping, Some(50))
+}
+
+fn rows_from_records(
+    records: &[Vec<String>],
+    header_row: u32,
+    columns: &[ImportColumnPreview],
+    mapping: &[ImportMappingField],
+    limit: Option<usize>,
+) -> Result<Vec<ImportPreviewRow>, ImportParseError> {
     let data_start = header_row as usize;
     records
         .iter()
         .enumerate()
         .skip(data_start)
-        .take(50)
+        .take(limit.unwrap_or(usize::MAX))
         .map(|(row_index, row)| {
             let cells = columns
                 .iter()
                 .enumerate()
-                .map(|(index, column)| {
-                    let raw_value = row.get(index).cloned().unwrap_or_default();
-                    let target_field = mapping
-                        .iter()
-                        .find(|field| field.source_column == column.name)
-                        .map(|field| field.target_field.clone());
-                    ImportPreviewCell {
-                        column: column.name.clone(),
-                        normalized_value: raw_value.trim().to_string(),
-                        raw_value,
-                        target_field,
-                        errors: Vec::new(),
-                        warnings: Vec::new(),
-                    }
-                })
-                .collect();
-            ImportPreviewRow {
+                .map(
+                    |(index, column)| -> Result<ImportPreviewCell, ImportParseError> {
+                        let raw_value = row.get(index).cloned().unwrap_or_default();
+                        let mapping_field = mapping
+                            .iter()
+                            .find(|field| field.source_column == column.name);
+                        let target_field = mapping_field.map(|field| field.target_field.clone());
+                        let normalized_value = apply_transform(
+                            &raw_value,
+                            mapping_field.and_then(|field| field.transform.as_deref()),
+                        )?;
+                        Ok(ImportPreviewCell {
+                            column: column.name.clone(),
+                            normalized_value,
+                            raw_value,
+                            target_field,
+                            errors: Vec::new(),
+                            warnings: Vec::new(),
+                        })
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ImportPreviewRow {
                 row_number: (row_index + 1) as u32,
                 cells,
                 errors: Vec::new(),
                 warnings: Vec::new(),
-            }
+            })
         })
         .collect()
+}
+
+fn apply_transform(
+    raw_value: &str,
+    transform: Option<&str>,
+) -> Result<Option<String>, ImportParseError> {
+    let trimmed = raw_value.trim();
+    match transform {
+        None | Some("trim") => Ok(Some(trimmed.to_string())),
+        Some("empty_to_null") => Ok((!trimmed.is_empty()).then(|| trimmed.to_string())),
+        Some("date_ymd") => Ok(Some(normalize_date_ymd(trimmed))),
+        Some("decimal") => Ok(Some(normalize_decimal(trimmed))),
+        Some("integer") => Ok(Some(normalize_integer(trimmed))),
+        Some(_) => Err(ImportParseError::UnsupportedTransform),
+    }
+}
+
+fn normalize_date_ymd(value: &str) -> String {
+    let parsed = if value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        time::Date::parse(
+            value,
+            time::macros::format_description!("[year][month][day]"),
+        )
+    } else if value.contains('/') {
+        time::Date::parse(
+            value,
+            time::macros::format_description!("[year]/[month]/[day]"),
+        )
+    } else {
+        time::Date::parse(
+            value,
+            time::macros::format_description!("[year]-[month]-[day]"),
+        )
+    };
+    parsed
+        .map(|date| {
+            date.format(time::macros::format_description!("[year]-[month]-[day]"))
+                .expect("static date format is valid")
+        })
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn normalize_decimal(value: &str) -> String {
+    normalize_grouped_number(value)
+        .filter(|value| valid_decimal(value))
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn normalize_integer(value: &str) -> String {
+    let Some(mut normalized) = normalize_grouped_number(value) else {
+        return value.to_string();
+    };
+    if let Some((whole, fraction)) = normalized.split_once('.') {
+        if fraction.is_empty() || fraction.bytes().any(|byte| byte != b'0') {
+            return value.to_string();
+        }
+        normalized = whole.to_string();
+    }
+    if !valid_integer(&normalized) {
+        return value.to_string();
+    }
+    let (sign, digits) = normalized
+        .strip_prefix('-')
+        .map_or(("", normalized.as_str()), |digits| ("-", digits));
+    let digits = digits.trim_start_matches('0');
+    format!("{sign}{}", if digits.is_empty() { "0" } else { digits })
+}
+
+fn normalize_grouped_number(value: &str) -> Option<String> {
+    let (sign, unsigned) = value
+        .strip_prefix('-')
+        .map_or(("", value), |value| ("-", value));
+    let (integer, fraction) = unsigned
+        .split_once('.')
+        .map_or((unsigned, None), |(whole, fraction)| {
+            (whole, Some(fraction))
+        });
+    let normalized_integer = if integer.contains(',') {
+        let groups = integer.split(',').collect::<Vec<_>>();
+        if groups.is_empty()
+            || groups[0].is_empty()
+            || groups[0].len() > 3
+            || groups[0].bytes().any(|byte| !byte.is_ascii_digit())
+            || groups[1..]
+                .iter()
+                .any(|group| group.len() != 3 || group.bytes().any(|byte| !byte.is_ascii_digit()))
+        {
+            return None;
+        }
+        groups.concat()
+    } else {
+        integer.to_string()
+    };
+    Some(match fraction {
+        Some(fraction) => format!("{sign}{normalized_integer}.{fraction}"),
+        None => format!("{sign}{normalized_integer}"),
+    })
+}
+
+fn valid_decimal(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    !whole.is_empty()
+        && whole.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction.is_none_or(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && parts.next().is_none()
+}
+
+fn valid_integer(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    !unsigned.is_empty() && unsigned.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn cell_to_string(cell: &Data) -> String {
@@ -666,6 +898,7 @@ fn validate_magic(format: AcceptedFileFormat, prefix: &[u8]) -> Result<(), Uploa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn validate(
         name: &str,
@@ -790,5 +1023,158 @@ mod tests {
             result.preview_rows[0].cells[0].target_field.as_deref(),
             Some("alpha")
         );
+    }
+
+    #[test]
+    fn full_parse_is_not_limited_to_preview_rows() {
+        let mut csv = String::from("date,code,name\n");
+        for index in 0..75 {
+            csv.push_str(&format!("2026-07-25,C{index},Name {index}\n"));
+        }
+        let mapping = vec![
+            ImportMappingField {
+                source_column: "date".into(),
+                target_field: "trade_date".into(),
+                transform: None,
+            },
+            ImportMappingField {
+                source_column: "code".into(),
+                target_field: "code".into(),
+                transform: None,
+            },
+        ];
+        let rows = parse_all_content(
+            "csv",
+            csv.as_bytes(),
+            ImportPreviewRequest {
+                encoding: Some("utf-8".into()),
+                delimiter: Some(",".into()),
+                selected_sheet: None,
+                header_row: Some(1),
+            },
+            &mapping,
+            DEFAULT_IMPORT_MAX_ROWS,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 75);
+        assert_eq!(rows.last().unwrap().row_number, 76);
+        let staging = rows
+            .iter()
+            .map(|row| {
+                let normalized_values = row
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.column.clone(), json!(cell.normalized_value)))
+                    .collect();
+                let target_fields = row
+                    .cells
+                    .iter()
+                    .map(|cell| {
+                        (
+                            cell.column.clone(),
+                            json!(cell.target_field.as_deref().unwrap_or("")),
+                        )
+                    })
+                    .collect();
+                crate::import_jobs::StagingRowInput {
+                    id: Uuid::now_v7(),
+                    row_number: row.row_number,
+                    normalized_values: serde_json::Value::Object(normalized_values),
+                    target_fields: serde_json::Value::Object(target_fields),
+                    preview_warnings: json!([]),
+                }
+            })
+            .collect();
+        let validated = crate::import_jobs::validate_staging_rows("generic", staging).unwrap();
+        assert_eq!(validated.rows.len(), 75);
+        assert_eq!(
+            crate::import_jobs::select_file_candidates(
+                &validated.rows,
+                domain::import::ImportConflictPolicy::Skip
+            )
+            .len(),
+            75,
+            "all rows must reach formal import candidates"
+        );
+    }
+
+    #[test]
+    fn deterministic_transforms_match_preview_and_full_validation_parse() {
+        let mapping = vec![
+            ImportMappingField {
+                source_column: "date".into(),
+                target_field: "trade_date".into(),
+                transform: Some("date_ymd".into()),
+            },
+            ImportMappingField {
+                source_column: "amount".into(),
+                target_field: "amount".into(),
+                transform: Some("decimal".into()),
+            },
+            ImportMappingField {
+                source_column: "note".into(),
+                target_field: "note".into(),
+                transform: Some("empty_to_null".into()),
+            },
+            ImportMappingField {
+                source_column: "quantity".into(),
+                target_field: "quantity".into(),
+                transform: Some("integer".into()),
+            },
+            ImportMappingField {
+                source_column: "name".into(),
+                target_field: "name".into(),
+                transform: Some("trim".into()),
+            },
+        ];
+        let csv = b"date,amount,note,quantity,name\n20260725,\"1,234.50\",   ,00042,  Alice  \n";
+        let request = ImportPreviewRequest {
+            encoding: Some("utf-8".into()),
+            delimiter: Some(",".into()),
+            selected_sheet: None,
+            header_row: Some(1),
+        };
+        let preview = preview_content(
+            Uuid::now_v7(),
+            ImportBatchStatus::Mapped,
+            "csv",
+            csv,
+            request.clone(),
+            &mapping,
+        )
+        .unwrap();
+        let full =
+            parse_all_content("csv", csv, request, &mapping, DEFAULT_IMPORT_MAX_ROWS).unwrap();
+        assert_eq!(preview.preview_rows, full);
+        let cells = &full[0].cells;
+        assert_eq!(cells[0].normalized_value.as_deref(), Some("2026-07-25"));
+        assert_eq!(cells[1].normalized_value.as_deref(), Some("1234.50"));
+        assert_eq!(cells[2].normalized_value, None);
+        assert_eq!(cells[3].normalized_value.as_deref(), Some("42"));
+        assert_eq!(cells[4].normalized_value.as_deref(), Some("Alice"));
+        assert_eq!(cells[4].raw_value, "  Alice  ");
+    }
+
+    #[test]
+    fn parameterized_or_unknown_transform_is_never_silently_ignored() {
+        let error = preview_content(
+            Uuid::now_v7(),
+            ImportBatchStatus::Mapped,
+            "csv",
+            b"note\nexchange\n",
+            ImportPreviewRequest {
+                encoding: Some("utf-8".into()),
+                delimiter: Some(",".into()),
+                selected_sheet: None,
+                header_row: Some(1),
+            },
+            &[ImportMappingField {
+                source_column: "note".into(),
+                target_field: "note".into(),
+                transform: Some("enum_map".into()),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error, ImportParseError::UnsupportedTransform);
     }
 }

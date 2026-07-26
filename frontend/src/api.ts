@@ -5,6 +5,16 @@ export interface ApiEnvelope<T> {
   }
 }
 
+export type ImportConflictPolicy = 'skip' | 'overwrite' | 'keep_conflict' | 'abort'
+
+export type ImportJobStatus =
+  | 'queued'
+  | 'running'
+  | 'progress'
+  | 'succeeded'
+  | 'failed'
+  | 'dead_letter'
+
 export interface HealthStatus {
   status: string
   checked_at: string
@@ -58,6 +68,18 @@ export interface ImportSummary {
   file: ImportFileSummary
   created_at: string
   updated_at: string
+  validation?: ImportValidationSummary | null
+  validation_summary?: ImportValidationSummary | null
+  job?: ImportJobSummary | null
+  job_id?: string | null
+  conflict_policy?: ImportConflictPolicy | null
+  processed_rows?: number
+  total_rows?: number
+  inserted_count?: number
+  updated_count?: number
+  skipped_count?: number
+  conflict_count?: number
+  error_code?: string | null
 }
 
 export interface ImportMappingField {
@@ -69,7 +91,7 @@ export interface ImportMappingField {
 export interface ImportPreviewCell {
   column: string
   raw_value: string
-  normalized_value: string
+  normalized_value: string | null
   target_field?: string | null
   errors: string[]
   warnings: string[]
@@ -103,10 +125,59 @@ export interface ImportInspectResponse {
 export interface ImportErrorItem {
   row_number?: number | null
   field_name?: string | null
-  severity: 'error' | 'warning'
+  severity: 'error' | 'warning' | 'duplicate' | 'conflict'
   error_code: string
   raw_value?: string | null
   message: string
+}
+
+export interface ImportValidationSummary {
+  import_id: string
+  validation_version: string
+  blocking_error_count: number
+  warning_count: number
+  duplicate_count: number
+  conflict_count: number
+  allowed_conflict_policies: ImportConflictPolicy[]
+}
+
+export interface ImportConfirmationSummary {
+  import_id: string
+  job_id: string
+  status: ImportJobStatus
+  conflict_policy: ImportConflictPolicy
+  replayed: boolean
+}
+
+export interface ImportJobSummary {
+  job_id: string
+  status: ImportJobStatus
+  processed_rows: number
+  total_rows: number
+  inserted_count: number
+  updated_count: number
+  skipped_count: number
+  conflict_count: number
+  error_code?: string | null
+}
+
+export interface ImportJobEvent {
+  event_seq: number
+  event_type: ImportJobStatus
+  status: ImportJobStatus
+  processed_rows: number
+  total_rows: number
+  inserted_count: number
+  updated_count: number
+  skipped_count: number
+  conflict_count: number
+  error_code?: string | null
+}
+
+export interface ImportErrorPage {
+  import_id: string
+  items: ImportErrorItem[]
+  next_cursor?: string | null
 }
 
 export interface ImportTemplateSummary {
@@ -151,10 +222,12 @@ export async function sendJson<T>(
   path: string,
   body: unknown,
   csrfToken?: string,
-  method = 'POST'
+  method = 'POST',
+  extraHeaders: Record<string, string> = {}
 ): Promise<T> {
   const headers: Record<string, string> = {
-    'content-type': 'application/json'
+    'content-type': 'application/json',
+    ...extraHeaders
   }
   if (csrfToken) {
     headers['x-csrf-token'] = csrfToken
@@ -169,6 +242,88 @@ export async function sendJson<T>(
     throw new Error(`request failed: ${response.status}`)
   }
   return response.json() as Promise<T>
+}
+
+export async function confirmImport(
+  importId: string,
+  conflictPolicy: ImportConflictPolicy,
+  csrfToken: string,
+  idempotencyKey: string
+): Promise<ApiEnvelope<ImportConfirmationSummary>> {
+  return sendJson<ApiEnvelope<ImportConfirmationSummary>>(
+    `/api/v1/imports/${encodeURIComponent(importId)}/confirm`,
+    { conflict_policy: conflictPolicy },
+    csrfToken,
+    'POST',
+    { 'Idempotency-Key': idempotencyKey }
+  )
+}
+
+export async function getImportErrors(
+  importId: string,
+  cursor?: string | null
+): Promise<ApiEnvelope<ImportErrorPage>> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+  return getJson<ApiEnvelope<ImportErrorPage>>(
+    `/api/v1/imports/${encodeURIComponent(importId)}/errors${query}`
+  )
+}
+
+export async function streamImportEvents(
+  importId: string,
+  lastEventSequence: number | null,
+  onEvent: (event: ImportJobEvent) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const headers: Record<string, string> = { accept: 'text/event-stream' }
+  if (lastEventSequence !== null) {
+    headers['Last-Event-ID'] = String(lastEventSequence)
+  }
+
+  const response = await fetch(
+    `/api/v1/imports/${encodeURIComponent(importId)}/events`,
+    {
+      credentials: 'include',
+      headers,
+      signal
+    }
+  )
+  if (!response.ok) {
+    throw new Error(`event stream failed: ${response.status}`)
+  }
+  if (!response.body) {
+    throw new Error('event stream unavailable')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const dispatchBlock = (block: string) => {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (!data) return
+    const event = JSON.parse(data) as ImportJobEvent
+    if (!Number.isSafeInteger(event.event_seq) || event.event_seq < 0) {
+      throw new Error('event stream returned an invalid sequence')
+    }
+    onEvent(event)
+  }
+
+  while (!signal.aborted) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() ?? ''
+    blocks.forEach(dispatchBlock)
+    if (done) {
+      if (buffer.trim()) dispatchBlock(buffer)
+      return
+    }
+  }
 }
 
 export async function uploadImport(file: File, csrfToken: string): Promise<ApiEnvelope<ImportSummary>> {

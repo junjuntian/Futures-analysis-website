@@ -41,6 +41,9 @@ use uuid::Uuid;
         imports::inspect,
         imports::save_mapping,
         imports::preview,
+        imports::validate,
+        imports::confirm,
+        imports::events,
         imports::errors,
         imports::list_templates,
         imports::list_datasets,
@@ -64,6 +67,9 @@ use uuid::Uuid;
         imports::ImportResponse,
         imports::ImportTemplatesResponse,
         imports::ImportDatasetsResponse,
+        imports::ImportValidateApiResponse,
+        imports::ImportConfirmApiResponse,
+        imports::ImportJobApiResponse,
         domain::import::ImportBatchStatus,
         domain::import::ImportErrorSeverity,
         domain::import::ImportInspectRequest,
@@ -83,7 +89,18 @@ use uuid::Uuid;
         domain::import::ImportTemplateCreateRequest,
         domain::import::ImportTemplateSummary,
         domain::import::ImportTemplateVersionResponse,
-        domain::import::ImportErrorsResponse
+        domain::import::ImportErrorsResponse,
+        domain::import::ImportConflictPolicy,
+        domain::import::ImportJobStatus,
+        domain::import::ImportJobEventType,
+        domain::import::ImportWorkflowErrorCode,
+        domain::import::ImportValidationSummary,
+        domain::import::ImportValidateResponse,
+        domain::import::ImportConfirmRequest,
+        domain::import::ImportConfirmResponse,
+        domain::import::ImportProgress,
+        domain::import::ImportJobSummary,
+        domain::import::ImportJobEvent
     )),
     modifiers(&SecurityAddon)
 )]
@@ -134,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         auth: state.clone(),
         storage,
         upload_policy,
+        idempotency_pepper: load_idempotency_pepper().await?,
     });
 
     let app = router(state, import_state);
@@ -142,6 +160,35 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+async fn load_idempotency_pepper() -> anyhow::Result<String> {
+    let path = std::env::var("IMPORT_IDEMPOTENCY_PEPPER_FILE")
+        .unwrap_or_else(|_| "/run/secrets/import-idempotency-pepper".to_string());
+    match tokio::fs::read_to_string(&path).await {
+        Ok(value) => {
+            let value = value.trim();
+            if value.len() < 32 {
+                anyhow::bail!("IMPORT_IDEMPOTENCY_PEPPER_FILE must contain at least 32 characters");
+            }
+            Ok(value.to_string())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let production = std::env::var("APP_ENV")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("production"));
+            if production {
+                anyhow::bail!("IMPORT_IDEMPOTENCY_PEPPER_FILE is required in production");
+            }
+            let value = std::env::var("IMPORT_IDEMPOTENCY_PEPPER").map_err(|_| {
+                anyhow::anyhow!("development requires explicit IMPORT_IDEMPOTENCY_PEPPER")
+            })?;
+            if value.len() < 32 {
+                anyhow::bail!("IMPORT_IDEMPOTENCY_PEPPER must contain at least 32 characters");
+            }
+            Ok(value)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Router {
@@ -176,6 +223,15 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
             "/api/v1/imports/{import_id}/preview",
             post(imports::preview),
         )
+        .route(
+            "/api/v1/imports/{import_id}/validate",
+            post(imports::validate),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/confirm",
+            post(imports::confirm),
+        )
+        .route("/api/v1/imports/{import_id}/events", get(imports::events))
         .route("/api/v1/imports/{import_id}/errors", get(imports::errors))
         .route(
             "/api/v1/import-templates",

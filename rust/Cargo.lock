@@ -51,6 +51,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -66,6 +67,7 @@ dependencies = [
  "domain",
  "encoding_rs",
  "serde",
+ "serde_json",
  "time",
  "utoipa",
  "uuid",
@@ -362,9 +364,11 @@ dependencies = [
 name = "database"
 version = "0.1.0"
 dependencies = [
+ "application",
  "domain",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror",
  "time",
@@ -2487,8 +2491,10 @@ dependencies = [
  "common",
  "database",
  "infrastructure",
+ "sqlx",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

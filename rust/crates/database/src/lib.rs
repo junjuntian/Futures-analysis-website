@@ -1,4 +1,5 @@
 pub mod imports;
+pub mod job_queue;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;

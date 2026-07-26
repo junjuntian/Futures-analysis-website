@@ -2,7 +2,7 @@
 
 计划日期：2026-07-25
 
-当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS；Phase 3C/3D 继续未授权。
+当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS；Phase 3C 已授权并进入实施中；Phase 3D 继续未授权。
 
 ## 1. 背景与目标
 
@@ -409,22 +409,291 @@ frontend 边界：
 
 ### 8.3 Phase 3C：校验、去重、冲突、确认任务与 SSE
 
-**授权状态：未授权；Phase 3B PASS 并提交后方可重新授权。**
+**授权状态：已授权、实施中；仅限本节明确列出的 Phase 3C 能力。Phase 3D 继续未授权。**
 
-范围：
+#### 8.3.1 本轮目标、状态与硬边界
 
-- 字段、跨字段、唯一键和引用校验；文件内重复与数据库冲突分别统计。
-- 在数据集允许范围内实现 `skip`、`overwrite`、`abort`，并用 `Idempotency-Key` 保证确认重试不重复写入。
-- 新增 staging/error/目标变更预备记录和 PostgreSQL 任务表，扩展 Worker 完成 `/confirm`、安全取消与后台任务处理。
-- 实现按 Workspace 隔离、可重连的 SSE 进度与错误分页查询。
+Phase 3C 只交付以下闭环：
 
-模块边界：可修改 API、Worker、database/application/domain 与必要迁移；只提供验证完整链路所需的最小 UI，不在本阶段实现完整导入中心。
+1. 对 Phase 3B staging 数据执行确定性的字段、跨字段、业务唯一键和受控引用校验。
+2. 分开统计文件内重复与正式导入域已有记录冲突。
+3. 实现 `skip`、`overwrite`、`keep_conflict`、`abort` 四种冲突策略。
+4. 通过 `/confirm` 冻结参数并创建 PostgreSQL `job_queue` 任务，由 Worker 正式写入导入域通用目标表。
+5. 对确认重试、并发确认、Worker 重试和租约恢复提供幂等保证。
+6. 通过持久化事件和 `Last-Event-ID` 提供可重连、可重放的 SSE 进度。
+7. 对新增数据、API、任务、事件和审计实施 Workspace 隔离、强制 RLS 与最小权限控制。
+8. 只补充确认、冲突策略选择和进度展示所需的最小前端。
 
-非目标：不实现原子回滚、补偿批次、完整前端导入中心或最终 VPS 全流程收口。
+本轮不创建行情、交易、持仓、套利或其他业务域目标表。正式写入的唯一目标是导入域通用表 `imported_records`，用于验证正式导入、唯一性、冲突和并发语义；其存在不代表任何行情或交易数据模型已获授权。
 
-验收与测试门禁：校验/重复/冲突矩阵、幂等重试、任务恢复与死信、取消安全点、SSE 断线重连、跨 Workspace API/RLS/SSE 隔离；完整本地回归和适用 VPS Docker 集成验证通过，Evaluator PASS。
+#### 8.3.2 校验、业务唯一性与冲突语义
 
-退出条件：3C 功能和证据单独提交，`PLANS.md` 更新为 3C 已完成、3D 待授权，且无 3D 越界实现。
+- 业务唯一键由服务端按 `dataset_type` 定义并规范化，客户端不得提交 SQL、列名、表达式或自定义唯一键。Phase 3C 只允许已具备确定性唯一键定义的数据集确认；其他数据集返回稳定错误 `dataset_not_confirmable`。
+- 校验结果必须绑定 `import_batch_id`、`mapping_version_id`、staging 版本和校验版本。inspect、mapping 或 preview 变化后，旧校验结果立即失效，必须重新校验。
+- blocking error、warning、文件内 duplicate 和数据库 conflict 分别计数；错误代码保持稳定英文枚举，中文消息脱敏。
+- 文件内重复按规范化业务唯一键分组，并按原始 `row_number` 确定顺序：
+  - `skip`：仅第一条有效候选可进入正式写入，其余标记为 skipped。
+  - `overwrite`：仅最后一条有效候选可进入正式写入，同一批次同一业务键最多产生一条正式记录。
+  - `keep_conflict`：重复组候选不写入 `imported_records`，全部保存在 `import_conflict_candidates`，等待未来另行授权的处理流程。
+  - `abort`：存在任一文件内重复即禁止确认；若确认后因并发才出现冲突，则 Worker 整次正式写入事务失败且不产生部分正式记录。
+- 与 `imported_records` 已有业务键冲突时：
+  - `skip`：保留既有正式记录，候选只计入 skipped。
+  - `overwrite`：更新同一正式记录的受控 `record_data`、来源批次、来源行号和行版本。
+  - `keep_conflict`：既有正式记录保持不变，候选完整保存在 `import_conflict_candidates`。
+  - `abort`：该批次不产生任何正式写入，并形成稳定冲突错误。
+- `keep_conflict` 明确不是 `keep_both`：它不会绕过业务唯一约束，不会在 `imported_records` 中保存第二条同键记录，也不提供本轮内的人工解决入口。
+- blocking validation error 与非法策略均在确认前拒绝；Worker 仍必须重新检查冻结版本和数据库唯一约束，以处理校验后至正式写入前的竞争。
+
+#### 8.3.3 正式目标与数据库迁移
+
+Phase 3C 只允许新增两组迁移，文件名匹配：
+
+- `rust/migrations/*_phase_3c_validation_and_imported_records.sql`
+- `rust/migrations/*_phase_3c_job_queue_and_events.sql`
+
+第一组迁移可扩展 `import_batches`、`import_staging_rows`、`import_errors` 的 3C 字段，并仅新增：
+
+- `imported_records`
+  - `id`
+  - `workspace_id`
+  - `dataset_type`
+  - `business_key`
+  - `record_data`
+  - `source_import_batch_id`
+  - `source_row_number`
+  - `row_version`
+  - `created_by`
+  - `created_at`
+  - `updated_at`
+  - 唯一约束：`(workspace_id, dataset_type, business_key)`
+- `import_conflict_candidates`
+  - `id`
+  - `workspace_id`
+  - `import_batch_id`
+  - `staging_row_id`
+  - `dataset_type`
+  - `business_key`
+  - `candidate_data`
+  - `existing_record_id`
+  - `conflict_kind`
+  - `created_at`
+  - 唯一约束必须防止同一 staging 行因任务重试重复保存。
+
+第二组迁移仅新增：
+
+- `import_confirmations`
+  - 保存 `workspace_id`、`import_batch_id`、`idempotency_key_hash`、规范化请求 `request_hash`、确认响应引用、操作者和时间。
+  - `(workspace_id, idempotency_key_hash)` 唯一；只保存带服务端 pepper 的摘要，不保存原始 `Idempotency-Key`。
+- `job_queue`
+  - 保存 `workspace_id`、`job_type`、`aggregate_id`、`status`、`payload`、`attempt_count`、`max_attempts`、`available_at`、`leased_by`、`lease_expires_at`、`last_error_code` 和时间戳。
+  - `job_type=import_confirm` 时 `(workspace_id, job_type, aggregate_id)` 唯一，保证一个批次最多一个正式导入任务。
+- `import_job_events`
+  - 保存 `workspace_id`、`import_batch_id`、`job_id`、批次内单调递增 `event_seq`、`event_type`、脱敏 `payload` 和 `created_at`。
+  - `(workspace_id, import_batch_id, event_seq)` 唯一，SSE 的 `id` 即十进制 `event_seq`。
+
+所有新增表从创建时即满足：
+
+- `workspace_id NOT NULL`，外键不得跨 Workspace；主要索引以 `workspace_id` 为首列。
+- `ENABLE ROW LEVEL SECURITY` 与 `FORCE ROW LEVEL SECURITY`，策略使用 `workspace_id = app.current_workspace_id()`。
+- 应用查询仍显式带当前 Workspace 条件；客户端请求和 SSE 参数均不得接收 `workspace_id`。
+- 运行时 API/Worker 角色只拥有所需表和操作的最小权限。
+- 不新增 `import_row_changes`，不新增任何 market/trading/arbitrage 表，也不为 Phase 3D 预建回滚或补偿结构。
+
+#### 8.3.4 API 与 OpenAPI 契约
+
+Phase 3C 允许新增或补齐的接口只有：
+
+| 方法 | 路径 | 契约 |
+| --- | --- | --- |
+| `POST` | `/api/v1/imports/{import_id}/validate` | 对当前 mapping/staging 版本执行校验并返回错误、警告、duplicate、conflict 计数；要求 Session、权限和 CSRF |
+| `GET` | `/api/v1/imports/{import_id}/errors` | 将 Phase 3B 固定上限改为稳定游标分页；游标绑定 Workspace、批次与排序键 |
+| `POST` | `/api/v1/imports/{import_id}/confirm` | 请求体只含允许的 `conflict_policy`；要求 Session、权限、CSRF 与 `Idempotency-Key`；首次成功返回 `202`，幂等重放返回相同批次/任务摘要 |
+| `GET` | `/api/v1/imports/{import_id}/events` | `text/event-stream`；读取 `Last-Event-ID` header，按当前 Workspace 和批次重放后继续实时推送 |
+| `GET` | `/api/v1/imports/{import_id}` | 补充校验摘要、冻结策略、任务状态、进度和终态摘要，不返回原始幂等键或敏感行内容 |
+
+统一错误至少覆盖 `validation_required`、`validation_stale`、`blocking_errors_present`、`conflict_policy_not_allowed`、`idempotency_key_reused`、`confirmation_conflict`、`event_id_invalid` 和 `event_not_visible`。OpenAPI 必须同步请求/响应、header、状态码、游标、冲突策略枚举和 SSE 事件 schema。
+
+本轮明确不新增 `/cancel`、`/rollback`、补偿、冲突人工解决或 dead-letter replay API。
+
+#### 8.3.5 确认并发、幂等与事务边界
+
+`POST /confirm` 必须在一个数据库事务内完成以下步骤：
+
+1. 设置当前 Workspace RLS 上下文并 `SELECT ... FOR UPDATE` 锁定批次。
+2. 验证批次可确认、校验版本未失效、无 blocking error、策略被该数据集允许。
+3. 对批次、mapping/staging/validation 版本、策略和操作者作用域生成规范化 `request_hash`。
+4. 查询或写入 `import_confirmations`：
+   - 同一幂等键且同一 `request_hash`：返回最初响应，不创建第二个任务。
+   - 同一幂等键但不同 `request_hash`：返回 `409 idempotency_key_reused`。
+5. 若批次已由另一幂等键确认：
+   - 冻结指纹相同：关联并返回同一 `job_id`，不重复冻结或入队。
+   - 冻结指纹不同：返回 `409 confirmation_conflict`。
+6. 首次确认时冻结 mapping、校验版本、冲突策略和确认参数，将批次转为 `confirmed`，插入唯一 `job_queue` 行、首个 `queued` 事件和确认审计。
+7. 一次提交上述全部记录；任一步失败均不留下“已确认但未入队”或“已入队但未确认”的状态。
+
+要求至少用同键重试、同键异参、不同键同参、不同键异参和多连接并发确认覆盖该事务。数据库普通事务失败回退是实现原子提交的基础，不等同于 Phase 3D 的用户可调用批次回滚能力。
+
+#### 8.3.6 PostgreSQL `job_queue`、Worker、租约、重试与死信
+
+- Worker 以 `FOR UPDATE SKIP LOCKED` 从 `status=queued` 且 `available_at <= now()`，或租约已过期的 `running` 任务中领取一条任务。
+- 领取时原子设置 `status=running`、`leased_by`、`lease_expires_at` 并递增 `attempt_count`；默认租约 30 秒，执行期间每 10 秒续租。
+- Worker 只处理 `job_type=import_confirm`；未知类型作为永久错误，不得动态执行 payload 中的代码、SQL、表名或列名。
+- 正式写入时锁定批次并验证冻结指纹。对业务键按稳定顺序处理，使用数据库唯一约束及受控 INSERT/UPDATE 实现策略。
+- 一次 Worker 尝试把 `imported_records`/`import_conflict_candidates` 写入、批次终态、任务终态、最终计数和终态事件放在同一事务中。进程在提交前退出不会留下部分正式数据；提交后退出也不会因租约重领再次产生正式效果。
+- 进度事件可按确定性分段提交，但不得改变正式写入幂等结果；重复领取不得重复事件终态或降低已报告进度。
+- 仅瞬时数据库连接错误、明确列入 allowlist 的可重试 SQLSTATE 和临时基础设施错误可重试。校验、权限、未知数据集、非法策略和确定性业务冲突是永久错误。
+- 默认 `max_attempts=5`；重试延迟为 2、4、8、16 秒并封顶 60 秒，写入 `available_at`。测试可通过配置缩短时间，但不得改变次数语义。
+- 超过最大尝试后将任务置为 `dead_letter`，批次置为 `failed`，持久化 `dead_letter` SSE 事件和脱敏审计。
+- Worker 重启后自动领取租约过期任务。Phase 3C 不提供取消、不提供人工 dead-letter 重放；人工 replay 和运维控制面必须等待后续单独授权。
+
+#### 8.3.7 SSE 持久化、隔离与 `Last-Event-ID` 重放
+
+- 事件类型仅包括 `queued`、`running`、`progress`、`succeeded`、`failed`、`dead_letter`；本轮没有 `cancelled`。
+- API 在建立流前完成 Session、批次可见性和 Workspace 权限校验；不可见批次使用统一不可见错误，不先返回 SSE 200。
+- 首次连接从该批次最早保留事件开始；重连时只读取 `Last-Event-ID` header，并重放 `event_seq > Last-Event-ID` 的持久化事件，再订阅新事件。
+- 非十进制、负数或大于当前批次最大序号的 `Last-Event-ID` 返回稳定 400；不得将其他批次或 Workspace 的 event id 当作游标。
+- 每 15 秒可发送不含业务数据的 heartbeat comment；建议客户端重连间隔为 3 秒。终态事件发送完毕后服务端可关闭连接。
+- Phase 3C 不删除 `import_job_events`，从而保证本阶段验收窗口内无重放缺口；事件清理、归档和手工恢复不在本轮实现。
+- SSE payload 只包含状态、已处理/总数、四类结果计数和稳定错误码，不含 Cookie、Token、原始行、完整 `record_data` 或其他 Workspace 信息。
+
+#### 8.3.8 审计
+
+至少记录：
+
+- 校验完成/失败及摘要计数。
+- 确认接受、幂等重放、幂等键冲突和并发确认冲突。
+- Worker 成功、最终失败和 dead-letter。
+- `skip`、`overwrite`、`keep_conflict`、`abort` 的聚合结果。
+- 权限拒绝沿用现有统一审计策略；SSE 不逐条审计 heartbeat 或 progress。
+
+审计只保存幂等键摘要前缀或不可逆关联 ID，不保存原始键、原始行、完整候选 JSON、Session/Cookie/Token 或数据库凭据。
+
+#### 8.3.9 最小前端
+
+前端只在现有 Phase 3B 导入页面补充：
+
+- “校验”动作和 blocking error、warning、文件内 duplicate、数据库 conflict 四类摘要。
+- 服务端返回的允许策略选择；`keep_conflict` 文案必须明确“保留候选、正式表不新增同键记录”。
+- “确认导入”动作；为同一批次生成并在当前页面会话内稳定复用一个 `Idempotency-Key`，网络重试不得生成新键。
+- queued/running/progress/succeeded/failed/dead_letter 进度展示。
+- SSE 自动重连并携带最后已处理 `event_seq`；连接失败时用批次 GET 状态作为只读兜底。
+- errors 游标分页。
+
+不增加取消、回滚、补偿、dead-letter 手工重放、冲突人工解决、完整导入中心改版或任何行情/交易/套利图表。
+
+#### 8.3.10 Phase 3B 五项 MEDIUM 的处理分类
+
+Phase 3B 评审实际有五项 MEDIUM，本轮全部显式排期，不按“三项”摘要遗漏：
+
+| # | 发现 | Phase 3C 分类与处理 |
+| --- | --- | --- |
+| 1 | 同参数 inspect 时前端仍清空预览 errors | 3C 前端前置修复；仅当 `preview_invalidated=true` 才清空，增加状态回归测试 |
+| 2 | errors API 固定 `LIMIT 500` | 3C 正式范围；改为 Workspace/批次绑定的稳定游标分页 |
+| 3 | 映射写入失败后的 staging/errors/status 事务一致性未直接测试 | 3C 数据库回归测试；这里验证普通数据库事务原子性，不实现批次回滚 API |
+| 4 | 模板 `dataset_type` 冻结竞争未覆盖 | 3C 并发数据库回归测试；两连接竞争后不变量保持且无锁序反转 |
+| 5 | 两份数据库脚本迁移前置注释止于 006 | 3C 测试维护；改为实际依赖 007，并由测试启动时检查迁移前置 |
+
+#### 8.3.11 Generator 精确文件范围
+
+仅允许修改或新增以下范围：
+
+- 迁移：上述两个 `rust/migrations/*_phase_3c_*.sql` 文件。
+- Domain/Application：
+  - `rust/crates/domain/src/import.rs`
+  - `rust/crates/domain/src/lib.rs`
+  - `rust/crates/application/src/imports.rs`
+  - `rust/crates/application/src/import_jobs.rs`
+  - `rust/crates/application/src/lib.rs`
+- Database：
+  - `rust/crates/database/src/imports.rs`
+  - `rust/crates/database/src/job_queue.rs`
+  - `rust/crates/database/src/lib.rs`
+- API：
+  - `rust/apps/api/src/imports.rs`
+  - `rust/apps/api/src/main.rs`
+  - 现有 OpenAPI 定义文件中仅 import schema/path 段。
+- Worker：
+  - `rust/apps/worker/src/main.rs`
+  - `rust/apps/worker/src/import_jobs.rs`
+- 依赖接线：仅上述 crate 的 `Cargo.toml`、`rust/Cargo.toml`、`rust/Cargo.lock`；优先复用现有依赖，不得引入通用脚本执行、消息代理或外部队列。
+- 前端：
+  - `frontend/src/views/ImportCenterView.vue`
+  - `frontend/src/api/imports.ts`
+  - `frontend/src/types/imports.ts`
+  - `frontend/src/router/index.ts` 仅在现有导入入口接线确有需要时最小修改
+  - 与上述 import 页面/API 同名或同目录的测试和 Phase 3C fixtures。
+- 数据库与 E2E 测试：现有 import 测试文件，以及新增文件名包含 `phase_3c`、`import_job`、`import_confirm` 或 `import_sse` 的测试/脚本。
+- 文档：`PLANS.md`、本文件、import/API/database 设计中与 3C 契约直接相关的段落，以及 3C review/handoff。
+
+若仓库当前实际文件名与上述计划名不同，Generator 必须先在实施记录中给出一一映射，并保持同一模块边界；不得借重命名扩大到认证、Workspace、行情、交易或其他页面。`docker-compose.yml` 只允许为现有 Worker 传入租约/重试配置作最小修改；Nginx 不需要为 SSE 之外的语义改动。
+
+#### 8.3.12 明确延期与禁止项
+
+以下项目明确延期，Phase 3C 不得实现，也不得以“预留表/路由/UI/测试夹具”名义创建：
+
+- cancel API、取消状态转换、取消安全点或取消 SSE 事件。
+- 手工 dead-letter replay、运维重放按钮或任务管理控制面。
+- 原子批次回滚、部分回滚、回滚检查、补偿批次。
+- `import_row_changes` 及其任何替代表、触发器或影子日志。
+- 冲突候选人工解决/提升为正式记录。
+- 完整前端导入中心改版。
+- 行情、交易、持仓、套利、图表、外部采集、OCR、AI、回测或自动交易。
+
+#### 8.3.13 本地测试门禁
+
+必须通过：
+
+```powershell
+git diff --check
+Set-Location rust
+cargo +stable fmt --check
+cargo +stable test --workspace
+cargo +stable clippy --workspace --all-targets -- -D warnings
+Set-Location ..
+pnpm lint
+pnpm test
+pnpm build
+```
+
+自动化测试至少覆盖：
+
+- 字段/跨字段/唯一键/受控引用校验的成功、blocking error 和 warning。
+- 四策略乘以文件内 duplicate、既有 DB conflict、校验后并发插入冲突的矩阵。
+- `keep_conflict` 只写 `import_conflict_candidates` 且绝不形成第二条正式同键记录。
+- `imported_records` 唯一约束和跨 Workspace 同业务键可共存。
+- 同键同参重放、同键异参冲突、不同键同参并发收敛到同一任务、不同键异参冲突；至少 20 个并发确认只产生一个 job 和一份正式效果。
+- Worker 双实例 `SKIP LOCKED`、租约续期、进程退出后的过期租约恢复、瞬时失败重试、永久失败不重试、第五次失败进入 dead-letter。
+- 任务提交前进程失败无部分正式数据，提交后模拟重复领取无重复写入。
+- SSE 初连、断线、`Last-Event-ID` 精确重放、终态关闭、非法 event id、跨批次和跨 Workspace 拒绝。
+- 所有新增表的 API 隔离与运行时角色强制 RLS 破坏性测试。
+- 审计存在且秘密/原始数据扫描为零命中。
+- 第 8.3.10 节五项 MEDIUM 各有对应测试或可核查脚本差异。
+- 仓库不存在 `/cancel`、`/rollback`、dead-letter replay、`import_row_changes` 或正式业务域表新增。
+
+#### 8.3.14 `futures` VPS 与 Evaluator 门禁
+
+VPS 必须完成：
+
+1. 从本地 Git 工作树构建部署包，校验 SHA-256；VPS 不手工改源码。
+2. `docker compose --profile dev config --quiet`、build、`up -d --force-recreate` 和服务健康检查。
+3. 执行并核验两组 Phase 3C 迁移、RLS policy、索引、唯一约束和运行时角色权限。
+4. 使用导入域通用数据集执行 validate → confirm → Worker → SSE → `imported_records` E2E，分别验证四种策略。
+5. 对同批次执行并发 confirm，核验一个 job、一个终态、无重复正式记录。
+6. Worker 处理中重启容器，等待租约过期后恢复；再注入可重试失败与永久失败，核验 retry/dead_letter。
+7. 中断 SSE 后携带 `Last-Event-ID` 重连，核验无丢失、无跨 Workspace 事件。
+8. 以两个 Workspace 执行 API、数据库、任务、正式记录、冲突候选、事件和审计的越权/强制 RLS 测试。
+9. 核验 Phase 1/2 认证、CSRF、健康接口和 Phase 3A/3B 上传/inspect/mapping/preview 回归。
+10. 扫描日志、响应、错误、SSE 和审计，秘密及原始敏感行命中数必须为 0。
+11. 核验没有 cancel/rollback/replay 路由，没有 `import_row_changes`，没有行情、交易、套利或其他正式业务表。
+
+独立 Evaluator 必须：
+
+- 审阅完整差异、迁移最终态、OpenAPI、队列状态机、确认事务、Worker 租约、SSE 重放、RLS/审计和最小前端。
+- 逐项核验五个 Phase 3B MEDIUM 的处理证据。
+- 复核本地与 VPS 证据，不以只读审查替代真实 Docker/数据库/E2E。
+- 将所有 BLOCKER/HIGH 交回 Generator 修复，并复核至最终 PASS；3C 未 PASS 前不得授权 3D。
+
+退出条件：3C 功能、测试和 VPS/Evaluator 证据单独提交，`PLANS.md` 更新为 3C 已完成且 Evaluator PASS；Phase 3D 仍为未授权，仓库不存在任何 3D 或其他业务域越界实现。
 
 ### 8.4 Phase 3D：原子回滚、补偿批次、完整前端与部署验收
 
@@ -542,7 +811,7 @@ docker compose --profile dev ps
 
 ## 13. Generator 边界
 
-Phase 3B Generator 工作已完成并收口；Phase 3C/3D 仍视为未收到授权。后续如进入 Phase 3C，必须重新由 Planner 明确范围，不得沿用 Phase 3B 授权。
+Phase 3B Generator 工作已完成并收口；Phase 3C 已按第 8.3 节获得独立授权并进入实施中，不得沿用或扩大 Phase 3B 授权；Phase 3D 仍视为未收到授权。
 
 获得实施授权后，Generator 仍必须遵守：
 
@@ -553,4 +822,4 @@ Phase 3B Generator 工作已完成并收口；Phase 3C/3D 仍视为未收到授�
 - 任何新增业务表必须包含 `workspace_id`、RLS、索引、审计和跨 Workspace 测试。
 - 所有新接口必须更新 OpenAPI、前端客户端和测试夹具。
 - BLOCKER/HIGH 必须由 Generator 修复，并由 Evaluator 复核至 PASS 后才能提交。
-- Generator 若再次卡住，允许创建新的 Generator 重做同一个 Phase 3B；新任务必须逐项引用第 8.2 节的文件范围、API/DB/frontend 边界、验收标准和最大边界，且不得由主 Agent 代替实现或评估。
+- Generator 若再次卡住，允许创建新的 Generator 接手同一个 Phase 3C；新任务必须逐项引用第 8.3 节的文件范围、API/DB/frontend 边界、验收标准和最大边界，且不得由主 Agent 代替实现或评估。

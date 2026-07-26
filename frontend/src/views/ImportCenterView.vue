@@ -1,17 +1,29 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { UploadUserFile } from 'element-plus'
-import { getJson, sendJson, uploadImport } from '../api'
+import {
+  confirmImport,
+  getImportErrors,
+  getJson,
+  sendJson,
+  streamImportEvents,
+  uploadImport
+} from '../api'
 import type {
   ApiEnvelope,
-  ImportErrorItem,
+  ImportConflictPolicy,
   ImportDatasetDefinition,
+  ImportErrorItem,
   ImportInspectResponse,
+  ImportJobEvent,
+  ImportJobStatus,
+  ImportJobSummary,
   ImportMappingField,
   ImportMappingResponse,
   ImportPreviewRow,
   ImportSummary,
-  ImportTemplateSummary
+  ImportTemplateSummary,
+  ImportValidationSummary
 } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { clearPreviewRows } from './importPreviewState'
@@ -30,13 +42,41 @@ const headerRow = ref(1)
 const datasetType = ref('generic')
 const templateName = ref('')
 const selectedTemplateVersionId = ref<string | null>(null)
+const validationSummary = ref<ImportValidationSummary | null>(null)
+const selectedConflictPolicy = ref<ImportConflictPolicy | null>(null)
+const errorNextCursor = ref<string | null>(null)
+const jobProgress = ref<ImportJobSummary | null>(null)
+const lastEventSequence = ref<number | null>(null)
+const sseDisconnected = ref(false)
 const message = ref('')
 const loading = ref(false)
+const idempotencyKeys = new Map<string, string>()
+let progressController: AbortController | null = null
 
 const columns = computed(() => inspectResult.value?.columns ?? [])
 const mappingFields = ref<ImportMappingField[]>([])
 const datasetDefinition = computed(() => datasets.value.find((dataset) => dataset.dataset_type === datasetType.value))
 const selectedTemplate = computed(() => templates.value.find((template) => template.latest_version_id === selectedTemplateVersionId.value))
+const progressPercentage = computed(() => {
+  const total = jobProgress.value?.total_rows ?? 0
+  if (total <= 0) return 0
+  return Math.min(100, Math.round(((jobProgress.value?.processed_rows ?? 0) / total) * 100))
+})
+const terminalJobStatuses = new Set<ImportJobStatus>(['succeeded', 'failed', 'dead_letter'])
+const jobStatuses = new Set<ImportJobStatus>([
+  'queued',
+  'running',
+  'progress',
+  'succeeded',
+  'failed',
+  'dead_letter'
+])
+const conflictPolicyLabels: Record<ImportConflictPolicy, string> = {
+  skip: '跳过冲突记录',
+  overwrite: '覆盖已有记录',
+  keep_conflict: '保留候选、正式表不新增同键记录',
+  abort: '发现冲突即终止'
+}
 
 async function ensureCsrf() {
   if (!auth.csrfToken) {
@@ -60,6 +100,12 @@ async function uploadSelected() {
     inspectResult.value = null
     mappingFields.value = []
     errors.value = []
+    validationSummary.value = null
+    selectedConflictPolicy.value = null
+    errorNextCursor.value = null
+    stopProgress()
+    jobProgress.value = null
+    lastEventSequence.value = null
     selectedTemplateVersionId.value = null
     await loadMetadata()
   } catch (error) {
@@ -86,7 +132,12 @@ async function inspectImport() {
       csrf
     )
     inspectResult.value = clearPreviewRows(envelope.data)
-    errors.value = []
+    if (envelope.data.preview_invalidated) {
+      errors.value = []
+      errorNextCursor.value = null
+      validationSummary.value = null
+      selectedConflictPolicy.value = null
+    }
     currentImport.value = { ...currentImport.value, status: envelope.data.status }
     selectedSheet.value = envelope.data.selected_sheet ?? ''
     if (mappingFields.value.length === 0) {
@@ -123,6 +174,9 @@ async function saveMapping() {
     if (envelope.data.preview_invalidated) {
       inspectResult.value = clearPreviewRows(inspectResult.value)
       errors.value = []
+      errorNextCursor.value = null
+      validationSummary.value = null
+      selectedConflictPolicy.value = null
       message.value = '映射已保存，旧预览已失效，请重新生成预览'
     } else {
       message.value = '映射已保存'
@@ -151,7 +205,9 @@ async function previewImport() {
       csrf
     )
     inspectResult.value = envelope.data
-    await loadErrors()
+    validationSummary.value = null
+    selectedConflictPolicy.value = null
+    await loadErrors(true)
   } catch (error) {
     message.value = error instanceof Error ? error.message : '预览失败'
   } finally {
@@ -228,12 +284,180 @@ function transformsFor(targetField: string) {
   return datasetDefinition.value?.fields.find((target) => target.code === targetField)?.transforms ?? []
 }
 
-async function loadErrors() {
+async function validateImport() {
   if (!currentImport.value) return
-  const envelope = await getJson<ApiEnvelope<{ items: ImportErrorItem[] }>>(
-    `/api/v1/imports/${currentImport.value.id}/errors`
+  loading.value = true
+  message.value = ''
+  try {
+    const csrf = await ensureCsrf()
+    const envelope = await sendJson<ApiEnvelope<ImportValidationSummary>>(
+      `/api/v1/imports/${currentImport.value.id}/validate`,
+      {},
+      csrf
+    )
+    validationSummary.value = envelope.data
+    selectedConflictPolicy.value = envelope.data.allowed_conflict_policies.includes(
+      selectedConflictPolicy.value as ImportConflictPolicy
+    )
+      ? selectedConflictPolicy.value
+      : (envelope.data.allowed_conflict_policies[0] ?? null)
+    await loadErrors(true)
+    message.value = envelope.data.blocking_error_count
+      ? '校验完成：存在阻断错误，暂不能确认导入'
+      : '校验完成，可以选择冲突策略并确认导入'
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '校验失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+function idempotencyKeyFor(importId: string) {
+  const existing = idempotencyKeys.get(importId)
+  if (existing) return existing
+  const key = `import-confirm:${importId}:${crypto.randomUUID()}`
+  idempotencyKeys.set(importId, key)
+  return key
+}
+
+async function confirmCurrentImport() {
+  if (!currentImport.value || !selectedConflictPolicy.value) return
+  loading.value = true
+  message.value = ''
+  try {
+    const csrf = await ensureCsrf()
+    const envelope = await confirmImport(
+      currentImport.value.id,
+      selectedConflictPolicy.value,
+      csrf,
+      idempotencyKeyFor(currentImport.value.id)
+    )
+    currentImport.value = { ...currentImport.value, status: envelope.data.status }
+    jobProgress.value = {
+      job_id: envelope.data.job_id,
+      status: envelope.data.status,
+      processed_rows: 0,
+      total_rows: inspectResult.value?.total_rows ?? 0,
+      inserted_count: 0,
+      updated_count: 0,
+      skipped_count: 0,
+      conflict_count: 0
+    }
+    message.value = envelope.data.replayed ? '已恢复同一确认任务' : '导入任务已进入队列'
+    startProgress(envelope.data.import_id)
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '确认导入失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadErrors(reset = false) {
+  if (!currentImport.value) return
+  const envelope = await getImportErrors(
+    currentImport.value.id,
+    reset ? null : errorNextCursor.value
   )
-  errors.value = envelope.data.items
+  errors.value = reset ? envelope.data.items : [...errors.value, ...envelope.data.items]
+  errorNextCursor.value = envelope.data.next_cursor ?? null
+}
+
+function applyProgressEvent(event: ImportJobEvent) {
+  if (lastEventSequence.value !== null && event.event_seq <= lastEventSequence.value) return
+  lastEventSequence.value = event.event_seq
+  sseDisconnected.value = false
+  jobProgress.value = {
+    job_id: jobProgress.value?.job_id ?? '',
+    status: event.status,
+    processed_rows: event.processed_rows,
+    total_rows: event.total_rows,
+    inserted_count: event.inserted_count,
+    updated_count: event.updated_count,
+    skipped_count: event.skipped_count,
+    conflict_count: event.conflict_count,
+    error_code: event.error_code
+  }
+  if (currentImport.value) {
+    currentImport.value = { ...currentImport.value, status: event.status }
+  }
+}
+
+function applyBatchFallback(summary: ImportSummary) {
+  currentImport.value = summary
+  validationSummary.value =
+    summary.validation_summary ?? summary.validation ?? validationSummary.value
+  const nestedJob = summary.job
+  const status = nestedJob?.status ?? summary.status
+  if (nestedJob) {
+    jobProgress.value = nestedJob
+  } else if (summary.job_id && jobStatuses.has(status as ImportJobStatus)) {
+    jobProgress.value = {
+      job_id: summary.job_id,
+      status: status as ImportJobStatus,
+      processed_rows: summary.processed_rows ?? 0,
+      total_rows: summary.total_rows ?? 0,
+      inserted_count: summary.inserted_count ?? 0,
+      updated_count: summary.updated_count ?? 0,
+      skipped_count: summary.skipped_count ?? 0,
+      conflict_count: summary.conflict_count ?? 0,
+      error_code: summary.error_code
+    }
+  }
+}
+
+async function refreshImportStatus(importId: string) {
+  const envelope = await getJson<ApiEnvelope<ImportSummary>>(
+    `/api/v1/imports/${encodeURIComponent(importId)}`
+  )
+  applyBatchFallback(envelope.data)
+}
+
+function waitForReconnect(signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, 3000)
+    signal.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer)
+        resolve()
+      },
+      { once: true }
+    )
+  })
+}
+
+async function followImportProgress(importId: string, signal: AbortSignal) {
+  while (!signal.aborted) {
+    try {
+      await streamImportEvents(importId, lastEventSequence.value, applyProgressEvent, signal)
+      if (jobProgress.value && terminalJobStatuses.has(jobProgress.value.status)) return
+      sseDisconnected.value = true
+    } catch (error) {
+      if (signal.aborted) return
+      sseDisconnected.value = true
+    }
+
+    try {
+      await refreshImportStatus(importId)
+      if (jobProgress.value && terminalJobStatuses.has(jobProgress.value.status)) return
+    } catch {
+      message.value = '进度连接中断，批次状态查询暂时不可用，正在重试'
+    }
+    await waitForReconnect(signal)
+  }
+}
+
+function startProgress(importId: string) {
+  stopProgress()
+  lastEventSequence.value = null
+  sseDisconnected.value = false
+  progressController = new AbortController()
+  void followImportProgress(importId, progressController.signal)
+}
+
+function stopProgress() {
+  progressController?.abort()
+  progressController = null
 }
 
 function previewCellValue(row: ImportPreviewRow, column: string) {
@@ -245,14 +469,16 @@ onMounted(() => {
     message.value = error instanceof Error ? error.message : '无法加载导入元数据'
   })
 })
+
+onUnmounted(stopProgress)
 </script>
 
 <template>
   <section class="page">
     <div class="page-heading">
-      <p class="eyebrow">Phase 3B</p>
+      <p class="eyebrow">Phase 3C</p>
       <h1>导入中心</h1>
-      <p>上传文件后完成格式识别、字段映射和前 50 行预览。</p>
+      <p>上传并预览文件，校验后选择冲突策略，确认导入并查看任务进度。</p>
     </div>
 
     <el-alert v-if="message" :title="message" type="info" show-icon class="status-alert" />
@@ -376,6 +602,76 @@ onMounted(() => {
       </el-table>
     </el-card>
 
+    <el-card v-if="inspectResult?.preview_rows.length || validationSummary" shadow="never" class="section-card">
+      <template #header>校验与确认</template>
+      <el-button :disabled="!inspectResult?.preview_rows.length" :loading="loading" @click="validateImport">
+        校验
+      </el-button>
+      <el-descriptions v-if="validationSummary" :column="4" border class="details">
+        <el-descriptions-item label="阻断错误">
+          {{ validationSummary.blocking_error_count }}
+        </el-descriptions-item>
+        <el-descriptions-item label="警告">
+          {{ validationSummary.warning_count }}
+        </el-descriptions-item>
+        <el-descriptions-item label="文件内重复">
+          {{ validationSummary.duplicate_count }}
+        </el-descriptions-item>
+        <el-descriptions-item label="数据库冲突">
+          {{ validationSummary.conflict_count }}
+        </el-descriptions-item>
+      </el-descriptions>
+      <div v-if="validationSummary" class="confirm-panel">
+        <p class="field-label">冲突策略（仅展示服务端允许的策略）</p>
+        <el-radio-group v-model="selectedConflictPolicy">
+          <el-radio
+            v-for="policy in validationSummary.allowed_conflict_policies"
+            :key="policy"
+            :value="policy"
+          >
+            {{ conflictPolicyLabels[policy] }}
+          </el-radio>
+        </el-radio-group>
+        <el-button
+          type="primary"
+          :disabled="validationSummary.blocking_error_count > 0 || !selectedConflictPolicy"
+          :loading="loading"
+          @click="confirmCurrentImport"
+        >
+          确认导入
+        </el-button>
+      </div>
+    </el-card>
+
+    <el-card v-if="jobProgress" shadow="never" class="section-card">
+      <template #header>导入进度</template>
+      <el-alert
+        v-if="sseDisconnected"
+        title="实时连接已中断，正在自动重连；当前状态由批次查询只读兜底。"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
+      <el-progress
+        :percentage="progressPercentage"
+        :status="jobProgress.status === 'succeeded' ? 'success' : undefined"
+        class="details"
+      />
+      <el-descriptions :column="4" border class="details">
+        <el-descriptions-item label="任务状态">{{ jobProgress.status }}</el-descriptions-item>
+        <el-descriptions-item label="已处理">
+          {{ jobProgress.processed_rows }} / {{ jobProgress.total_rows }}
+        </el-descriptions-item>
+        <el-descriptions-item label="新增">{{ jobProgress.inserted_count }}</el-descriptions-item>
+        <el-descriptions-item label="覆盖">{{ jobProgress.updated_count }}</el-descriptions-item>
+        <el-descriptions-item label="跳过">{{ jobProgress.skipped_count }}</el-descriptions-item>
+        <el-descriptions-item label="冲突候选">{{ jobProgress.conflict_count }}</el-descriptions-item>
+        <el-descriptions-item v-if="jobProgress.error_code" label="错误代码">
+          {{ jobProgress.error_code }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-card>
+
     <el-card v-if="templates.length || errors.length || inspectResult?.warnings.length" shadow="never" class="section-card">
       <template #header>模板与错误</template>
       <el-table v-if="templates.length" :data="templates" border class="details">
@@ -390,6 +686,14 @@ onMounted(() => {
         <el-table-column prop="error_code" label="代码" width="180" />
         <el-table-column prop="message" label="消息" min-width="240" />
       </el-table>
+      <el-button
+        v-if="errorNextCursor"
+        :loading="loading"
+        class="details"
+        @click="loadErrors(false)"
+      >
+        加载更多错误
+      </el-button>
     </el-card>
   </section>
 </template>
@@ -419,6 +723,17 @@ onMounted(() => {
 
 .inline-input {
   width: 180px;
+}
+
+.confirm-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.field-label {
+  margin: 0;
+  color: var(--el-text-color-secondary);
 }
 
 @media (max-width: 860px) {

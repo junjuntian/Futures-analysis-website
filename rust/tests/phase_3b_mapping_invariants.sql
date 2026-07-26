@@ -1,4 +1,4 @@
--- Run with a privileged PostgreSQL role after migrations 202607250004 through 202607250006.
+-- Run with a privileged PostgreSQL role after migrations 202607250004 through 202607250007.
 -- The outer transaction always rolls back; no test user, workspace, batch, mapping, staging row,
 -- or error row remains after a successful run.
 \set ON_ERROR_STOP on
@@ -152,6 +152,16 @@ begin
         (preview_mapping, workspace_one, preview_batch, version_one, 'generic',
          jsonb_build_object('fields', fields), user_one);
     update import_batches set status = 'preview_ready' where id = preview_batch;
+    if exists (
+        select 1
+          from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'import_batches'
+           and column_name = 'staging_version'
+    ) then
+        execute 'update import_batches set staging_version = 1 where id = $1'
+            using preview_batch;
+    end if;
     insert into import_staging_rows
         (id, workspace_id, import_batch_id, row_number, raw_values, normalized_values, target_fields, created_by)
     values
@@ -163,6 +173,31 @@ begin
     values
         ('30000000-0000-7000-8000-000000000072', workspace_one, preview_batch,
          'warning', 'phase3b_test_warning', 'phase3b test warning', user_one);
+
+    -- Simulate save_mapping's preview invalidation and then force the mapping write to fail.
+    -- The nested PL/pgSQL block is a database subtransaction: every preceding delete/status
+    -- update must roll back together with the rejected mapping update.
+    begin
+        delete from import_errors
+         where workspace_id = workspace_one and import_batch_id = preview_batch;
+        delete from import_staging_rows
+         where workspace_id = workspace_one and import_batch_id = preview_batch;
+        update import_batches
+           set status = 'mapped'
+         where workspace_id = workspace_one and id = preview_batch;
+        update import_mappings
+           set mapping_json = jsonb_build_object('fields', mismatched_fields)
+         where workspace_id = workspace_one and id = preview_mapping;
+        raise exception 'expected simulated save_mapping write to fail';
+    exception when check_violation then null;
+    end;
+    if (select status from import_batches where id = preview_batch) <> 'preview_ready'
+       or (select count(*) from import_staging_rows where import_batch_id = preview_batch) <> 1
+       or (select count(*) from import_errors where import_batch_id = preview_batch) <> 1
+       or (select mapping_json from import_mappings where id = preview_mapping)
+          <> jsonb_build_object('fields', fields) then
+        raise exception 'failed save_mapping did not atomically restore preview state and mapping';
+    end if;
 
     -- Direct ordinary-mapping mutation is rejected while persisted preview data exists.
     begin

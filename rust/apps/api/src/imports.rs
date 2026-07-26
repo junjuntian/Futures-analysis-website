@@ -2,9 +2,12 @@ use crate::auth::{self, AuthError, AuthState, Permission};
 use application::imports::{ImportParseError, UploadValidationError, UploadValidator};
 use axum::{
     Json,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response, Sse,
+        sse::{Event, KeepAlive},
+    },
 };
 use common::ApiResponse;
 use database::imports::{
@@ -12,14 +15,15 @@ use database::imports::{
     PreviewInputSnapshot, PreviewSave,
 };
 use domain::import::{
-    ImportBatchStatus, ImportDatasetDefinition, ImportErrorsResponse, ImportInspectRequest,
-    ImportInspectResponse, ImportMappingRequest, ImportMappingResponse, ImportPreviewRequest,
-    ImportTemplateCreateRequest, ImportTemplateSummary, ImportTemplateVersionResponse,
-    import_dataset_definitions,
+    ImportBatchStatus, ImportConfirmRequest, ImportConflictPolicy, ImportDatasetDefinition,
+    ImportErrorsResponse, ImportInspectRequest, ImportInspectResponse, ImportMappingRequest,
+    ImportMappingResponse, ImportPreviewRequest, ImportTemplateCreateRequest,
+    ImportTemplateSummary, ImportTemplateVersionResponse, import_dataset_definitions,
 };
 use infrastructure::object_storage::{ObjectStorage, ObjectStorageError};
-use serde::Serialize;
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -29,6 +33,7 @@ pub struct ImportState {
     pub auth: Arc<AuthState>,
     pub storage: Arc<infrastructure::object_storage::LocalObjectStorage>,
     pub upload_policy: application::imports::UploadPolicy,
+    pub idempotency_pepper: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -65,6 +70,9 @@ pub struct ImportResponse {
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String)]
     pub updated_at: OffsetDateTime,
+    pub validation: Option<ImportValidateApiResponse>,
+    pub job: Option<ImportJobApiResponse>,
+    pub conflict_policy: Option<ImportConflictPolicy>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -79,6 +87,35 @@ pub struct ImportDatasetsResponse {
 
 impl From<ImportUploadRecord> for ImportResponse {
     fn from(record: ImportUploadRecord) -> Self {
+        let validation =
+            record
+                .validation_version
+                .map(|validation_version| ImportValidateApiResponse {
+                    import_id: record.import_id,
+                    validation_version: validation_version.to_string(),
+                    blocking_error_count: record.blocking_error_count as u32,
+                    warning_count: record.warning_count as u32,
+                    duplicate_count: record.duplicate_count as u32,
+                    conflict_count: record.conflict_count as u32,
+                    allowed_conflict_policies: ImportConflictPolicy::ALL.to_vec(),
+                });
+        let job = record.job_id.map(|job_id| ImportJobApiResponse {
+            job_id,
+            status: record.job_status.unwrap_or_else(|| "queued".into()),
+            processed_rows: record.processed_count as u32,
+            total_rows: record.total_rows as u32,
+            inserted_count: record.imported_count as u32,
+            updated_count: record.overwritten_count as u32,
+            skipped_count: record.skipped_count as u32,
+            conflict_count: record.conflict_result_count as u32,
+            error_code: record.job_error_code,
+            attempt_count: record.job_attempt_count.unwrap_or(0) as u32,
+            max_attempts: record.job_max_attempts.unwrap_or(5) as u32,
+        });
+        let conflict_policy = record
+            .conflict_policy
+            .as_deref()
+            .and_then(ImportConflictPolicy::parse);
         Self {
             id: record.import_id,
             status: record.status,
@@ -92,6 +129,9 @@ impl From<ImportUploadRecord> for ImportResponse {
             },
             created_at: record.created_at,
             updated_at: record.updated_at,
+            validation,
+            job,
+            conflict_policy,
         }
     }
 }
@@ -158,6 +198,56 @@ impl ImportApiError {
             request_id,
         }
     }
+
+    fn conflict(code: &'static str, request_id: Uuid) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+            message: "request conflicts with an existing confirmation",
+            request_id,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ImportErrorsQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportValidateApiResponse {
+    pub import_id: Uuid,
+    pub validation_version: String,
+    pub blocking_error_count: u32,
+    pub warning_count: u32,
+    pub duplicate_count: u32,
+    pub conflict_count: u32,
+    pub allowed_conflict_policies: Vec<ImportConflictPolicy>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportConfirmApiResponse {
+    pub import_id: Uuid,
+    pub job_id: Uuid,
+    pub status: String,
+    pub conflict_policy: ImportConflictPolicy,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportJobApiResponse {
+    pub job_id: Uuid,
+    pub status: String,
+    pub processed_rows: u32,
+    pub total_rows: u32,
+    pub inserted_count: u32,
+    pub updated_count: u32,
+    pub skipped_count: u32,
+    pub conflict_count: u32,
+    pub error_code: Option<String>,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
 }
 
 impl IntoResponse for ImportApiError {
@@ -544,18 +634,235 @@ pub async fn preview(
 }
 
 #[utoipa::path(
-    get,
-    path = "/api/v1/imports/{import_id}/errors",
-    params(("import_id" = Uuid, Path, description = "Import batch id")),
+    post,
+    path = "/api/v1/imports/{import_id}/validate",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
     security(("session_cookie" = [])),
     responses(
-        (status = 200, body = ImportErrorsResponse),
+        (status = 200, body = ImportValidateApiResponse),
+        (status = 400, body = ImportErrorBody),
         (status = 401, body = ImportErrorBody),
         (status = 403, body = ImportErrorBody),
         (status = 404, body = ImportErrorBody)
     )
 )]
-pub async fn errors(
+pub async fn validate(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let result: Result<Response, ImportApiError> = async {
+        let initial_context = database::imports::load_validation_context(
+            &state.auth.pool,
+            context.workspace_id(),
+            import_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        let record =
+            load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+        let bytes = state
+            .storage
+            .read(&record.object_key, state.upload_policy.max_bytes)
+            .await
+            .map_err(|_| ImportApiError::internal(request_id))?;
+        let full_parse = application::imports::parse_all_content_with_warnings(
+            &record.detected_format,
+            &bytes,
+            ImportPreviewRequest {
+                encoding: initial_context.detected_encoding.clone(),
+                delimiter: initial_context.detected_delimiter.clone(),
+                selected_sheet: initial_context.selected_sheet.clone(),
+                header_row: Some(initial_context.header_row as u32),
+            },
+            &initial_context.mapping_fields,
+            application::imports::DEFAULT_IMPORT_MAX_ROWS,
+        )
+        .map_err(|error| map_parse_error(error, request_id))?;
+        database::imports::save_preview(
+            &state.auth.pool,
+            PreviewSave {
+                workspace_id: context.workspace_id(),
+                actor_user_id: context.user_id(),
+                import_id,
+                snapshot: PreviewInputSnapshot {
+                    detected_encoding: initial_context.detected_encoding.as_deref(),
+                    detected_delimiter: initial_context.detected_delimiter.as_deref(),
+                    selected_sheet: initial_context.selected_sheet.as_deref(),
+                    header_row: initial_context.header_row,
+                    fields: &initial_context.mapping_fields,
+                },
+                rows: &full_parse.rows,
+                errors: &[],
+                warnings: &full_parse.warnings,
+            },
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        let validation_context = database::imports::load_validation_context(
+            &state.auth.pool,
+            context.workspace_id(),
+            import_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        let outcome = application::import_jobs::validate_staging_rows(
+            &validation_context.dataset_type,
+            validation_context.rows.clone(),
+        )
+        .map_err(|error| match error {
+            application::import_jobs::ValidationDefinitionError::DatasetNotConfirmable => {
+                ImportApiError::bad_request("dataset_not_confirmable", request_id)
+            }
+            application::import_jobs::ValidationDefinitionError::InvalidStagingShape => {
+                ImportApiError::bad_request("validation_stale", request_id)
+            }
+        })?;
+        let saved = database::imports::save_validation(
+            &state.auth.pool,
+            context.workspace_id(),
+            context.user_id(),
+            import_id,
+            &validation_context,
+            &outcome,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        let allowed_conflict_policies =
+            application::import_jobs::allowed_conflict_policies(&validation_context.dataset_type)
+                .to_vec();
+        Ok(Json(ApiResponse::new(
+            ImportValidateApiResponse {
+                import_id,
+                validation_version: saved.validation_version.to_string(),
+                blocking_error_count: saved.blocking_error_count,
+                warning_count: saved.warning_count,
+                duplicate_count: saved.duplicate_count,
+                conflict_count: saved.conflict_count,
+                allowed_conflict_policies,
+            },
+            request_id,
+        ))
+        .into_response())
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Err(audit_import_failure(
+            &state,
+            &context,
+            request_id,
+            import_id,
+            "import.validate",
+            error,
+        )
+        .await),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/confirm",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("Idempotency-Key" = String, Header, description = "Stable key for this confirmation"),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    request_body = ImportConfirmRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 202, body = ImportConfirmApiResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn confirm(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ImportConfirmRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    let result: Result<Response, ImportApiError> = async {
+        let raw_key = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| (16..=200).contains(&value.len()))
+            .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))?;
+        let idempotency_key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+        let request_hash = digest(&[
+            &context.workspace_id().to_string(),
+            &import_id.to_string(),
+            request.conflict_policy.as_str(),
+            &context.user_id().to_string(),
+        ]);
+        let confirmed = database::imports::confirm_import(
+            &state.auth.pool,
+            context.workspace_id(),
+            context.user_id(),
+            import_id,
+            request.conflict_policy,
+            &idempotency_key_hash,
+            &request_hash,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        Ok((
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::new(
+                ImportConfirmApiResponse {
+                    import_id,
+                    job_id: confirmed.job_id,
+                    status: confirmed.status,
+                    conflict_policy: request.conflict_policy,
+                    replayed: confirmed.replayed,
+                },
+                request_id,
+            )),
+        )
+            .into_response())
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Err(audit_import_failure(
+            &state,
+            &context,
+            request_id,
+            import_id,
+            "import.confirm",
+            error,
+        )
+        .await),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/imports/{import_id}/events",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("Last-Event-ID" = Option<String>, Header, description = "Last processed decimal event sequence")
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, content_type = "text/event-stream"),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn events(
     State(state): State<Arc<ImportState>>,
     Path(import_id): Path<Uuid>,
     headers: HeaderMap,
@@ -567,11 +874,108 @@ pub async fn errors(
     context
         .require_permission(Permission::ImportRead)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
-    let items = database::imports::list_errors(&state.auth.pool, context.workspace_id(), import_id)
+    database::imports::get_import(&state.auth.pool, context.workspace_id(), import_id)
         .await
         .map_err(|error| map_repository_error(error, request_id))?;
+    let after = match headers.get("last-event-id") {
+        None => 0,
+        Some(value) => value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| ImportApiError::bad_request("event_id_invalid", request_id))?,
+    };
+    let initial = database::job_queue::list_events_after(
+        &state.auth.pool,
+        context.workspace_id(),
+        import_id,
+        after,
+    )
+    .await
+    .map_err(|_| ImportApiError::bad_request("event_id_invalid", request_id))?;
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    let pool = state.auth.pool.clone();
+    let workspace_id = context.workspace_id();
+    tokio::spawn(async move {
+        let mut cursor = after;
+        let mut pending = VecDeque::from(initial);
+        loop {
+            if let Some(event) = pending.pop_front() {
+                cursor = event.event_seq;
+                let terminal = matches!(
+                    event.event_type.as_str(),
+                    "succeeded" | "failed" | "dead_letter"
+                );
+                let sse = Event::default()
+                    .id(event.event_seq.to_string())
+                    .event(event.event_type.clone())
+                    .data(serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()));
+                if sender.send(Ok(sse)).await.is_err() || terminal {
+                    break;
+                }
+                continue;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            match database::job_queue::list_events_after(&pool, workspace_id, import_id, cursor)
+                .await
+            {
+                Ok(events) if !events.is_empty() => pending = VecDeque::from(events),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver);
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("heartbeat"),
+        )
+        .into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/imports/{import_id}/errors",
+    params(("import_id" = Uuid, Path, description = "Import batch id"), ImportErrorsQuery),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportErrorsResponse),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn errors(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    Query(query): Query<ImportErrorsQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::ImportRead)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let page = database::imports::list_errors(
+        &state.auth.pool,
+        context.workspace_id(),
+        import_id,
+        query.cursor.as_deref(),
+        query.limit.unwrap_or(100),
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
     Ok(Json(ApiResponse::new(
-        ImportErrorsResponse { import_id, items },
+        ImportErrorsResponse {
+            import_id,
+            items: page.items,
+            next_cursor: page.next_cursor,
+        },
         request_id,
     ))
     .into_response())
@@ -717,6 +1121,12 @@ fn map_parse_error(error: ImportParseError, request_id: Uuid) -> ImportApiError 
         ImportParseError::SpreadsheetReadFailed => {
             ImportApiError::bad_request("spreadsheet_read_failed", request_id)
         }
+        ImportParseError::TooManyRows => {
+            ImportApiError::bad_request("import_row_limit_exceeded", request_id)
+        }
+        ImportParseError::UnsupportedTransform => {
+            ImportApiError::bad_request("unsupported_transform", request_id)
+        }
     }
 }
 
@@ -746,6 +1156,27 @@ fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> Impor
         ImportRepositoryError::PreviewInputsChanged => {
             ImportApiError::bad_request("preview_inputs_changed", request_id)
         }
+        ImportRepositoryError::ValidationRequired => {
+            ImportApiError::bad_request("validation_required", request_id)
+        }
+        ImportRepositoryError::ValidationStale => {
+            ImportApiError::bad_request("validation_stale", request_id)
+        }
+        ImportRepositoryError::BlockingErrorsPresent => {
+            ImportApiError::bad_request("blocking_errors_present", request_id)
+        }
+        ImportRepositoryError::ConflictPolicyNotAllowed => {
+            ImportApiError::bad_request("conflict_policy_not_allowed", request_id)
+        }
+        ImportRepositoryError::IdempotencyKeyReused => {
+            ImportApiError::conflict("idempotency_key_reused", request_id)
+        }
+        ImportRepositoryError::ConfirmationConflict => {
+            ImportApiError::conflict("confirmation_conflict", request_id)
+        }
+        ImportRepositoryError::EventIdInvalid => {
+            ImportApiError::bad_request("event_id_invalid", request_id)
+        }
         _ => ImportApiError::internal(request_id),
     }
 }
@@ -758,15 +1189,65 @@ async fn require_import_write(
     let context = auth::current_context(&state.auth, headers)
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
-    auth::ensure_allowed_origin(&state.auth.config, headers)
-        .map_err(|error| ImportApiError::auth(error, request_id))?;
-    auth::ensure_csrf(&state.auth, headers)
-        .await
-        .map_err(|error| ImportApiError::auth(error, request_id))?;
-    context
-        .require_permission(Permission::ImportUpload)
-        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    if let Err(error) = auth::ensure_allowed_origin(&state.auth.config, headers) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = auth::ensure_csrf(&state.auth, headers).await {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = context.require_permission(Permission::ImportUpload) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
     Ok((request_id, context))
+}
+
+async fn audit_write_denial(
+    state: &ImportState,
+    context: &auth::AuthContext,
+    request_id: Uuid,
+    error: AuthError,
+) -> ImportApiError {
+    let error_code = error.code();
+    match database::imports::record_import_audit(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        request_id,
+        None,
+        "import.write",
+        "denied",
+        error_code,
+    )
+    .await
+    {
+        Ok(()) => ImportApiError::auth(error, request_id),
+        Err(_) => ImportApiError::internal(request_id),
+    }
+}
+
+async fn audit_import_failure(
+    state: &ImportState,
+    context: &auth::AuthContext,
+    request_id: Uuid,
+    import_id: Uuid,
+    event_type: &str,
+    error: ImportApiError,
+) -> ImportApiError {
+    match database::imports::record_import_audit(
+        &state.auth.pool,
+        context.workspace_id(),
+        context.user_id(),
+        request_id,
+        Some(import_id),
+        event_type,
+        "failure",
+        error.code,
+    )
+    .await
+    {
+        Ok(()) => error,
+        Err(_) => ImportApiError::internal(request_id),
+    }
 }
 
 async fn load_import_object(
@@ -801,4 +1282,13 @@ async fn audit_upload_denial(
     } else {
         ImportApiError::auth(error, request_id)
     }
+}
+
+fn digest(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
