@@ -610,6 +610,56 @@ pub struct ImportConfirmResponse {
     pub conflict_policy: ImportConflictPolicy,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportRollbackRequest {
+    pub precheck_request_id: uuid::Uuid,
+    pub precheck_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportRollbackConflict {
+    pub conflict_seq: u64,
+    pub conflict_type: ImportRollbackConflictType,
+    pub target_kind: Option<String>,
+    pub target_id: Option<uuid::Uuid>,
+    pub expected_row_version: Option<u64>,
+    pub current_row_version: Option<u64>,
+    pub dependency_kind: Option<String>,
+    pub detail_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportRollbackCheckResponse {
+    pub import_id: uuid::Uuid,
+    pub precheck_request_id: uuid::Uuid,
+    pub precheck_fingerprint: String,
+    pub rollback_capability: RollbackCapability,
+    pub change_log_version: Option<u32>,
+    pub can_rollback: bool,
+    pub compensation_recommended: bool,
+    pub affected_count: u32,
+    pub conflict_count: u32,
+    pub conflicts: Vec<ImportRollbackConflict>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportRollbackConflictsResponse {
+    pub import_id: uuid::Uuid,
+    pub precheck_request_id: uuid::Uuid,
+    pub items: Vec<ImportRollbackConflict>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportRollbackResponse {
+    pub import_id: uuid::Uuid,
+    pub precheck_request_id: uuid::Uuid,
+    pub job_id: uuid::Uuid,
+    pub status: ImportRollbackRequestStatus,
+    pub replayed: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ImportProgress {
     pub processed_count: u32,

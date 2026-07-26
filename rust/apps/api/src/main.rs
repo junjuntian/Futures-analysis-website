@@ -43,6 +43,9 @@ use uuid::Uuid;
         imports::preview,
         imports::validate,
         imports::confirm,
+        imports::rollback_check,
+        imports::rollback_conflicts,
+        imports::rollback,
         imports::events,
         imports::errors,
         imports::list_templates,
@@ -62,6 +65,7 @@ use uuid::Uuid;
         auth::SessionsQuery,
         auth::ErrorBody,
         imports::ImportErrorBody,
+        imports::ImportRollbackConflictApiResponse,
         imports::ImportUploadRequest,
         imports::ImportFileResponse,
         imports::ImportResponse,
@@ -98,6 +102,14 @@ use uuid::Uuid;
         domain::import::ImportValidateResponse,
         domain::import::ImportConfirmRequest,
         domain::import::ImportConfirmResponse,
+        domain::import::RollbackCapability,
+        domain::import::ImportRollbackRequestStatus,
+        domain::import::ImportRollbackConflictType,
+        domain::import::ImportRollbackRequest,
+        domain::import::ImportRollbackConflict,
+        domain::import::ImportRollbackCheckResponse,
+        domain::import::ImportRollbackConflictsResponse,
+        domain::import::ImportRollbackResponse,
         domain::import::ImportProgress,
         domain::import::ImportJobSummary,
         domain::import::ImportJobEvent
@@ -231,6 +243,18 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
             "/api/v1/imports/{import_id}/confirm",
             post(imports::confirm),
         )
+        .route(
+            "/api/v1/imports/{import_id}/rollback-check",
+            post(imports::rollback_check),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/rollback-conflicts",
+            get(imports::rollback_conflicts),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/rollback",
+            post(imports::rollback),
+        )
         .route("/api/v1/imports/{import_id}/events", get(imports::events))
         .route("/api/v1/imports/{import_id}/errors", get(imports::errors))
         .route(
@@ -309,5 +333,59 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openapi_exposes_secured_rollback_precheck_conflicts_and_enqueue() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let paths = document["paths"].as_object().expect("OpenAPI paths");
+        let check = &paths["/api/v1/imports/{import_id}/rollback-check"]["post"];
+        let conflicts = &paths["/api/v1/imports/{import_id}/rollback-conflicts"]["get"];
+        let rollback = &paths["/api/v1/imports/{import_id}/rollback"]["post"];
+        for operation in [check, conflicts, rollback] {
+            assert_eq!(
+                operation["security"][0]["session_cookie"],
+                serde_json::json!([])
+            );
+            assert!(operation["responses"]["401"].is_object());
+            assert!(operation["responses"]["403"].is_object());
+            assert!(operation["responses"]["404"].is_object());
+        }
+        assert!(
+            check["parameters"]
+                .as_array()
+                .expect("check parameters")
+                .iter()
+                .any(|parameter| parameter["name"] == "x-csrf-token")
+        );
+        assert!(
+            rollback["parameters"]
+                .as_array()
+                .expect("rollback parameters")
+                .iter()
+                .any(|parameter| parameter["name"] == "Idempotency-Key")
+        );
+        assert!(rollback["requestBody"].is_object());
+        assert!(rollback["responses"]["202"].is_object());
+        assert!(rollback["responses"]["409"].is_object());
+        let rollback_conflict_schema =
+            &document["components"]["schemas"]["ImportRollbackConflictApiResponse"];
+        let variants = rollback_conflict_schema["oneOf"]
+            .as_array()
+            .expect("rollback 409 response is oneOf");
+        assert_eq!(variants.len(), 2);
+        let response_schema_ref =
+            rollback["responses"]["409"]["content"]["application/json"]["schema"]["$ref"]
+                .as_str()
+                .expect("rollback 409 schema ref");
+        assert_eq!(
+            response_schema_ref,
+            "#/components/schemas/ImportRollbackConflictApiResponse"
+        );
     }
 }

@@ -12,13 +12,15 @@ use axum::{
 use common::ApiResponse;
 use database::imports::{
     ImportRepositoryError, ImportUploadRecord, InspectionUpdate, NewImportUpload,
-    PreviewInputSnapshot, PreviewSave,
+    PreviewInputSnapshot, PreviewSave, QueueRollbackResult, RollbackPrecheck,
 };
 use domain::import::{
     ImportBatchStatus, ImportConfirmRequest, ImportConflictPolicy, ImportDatasetDefinition,
     ImportErrorsResponse, ImportInspectRequest, ImportInspectResponse, ImportMappingRequest,
-    ImportMappingResponse, ImportPreviewRequest, ImportTemplateCreateRequest,
-    ImportTemplateSummary, ImportTemplateVersionResponse, import_dataset_definitions,
+    ImportMappingResponse, ImportPreviewRequest, ImportRollbackCheckResponse,
+    ImportRollbackConflictsResponse, ImportRollbackRequest, ImportRollbackResponse,
+    ImportTemplateCreateRequest, ImportTemplateSummary, ImportTemplateVersionResponse,
+    RollbackCapability, import_dataset_definitions,
 };
 use infrastructure::object_storage::{ObjectStorage, ObjectStorageError};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,14 @@ pub struct ImportState {
 pub struct ImportErrorBody {
     code: &'static str,
     message: &'static str,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ImportRollbackConflictApiResponse {
+    Precheck(ImportRollbackCheckResponse),
+    Error(ImportErrorBody),
 }
 
 #[derive(Debug, ToSchema)]
@@ -203,7 +213,7 @@ impl ImportApiError {
         Self {
             status: StatusCode::CONFLICT,
             code,
-            message: "request conflicts with an existing confirmation",
+            message: "request conflicts with current state",
             request_id,
         }
     }
@@ -211,6 +221,13 @@ impl ImportApiError {
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ImportErrorsQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ImportRollbackConflictsQuery {
+    pub precheck_request_id: Uuid,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
 }
@@ -303,7 +320,7 @@ pub async fn upload(
     if let Err(error) = auth::ensure_csrf(&state.auth, &headers).await {
         return Err(audit_upload_denial(&state, &context, request_id, error).await);
     }
-    if let Err(error) = context.require_permission(Permission::ImportUpload) {
+    if let Err(error) = context.require_permission(Permission::Upload) {
         return Err(audit_upload_denial(&state, &context, request_id, error).await);
     }
     let mut field = multipart
@@ -450,7 +467,7 @@ pub async fn get(
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     context
-        .require_permission(Permission::ImportRead)
+        .require_permission(Permission::ReadImports)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     let record = database::imports::get_import(&state.auth.pool, context.workspace_id(), import_id)
         .await
@@ -847,6 +864,221 @@ pub async fn confirm(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/rollback-check",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportRollbackCheckResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody)
+    )
+)]
+pub async fn rollback_check(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_rollback_write(&state, &headers).await?;
+    let result: Result<Response, ImportApiError> = async {
+        let precheck = database::imports::create_rollback_check(
+            &state.auth.pool,
+            context.workspace_id(),
+            context.user_id(),
+            import_id,
+            request_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        let response =
+            rollback_check_response(&state, context.workspace_id(), precheck, request_id).await?;
+        Ok(Json(ApiResponse::new(response, request_id)).into_response())
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Err(audit_import_failure(
+            &state,
+            &context,
+            request_id,
+            import_id,
+            "import.rollback_check",
+            error,
+        )
+        .await),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/imports/{import_id}/rollback-conflicts",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ImportRollbackConflictsQuery
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = ImportRollbackConflictsResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn rollback_conflicts(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    Query(query): Query<ImportRollbackConflictsQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, &headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    context
+        .require_permission(Permission::Rollback)
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    let page = database::imports::list_rollback_conflicts(
+        &state.auth.pool,
+        context.workspace_id(),
+        import_id,
+        query.precheck_request_id,
+        query.cursor.as_deref(),
+        query.limit.unwrap_or(100),
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    Ok(Json(ApiResponse::new(
+        ImportRollbackConflictsResponse {
+            import_id,
+            precheck_request_id: query.precheck_request_id,
+            items: page.items,
+            next_cursor: page.next_cursor,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/rollback",
+    params(
+        ("import_id" = Uuid, Path, description = "Import batch id"),
+        ("Idempotency-Key" = String, Header, description = "Stable key for this rollback request"),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    request_body = ImportRollbackRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 202, body = ImportRollbackResponse),
+        (status = 400, body = ImportErrorBody),
+        (
+            status = 409,
+            description = "Full recheck conflict result or stable rollback request error",
+            body = ImportRollbackConflictApiResponse
+        ),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody)
+    )
+)]
+pub async fn rollback(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<ImportRollbackRequest>,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_rollback_write(&state, &headers).await?;
+    let result: Result<Response, ImportApiError> = async {
+        let raw_key = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| (16..=200).contains(&value.len()))
+            .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))?;
+        if request.precheck_fingerprint.len() != 64
+            || !request
+                .precheck_fingerprint
+                .bytes()
+                .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        {
+            return Err(ImportApiError::bad_request(
+                "rollback_fingerprint_invalid",
+                request_id,
+            ));
+        }
+        let idempotency_key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+        let request_hash = digest(&[
+            &context.workspace_id().to_string(),
+            &import_id.to_string(),
+            &request.precheck_request_id.to_string(),
+            &request.precheck_fingerprint,
+            &context.user_id().to_string(),
+        ]);
+        match database::imports::queue_rollback(
+            &state.auth.pool,
+            context.workspace_id(),
+            context.user_id(),
+            import_id,
+            request.precheck_request_id,
+            &request.precheck_fingerprint,
+            &idempotency_key_hash,
+            &request_hash,
+            request_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?
+        {
+            QueueRollbackResult::Queued(queued) => Ok((
+                StatusCode::ACCEPTED,
+                Json(ApiResponse::new(
+                    ImportRollbackResponse {
+                        import_id,
+                        precheck_request_id: queued.request_id,
+                        job_id: queued.job_id,
+                        status: queued.status,
+                        replayed: queued.replayed,
+                    },
+                    request_id,
+                )),
+            )
+                .into_response()),
+            QueueRollbackResult::Conflict(precheck) => {
+                let response =
+                    rollback_check_response(&state, context.workspace_id(), precheck, request_id)
+                        .await?;
+                Ok((
+                    StatusCode::CONFLICT,
+                    Json(ApiResponse::new(response, request_id)),
+                )
+                    .into_response())
+            }
+        }
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => Err(audit_import_failure(
+            &state,
+            &context,
+            request_id,
+            import_id,
+            "import.rollback",
+            error,
+        )
+        .await),
+    }
+}
+
+#[utoipa::path(
     get,
     path = "/api/v1/imports/{import_id}/events",
     params(
@@ -872,7 +1104,7 @@ pub async fn events(
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     context
-        .require_permission(Permission::ImportRead)
+        .require_permission(Permission::ReadImports)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     database::imports::get_import(&state.auth.pool, context.workspace_id(), import_id)
         .await
@@ -959,7 +1191,7 @@ pub async fn errors(
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     context
-        .require_permission(Permission::ImportRead)
+        .require_permission(Permission::ReadImports)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     let page = database::imports::list_errors(
         &state.auth.pool,
@@ -1000,7 +1232,7 @@ pub async fn list_templates(
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     context
-        .require_permission(Permission::ImportRead)
+        .require_permission(Permission::ReadImports)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     let items = database::imports::list_templates(&state.auth.pool, context.workspace_id())
         .await
@@ -1031,7 +1263,7 @@ pub async fn list_datasets(
         .await
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     context
-        .require_permission(Permission::ImportRead)
+        .require_permission(Permission::ReadImports)
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     Ok(Json(ApiResponse::new(
         ImportDatasetsResponse {
@@ -1080,6 +1312,41 @@ pub async fn create_template(
         Json(ApiResponse::new(response, request_id)),
     )
         .into_response())
+}
+
+async fn rollback_check_response(
+    state: &ImportState,
+    workspace_id: Uuid,
+    precheck: RollbackPrecheck,
+    request_id: Uuid,
+) -> Result<ImportRollbackCheckResponse, ImportApiError> {
+    let page = database::imports::list_rollback_conflicts(
+        &state.auth.pool,
+        workspace_id,
+        precheck.import_id,
+        precheck.request_id,
+        None,
+        100,
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    let can_rollback = precheck.can_rollback();
+    Ok(ImportRollbackCheckResponse {
+        import_id: precheck.import_id,
+        precheck_request_id: precheck.request_id,
+        precheck_fingerprint: precheck.fingerprint,
+        rollback_capability: precheck.rollback_capability,
+        change_log_version: precheck
+            .change_log_version
+            .and_then(|value| u32::try_from(value).ok()),
+        can_rollback,
+        compensation_recommended: !can_rollback
+            || precheck.rollback_capability == RollbackCapability::CompensationOnly,
+        affected_count: precheck.affected_count,
+        conflict_count: precheck.conflicts.len() as u32,
+        conflicts: page.items,
+        next_cursor: page.next_cursor,
+    })
 }
 
 fn map_validation_error(error: UploadValidationError, request_id: Uuid) -> ImportApiError {
@@ -1177,6 +1444,30 @@ fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> Impor
         ImportRepositoryError::EventIdInvalid => {
             ImportApiError::bad_request("event_id_invalid", request_id)
         }
+        ImportRepositoryError::RollbackNotAllowed => {
+            ImportApiError::conflict("rollback_not_allowed", request_id)
+        }
+        ImportRepositoryError::RollbackNotAvailable => {
+            ImportApiError::conflict("rollback_not_available", request_id)
+        }
+        ImportRepositoryError::RollbackPreconditionStale => {
+            ImportApiError::conflict("rollback_precondition_stale", request_id)
+        }
+        ImportRepositoryError::RollbackConflict => {
+            ImportApiError::conflict("rollback_conflict", request_id)
+        }
+        ImportRepositoryError::RollbackAlreadyCompleted => {
+            ImportApiError::conflict("rollback_already_completed", request_id)
+        }
+        ImportRepositoryError::RollbackInProgress => {
+            ImportApiError::conflict("rollback_in_progress", request_id)
+        }
+        ImportRepositoryError::RollbackIdempotencyKeyReused => {
+            ImportApiError::conflict("rollback_idempotency_key_reused", request_id)
+        }
+        ImportRepositoryError::RollbackCursorInvalid => {
+            ImportApiError::bad_request("rollback_cursor_invalid", request_id)
+        }
         _ => ImportApiError::internal(request_id),
     }
 }
@@ -1195,7 +1486,27 @@ async fn require_import_write(
     if let Err(error) = auth::ensure_csrf(&state.auth, headers).await {
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
-    if let Err(error) = context.require_permission(Permission::ImportUpload) {
+    if let Err(error) = context.require_permission(Permission::Upload) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    Ok((request_id, context))
+}
+
+async fn require_import_rollback_write(
+    state: &ImportState,
+    headers: &HeaderMap,
+) -> Result<(Uuid, auth::AuthContext), ImportApiError> {
+    let request_id = Uuid::now_v7();
+    let context = auth::current_context(&state.auth, headers)
+        .await
+        .map_err(|error| ImportApiError::auth(error, request_id))?;
+    if let Err(error) = auth::ensure_allowed_origin(&state.auth.config, headers) {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = auth::ensure_csrf(&state.auth, headers).await {
+        return Err(audit_write_denial(state, &context, request_id, error).await);
+    }
+    if let Err(error) = context.require_permission(Permission::Rollback) {
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     Ok((request_id, context))

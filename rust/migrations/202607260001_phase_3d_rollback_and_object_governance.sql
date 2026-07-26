@@ -595,6 +595,7 @@ begin
        and new.status is distinct from old.status
        and (old.status, new.status) not in (
             ('prechecked', 'queued'),
+            ('prechecked', 'precheck_conflict'),
             ('queued', 'running'),
             ('running', 'succeeded'),
             ('running', 'worker_conflict'),

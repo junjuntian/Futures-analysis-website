@@ -287,15 +287,17 @@ pub(crate) struct AuthContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Permission {
-    ImportRead,
-    ImportUpload,
+    ReadImports,
+    Upload,
+    Rollback,
 }
 
 impl Permission {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::ImportRead => "import.read",
-            Self::ImportUpload => "import.upload",
+            Self::ReadImports => "import.read",
+            Self::Upload => "import.upload",
+            Self::Rollback => "import.rollback",
         }
     }
 }
@@ -329,7 +331,11 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         permissions.push("session.any.read".to_string());
         permissions.push("session.any.revoke".to_string());
     }
-    for permission in [Permission::ImportRead, Permission::ImportUpload] {
+    for permission in [
+        Permission::ReadImports,
+        Permission::Upload,
+        Permission::Rollback,
+    ] {
         if roles_allow_permission(roles, permission) {
             permissions.push(permission.as_str().to_string());
         }
@@ -341,10 +347,13 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
 
 fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
     match permission {
-        Permission::ImportRead => roles
+        Permission::ReadImports => roles
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst" | "viewer")),
-        Permission::ImportUpload => roles
+        Permission::Upload => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst")),
+        Permission::Rollback => roles
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst")),
     }
@@ -1273,14 +1282,17 @@ mod tests {
         let admin = permissions_for_roles(&["admin".to_string()]);
         assert!(admin.contains(&"import.read".to_string()));
         assert!(admin.contains(&"import.upload".to_string()));
+        assert!(admin.contains(&"import.rollback".to_string()));
 
         let analyst = permissions_for_roles(&["analyst".to_string()]);
         assert!(analyst.contains(&"import.read".to_string()));
         assert!(analyst.contains(&"import.upload".to_string()));
+        assert!(analyst.contains(&"import.rollback".to_string()));
 
         let viewer = permissions_for_roles(&["viewer".to_string()]);
         assert!(viewer.contains(&"import.read".to_string()));
         assert!(!viewer.contains(&"import.upload".to_string()));
+        assert!(!viewer.contains(&"import.rollback".to_string()));
     }
 
     #[test]

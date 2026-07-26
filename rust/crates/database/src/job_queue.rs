@@ -90,6 +90,7 @@ const CLAIM_CANDIDATE_SQL: &str = "select id, job_type, aggregate_id, status::te
         attempt_count, max_attempts, available_at, lease_expires_at, lease_generation
     from job_queue
     where workspace_id = $1
+      and job_type = 'import_confirm'
       and (
            (status = 'queued' and available_at <= now() and attempt_count < max_attempts)
            or (status = 'running' and lease_expires_at < now())
@@ -1218,6 +1219,11 @@ mod tests {
         assert!(!JobQueueError::AbortConflict.retryable());
         assert!(!JobQueueError::InvalidFrozenImport.retryable());
         assert!(!JobQueueError::UnsupportedJobType.retryable());
+    }
+
+    #[test]
+    fn phase_3c_worker_does_not_claim_phase_3d_rollback_jobs() {
+        assert!(CLAIM_CANDIDATE_SQL.contains("job_type = 'import_confirm'"));
     }
 
     #[test]

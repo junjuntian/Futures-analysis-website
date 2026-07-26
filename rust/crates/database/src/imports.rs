@@ -2,12 +2,14 @@ use application::import_jobs::{StagingRowInput, ValidationOutcome};
 use domain::import::{
     ImportBatchStatus, ImportConflictPolicy, ImportErrorPreview, ImportErrorSeverity,
     ImportMappingDefinitionError, ImportMappingField, ImportMappingResponse, ImportPreviewRow,
-    ImportTemplateSummary, ImportTemplateVersionResponse, ensure_status_transition,
-    validate_mapping_fields,
+    ImportRollbackConflict, ImportRollbackConflictType, ImportRollbackRequestStatus,
+    ImportTemplateSummary, ImportTemplateVersionResponse, RollbackCapability,
+    ensure_status_transition, validate_mapping_fields,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
+use std::collections::HashSet;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -147,6 +149,22 @@ pub enum ImportRepositoryError {
     ConfirmationConflict,
     #[error("event cursor is invalid")]
     EventIdInvalid,
+    #[error("rollback is not allowed for this batch")]
+    RollbackNotAllowed,
+    #[error("direct rollback is not available")]
+    RollbackNotAvailable,
+    #[error("rollback precheck is stale")]
+    RollbackPreconditionStale,
+    #[error("rollback precheck has conflicts")]
+    RollbackConflict,
+    #[error("rollback is already complete")]
+    RollbackAlreadyCompleted,
+    #[error("rollback is already in progress")]
+    RollbackInProgress,
+    #[error("rollback idempotency key was reused")]
+    RollbackIdempotencyKeyReused,
+    #[error("rollback conflict cursor is invalid")]
+    RollbackCursorInvalid,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +201,53 @@ pub struct ConfirmedImport {
     pub job_id: Uuid,
     pub status: String,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RollbackPrecheck {
+    pub import_id: Uuid,
+    pub request_id: Uuid,
+    pub fingerprint: String,
+    pub rollback_capability: RollbackCapability,
+    pub change_log_version: Option<i32>,
+    pub affected_count: u32,
+    pub conflicts: Vec<ImportRollbackConflict>,
+}
+
+impl RollbackPrecheck {
+    pub fn can_rollback(&self) -> bool {
+        self.conflicts.is_empty() && self.rollback_capability == RollbackCapability::Direct
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RollbackConflictPage {
+    pub items: Vec<ImportRollbackConflict>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueuedRollback {
+    pub request_id: Uuid,
+    pub job_id: Uuid,
+    pub status: ImportRollbackRequestStatus,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum QueueRollbackResult {
+    Queued(QueuedRollback),
+    Conflict(RollbackPrecheck),
+}
+
+#[derive(Debug)]
+struct EvaluatedRollback {
+    import_id: Uuid,
+    fingerprint: String,
+    rollback_capability: RollbackCapability,
+    change_log_version: Option<i32>,
+    affected_count: u32,
+    conflicts: Vec<ImportRollbackConflict>,
 }
 
 pub async fn register_upload(
@@ -1270,6 +1335,977 @@ pub async fn confirm_import(
     })
 }
 
+pub async fn create_rollback_check(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    import_id: Uuid,
+    audit_request_id: Uuid,
+) -> Result<RollbackPrecheck, ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id).await?;
+    let rollback_request_id = Uuid::now_v7();
+    persist_rollback_precheck(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        rollback_request_id,
+        audit_request_id,
+        &evaluated,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(RollbackPrecheck {
+        import_id,
+        request_id: rollback_request_id,
+        fingerprint: evaluated.fingerprint,
+        rollback_capability: evaluated.rollback_capability,
+        change_log_version: evaluated.change_log_version,
+        affected_count: evaluated.affected_count,
+        conflicts: evaluated.conflicts,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn queue_rollback(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    import_id: Uuid,
+    precheck_request_id: Uuid,
+    supplied_fingerprint: &str,
+    idempotency_key_hash: &str,
+    request_hash: &str,
+    audit_request_id: Uuid,
+) -> Result<QueueRollbackResult, ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    sqlx::query(CONFIRM_IDEMPOTENCY_LOCK_SQL)
+        .bind(workspace_id)
+        .bind(idempotency_key_hash)
+        .execute(&mut *tx)
+        .await?;
+
+    if let Some(existing) = sqlx::query(
+        "select id, import_batch_id, request_hash, job_id, status
+           from import_rollback_requests
+          where workspace_id = $1 and idempotency_key_hash = $2",
+    )
+    .bind(workspace_id)
+    .bind(idempotency_key_hash)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        if existing.get::<Option<String>, _>("request_hash").as_deref() != Some(request_hash)
+            || existing.get::<Uuid, _>("import_batch_id") != import_id
+        {
+            tx.commit().await?;
+            return Err(ImportRepositoryError::RollbackIdempotencyKeyReused);
+        }
+        let status = existing.get::<String, _>("status");
+        let parsed_status = ImportRollbackRequestStatus::parse(&status)
+            .ok_or(ImportRepositoryError::InvalidStoredStatus)?;
+        let job_id = existing
+            .get::<Option<Uuid>, _>("job_id")
+            .ok_or(ImportRepositoryError::InvalidStoredStatus)?;
+        tx.commit().await?;
+        return Ok(QueueRollbackResult::Queued(QueuedRollback {
+            request_id: existing.get("id"),
+            job_id,
+            status: parsed_status,
+            replayed: true,
+        }));
+    }
+
+    lock_rollback_batch(&mut tx, workspace_id, import_id).await?;
+    let request = sqlx::query(
+        "select status, precheck_fingerprint, job_id
+           from import_rollback_requests
+          where workspace_id = $1 and id = $2 and import_batch_id = $3
+          for update",
+    )
+    .bind(workspace_id)
+    .bind(precheck_request_id)
+    .bind(import_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ImportRepositoryError::NotFound)?;
+    let stored_fingerprint: String = request.get("precheck_fingerprint");
+    if stored_fingerprint != supplied_fingerprint {
+        return Err(ImportRepositoryError::RollbackPreconditionStale);
+    }
+    let request_status = request.get::<String, _>("status");
+    if request_status != "prechecked" {
+        if matches!(request_status.as_str(), "queued" | "running") {
+            let job_id = request
+                .get::<Option<Uuid>, _>("job_id")
+                .ok_or(ImportRepositoryError::InvalidStoredStatus)?;
+            tx.commit().await?;
+            return Ok(QueueRollbackResult::Queued(QueuedRollback {
+                request_id: precheck_request_id,
+                job_id,
+                status: ImportRollbackRequestStatus::parse(&request_status)
+                    .ok_or(ImportRepositoryError::InvalidStoredStatus)?,
+                replayed: true,
+            }));
+        }
+        return Err(if request_status == "succeeded" {
+            ImportRepositoryError::RollbackAlreadyCompleted
+        } else if matches!(
+            request_status.as_str(),
+            "precheck_conflict" | "worker_conflict"
+        ) {
+            ImportRepositoryError::RollbackConflict
+        } else {
+            ImportRepositoryError::RollbackInProgress
+        });
+    }
+
+    let evaluated = evaluate_rollback(&mut tx, workspace_id, import_id).await?;
+    if !evaluated.conflicts.is_empty() {
+        sqlx::query(
+            "update import_rollback_requests
+                set status = 'precheck_conflict', precheck_fingerprint = $1,
+                    conflict_count = $2, updated_at = now(), finished_at = now()
+              where workspace_id = $3 and id = $4 and status = 'prechecked'",
+        )
+        .bind(&evaluated.fingerprint)
+        .bind(evaluated.conflicts.len() as i32)
+        .bind(workspace_id)
+        .bind(precheck_request_id)
+        .execute(&mut *tx)
+        .await?;
+        insert_rollback_conflicts(
+            &mut tx,
+            workspace_id,
+            import_id,
+            precheck_request_id,
+            &evaluated.conflicts,
+        )
+        .await?;
+        insert_rollback_audit(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            audit_request_id,
+            import_id,
+            precheck_request_id,
+            "import.rollback_recheck",
+            "failure",
+            evaluated.conflicts.len(),
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(QueueRollbackResult::Conflict(RollbackPrecheck {
+            import_id,
+            request_id: precheck_request_id,
+            fingerprint: evaluated.fingerprint,
+            rollback_capability: evaluated.rollback_capability,
+            change_log_version: evaluated.change_log_version,
+            affected_count: evaluated.affected_count,
+            conflicts: evaluated.conflicts,
+        }));
+    }
+    if evaluated.fingerprint != supplied_fingerprint {
+        return Err(ImportRepositoryError::RollbackPreconditionStale);
+    }
+
+    let job_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into job_queue
+           (id, workspace_id, job_type, aggregate_id, status, payload,
+            attempt_count, max_attempts, available_at)
+         values ($1, $2, 'import_rollback', $3, 'queued',
+                 jsonb_build_object(
+                    'import_id', $3::text,
+                    'rollback_request_id', $4::text,
+                    'precheck_fingerprint', $5::text
+                 ), 0, 5, now())",
+    )
+    .bind(job_id)
+    .bind(workspace_id)
+    .bind(import_id)
+    .bind(precheck_request_id)
+    .bind(&evaluated.fingerprint)
+    .execute(&mut *tx)
+    .await?;
+    let event_seq = sqlx::query_scalar::<_, i64>(
+        "select coalesce(max(event_seq), 0) + 1
+           from import_job_events
+          where workspace_id = $1 and import_batch_id = $2",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "insert into import_job_events
+           (id, workspace_id, import_batch_id, job_id, event_seq, event_type, payload)
+         values ($1, $2, $3, $4, $5, 'rollback_queued',
+                 jsonb_build_object(
+                    'status', 'queued',
+                    'rollback_request_id', $6::text
+                 ))",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(import_id)
+    .bind(job_id)
+    .bind(event_seq)
+    .bind(precheck_request_id)
+    .execute(&mut *tx)
+    .await?;
+    let updated = sqlx::query(
+        "update import_rollback_requests
+            set status = 'queued', idempotency_key_hash = $1, request_hash = $2,
+                job_id = $3, conflict_count = 0, finished_at = null, updated_at = now()
+          where workspace_id = $4 and id = $5 and import_batch_id = $6
+            and status = 'prechecked' and precheck_fingerprint = $7",
+    )
+    .bind(idempotency_key_hash)
+    .bind(request_hash)
+    .bind(job_id)
+    .bind(workspace_id)
+    .bind(precheck_request_id)
+    .bind(import_id)
+    .bind(&evaluated.fingerprint)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(ImportRepositoryError::RollbackPreconditionStale);
+    }
+    insert_rollback_audit(
+        &mut tx,
+        workspace_id,
+        actor_user_id,
+        audit_request_id,
+        import_id,
+        precheck_request_id,
+        "import.rollback_queued",
+        "success",
+        0,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(QueueRollbackResult::Queued(QueuedRollback {
+        request_id: precheck_request_id,
+        job_id,
+        status: ImportRollbackRequestStatus::Queued,
+        replayed: false,
+    }))
+}
+
+async fn lock_rollback_batch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<(), ImportRepositoryError> {
+    let visible = sqlx::query_scalar::<_, Uuid>(
+        "select id from import_batches
+          where workspace_id = $1 and id = $2
+          for update",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if visible.is_none() {
+        return Err(ImportRepositoryError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn list_rollback_conflicts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    import_id: Uuid,
+    precheck_request_id: Uuid,
+    cursor: Option<&str>,
+    limit: u32,
+) -> Result<RollbackConflictPage, ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let visible = sqlx::query_scalar::<_, bool>(
+        "select exists(
+            select 1 from import_rollback_requests
+             where workspace_id = $1 and id = $2 and import_batch_id = $3
+         )",
+    )
+    .bind(workspace_id)
+    .bind(precheck_request_id)
+    .bind(import_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !visible {
+        return Err(ImportRepositoryError::NotFound);
+    }
+    let (after_seq, after_id) = cursor
+        .map(|value| parse_rollback_cursor(value, workspace_id, import_id, precheck_request_id))
+        .transpose()?
+        .unwrap_or((0, Uuid::nil()));
+    let page_size = limit.clamp(1, 200);
+    let rows = sqlx::query(
+        "select id, conflict_seq, conflict_type, target_kind, target_id,
+                expected_row_version, current_row_version, dependency_kind, detail_code
+           from import_rollback_conflicts
+          where workspace_id = $1 and rollback_request_id = $2
+            and (conflict_seq, id) > ($3, $4)
+          order by conflict_seq, id
+          limit $5",
+    )
+    .bind(workspace_id)
+    .bind(precheck_request_id)
+    .bind(after_seq)
+    .bind(after_id)
+    .bind(i64::from(page_size) + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let has_more = rows.len() > page_size as usize;
+    let visible_rows = rows
+        .into_iter()
+        .take(page_size as usize)
+        .collect::<Vec<_>>();
+    let next_cursor = if has_more {
+        visible_rows.last().map(|row| {
+            format_rollback_cursor(
+                workspace_id,
+                import_id,
+                precheck_request_id,
+                row.get("conflict_seq"),
+                row.get("id"),
+            )
+        })
+    } else {
+        None
+    };
+    let items = visible_rows
+        .iter()
+        .map(rollback_conflict_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RollbackConflictPage { items, next_cursor })
+}
+
+async fn evaluate_rollback(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<EvaluatedRollback, ImportRepositoryError> {
+    let batch = sqlx::query(
+        "select status::text, rollback_capability, change_log_version,
+                imported_count, overwritten_count
+           from import_batches
+          where workspace_id = $1 and id = $2
+          for update",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(ImportRepositoryError::NotFound)?;
+    let batch_status = batch.get::<String, _>("status");
+    let capability_value = batch.get::<String, _>("rollback_capability");
+    let rollback_capability = RollbackCapability::parse(&capability_value)
+        .ok_or(ImportRepositoryError::InvalidStoredStatus)?;
+    let change_log_version = batch.get::<Option<i32>, _>("change_log_version");
+    let expected_change_count = i64::from(batch.get::<i32, _>("imported_count"))
+        + i64::from(batch.get::<i32, _>("overwritten_count"));
+    let mut conflicts = Vec::new();
+    let mut fingerprint_material = vec![json!({
+        "import_id": import_id,
+        "batch_status": batch_status,
+        "rollback_capability": rollback_capability.as_str(),
+        "change_log_version": change_log_version,
+        "expected_change_count": expected_change_count,
+    })];
+    let active_rollback_exists = sqlx::query_scalar::<_, bool>(
+        "select exists(
+            select 1 from import_rollback_requests
+             where workspace_id = $1 and import_batch_id = $2
+               and status in ('queued', 'running')
+         )",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    fingerprint_material.push(json!({
+        "active_rollback_exists": active_rollback_exists,
+    }));
+
+    if batch_status != ImportBatchStatus::Succeeded.as_str() {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::IllegalChange,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "batch_status_not_succeeded",
+        );
+    }
+    if active_rollback_exists {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::IllegalChange,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "rollback_request_in_progress",
+        );
+    }
+    if rollback_capability != RollbackCapability::Direct {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::RollbackNotAvailable,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "rollback_capability_compensation_only",
+        );
+        return finalize_rollback_evaluation(
+            import_id,
+            rollback_capability,
+            change_log_version,
+            0,
+            conflicts,
+            fingerprint_material,
+        );
+    }
+    if change_log_version != Some(1) {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::ChangeLogIncomplete,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "unsupported_change_log_version",
+        );
+    }
+
+    let change_rows = sqlx::query(
+        "select change_row.id, change_row.sequence_no, change_row.target_kind,
+                change_row.target_id, change_row.operation, change_row.before_json,
+                change_row.after_json, change_row.target_row_version,
+                change_row.source_file_id, change_row.source_row_number,
+                change_row.created_at,
+                exists(
+                    select 1 from import_files source_file
+                     where source_file.workspace_id = change_row.workspace_id
+                       and source_file.id = change_row.source_file_id
+                       and source_file.import_batch_id = change_row.import_batch_id
+                ) as source_valid
+           from import_row_changes change_row
+          where change_row.workspace_id = $1 and change_row.import_batch_id = $2
+          order by change_row.sequence_no, change_row.id",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if change_rows.len() as i64 != expected_change_count {
+        push_rollback_conflict(
+            &mut conflicts,
+            ImportRollbackConflictType::ChangeLogIncomplete,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "change_count_mismatch",
+        );
+    }
+
+    let mut seen_targets = HashSet::new();
+    for (index, change) in change_rows.iter().enumerate() {
+        let sequence_no = change.get::<i64, _>("sequence_no");
+        let target_kind = change.get::<String, _>("target_kind");
+        let target_id = change.get::<Uuid, _>("target_id");
+        let operation = change.get::<String, _>("operation");
+        let after_json = change.get::<Option<serde_json::Value>, _>("after_json");
+        let expected_row_version = change.get::<i64, _>("target_row_version");
+        let source_valid = change.get::<bool, _>("source_valid");
+        let change_created_at = change.get::<OffsetDateTime, _>("created_at");
+        let target_label = Some(target_kind.as_str());
+        let expected_version = u64::try_from(expected_row_version).ok();
+
+        fingerprint_material.push(json!({
+            "change_id": change.get::<Uuid, _>("id"),
+            "sequence_no": sequence_no,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "operation": operation,
+            "before_json": change.get::<Option<serde_json::Value>, _>("before_json"),
+            "after_json": after_json,
+            "target_row_version": expected_row_version,
+            "source_file_id": change.get::<Uuid, _>("source_file_id"),
+            "source_row_number": change.get::<i32, _>("source_row_number"),
+            "source_valid": source_valid,
+        }));
+
+        if sequence_no != (index as i64) + 1 {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::ChangeLogIncomplete,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "non_contiguous_change_sequence",
+            );
+        }
+        if !seen_targets.insert((target_kind.clone(), target_id)) {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::IllegalChange,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "duplicate_change_target",
+            );
+        }
+        if !source_valid {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::SourceChainBroken,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "source_file_not_linked",
+            );
+        }
+        if target_kind != "imported_record" {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::IllegalChange,
+                None,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "unsupported_target_kind",
+            );
+            continue;
+        }
+        if !matches!(operation.as_str(), "insert" | "update") {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::IllegalChange,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "unsupported_change_operation",
+            );
+        }
+
+        let current = sqlx::query(
+            "select record_data, source_import_batch_id, source_row_number, row_version
+               from imported_records
+              where workspace_id = $1 and id = $2
+              for update",
+        )
+        .bind(workspace_id)
+        .bind(target_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(current) = current else {
+            fingerprint_material.push(json!({
+                "target_id": target_id,
+                "current": null,
+            }));
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::TargetMissing,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "target_missing",
+            );
+            continue;
+        };
+        let current_row_version = current.get::<i64, _>("row_version");
+        let current_version = u64::try_from(current_row_version).ok();
+        let current_source_batch = current.get::<Uuid, _>("source_import_batch_id");
+        let current_snapshot = json!({
+            "record_data": current.get::<serde_json::Value, _>("record_data"),
+            "source_import_batch_id": current_source_batch,
+            "source_row_number": current.get::<i32, _>("source_row_number"),
+            "row_version": current_row_version,
+        });
+        fingerprint_material.push(json!({
+            "target_id": target_id,
+            "current": current_snapshot,
+        }));
+
+        if current_source_batch != import_id {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::LaterImport,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                None,
+                "source_batch_changed",
+            );
+        } else if current_row_version != expected_row_version {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::TargetVersionChanged,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                None,
+                "target_row_version_changed",
+            );
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::LaterModification,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                None,
+                "target_modified_after_import",
+            );
+        } else if after_json.as_ref() != Some(&current_snapshot) {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::TargetDataChanged,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                None,
+                "after_snapshot_mismatch",
+            );
+        }
+
+        let later_change_exists = sqlx::query_scalar::<_, bool>(
+            "select exists(
+                select 1 from import_row_changes later_change
+                 where later_change.workspace_id = $1
+                   and later_change.target_kind = 'imported_record'
+                   and later_change.target_id = $2
+                   and later_change.import_batch_id <> $3
+                   and later_change.created_at > $4
+             )",
+        )
+        .bind(workspace_id)
+        .bind(target_id)
+        .bind(import_id)
+        .bind(change_created_at)
+        .fetch_one(&mut **tx)
+        .await?;
+        fingerprint_material.push(json!({
+            "target_id": target_id,
+            "later_change_exists": later_change_exists,
+        }));
+        if later_change_exists && current_source_batch == import_id {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::LaterImport,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                None,
+                "later_import_change_log_exists",
+            );
+        }
+
+        let dependency_exists = sqlx::query_scalar::<_, bool>(
+            "select exists(
+                select 1 from import_conflict_candidates candidate
+                 where candidate.workspace_id = $1
+                   and candidate.existing_record_id = $2
+                   and candidate.import_batch_id <> $3
+             )",
+        )
+        .bind(workspace_id)
+        .bind(target_id)
+        .bind(import_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        fingerprint_material.push(json!({
+            "target_id": target_id,
+            "import_conflict_candidate_dependency": dependency_exists,
+        }));
+        if dependency_exists {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::DownstreamDependency,
+                target_label,
+                Some(target_id),
+                expected_version,
+                current_version,
+                Some("import_conflict_candidate"),
+                "downstream_import_conflict_candidate",
+            );
+        }
+    }
+
+    finalize_rollback_evaluation(
+        import_id,
+        rollback_capability,
+        change_log_version,
+        change_rows.len() as u32,
+        conflicts,
+        fingerprint_material,
+    )
+}
+
+fn finalize_rollback_evaluation(
+    import_id: Uuid,
+    rollback_capability: RollbackCapability,
+    change_log_version: Option<i32>,
+    affected_count: u32,
+    conflicts: Vec<ImportRollbackConflict>,
+    fingerprint_material: Vec<serde_json::Value>,
+) -> Result<EvaluatedRollback, ImportRepositoryError> {
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&fingerprint_material)
+                .map_err(|_| ImportRepositoryError::InvalidStoredStatus)?
+        )
+    );
+    Ok(EvaluatedRollback {
+        import_id,
+        fingerprint,
+        rollback_capability,
+        change_log_version,
+        affected_count,
+        conflicts,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_rollback_conflict(
+    conflicts: &mut Vec<ImportRollbackConflict>,
+    conflict_type: ImportRollbackConflictType,
+    target_kind: Option<&str>,
+    target_id: Option<Uuid>,
+    expected_row_version: Option<u64>,
+    current_row_version: Option<u64>,
+    dependency_kind: Option<&str>,
+    detail_code: &str,
+) {
+    conflicts.push(ImportRollbackConflict {
+        conflict_seq: conflicts.len() as u64 + 1,
+        conflict_type,
+        target_kind: target_kind.map(str::to_string),
+        target_id,
+        expected_row_version,
+        current_row_version,
+        dependency_kind: dependency_kind.map(str::to_string),
+        detail_code: detail_code.to_string(),
+    });
+}
+
+async fn persist_rollback_precheck(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    rollback_request_id: Uuid,
+    audit_request_id: Uuid,
+    evaluated: &EvaluatedRollback,
+) -> Result<(), ImportRepositoryError> {
+    let status = if evaluated.conflicts.is_empty()
+        && evaluated.rollback_capability == RollbackCapability::Direct
+    {
+        "prechecked"
+    } else {
+        "precheck_conflict"
+    };
+    sqlx::query(
+        "insert into import_rollback_requests
+           (id, workspace_id, import_batch_id, requested_by, precheck_fingerprint,
+            status, conflict_count, finished_at)
+         values ($1, $2, $3, $4, $5, $6, $7, now())",
+    )
+    .bind(rollback_request_id)
+    .bind(workspace_id)
+    .bind(evaluated.import_id)
+    .bind(actor_user_id)
+    .bind(&evaluated.fingerprint)
+    .bind(status)
+    .bind(evaluated.conflicts.len() as i32)
+    .execute(&mut **tx)
+    .await?;
+    insert_rollback_conflicts(
+        tx,
+        workspace_id,
+        evaluated.import_id,
+        rollback_request_id,
+        &evaluated.conflicts,
+    )
+    .await?;
+    insert_rollback_audit(
+        tx,
+        workspace_id,
+        actor_user_id,
+        audit_request_id,
+        evaluated.import_id,
+        rollback_request_id,
+        "import.rollback_check",
+        if evaluated.conflicts.is_empty() {
+            "success"
+        } else {
+            "failure"
+        },
+        evaluated.conflicts.len(),
+    )
+    .await
+}
+
+async fn insert_rollback_conflicts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    import_id: Uuid,
+    rollback_request_id: Uuid,
+    conflicts: &[ImportRollbackConflict],
+) -> Result<(), ImportRepositoryError> {
+    for conflict in conflicts {
+        sqlx::query(
+            "insert into import_rollback_conflicts
+               (id, workspace_id, rollback_request_id, import_batch_id, conflict_seq,
+                conflict_type, target_kind, target_id, expected_row_version,
+                current_row_version, dependency_kind, detail_code)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(rollback_request_id)
+        .bind(import_id)
+        .bind(conflict.conflict_seq as i64)
+        .bind(conflict.conflict_type.as_str())
+        .bind(&conflict.target_kind)
+        .bind(conflict.target_id)
+        .bind(conflict.expected_row_version.map(|value| value as i64))
+        .bind(conflict.current_row_version.map(|value| value as i64))
+        .bind(&conflict.dependency_kind)
+        .bind(&conflict.detail_code)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_rollback_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    audit_request_id: Uuid,
+    import_id: Uuid,
+    rollback_request_id: Uuid,
+    event_type: &'static str,
+    outcome: &'static str,
+    conflict_count: usize,
+) -> Result<(), ImportRepositoryError> {
+    sqlx::query(
+        "insert into audit_logs
+           (id, workspace_id, actor_user_id, event_type, outcome, request_id, metadata)
+         values ($1, $2, $3, $4, $5, $6,
+                 jsonb_build_object(
+                    'import_id', $7::text,
+                    'rollback_request_id', $8::text,
+                    'conflict_count', $9::integer
+                 ))",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(actor_user_id)
+    .bind(event_type)
+    .bind(outcome)
+    .bind(audit_request_id)
+    .bind(import_id)
+    .bind(rollback_request_id)
+    .bind(conflict_count as i32)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn format_rollback_cursor(
+    workspace_id: Uuid,
+    import_id: Uuid,
+    rollback_request_id: Uuid,
+    conflict_seq: i64,
+    conflict_id: Uuid,
+) -> String {
+    format!("{workspace_id}:{import_id}:{rollback_request_id}:{conflict_seq}:{conflict_id}")
+}
+
+fn parse_rollback_cursor(
+    cursor: &str,
+    expected_workspace_id: Uuid,
+    expected_import_id: Uuid,
+    expected_rollback_request_id: Uuid,
+) -> Result<(i64, Uuid), ImportRepositoryError> {
+    let mut parts = cursor.split(':');
+    let workspace_id = parts.next().and_then(|value| Uuid::parse_str(value).ok());
+    let import_id = parts.next().and_then(|value| Uuid::parse_str(value).ok());
+    let rollback_request_id = parts.next().and_then(|value| Uuid::parse_str(value).ok());
+    let conflict_seq = parts.next().and_then(|value| value.parse::<i64>().ok());
+    let conflict_id = parts.next().and_then(|value| Uuid::parse_str(value).ok());
+    if workspace_id != Some(expected_workspace_id)
+        || import_id != Some(expected_import_id)
+        || rollback_request_id != Some(expected_rollback_request_id)
+        || conflict_seq.is_none_or(|value| value < 1)
+        || conflict_id.is_none()
+        || parts.next().is_some()
+    {
+        return Err(ImportRepositoryError::RollbackCursorInvalid);
+    }
+    Ok((
+        conflict_seq.expect("validated conflict sequence"),
+        conflict_id.expect("validated conflict id"),
+    ))
+}
+
+fn rollback_conflict_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<ImportRollbackConflict, ImportRepositoryError> {
+    let conflict_type =
+        ImportRollbackConflictType::parse(row.get::<String, _>("conflict_type").as_str())
+            .ok_or(ImportRepositoryError::InvalidStoredStatus)?;
+    Ok(ImportRollbackConflict {
+        conflict_seq: row.get::<i64, _>("conflict_seq") as u64,
+        conflict_type,
+        target_kind: row.get("target_kind"),
+        target_id: row.get("target_id"),
+        expected_row_version: row
+            .get::<Option<i64>, _>("expected_row_version")
+            .and_then(|value| u64::try_from(value).ok()),
+        current_row_version: row
+            .get::<Option<i64>, _>("current_row_version")
+            .and_then(|value| u64::try_from(value).ok()),
+        dependency_kind: row.get("dependency_kind"),
+        detail_code: row.get("detail_code"),
+    })
+}
+
 pub async fn list_errors(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1822,6 +2858,8 @@ async fn set_workspace(
 mod tests {
     use super::*;
 
+    const IMPORTS_SOURCE: &str = include_str!("imports.rs");
+
     #[test]
     fn template_configuration_round_trips_and_requires_exact_binding() {
         let fields = vec![ImportMappingField {
@@ -1979,5 +3017,160 @@ mod tests {
         assert!(CONFIRM_IDEMPOTENCY_LOCK_SQL.contains("pg_advisory_xact_lock"));
         assert!(CONFIRM_IDEMPOTENCY_LOCK_SQL.contains("$1::text"));
         assert!(CONFIRM_IDEMPOTENCY_LOCK_SQL.contains("$2::text"));
+    }
+
+    #[test]
+    fn rollback_conflict_cursor_is_bound_to_workspace_batch_and_precheck() {
+        let workspace_id = Uuid::now_v7();
+        let import_id = Uuid::now_v7();
+        let request_id = Uuid::now_v7();
+        let conflict_id = Uuid::now_v7();
+        let cursor = format_rollback_cursor(workspace_id, import_id, request_id, 7, conflict_id);
+        assert_eq!(
+            parse_rollback_cursor(&cursor, workspace_id, import_id, request_id).unwrap(),
+            (7, conflict_id)
+        );
+        assert!(parse_rollback_cursor(&cursor, Uuid::now_v7(), import_id, request_id).is_err());
+        assert!(parse_rollback_cursor(&cursor, workspace_id, Uuid::now_v7(), request_id).is_err());
+        assert!(parse_rollback_cursor(&cursor, workspace_id, import_id, Uuid::now_v7()).is_err());
+        assert!(
+            parse_rollback_cursor(
+                &format!("{workspace_id}:{import_id}:{request_id}:0:{conflict_id}"),
+                workspace_id,
+                import_id,
+                request_id
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rollback_precheck_fingerprint_is_deterministic_and_state_sensitive() {
+        let import_id = Uuid::now_v7();
+        let material = vec![json!({
+            "import_id": import_id,
+            "target_id": Uuid::nil(),
+            "row_version": 3,
+        })];
+        let first = finalize_rollback_evaluation(
+            import_id,
+            RollbackCapability::Direct,
+            Some(1),
+            1,
+            Vec::new(),
+            material.clone(),
+        )
+        .unwrap();
+        let second = finalize_rollback_evaluation(
+            import_id,
+            RollbackCapability::Direct,
+            Some(1),
+            1,
+            Vec::new(),
+            material,
+        )
+        .unwrap();
+        let changed = finalize_rollback_evaluation(
+            import_id,
+            RollbackCapability::Direct,
+            Some(1),
+            1,
+            Vec::new(),
+            vec![json!({
+                "import_id": import_id,
+                "target_id": Uuid::nil(),
+                "row_version": 4,
+            })],
+        )
+        .unwrap();
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_ne!(first.fingerprint, changed.fingerprint);
+        assert_eq!(first.fingerprint.len(), 64);
+    }
+
+    #[test]
+    fn rollback_enqueue_rechecks_before_creating_any_job() {
+        let queue_body = IMPORTS_SOURCE
+            .split("pub async fn queue_rollback")
+            .nth(1)
+            .expect("queue function")
+            .split("pub async fn list_rollback_conflicts")
+            .next()
+            .expect("queue function end");
+        let recheck = queue_body
+            .find("evaluate_rollback(&mut tx")
+            .expect("synchronous recheck");
+        let conflict_return = queue_body
+            .find("QueueRollbackResult::Conflict")
+            .expect("conflict return");
+        let job_insert = queue_body
+            .find("insert into job_queue")
+            .expect("rollback job insert");
+        assert!(recheck < conflict_return);
+        assert!(conflict_return < job_insert);
+        assert_eq!(queue_body.matches("pool.begin().await?").count(), 1);
+        assert_eq!(queue_body.matches("insert into job_queue").count(), 1);
+    }
+
+    #[test]
+    fn rollback_mutation_lock_order_is_advisory_batch_request_then_targets() {
+        let queue_body = IMPORTS_SOURCE
+            .split("pub async fn queue_rollback")
+            .nth(1)
+            .expect("queue function")
+            .split("async fn lock_rollback_batch")
+            .next()
+            .expect("queue function end");
+        let advisory = queue_body
+            .find("CONFIRM_IDEMPOTENCY_LOCK_SQL")
+            .expect("workspace advisory lock");
+        let batch = queue_body
+            .find("lock_rollback_batch(&mut tx")
+            .expect("batch lock");
+        let request = queue_body
+            .find("select status, precheck_fingerprint, job_id")
+            .expect("rollback request lock");
+        let targets = queue_body
+            .find("evaluate_rollback(&mut tx")
+            .expect("target precheck locks");
+        assert!(advisory < batch);
+        assert!(batch < request);
+        assert!(request < targets);
+
+        let batch_lock = IMPORTS_SOURCE
+            .split("async fn lock_rollback_batch")
+            .nth(1)
+            .expect("batch lock helper")
+            .split("pub async fn list_rollback_conflicts")
+            .next()
+            .expect("batch lock helper end");
+        assert!(batch_lock.contains("from import_batches"));
+        assert!(batch_lock.contains("for update"));
+    }
+
+    #[test]
+    fn rollback_precheck_is_deny_by_default_for_unknown_targets_and_dependencies() {
+        let evaluation = IMPORTS_SOURCE
+            .split("async fn evaluate_rollback")
+            .nth(1)
+            .expect("evaluation")
+            .split("fn finalize_rollback_evaluation")
+            .next()
+            .expect("evaluation end");
+        assert!(evaluation.contains("unsupported_target_kind"));
+        assert!(evaluation.contains("unsupported_change_operation"));
+        assert!(evaluation.contains("import_conflict_candidates candidate"));
+        assert!(evaluation.contains("downstream_import_conflict_candidate"));
+        assert!(evaluation.contains("for update"));
+    }
+
+    #[test]
+    fn phase_3d_migration_allows_atomic_recheck_conflict_transition() {
+        let migration = include_str!(
+            "../../../migrations/202607260001_phase_3d_rollback_and_object_governance.sql"
+        );
+        assert!(migration.contains("('prechecked', 'precheck_conflict')"));
+        assert!(migration.contains("import_rollback_conflicts_immutable"));
+        assert!(migration.contains("force row level security"));
     }
 }
