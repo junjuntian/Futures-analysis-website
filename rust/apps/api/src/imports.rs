@@ -42,12 +42,113 @@ pub struct ImportState {
     pub storage: Arc<infrastructure::object_storage::LocalObjectStorage>,
     pub upload_policy: application::imports::UploadPolicy,
     pub idempotency_pepper: String,
+    pub sse_revalidate_seconds: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ImportErrorBody {
     code: &'static str,
     message: &'static str,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum ImportEventStreamErrorCode {
+    AuthRequired,
+    PermissionDenied,
+    EventIdInvalid,
+    EventNotVisible,
+    InternalError,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ImportEventStreamErrorBody {
+    pub code: ImportEventStreamErrorCode,
+    pub message: String,
+}
+
+macro_rules! import_sse_frame {
+    ($frame:ident, $kind:ident, $variant:ident) => {
+        #[derive(Debug, Serialize, ToSchema)]
+        #[serde(rename_all = "snake_case")]
+        #[allow(dead_code)]
+        pub enum $kind {
+            $variant,
+        }
+
+        #[derive(Debug, Serialize, ToSchema)]
+        pub struct $frame {
+            pub event_seq: i64,
+            pub event_type: $kind,
+            pub status: String,
+            pub processed_rows: i64,
+            pub total_rows: i64,
+            pub inserted_count: i64,
+            pub updated_count: i64,
+            pub skipped_count: i64,
+            pub conflict_count: i64,
+            pub error_code: Option<String>,
+        }
+    };
+}
+
+import_sse_frame!(ImportQueuedEventFrame, ImportQueuedEventType, Queued);
+import_sse_frame!(ImportRunningEventFrame, ImportRunningEventType, Running);
+import_sse_frame!(ImportProgressEventFrame, ImportProgressEventType, Progress);
+import_sse_frame!(
+    ImportSucceededEventFrame,
+    ImportSucceededEventType,
+    Succeeded
+);
+import_sse_frame!(ImportFailedEventFrame, ImportFailedEventType, Failed);
+import_sse_frame!(
+    ImportDeadLetterEventFrame,
+    ImportDeadLetterEventType,
+    DeadLetter
+);
+import_sse_frame!(
+    ImportRollbackQueuedEventFrame,
+    ImportRollbackQueuedEventType,
+    RollbackQueued
+);
+import_sse_frame!(
+    ImportRollbackRunningEventFrame,
+    ImportRollbackRunningEventType,
+    RollbackRunning
+);
+import_sse_frame!(
+    ImportRollbackConflictEventFrame,
+    ImportRollbackConflictEventType,
+    RollbackConflict
+);
+import_sse_frame!(
+    ImportRolledBackEventFrame,
+    ImportRolledBackEventType,
+    RolledBack
+);
+import_sse_frame!(
+    ImportRollbackFailedEventFrame,
+    ImportRollbackFailedEventType,
+    RollbackFailed
+);
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+#[schema(discriminator = "event_type")]
+#[allow(dead_code)]
+pub enum ImportSseEventFrame {
+    Queued(ImportQueuedEventFrame),
+    Running(ImportRunningEventFrame),
+    Progress(ImportProgressEventFrame),
+    Succeeded(ImportSucceededEventFrame),
+    Failed(ImportFailedEventFrame),
+    DeadLetter(ImportDeadLetterEventFrame),
+    RollbackQueued(ImportRollbackQueuedEventFrame),
+    RollbackRunning(ImportRollbackRunningEventFrame),
+    RollbackConflict(ImportRollbackConflictEventFrame),
+    RolledBack(ImportRolledBackEventFrame),
+    RollbackFailed(ImportRollbackFailedEventFrame),
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -210,6 +311,15 @@ impl ImportApiError {
             status: StatusCode::NOT_FOUND,
             code: "import_not_found",
             message: "import is not visible",
+            request_id,
+        }
+    }
+
+    fn not_found_with_code(code: &'static str, request_id: Uuid) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code,
+            message: "resource is not visible",
             request_id,
         }
     }
@@ -1521,11 +1631,17 @@ pub async fn rollback(
     ),
     security(("session_cookie" = [])),
     responses(
-        (status = 200, content_type = "text/event-stream"),
-        (status = 400, body = ImportErrorBody),
-        (status = 401, body = ImportErrorBody),
-        (status = 403, body = ImportErrorBody),
-        (status = 404, body = ImportErrorBody)
+        (
+            status = 200,
+            body = ImportSseEventFrame,
+            content_type = "text/event-stream",
+            description = "SSE frames use event_seq as id, event_type as event, and the matching discriminated JSON schema as data"
+        ),
+        (status = 400, body = ImportEventStreamErrorBody, description = "event_id_invalid"),
+        (status = 401, body = ImportEventStreamErrorBody, description = "auth_required"),
+        (status = 403, body = ImportEventStreamErrorBody, description = "permission_denied"),
+        (status = 404, body = ImportEventStreamErrorBody, description = "event_not_visible"),
+        (status = 500, body = ImportEventStreamErrorBody, description = "internal_error")
     )
 )]
 pub async fn events(
@@ -1542,7 +1658,7 @@ pub async fn events(
         .map_err(|error| ImportApiError::auth(error, request_id))?;
     database::imports::get_import(&state.auth.pool, context.workspace_id(), import_id)
         .await
-        .map_err(|error| map_repository_error(error, request_id))?;
+        .map_err(|error| map_event_repository_error(error, request_id))?;
     let after = match headers.get("last-event-id") {
         None => 0,
         Some(value) => value
@@ -1559,36 +1675,117 @@ pub async fn events(
         after,
     )
     .await
-    .map_err(|_| ImportApiError::bad_request("event_id_invalid", request_id))?;
+    .map_err(|error| map_event_queue_error(error, request_id))?;
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let pool = state.auth.pool.clone();
+    let auth_state = state.auth.clone();
+    let revalidation_headers = headers;
     let workspace_id = context.workspace_id();
+    let user_id = context.user_id();
+    let session_id = context.session_id();
+    let revalidate_seconds = state.sse_revalidate_seconds;
     tokio::spawn(async move {
         let mut cursor = after;
         let mut pending = VecDeque::from(initial);
+        let mut poll = tokio::time::interval(Duration::from_secs(1));
+        let mut revalidate = tokio::time::interval(Duration::from_secs(revalidate_seconds));
+        poll.tick().await;
+        revalidate.tick().await;
         loop {
-            if let Some(event) = pending.pop_front() {
-                cursor = event.event_seq;
-                let terminal = matches!(
-                    event.event_type.as_str(),
-                    "succeeded" | "failed" | "dead_letter"
-                );
+            if let Some(event) = pending.front() {
+                let terminal = is_terminal_event_type(&event.event_type);
                 let sse = Event::default()
                     .id(event.event_seq.to_string())
                     .event(event.event_type.clone())
                     .data(serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()));
-                if sender.send(Ok(sse)).await.is_err() || terminal {
-                    break;
+                match send_frame_or_revalidate(&sender, &mut revalidate, sse).await {
+                    FrameWait::Sent(Ok(())) => {
+                        cursor = event.event_seq;
+                        pending.pop_front();
+                        if terminal {
+                            break;
+                        }
+                    }
+                    FrameWait::Sent(Err(_)) => break,
+                    FrameWait::Revalidate => {
+                        if let Err(reason_code) = revalidate_event_stream(
+                            &auth_state,
+                            &revalidation_headers,
+                            session_id,
+                            user_id,
+                            workspace_id,
+                            import_id,
+                        )
+                        .await
+                        {
+                            audit_event_stream_termination(
+                                &pool,
+                                workspace_id,
+                                user_id,
+                                request_id,
+                                import_id,
+                                reason_code,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
                 }
                 continue;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            match database::job_queue::list_events_after(&pool, workspace_id, import_id, cursor)
-                .await
-            {
-                Ok(events) if !events.is_empty() => pending = VecDeque::from(events),
-                Ok(_) => {}
-                Err(_) => break,
+            tokio::select! {
+                biased;
+                _ = revalidate.tick() => {
+                    if let Err(reason_code) = revalidate_event_stream(
+                        &auth_state,
+                        &revalidation_headers,
+                        session_id,
+                        user_id,
+                        workspace_id,
+                        import_id,
+                    ).await {
+                        audit_event_stream_termination(
+                            &pool,
+                            workspace_id,
+                            user_id,
+                            request_id,
+                            import_id,
+                            reason_code,
+                        ).await;
+                        break;
+                    }
+                }
+                _ = poll.tick() => {
+                    match database::job_queue::list_events_after(
+                        &pool,
+                        workspace_id,
+                        import_id,
+                        cursor,
+                    ).await {
+                        Ok(events) if !events.is_empty() => pending = VecDeque::from(events),
+                        Ok(_) => {}
+                        Err(error) => {
+                            let reason_code = match error {
+                                database::job_queue::JobQueueError::EventNotVisible => {
+                                    "event_not_visible"
+                                }
+                                database::job_queue::JobQueueError::EventIdInvalid => {
+                                    "event_id_invalid"
+                                }
+                                _ => "internal_error",
+                            };
+                            audit_event_stream_termination(
+                                &pool,
+                                workspace_id,
+                                user_id,
+                                request_id,
+                                import_id,
+                                reason_code,
+                            ).await;
+                            break;
+                        }
+                    }
+                }
             }
         }
     });
@@ -1600,6 +1797,88 @@ pub async fn events(
                 .text("heartbeat"),
         )
         .into_response())
+}
+
+enum FrameWait {
+    Sent(Result<(), tokio::sync::mpsc::error::SendError<Result<Event, Infallible>>>),
+    Revalidate,
+}
+
+async fn send_frame_or_revalidate(
+    sender: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    revalidate: &mut tokio::time::Interval,
+    event: Event,
+) -> FrameWait {
+    tokio::select! {
+        biased;
+        _ = revalidate.tick() => FrameWait::Revalidate,
+        result = sender.send(Ok(event)) => FrameWait::Sent(result),
+    }
+}
+
+async fn audit_event_stream_termination(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    request_id: Uuid,
+    import_id: Uuid,
+    reason_code: &'static str,
+) {
+    let outcome = if reason_code == "internal_error" {
+        "failure"
+    } else {
+        "denied"
+    };
+    let _ = database::imports::record_import_audit(
+        pool,
+        workspace_id,
+        user_id,
+        request_id,
+        Some(import_id),
+        "import.events_access_terminated",
+        outcome,
+        reason_code,
+    )
+    .await;
+}
+
+fn is_terminal_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "succeeded"
+            | "failed"
+            | "dead_letter"
+            | "rolled_back"
+            | "rollback_conflict"
+            | "rollback_failed"
+    )
+}
+
+async fn revalidate_event_stream(
+    auth_state: &AuthState,
+    headers: &HeaderMap,
+    expected_session_id: Uuid,
+    expected_user_id: Uuid,
+    expected_workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<(), &'static str> {
+    let context = auth::current_context(auth_state, headers)
+        .await
+        .map_err(|error| error.code())?;
+    if context.session_id() != expected_session_id || context.user_id() != expected_user_id {
+        return Err("auth_required");
+    }
+    if context.workspace_id() != expected_workspace_id {
+        return Err("event_not_visible");
+    }
+    context
+        .require_permission(Permission::ReadImports)
+        .map_err(|error| error.code())?;
+    match database::imports::get_import(&auth_state.pool, expected_workspace_id, import_id).await {
+        Ok(_) => Ok(()),
+        Err(ImportRepositoryError::NotFound) => Err("event_not_visible"),
+        Err(_) => Err("internal_error"),
+    }
 }
 
 #[utoipa::path(
@@ -1906,6 +2185,31 @@ fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> Impor
     }
 }
 
+fn map_event_repository_error(error: ImportRepositoryError, request_id: Uuid) -> ImportApiError {
+    match error {
+        ImportRepositoryError::NotFound => {
+            ImportApiError::not_found_with_code("event_not_visible", request_id)
+        }
+        _ => ImportApiError::internal(request_id),
+    }
+}
+
+fn map_event_queue_error(
+    error: database::job_queue::JobQueueError,
+    request_id: Uuid,
+) -> ImportApiError {
+    use database::job_queue::JobQueueError;
+    match error {
+        JobQueueError::EventNotVisible => {
+            ImportApiError::not_found_with_code("event_not_visible", request_id)
+        }
+        JobQueueError::EventIdInvalid => {
+            ImportApiError::bad_request("event_id_invalid", request_id)
+        }
+        _ => ImportApiError::internal(request_id),
+    }
+}
+
 fn map_compensation_error(error: CompensationRepositoryError, request_id: Uuid) -> ImportApiError {
     match error {
         CompensationRepositoryError::NotFound => ImportApiError::not_found(request_id),
@@ -2126,6 +2430,7 @@ fn digest(parts: &[&str]) -> String {
 mod phase_3d_compensation_contract {
     use super::{Uuid, map_object_governance_error};
     use database::object_governance::ObjectGovernanceError;
+    use std::{convert::Infallible, time::Duration};
 
     const SOURCE: &str = include_str!("imports.rs");
 
@@ -2178,5 +2483,95 @@ mod phase_3d_compensation_contract {
         let internal =
             map_object_governance_error(ObjectGovernanceError::InvalidStoredState, request_id);
         assert_eq!(internal.code, "object_consistency_error");
+    }
+
+    #[test]
+    fn every_import_and_rollback_terminal_event_closes_sse() {
+        for event_type in [
+            "succeeded",
+            "failed",
+            "dead_letter",
+            "rolled_back",
+            "rollback_conflict",
+            "rollback_failed",
+        ] {
+            assert!(super::is_terminal_event_type(event_type));
+        }
+        for event_type in [
+            "queued",
+            "running",
+            "progress",
+            "rollback_queued",
+            "rollback_running",
+        ] {
+            assert!(!super::is_terminal_event_type(event_type));
+        }
+    }
+
+    #[test]
+    fn event_visibility_and_cursor_errors_use_stable_codes() {
+        let request_id = Uuid::now_v7();
+        let invisible = super::map_event_queue_error(
+            database::job_queue::JobQueueError::EventNotVisible,
+            request_id,
+        );
+        assert_eq!(invisible.code, "event_not_visible");
+        let invalid = super::map_event_queue_error(
+            database::job_queue::JobQueueError::EventIdInvalid,
+            request_id,
+        );
+        assert_eq!(invalid.code, "event_id_invalid");
+    }
+
+    #[tokio::test]
+    async fn slow_sse_sender_yields_to_periodic_revalidation() {
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, Infallible>>(1);
+        sender
+            .send(Ok(axum::response::sse::Event::default().data("backlog")))
+            .await
+            .unwrap();
+        let mut revalidate = tokio::time::interval(Duration::from_millis(5));
+        revalidate.tick().await;
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(100),
+            super::send_frame_or_revalidate(
+                &sender,
+                &mut revalidate,
+                axum::response::sse::Event::default().data("next"),
+            ),
+        )
+        .await
+        .expect("revalidation must not be blocked by a full client channel");
+        assert!(matches!(outcome, super::FrameWait::Revalidate));
+        assert!(receiver.try_recv().is_ok(), "the pending frame is retained");
+    }
+
+    #[test]
+    fn established_stream_revalidates_every_visibility_boundary_and_audits_termination() {
+        let events = SOURCE
+            .split("pub async fn events")
+            .nth(1)
+            .unwrap()
+            .split("#[utoipa::path(\n    get,\n    path = \"/api/v1/imports/{import_id}/errors\"")
+            .next()
+            .unwrap();
+        for boundary in [
+            "current_context",
+            "session_id",
+            "user_id",
+            "workspace_id",
+            "Permission::ReadImports",
+            "get_import",
+            "import.events_access_terminated",
+        ] {
+            assert!(events.contains(boundary), "missing SSE boundary {boundary}");
+        }
+        for forbidden in ["cookie", "token", "csrf", "idempotency_key", "record_data"] {
+            assert!(
+                !events.contains(&format!("\"{forbidden}\"")),
+                "SSE audit must not persist {forbidden}"
+            );
+        }
     }
 }

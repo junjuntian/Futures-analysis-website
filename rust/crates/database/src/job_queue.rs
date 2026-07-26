@@ -62,6 +62,10 @@ pub enum JobQueueError {
     InvalidFrozenImport,
     #[error("abort policy encountered a conflict")]
     AbortConflict,
+    #[error("event stream is not visible")]
+    EventNotVisible,
+    #[error("event cursor is invalid")]
+    EventIdInvalid,
 }
 
 impl JobQueueError {
@@ -82,6 +86,8 @@ impl JobQueueError {
             Self::UnsupportedJobType => "unsupported_job_type",
             Self::InvalidFrozenImport => "invalid_frozen_import",
             Self::AbortConflict => "abort_conflict",
+            Self::EventNotVisible => "event_not_visible",
+            Self::EventIdInvalid => "event_id_invalid",
         }
     }
 }
@@ -103,124 +109,121 @@ pub async fn claim_next_import_job(
     pool: &PgPool,
     worker_id: &str,
     lease_seconds: i64,
+    workspace_id: Uuid,
 ) -> Result<Option<ClaimedJob>, JobQueueError> {
-    let workspace_ids = sqlx::query_scalar::<_, Uuid>("select id from workspaces order by id")
-        .fetch_all(pool)
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    // Claims and reclaims are short job-first transactions. SKIP LOCKED
+    // lets multiple workers select different jobs. Import confirmation
+    // keeps its existing commit fence; rollback holds the same job-first
+    // order for its intentionally atomic inverse transaction.
+    let row = sqlx::query(CLAIM_CANDIDATE_SQL)
+        .bind(workspace_id)
+        .fetch_optional(&mut *tx)
         .await?;
-    for workspace_id in workspace_ids {
-        let mut tx = pool.begin().await?;
-        set_workspace(&mut tx, workspace_id).await?;
-        // Claims and reclaims are short job-first transactions. SKIP LOCKED
-        // lets multiple workers select different jobs. Import confirmation
-        // keeps its existing commit fence; rollback holds the same job-first
-        // order for its intentionally atomic inverse transaction.
-        let row = sqlx::query(CLAIM_CANDIDATE_SQL)
-            .bind(workspace_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(row) = row else {
-            tx.commit().await?;
-            continue;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let job_id: Uuid = row.get("id");
+    let aggregate_id: Uuid = row.get("aggregate_id");
+    let status: String = row.get("status");
+    let attempt_count: i32 = row.get("attempt_count");
+    let max_attempts: i32 = row.get("max_attempts");
+    let available_at: OffsetDateTime = row.get("available_at");
+    let current_expiry: Option<OffsetDateTime> = row.get("lease_expires_at");
+    let now = OffsetDateTime::now_utc();
+    let expired = current_expiry.is_some_and(|expires_at| expires_at < now);
+    if status == "running" && expired && attempt_count >= max_attempts {
+        let exhausted_job = ClaimedJob {
+            id: row.get("id"),
+            workspace_id,
+            job_type: row.get("job_type"),
+            aggregate_id,
+            attempt_count,
+            max_attempts,
+            lease_expires_at: current_expiry.expect("expired running job has a lease"),
+            lease_generation: row.get("lease_generation"),
         };
-        let job_id: Uuid = row.get("id");
-        let aggregate_id: Uuid = row.get("aggregate_id");
-        let status: String = row.get("status");
-        let attempt_count: i32 = row.get("attempt_count");
-        let max_attempts: i32 = row.get("max_attempts");
-        let available_at: OffsetDateTime = row.get("available_at");
-        let current_expiry: Option<OffsetDateTime> = row.get("lease_expires_at");
-        let now = OffsetDateTime::now_utc();
-        let expired = current_expiry.is_some_and(|expires_at| expires_at < now);
-        if status == "running" && expired && attempt_count >= max_attempts {
-            let exhausted_job = ClaimedJob {
-                id: row.get("id"),
-                workspace_id,
-                job_type: row.get("job_type"),
-                aggregate_id,
-                attempt_count,
-                max_attempts,
-                lease_expires_at: current_expiry.expect("expired running job has a lease"),
-                lease_generation: row.get("lease_generation"),
-            };
-            sqlx::query(
-                "update job_queue
+        sqlx::query(
+            "update job_queue
                  set status = 'dead_letter', leased_by = null, lease_expires_at = null,
                      last_error_code = 'lease_attempts_exhausted', finished_at = now(),
                      updated_at = now()
                  where workspace_id = $1 and id = $2",
-            )
-            .bind(workspace_id)
-            .bind(exhausted_job.id)
-            .execute(&mut *tx)
-            .await?;
-            if exhausted_job.job_type == "import_confirm" {
-                let actor_user_id = sqlx::query_scalar::<_, Uuid>(
-                    "update import_batches
+        )
+        .bind(workspace_id)
+        .bind(exhausted_job.id)
+        .execute(&mut *tx)
+        .await?;
+        if exhausted_job.job_type == "import_confirm" {
+            let actor_user_id = sqlx::query_scalar::<_, Uuid>(
+                "update import_batches
                      set status = 'failed', updated_at = now()
                      where workspace_id = $1 and id = $2 and status = 'importing'
                      returning confirmed_by",
-                )
-                .bind(workspace_id)
-                .bind(exhausted_job.aggregate_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                append_event(
+            )
+            .bind(workspace_id)
+            .bind(exhausted_job.aggregate_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            append_event(
+                &mut tx,
+                workspace_id,
+                exhausted_job.aggregate_id,
+                exhausted_job.id,
+                "dead_letter",
+                "dead_letter",
+                ImportCounters::default(),
+                Some("lease_attempts_exhausted"),
+            )
+            .await?;
+            if let Some(actor_user_id) = actor_user_id {
+                insert_audit(
                     &mut tx,
-                    workspace_id,
-                    exhausted_job.aggregate_id,
-                    exhausted_job.id,
-                    "dead_letter",
-                    "dead_letter",
+                    &exhausted_job,
+                    actor_user_id,
+                    "import.worker_dead_letter",
+                    "failure",
                     ImportCounters::default(),
                     Some("lease_attempts_exhausted"),
+                    None,
                 )
                 .await?;
-                if let Some(actor_user_id) = actor_user_id {
-                    insert_audit(
-                        &mut tx,
-                        &exhausted_job,
-                        actor_user_id,
-                        "import.worker_dead_letter",
-                        "failure",
-                        ImportCounters::default(),
-                        Some("lease_attempts_exhausted"),
-                        None,
-                    )
-                    .await?;
-                }
-            } else if exhausted_job.job_type == "import_rollback" {
-                fail_exhausted_rollback(&mut tx, &exhausted_job).await?;
             }
-            tx.commit().await?;
-            return Ok(None);
+        } else if exhausted_job.job_type == "import_rollback" {
+            fail_exhausted_rollback(&mut tx, &exhausted_job).await?;
         }
-        let claimable = attempt_count < max_attempts
-            && ((status == "queued" && available_at <= now) || (status == "running" && expired));
-        if !claimable {
-            tx.commit().await?;
-            continue;
-        }
-        let job_type: String = row.get("job_type");
-        let attempt_count = attempt_count + 1;
-        let lease_generation = row.get::<i64, _>("lease_generation") + 1;
-        let lease_expires_at = OffsetDateTime::now_utc() + Duration::seconds(lease_seconds);
-        sqlx::query(
-            "update job_queue
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let claimable = attempt_count < max_attempts
+        && ((status == "queued" && available_at <= now) || (status == "running" && expired));
+    if !claimable {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let job_type: String = row.get("job_type");
+    let attempt_count = attempt_count + 1;
+    let lease_generation = row.get::<i64, _>("lease_generation") + 1;
+    let lease_expires_at = OffsetDateTime::now_utc() + Duration::seconds(lease_seconds);
+    sqlx::query(
+        "update job_queue
              set status = 'running', attempt_count = $1, leased_by = $2,
                  lease_expires_at = $3, lease_generation = $4, updated_at = now()
              where workspace_id = $5 and id = $6",
-        )
-        .bind(attempt_count)
-        .bind(worker_id)
-        .bind(lease_expires_at)
-        .bind(lease_generation)
-        .bind(workspace_id)
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await?;
-        if job_type == "import_confirm" {
-            sqlx::query(
-                "update import_batches
+    )
+    .bind(attempt_count)
+    .bind(worker_id)
+    .bind(lease_expires_at)
+    .bind(lease_generation)
+    .bind(workspace_id)
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+    if job_type == "import_confirm" {
+        sqlx::query(
+            "update import_batches
              set status = case
                    when status = 'confirmed' then 'importing'::import_batch_status
                    else status
@@ -228,25 +231,25 @@ pub async fn claim_next_import_job(
                  updated_at = now()
              where workspace_id = $1 and id = $2
                and status in ('confirmed', 'importing')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .execute(&mut *tx)
-            .await?;
-            append_event(
-                &mut tx,
-                workspace_id,
-                aggregate_id,
-                job_id,
-                "running",
-                "running",
-                ImportCounters::default(),
-                None,
-            )
-            .await?;
-        } else if job_type == "import_rollback" {
-            let batch_updated = sqlx::query(
-                "update import_batches
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event(
+            &mut tx,
+            workspace_id,
+            aggregate_id,
+            job_id,
+            "running",
+            "running",
+            ImportCounters::default(),
+            None,
+        )
+        .await?;
+    } else if job_type == "import_rollback" {
+        let batch_updated = sqlx::query(
+            "update import_batches
                     set status = case
                         when status = 'succeeded' then 'rollback_check'::import_batch_status
                         else status
@@ -254,59 +257,57 @@ pub async fn claim_next_import_job(
                         updated_at = now()
                   where workspace_id = $1 and id = $2
                     and status in ('succeeded', 'rollback_check', 'rolling_back')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if batch_updated != 1 {
-                return Err(JobQueueError::InvalidFrozenImport);
-            }
-            let rolling = sqlx::query(
-                "update import_batches
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if batch_updated != 1 {
+            return Err(JobQueueError::InvalidFrozenImport);
+        }
+        let rolling = sqlx::query(
+            "update import_batches
                     set status = 'rolling_back', updated_at = now()
                   where workspace_id = $1 and id = $2
                     and status in ('rollback_check', 'rolling_back')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if rolling != 1 {
-                return Err(JobQueueError::InvalidFrozenImport);
-            }
-            let request_updated = sqlx::query(
-                "update import_rollback_requests
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if rolling != 1 {
+            return Err(JobQueueError::InvalidFrozenImport);
+        }
+        let request_updated = sqlx::query(
+            "update import_rollback_requests
                     set status = case when status = 'queued' then 'running' else status end,
                         updated_at = now()
                   where workspace_id = $1 and import_batch_id = $2 and job_id = $3
                     and status in ('queued', 'running')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-            if request_updated != 1 {
-                return Err(JobQueueError::InvalidFrozenImport);
-            }
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if request_updated != 1 {
+            return Err(JobQueueError::InvalidFrozenImport);
         }
-        tx.commit().await?;
-        return Ok(Some(ClaimedJob {
-            id: job_id,
-            workspace_id,
-            job_type,
-            aggregate_id,
-            attempt_count,
-            max_attempts,
-            lease_expires_at,
-            lease_generation,
-        }));
     }
-    Ok(None)
+    tx.commit().await?;
+    Ok(Some(ClaimedJob {
+        id: job_id,
+        workspace_id,
+        job_type,
+        aggregate_id,
+        attempt_count,
+        max_attempts,
+        lease_expires_at,
+        lease_generation,
+    }))
 }
 
 async fn fail_exhausted_rollback(
@@ -1087,7 +1088,7 @@ pub async fn list_events_after(
     .fetch_one(&mut *tx)
     .await?;
     if !visible {
-        return Err(JobQueueError::InvalidFrozenImport);
+        return Err(JobQueueError::EventNotVisible);
     }
     let max = sqlx::query_scalar::<_, i64>(
         "select coalesce(max(event_seq), 0) from import_job_events
@@ -1098,7 +1099,7 @@ pub async fn list_events_after(
     .fetch_one(&mut *tx)
     .await?;
     if after < 0 || after > max {
-        return Err(JobQueueError::InvalidFrozenImport);
+        return Err(JobQueueError::EventIdInvalid);
     }
     let rows = sqlx::query(
         "select event_seq, event_type, payload
@@ -1391,6 +1392,22 @@ mod tests {
         });
         assert!(payload.get("record_data").is_none());
         assert_eq!(payload["processed_rows"], 3);
+        let event = ImportProgressEvent {
+            event_seq: 4,
+            event_type: "progress".into(),
+            status: "running".into(),
+            processed_rows: 3,
+            total_rows: 5,
+            inserted_count: 1,
+            updated_count: 1,
+            skipped_count: 1,
+            conflict_count: 0,
+            error_code: None,
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        for forbidden in ["record_data", "cookie", "token", "csrf", "idempotency_key"] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]

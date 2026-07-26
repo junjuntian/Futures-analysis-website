@@ -307,6 +307,10 @@ impl Permission {
 }
 
 impl AuthContext {
+    pub(crate) fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+
     pub(crate) fn user_id(&self) -> Uuid {
         self.user_id
     }

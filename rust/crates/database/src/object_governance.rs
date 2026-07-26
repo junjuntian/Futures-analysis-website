@@ -95,15 +95,12 @@ pub async fn claim_next_job(
     pool: &PgPool,
     worker_id: &str,
     lease_seconds: i64,
+    workspace_id: Uuid,
 ) -> Result<Option<ClaimedGovernanceJob>, ObjectGovernanceError> {
-    let workspace_ids = sqlx::query_scalar::<_, Uuid>("select id from workspaces order by id")
-        .fetch_all(pool)
-        .await?;
-    for workspace_id in workspace_ids {
-        let mut tx = pool.begin().await?;
-        set_workspace(&mut tx, workspace_id).await?;
-        let row = sqlx::query(
-            "select id, job_type, scan_run_id, quarantine_request_id,
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let row = sqlx::query(
+        "select id, job_type, scan_run_id, quarantine_request_id,
                     attempt_count, max_attempts, lease_generation
                from object_governance_jobs
               where workspace_id = $1
@@ -114,141 +111,139 @@ pub async fn claim_next_job(
               order by available_at, created_at, id
               for update skip locked
               limit 1",
-        )
-        .bind(workspace_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(row) = row else {
-            tx.commit().await?;
-            continue;
-        };
-        let job_type = row.get::<String, _>("job_type");
-        let aggregate_id = match job_type.as_str() {
-            "object_consistency_scan" => row
-                .get::<Option<Uuid>, _>("scan_run_id")
-                .ok_or(ObjectGovernanceError::InvalidStoredState)?,
-            "object_quarantine" => row
-                .get::<Option<Uuid>, _>("quarantine_request_id")
-                .ok_or(ObjectGovernanceError::InvalidStoredState)?,
-            _ => return Err(ObjectGovernanceError::InvalidStoredState),
-        };
-        let prior_attempt_count = row.get::<i32, _>("attempt_count");
-        let max_attempts = row.get::<i32, _>("max_attempts");
-        let job_id = row.get("id");
-        if prior_attempt_count >= max_attempts {
-            sqlx::query(
-                "update object_governance_jobs
+    )
+    .bind(workspace_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let job_type = row.get::<String, _>("job_type");
+    let aggregate_id = match job_type.as_str() {
+        "object_consistency_scan" => row
+            .get::<Option<Uuid>, _>("scan_run_id")
+            .ok_or(ObjectGovernanceError::InvalidStoredState)?,
+        "object_quarantine" => row
+            .get::<Option<Uuid>, _>("quarantine_request_id")
+            .ok_or(ObjectGovernanceError::InvalidStoredState)?,
+        _ => return Err(ObjectGovernanceError::InvalidStoredState),
+    };
+    let prior_attempt_count = row.get::<i32, _>("attempt_count");
+    let max_attempts = row.get::<i32, _>("max_attempts");
+    let job_id = row.get("id");
+    if prior_attempt_count >= max_attempts {
+        sqlx::query(
+            "update object_governance_jobs
                     set status = 'dead_letter', leased_by = null, lease_expires_at = null,
                         last_error_code = 'lease_attempts_exhausted',
                         finished_at = now(), updated_at = now()
                   where workspace_id = $1 and id = $2",
-            )
-            .bind(workspace_id)
-            .bind(job_id)
-            .execute(&mut *tx)
-            .await?;
-            let actor_user_id = match job_type.as_str() {
-                "object_consistency_scan" => {
-                    sqlx::query_scalar::<_, Uuid>(
-                        "update object_consistency_runs
+        )
+        .bind(workspace_id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+        let actor_user_id = match job_type.as_str() {
+            "object_consistency_scan" => {
+                sqlx::query_scalar::<_, Uuid>(
+                    "update object_consistency_runs
                             set status = 'failed', finished_at = now()
                           where workspace_id = $1 and id = $2 and status = 'running'
                           returning requested_by",
-                    )
-                    .bind(workspace_id)
-                    .bind(aggregate_id)
-                    .fetch_one(&mut *tx)
-                    .await?
-                }
-                "object_quarantine" => {
-                    sqlx::query_scalar::<_, Uuid>(
-                        "update object_quarantine_requests
+                )
+                .bind(workspace_id)
+                .bind(aggregate_id)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+            "object_quarantine" => {
+                sqlx::query_scalar::<_, Uuid>(
+                    "update object_quarantine_requests
                             set status = 'failed', finished_at = now()
                           where workspace_id = $1 and id = $2 and status = 'running'
                           returning requested_by",
-                    )
-                    .bind(workspace_id)
-                    .bind(aggregate_id)
-                    .fetch_one(&mut *tx)
-                    .await?
-                }
-                _ => return Err(ObjectGovernanceError::InvalidStoredState),
-            };
-            insert_audit(
-                &mut tx,
-                workspace_id,
-                actor_user_id,
-                Uuid::now_v7(),
-                "object.governance_dead_letter",
-                "failure",
-                json!({
-                    "job_id": job_id,
-                    "job_type": job_type,
-                    "aggregate_id": aggregate_id,
-                    "error_code": "lease_attempts_exhausted"
-                }),
-            )
-            .await?;
-            tx.commit().await?;
-            continue;
-        }
-        let attempt_count = prior_attempt_count + 1;
-        let lease_generation = row.get::<i64, _>("lease_generation") + 1;
-        let updated = sqlx::query(
-            "update object_governance_jobs
+                )
+                .bind(workspace_id)
+                .bind(aggregate_id)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+            _ => return Err(ObjectGovernanceError::InvalidStoredState),
+        };
+        insert_audit(
+            &mut tx,
+            workspace_id,
+            actor_user_id,
+            Uuid::now_v7(),
+            "object.governance_dead_letter",
+            "failure",
+            json!({
+                "job_id": job_id,
+                "job_type": job_type,
+                "aggregate_id": aggregate_id,
+                "error_code": "lease_attempts_exhausted"
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let attempt_count = prior_attempt_count + 1;
+    let lease_generation = row.get::<i64, _>("lease_generation") + 1;
+    let updated = sqlx::query(
+        "update object_governance_jobs
                 set status = 'running', attempt_count = $1, leased_by = $2,
                     lease_expires_at = now() + make_interval(secs => $3),
                     lease_generation = $4, updated_at = now()
               where workspace_id = $5 and id = $6",
+    )
+    .bind(attempt_count)
+    .bind(worker_id)
+    .bind(lease_seconds as f64)
+    .bind(lease_generation)
+    .bind(workspace_id)
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    require_one(updated)?;
+    let aggregate_updated = match job_type.as_str() {
+        "object_consistency_scan" => sqlx::query(
+            "update object_consistency_runs
+                        set status = 'running'
+                      where workspace_id = $1 and id = $2
+                        and status in ('queued', 'running')",
         )
-        .bind(attempt_count)
-        .bind(worker_id)
-        .bind(lease_seconds as f64)
-        .bind(lease_generation)
         .bind(workspace_id)
-        .bind(job_id)
+        .bind(aggregate_id)
         .execute(&mut *tx)
         .await?
-        .rows_affected();
-        require_one(updated)?;
-        let aggregate_updated = match job_type.as_str() {
-            "object_consistency_scan" => sqlx::query(
-                "update object_consistency_runs
+        .rows_affected(),
+        "object_quarantine" => sqlx::query(
+            "update object_quarantine_requests
                         set status = 'running'
                       where workspace_id = $1 and id = $2
                         and status in ('queued', 'running')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected(),
-            "object_quarantine" => sqlx::query(
-                "update object_quarantine_requests
-                        set status = 'running'
-                      where workspace_id = $1 and id = $2
-                        and status in ('queued', 'running')",
-            )
-            .bind(workspace_id)
-            .bind(aggregate_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected(),
-            _ => 0,
-        };
-        require_one(aggregate_updated)?;
-        tx.commit().await?;
-        return Ok(Some(ClaimedGovernanceJob {
-            id: job_id,
-            workspace_id,
-            job_type,
-            aggregate_id,
-            attempt_count,
-            max_attempts,
-            lease_generation,
-        }));
-    }
-    Ok(None)
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected(),
+        _ => 0,
+    };
+    require_one(aggregate_updated)?;
+    tx.commit().await?;
+    Ok(Some(ClaimedGovernanceJob {
+        id: job_id,
+        workspace_id,
+        job_type,
+        aggregate_id,
+        attempt_count,
+        max_attempts,
+        lease_generation,
+    }))
 }
 
 pub async fn renew_job(

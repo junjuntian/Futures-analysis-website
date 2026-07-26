@@ -3,6 +3,7 @@ use database::job_queue::{
     renew_lease,
 };
 use database::rollback_jobs::execute_rollback_job;
+use database::worker_scheduler::WorkerQueue;
 use infrastructure::object_storage::LocalObjectStorage;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -47,20 +48,35 @@ pub async fn run(
     config: ImportWorkerConfig,
 ) -> anyhow::Result<()> {
     loop {
-        match claim_next_import_job(&pool, &worker_id, config.lease_seconds).await {
-            Ok(Some(job)) => process_claimed(&pool, &worker_id, &config, job).await,
-            Ok(None) => {
-                match database::object_governance::claim_next_job(
+        match database::worker_scheduler::reserve_next_work(&pool).await {
+            Ok(Some(reservation)) => match reservation.queue {
+                WorkerQueue::Import => match claim_next_import_job(
                     &pool,
                     &worker_id,
                     config.lease_seconds,
+                    reservation.workspace_id,
+                )
+                .await
+                {
+                    Ok(Some(job)) => process_claimed(&pool, &worker_id, &config, job).await,
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(error_code = error.code(), "failed to claim import job");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                },
+                WorkerQueue::ObjectGovernance => match database::object_governance::claim_next_job(
+                    &pool,
+                    &worker_id,
+                    config.lease_seconds,
+                    reservation.workspace_id,
                 )
                 .await
                 {
                     Ok(Some(job)) => {
                         process_governance_job(&pool, &storage, &worker_id, &config, job).await
                     }
-                    Ok(None) => tokio::time::sleep(Duration::from_millis(config.idle_millis)).await,
+                    Ok(None) => {}
                     Err(error) => {
                         warn!(
                             error_code = error.code(),
@@ -68,10 +84,11 @@ pub async fn run(
                         );
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                }
-            }
+                },
+            },
+            Ok(None) => tokio::time::sleep(Duration::from_millis(config.idle_millis)).await,
             Err(error) => {
-                warn!(error_code = error.code(), "failed to claim import job");
+                warn!(error = %error, "failed to reserve fair worker dispatch");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
@@ -271,5 +288,21 @@ mod tests {
         assert!(dispatch.contains("\"import_confirm\" =>"));
         assert!(dispatch.contains("\"import_rollback\" =>"));
         assert!(dispatch.contains("_ => Err(JobQueueError::UnsupportedJobType)"));
+    }
+
+    #[test]
+    fn worker_uses_persistent_cross_queue_reservations_without_import_priority() {
+        let source = include_str!("import_jobs.rs");
+        let run = source
+            .split("pub async fn run")
+            .nth(1)
+            .unwrap()
+            .split("async fn process_governance_job")
+            .next()
+            .unwrap();
+        assert!(run.contains("reserve_next_work"));
+        assert!(run.contains("WorkerQueue::Import"));
+        assert!(run.contains("WorkerQueue::ObjectGovernance"));
+        assert!(!run.contains("Ok(None) => {\n                match"));
     }
 }

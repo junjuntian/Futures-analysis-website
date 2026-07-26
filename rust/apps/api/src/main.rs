@@ -70,6 +70,31 @@ use uuid::Uuid;
         auth::SessionsQuery,
         auth::ErrorBody,
         imports::ImportErrorBody,
+        imports::ImportEventStreamErrorCode,
+        imports::ImportEventStreamErrorBody,
+        imports::ImportSseEventFrame,
+        imports::ImportQueuedEventFrame,
+        imports::ImportQueuedEventType,
+        imports::ImportRunningEventFrame,
+        imports::ImportRunningEventType,
+        imports::ImportProgressEventFrame,
+        imports::ImportProgressEventType,
+        imports::ImportSucceededEventFrame,
+        imports::ImportSucceededEventType,
+        imports::ImportFailedEventFrame,
+        imports::ImportFailedEventType,
+        imports::ImportDeadLetterEventFrame,
+        imports::ImportDeadLetterEventType,
+        imports::ImportRollbackQueuedEventFrame,
+        imports::ImportRollbackQueuedEventType,
+        imports::ImportRollbackRunningEventFrame,
+        imports::ImportRollbackRunningEventType,
+        imports::ImportRollbackConflictEventFrame,
+        imports::ImportRollbackConflictEventType,
+        imports::ImportRolledBackEventFrame,
+        imports::ImportRolledBackEventType,
+        imports::ImportRollbackFailedEventFrame,
+        imports::ImportRollbackFailedEventType,
         imports::ImportRollbackConflictApiResponse,
         imports::ImportUploadRequest,
         imports::ImportCompensationUploadRequest,
@@ -182,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
         storage,
         upload_policy,
         idempotency_pepper: load_idempotency_pepper().await?,
+        sse_revalidate_seconds: load_sse_revalidate_seconds()?,
     });
 
     let app = router(state, import_state);
@@ -189,6 +215,22 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+fn load_sse_revalidate_seconds() -> anyhow::Result<u64> {
+    let seconds = std::env::var("IMPORT_SSE_REVALIDATE_SECONDS")
+        .map(|value| value.parse::<u64>())
+        .unwrap_or(Ok(15))
+        .map_err(|_| anyhow::anyhow!("IMPORT_SSE_REVALIDATE_SECONDS must be an integer"))?;
+    validate_sse_revalidate_seconds(seconds)?;
+    Ok(seconds)
+}
+
+fn validate_sse_revalidate_seconds(seconds: u64) -> anyhow::Result<()> {
+    if !(1..=60).contains(&seconds) {
+        anyhow::bail!("IMPORT_SSE_REVALIDATE_SECONDS must be between 1 and 60");
+    }
     Ok(())
 }
 
@@ -494,5 +536,89 @@ mod tests {
                 .keys()
                 .any(|path| path.contains("delete") || path.contains("purge"))
         );
+    }
+
+    #[test]
+    fn openapi_snapshots_discriminated_sse_frames_and_stable_errors() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let events = &document["paths"]["/api/v1/imports/{import_id}/events"]["get"];
+        assert!(
+            events["parameters"]
+                .as_array()
+                .expect("SSE parameters")
+                .iter()
+                .any(
+                    |parameter| parameter["name"] == "Last-Event-ID" && parameter["in"] == "header"
+                )
+        );
+        assert_eq!(
+            events["responses"]["200"]["content"]["text/event-stream"]["schema"]["$ref"],
+            "#/components/schemas/ImportSseEventFrame"
+        );
+        let frame = &document["components"]["schemas"]["ImportSseEventFrame"];
+        assert_eq!(frame["discriminator"]["propertyName"], "event_type");
+        let variants = frame["oneOf"].as_array().expect("SSE oneOf variants");
+        assert_eq!(variants.len(), 11);
+        let refs = variants
+            .iter()
+            .filter_map(|variant| variant["$ref"].as_str())
+            .collect::<Vec<_>>();
+        for expected in [
+            "ImportQueuedEventFrame",
+            "ImportRunningEventFrame",
+            "ImportProgressEventFrame",
+            "ImportSucceededEventFrame",
+            "ImportFailedEventFrame",
+            "ImportDeadLetterEventFrame",
+            "ImportRollbackQueuedEventFrame",
+            "ImportRollbackRunningEventFrame",
+            "ImportRollbackConflictEventFrame",
+            "ImportRolledBackEventFrame",
+            "ImportRollbackFailedEventFrame",
+        ] {
+            assert!(
+                refs.iter().any(|schema_ref| schema_ref.ends_with(expected)),
+                "missing SSE frame {expected}"
+            );
+        }
+        let snapshot = serde_json::json!({
+            "400": "event_id_invalid",
+            "401": "auth_required",
+            "403": "permission_denied",
+            "404": "event_not_visible",
+            "500": "internal_error",
+        });
+        let actual = serde_json::json!({
+            "400": events["responses"]["400"]["description"],
+            "401": events["responses"]["401"]["description"],
+            "403": events["responses"]["403"]["description"],
+            "404": events["responses"]["404"]["description"],
+            "500": events["responses"]["500"]["description"],
+        });
+        assert_eq!(actual, snapshot);
+        let schemas = document["components"]["schemas"].to_string();
+        for forbidden in [
+            "record_data",
+            "cookie",
+            "token",
+            "csrf",
+            "idempotency_key",
+            "original_row",
+        ] {
+            assert!(
+                !frame.to_string().contains(forbidden),
+                "SSE frame schema leaks {forbidden}"
+            );
+        }
+        assert!(schemas.contains("ImportEventStreamErrorBody"));
+    }
+
+    #[test]
+    fn sse_revalidation_interval_is_configurable_but_bounded() {
+        assert!(validate_sse_revalidate_seconds(1).is_ok());
+        assert!(validate_sse_revalidate_seconds(15).is_ok());
+        assert!(validate_sse_revalidate_seconds(60).is_ok());
+        assert!(validate_sse_revalidate_seconds(0).is_err());
+        assert!(validate_sse_revalidate_seconds(61).is_err());
     }
 }

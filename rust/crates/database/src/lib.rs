@@ -3,6 +3,7 @@ pub mod imports;
 pub mod job_queue;
 pub mod object_governance;
 pub mod rollback_jobs;
+pub mod worker_scheduler;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
@@ -24,6 +25,8 @@ mod phase_3d_schema_contract {
     const MIGRATION: &str = include_str!(
         "../../../migrations/202607260001_phase_3d_rollback_and_object_governance.sql"
     );
+    const FAIRNESS_MIGRATION: &str =
+        include_str!("../../../migrations/202607260002_phase_3d_worker_fairness.sql");
 
     #[test]
     fn legacy_batches_are_not_given_fabricated_change_rows() {
@@ -183,5 +186,15 @@ mod phase_3d_schema_contract {
         assert!(MIGRATION.contains("grant delete on imported_records to futures_runtime;"));
         assert!(MIGRATION.contains("revoke delete on stored_objects from futures_runtime;"));
         assert!(!MIGRATION.contains("grant delete on stored_objects"));
+    }
+
+    #[test]
+    fn fair_dispatch_state_is_persistent_without_a_tenant_bypass_table() {
+        assert!(FAIRNESS_MIGRATION.contains("alter table workspaces"));
+        assert!(FAIRNESS_MIGRATION.contains("import_job_last_served_ticket"));
+        assert!(FAIRNESS_MIGRATION.contains("object_job_last_served_ticket"));
+        assert!(FAIRNESS_MIGRATION.contains("worker_dispatch_ticket_seq"));
+        assert!(!FAIRNESS_MIGRATION.contains("create table"));
+        assert!(!FAIRNESS_MIGRATION.contains("disable row level security"));
     }
 }
