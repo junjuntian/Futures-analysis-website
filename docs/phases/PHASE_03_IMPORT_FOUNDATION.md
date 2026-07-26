@@ -2,7 +2,7 @@
 
 计划日期：2026-07-25
 
-当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS；Phase 3C 已授权并进入实施中；Phase 3D 继续未授权。
+当前状态：已拆分为 Phase 3A/3B/3C/3D；Phase 3A、Phase 3B、Phase 3C 已完成并经独立 Evaluator PASS；Phase 3D 范围与关键决策已由用户确认并获实施授权，详细契约见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
 
 ## 1. 背景与目标
 
@@ -35,7 +35,6 @@ Phase 3 的目标是建设 MVP 的第一个业务入口：导入中心基础能�
   - `importing`
   - `succeeded`
   - `failed`
-  - `cancelled`
   - `rollback_check`
   - `rolling_back`
   - `rolled_back`
@@ -100,20 +99,21 @@ Phase 3 的目标是建设 MVP 的第一个业务入口：导入中心基础能�
 - 业务唯一约束和主要查询索引必须包含 `workspace_id`。
 - 所有导入域业务表从迁移创建时启用并强制 PostgreSQL RLS。
 - 应用层查询仍必须显式按当前 session 解析出的 Workspace 过滤，RLS 作为第二层防护。
-- 导入上传、inspect、mapping、preview、confirm、cancel、rollback、错误查询和 SSE 事件均必须审计关键动作。
+- 导入上传、inspect、mapping、preview、confirm、rollback、补偿、错误查询和 SSE 事件均必须审计关键动作。
 - 不允许客户端传入或切换 `workspace_id`。
 
 ### 2.10 SSE 导入进度
 
 - 后台导入任务进度使用 SSE。
 - 事件流按当前 `workspace_id` 和 session 权限过滤。
-- 事件至少覆盖 queued、running、progress、waiting_for_user、succeeded、failed、cancelled、dead_letter。
+- 事件至少覆盖 queued、running、progress、waiting_for_user、succeeded、failed、dead_letter、rollback_conflict、rolled_back。
 - 断线重连不得泄漏其他 Workspace 事件；重复事件不得造成重复写入。
 
 ### 2.11 本地测试与 futures VPS 验收
 
 - 本地完成 Rust fmt/test/clippy、前端 lint/test/build、迁移检查和导入域单元/集成测试。
-- 本机没有 Docker 不作为阻塞；Docker Compose config、镜像构建、容器启动和部署测试在 `futures` VPS 执行。
+- GitHub Actions 负责权威 CI、Dockerfile 检查及 `linux/amd64` API、Worker、Frontend 镜像构建与 GHCR 发布。
+- `futures` VPS 不承担常规 Rust/前端编译，也不接收源码包现场 build；只按不可变 digest pull 已验证镜像、备份数据库、执行迁移并完成真实 RLS、对象持久化和 E2E。
 - VPS 验收必须覆盖上传、inspect、mapping、preview、confirm、SSE、错误报告、幂等、回滚、跨 Workspace 越权、RLS 和日志秘密扫描。
 
 ### 2.12 本轮 VPS 容量治理记录
@@ -246,8 +246,8 @@ Phase 3 明确排除以下能力：
 | `PUT` | `/api/v1/imports/{import_id}/mapping` | 保存字段映射和转换参数 |
 | `POST` | `/api/v1/imports/{import_id}/preview` | 生成前 50 行预览和错误摘要 |
 | `POST` | `/api/v1/imports/{import_id}/confirm` | 冻结参数并提交后台导入任务 |
-| `POST` | `/api/v1/imports/{import_id}/cancel` | 取消尚未提交或安全检查点可停止的任务 |
-| `POST` | `/api/v1/imports/{import_id}/rollback` | 整批原子回滚成功批次 |
+| `POST` | `/api/v1/imports/{import_id}/rollback-check` | 同步执行整批回滚全量预检 |
+| `POST` | `/api/v1/imports/{import_id}/rollback` | 同步重验后幂等创建异步回滚任务 |
 | `GET` | `/api/v1/imports/{import_id}/errors` | 分页读取错误、警告和冲突 |
 | `GET` | `/api/v1/imports/{import_id}/events` | SSE 导入进度事件 |
 | `GET` | `/api/v1/import-templates` | 查询当前 Workspace 可用映射模板 |
@@ -409,7 +409,7 @@ frontend 边界：
 
 ### 8.3 Phase 3C：校验、去重、冲突、确认任务与 SSE
 
-**授权状态：已完成并经独立 Evaluator PASS；Phase 3D 继续未授权。**
+**授权状态：已完成并经独立 Evaluator PASS；本节收口时 Phase 3D 尚未授权，当前 Phase 3D 已按第 8.4 节另行授权。**
 
 #### 8.3.1 本轮目标、状态与硬边界
 
@@ -693,7 +693,7 @@ VPS 必须完成：
 - 复核本地与 VPS 证据，不以只读审查替代真实 Docker/数据库/E2E。
 - 将所有 BLOCKER/HIGH 交回 Generator 修复，并复核至最终 PASS；3C 未 PASS 前不得授权 3D。
 
-退出条件：3C 功能、测试和 VPS/Evaluator 证据单独提交，`PLANS.md` 更新为 3C 已完成且 Evaluator PASS；Phase 3D 仍为未授权，仓库不存在任何 3D 或其他业务域越界实现。
+退出条件（已满足）：3C 功能、测试和 VPS/Evaluator 证据单独提交，`PLANS.md` 更新为 3C 已完成且 Evaluator PASS；3C 收口时仓库不存在任何 3D 或其他业务域越界实现。Phase 3D 当前授权见第 8.4 节。
 
 收口结果（2026-07-26）：
 
@@ -707,24 +707,24 @@ VPS 必须完成：
 
 ### 8.4 Phase 3D：原子回滚、补偿批次、完整前端与部署验收
 
-**授权状态：未授权；Phase 3C PASS 并提交后方可重新授权。**
+**授权状态：用户已确认范围与关键决策，Phase 3D 已获实施授权；Generator 按 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md` 的小任务包实施。**
 
-范围：
+固定语义：
 
-- 实现整批原子回滚检查、逆序变更、零变更冲突语义和完整冲突清单；不提供部分回滚。
-- 实现通过 `compensates_batch_id` 追溯的补偿批次。
-- 完成上传、inspect、mapping、preview、confirm、SSE、错误报告、回滚的前端完整流程和失败状态。
-- 执行完整本地回归、`futures` VPS Docker 部署/E2E/RLS/SSE/回滚/恢复/秘密扫描及最终 Evaluator 收口。
+- API 同步执行全量预检；`POST /rollback` 必须再次同步重验，通过后才幂等创建唯一 `import_rollback` job 并返回 `202`。
+- Worker 异步执行并在事务内再次全量预检。成功时全部逆变更、数据失效记录、批次/rollback request/job 终态、事件和审计单事务提交；冲突时正式目标零变更，冲突清单、`rollback_conflict`、任务终态、事件和审计单事务提交。
+- 任一后续修改或下游依赖使整批直接回滚失败；不提供部分回滚或绕过入口，只允许创建通过 `compensates_batch_id` 追溯且走完整导入流程的补偿批次。
+- Phase 3C 已成功批次没有完整 change log，禁止伪造 backfill。只有带 `rollback_capability`、`change_log_version` 或等价完整能力标记的新批次可直接回滚；旧批次只允许补偿。
+- 对象治理只允许 scan、consistency check、quarantine 和 audit；Phase 3D 绝不物理删除对象。
+- 明确排除 cancel、人工 dead-letter replay、冲突候选人工合并、套利/交易/持仓/席位/图表、外部采集、浏览器识别、OCR、AI 和自动回测。
 
-模块边界：只补齐回滚/补偿所需后端、迁移和完整 `frontend/` 导入中心；不得扩展到行情、交易、套利、外部采集、OCR、AI 或回测。
+云端准入：SHA `636c8ae036f6ea65e8292bca19f38205db98f4a6` 的 CI run `30187416767` 和 Container images run `30187946869` 已成功；它们只证明实施前基线，Phase 3D 候选提交必须重新取得 CI 与镜像成功结果。
 
-验收与测试门禁：无后续修改时整批回滚成功；任一行冲突或下游依赖时整批零变更；补偿链可追溯；前端主流程和故障流程有测试；第 9、10、11 节全部验收项通过，Evaluator PASS。
-
-退出条件：完整 Phase 3 在 VPS 验收通过，Evaluator 最终 PASS 且无 BLOCKER/HIGH，3D 单独提交并更新 `PLANS.md` 与 handoff。
+验收与退出：按 GHCR 不可变 digest 部署候选到 `futures` VPS，完成备份、迁移、真实 RLS、对象持久化、全量 E2E 和秘密扫描；独立 Evaluator 最终 PASS 且无 BLOCKER/HIGH 后收口。
 
 ## 9. Phase 3 总体验收标准
 
-以下是 Phase 3D 最终收口时的总体验收标准，不得用尚未授权的 3C/3D 条件阻塞当前 Phase 3B 的独立验收：
+以下是 Phase 3D 最终收口时的 Phase 3 总体验收标准：
 
 - TXT、CSV、XLS、XLSX 至少各有正常、边界和恶意样例。
 - UTF-8 与批准的中文编码可正确预览；检测失败时可人工选择。
@@ -743,7 +743,7 @@ VPS 必须完成：
 - 补偿批次可追溯到原批次。
 - 导入批次、文件、staging、错误、变更日志、任务和 SSE 事件均受 Workspace 隔离。
 - PostgreSQL RLS 跨 Workspace 读写破坏性测试通过。
-- 上传、确认、取消、回滚和权限拒绝均有审计记录。
+- 上传、确认、回滚、补偿和权限拒绝均有审计记录。
 - 日志、响应、错误报告和审计中不出现 Cookie、Token、密码、数据库凭据或原始文件敏感片段。
 - OpenAPI 与实现一致。
 - 本地测试和 `futures` VPS 验收全部通过。
@@ -769,7 +769,9 @@ VPS 验收命令类别：
 
 ```bash
 docker compose --profile dev config --quiet
-docker compose --profile dev build
+docker pull <api-digest>
+docker pull <worker-digest>
+docker pull <frontend-digest>
 docker compose --profile dev up -d
 docker compose --profile dev ps
 ```
@@ -785,15 +787,15 @@ docker compose --profile dev ps
 
 ## 11. 本地与 futures VPS 验收流程
 
-本节是 Phase 3D 的最终全流程。Phase 3A 只执行第 8.1 节规定的 VPS 子集，不得为满足本节而提前实现 inspect、mapping、preview、confirm、SSE 或 rollback。
+本节是 Phase 3D 的最终全流程。
 
-1. 本地只从 Git 工作树打包源码，排除 `.git`、`node_modules`、`target`、`dist`、`.env`、`secrets`、上传文件和临时文件。
-2. 通过已配置 SSH/SFTP 上传到 `futures` VPS 的 `/tmp`，校验本地与远端 SHA-256。
-3. 部署前备份 `/opt/futures-platform` 当前版本。
-4. 解压覆盖到 `/opt/futures-platform`；禁止直接在 VPS 修改源码。
-5. 在 VPS 执行 Compose config、build、up。
-6. 执行数据库迁移，并核验 `schema_versions`。
-7. 运行 API live、ready、version 和 OpenAPI 检查。
+1. 将 Phase 3D 候选提交推送到 GitHub 私有仓库，等待该 SHA 的 CI 成功。
+2. 通过 container workflow 构建并发布 `linux/amd64` API、Worker、Frontend 镜像，记录 SHA 标签和三个完整 digest。
+3. 部署前在 `futures` VPS 备份 PostgreSQL，并记录上一稳定版本三个镜像 digest；数据库备份与主密钥恢复副本分离。
+4. 只传递生产 Compose 覆盖配置和非秘密发布元数据；不得上传源码到 VPS 常规编译，不得在 VPS 手工修改源码。
+5. 在 VPS 按完整 digest 执行 `docker pull`，校验 Compose config 后执行 `docker compose up -d`。
+6. 执行数据库迁移，并核验 `schema_versions`、RLS、索引、约束与运行时最小权限。
+7. 运行 API live、ready、version、真实 `GIT_SHA` 和 OpenAPI 检查。
 8. 执行导入 E2E：
    - 上传四类文件。
    - inspect 参数识别。
@@ -804,10 +806,14 @@ docker compose --profile dev ps
    - 幂等重试。
    - 成功回滚。
    - 回滚冲突零变更。
+   - 旧 Phase 3C 批次不可直接回滚且只允许补偿。
+   - 补偿批次与 lineage。
+   - 对象 scan/check/quarantine，物理删除数为 0。
 9. 执行跨 Workspace 越权和 RLS 破坏性测试。
-10. 执行服务重启恢复测试。
-11. 执行日志秘密扫描。
-12. 调用 Evaluator 独立审查，修复 BLOCKER/HIGH 后复核至 PASS。
+10. 执行服务重启、Worker 租约恢复和 SSE 撤权终止测试。
+11. 执行日志、响应、事件、审计和证据秘密扫描。
+12. 调用独立 Evaluator 审查，修复 BLOCKER/HIGH 后复核至 PASS。
+13. Evaluator PASS 后以普通 merge commit 合并 `main`，禁止 squash/rebase；创建实际日期 `phase-3-pass-YYYYMMDD`，不创建 `v*`。
 
 ## 12. 风险与开放问题
 
@@ -821,7 +827,7 @@ docker compose --profile dev ps
 
 ## 13. Generator 边界
 
-Phase 3B Generator 工作已完成并收口；Phase 3C 已按第 8.3 节获得独立授权并进入实施中，不得沿用或扩大 Phase 3B 授权；Phase 3D 仍视为未收到授权。
+Phase 3A、3B、3C Generator 工作均已完成并收口。Phase 3D 已获得独立授权，Generator 只能按第 8.4 节及 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md` 的任务包实施，不得沿用或扩大历史授权。
 
 获得实施授权后，Generator 仍必须遵守：
 

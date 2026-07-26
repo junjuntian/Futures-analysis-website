@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；Phase 3A、Phase 3B、Phase 3C 均已完成并经独立 Evaluator PASS；Phase 3D 详细计划已形成，当前待用户确认、未授权实现。
+阶段 3：导入基础；Phase 3A、Phase 3B、Phase 3C 均已完成并经独立 Evaluator PASS；Phase 3D 范围与关键决策已由用户确认并获实施授权，Generator 尚未开始。
 
-状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 以 `150194c feat: complete phase 3b import parsing preview mapping` 收口。Phase 3C 实现提交为 `04011ed feat: complete phase 3c validation and async import`，收口提交为 `6e1d46d`，独立 Evaluator 最终 `PASS`、`BLOCKER=0`、`HIGH=0`。Phase 3D 计划见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`，尚待用户确认且未授权实现。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 以 `150194c feat: complete phase 3b import parsing preview mapping` 收口。Phase 3C 实现提交为 `04011ed feat: complete phase 3c validation and async import`，收口提交为 `6e1d46d`，独立 Evaluator 最终 `PASS`、`BLOCKER=0`、`HIGH=0`。Phase 3D 唯一详细契约为 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`，已拆为可交给 Generator 的小任务包。
 
 ## 本阶段任务状态
 
@@ -37,8 +37,9 @@
 | Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3C：校验与异步确认 | 已完成、已提交、Evaluator PASS | 实现提交 `04011ed`，收口提交 `6e1d46d`；独立 Evaluator `BLOCKER=0`、`HIGH=0` |
-| Phase 3D：回滚与完整流程 | 计划完成、待用户确认、未授权实现 | 详细计划见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`；确认前禁止调用 Generator、创建迁移或实现业务代码 |
+| Phase 3D：回滚与完整流程 | 已确认、已授权、待 Generator 实施 | API 同步全量预检并幂等入队，Worker 异步原子回滚，冲突整体中止，补偿/lineage，对象 scan/check/quarantine/audit，完整前端与最终验收 |
 | 标准发布流程 | 已确认 | 本地 Git → GitHub 私有仓库 → Codex Cloud/GitHub Actions 测试 → `linux/amd64` 镜像 → GHCR → `futures` VPS pull/迁移/E2E；VPS 不再承担常规编译 |
+| Phase 3D 云端准入 | 已通过 | SHA `636c8ae036f6ea65e8292bca19f38205db98f4a6`；CI run `30187416767` success；Container images run `30187946869` success |
 
 ## Phase 3A 收口核验
 
@@ -60,7 +61,7 @@
 | Phase 3A RLS | 上传域 RLS 与跨 Workspace 拒绝验证通过 |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-收口结论：Phase 3A 已按限定边界完成并提交；其未关闭 MEDIUM 已明确归入 Phase 3D。Phase 3B、Phase 3C 随后均已单独授权、完成并经 Evaluator PASS；Phase 3D 计划已完成但仍待用户确认、未授权实现。
+收口结论：Phase 3A 已按限定边界完成并提交；其未关闭 MEDIUM 已明确归入 Phase 3D。Phase 3B、Phase 3C 随后均已单独授权、完成并经 Evaluator PASS；Phase 3D 已确认并获实施授权。
 
 ## Phase 3B 收口核验
 
@@ -149,7 +150,7 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
 - Phase 3B（已完成并 PASS）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
 - Phase 3C（已完成并 PASS）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
-- Phase 3D（计划完成，待用户确认、未授权实现）：整批原子回滚、后续修改/依赖冲突检测、补偿批次、审计与来源链、对象一致性治理、完整前端、全量自动化及 VPS/Evaluator 最终验收。详细实施契约见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
+- Phase 3D（已确认、已授权、待实施）：API 同步全量预检和幂等入队、Worker 异步单事务原子回滚、后续修改/依赖冲突整体中止、补偿批次、审计与来源链、对象 scan/check/quarantine/audit、完整前端、全量自动化及 VPS/Evaluator 最终验收。详细实施契约见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
 
 明确排除：套利统计和图表、交易与持仓、席位分析、外部网站采集、浏览器识别、OCR、AI、自动回测。
 
@@ -161,15 +162,19 @@ Phase 3C 实施边界：
 - cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决和完整前端继续延期；行情、交易、套利、图表、外部采集、OCR、AI 与回测继续禁止。
 - 本地完整回归、VPS Docker/迁移/四策略 E2E/并发确认/Worker 恢复/SSE 重放/跨 Workspace RLS/审计秘密扫描及独立 Evaluator PASS 均为退出门禁。
 
-## Phase 3D 规划状态与后续步骤
+## Phase 3D 授权状态与实施顺序
 
-1. Phase 3D Planner 契约已创建：`docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
-2. 当前授权状态固定为“待用户确认、未授权实现”；本轮不得调用 Generator，不得创建数据库迁移。
-3. Phase 3A 仍需归入 3D 的 MEDIUM 为对象孤儿治理和可重复 API/DB/RLS 自动化；multipart 契约已由 3B 关闭。Phase 3B 的 5 项 MEDIUM 已由 3C 全部关闭。
-4. Phase 3C 的 4 项 MEDIUM 全部纳入 3D：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板/断线重连组件级测试。
-5. 用户需确认回滚执行模式、对象物理删除边界、`cancel`/人工 dead-letter replay/冲突候选人工合并是否继续排除，以及 Phase 3 完成后的 main 合并和标签方案。
-6. 用户明确确认后，才可调用 Generator；完成本地与 GitHub CI、`futures` VPS 全量 E2E 和独立 Evaluator PASS 后，方可由用户确认 main 合并和 PASS 标签。
-7. 若要进入生产 HTTPS，仍需补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证；该事项不因 Phase 3D 规划而自动获得授权。
+1. Phase 3D Planner 契约已由用户确认并获实施授权：`docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
+2. 云端准入已通过：CI run `30187416767`、Container images run `30187946869`，目标 SHA 为 `636c8ae036f6ea65e8292bca19f38205db98f4a6`。该证据只覆盖实施前基线，Phase 3D 候选提交必须重新运行云端门禁。
+3. Generator 依次执行八个小任务包：契约/迁移 → 正式导入 change log → 回滚预检/入队 API → 回滚 Worker → 补偿/lineage → 对象一致性 → 前端/MEDIUM → 全量门禁/VPS/Evaluator/收口。
+4. API 必须同步全量预检并幂等创建唯一 `import_rollback` job；Worker 异步执行并在事务内重验。成功时全部逆变更、数据失效、批次/request/job 状态、事件和审计单事务提交；冲突时正式目标零变更并整体中止。
+5. Phase 3C 已成功批次无完整 change log，禁止伪造 backfill。只有带 `rollback_capability`、`change_log_version` 或等价完整能力标记的新批次可直接回滚；旧批次以及存在后续修改/依赖的批次只允许可追溯补偿。
+6. 对象治理只允许 scan、check、quarantine 和 audit，Phase 3D 绝不物理删除。
+7. 明确排除 `cancel`、人工 dead-letter replay、冲突候选人工合并、套利/交易/持仓/席位/图表、外部采集、浏览器识别、OCR、AI 和自动回测。
+8. Phase 3A 仍需归入 3D 的 MEDIUM 为对象孤儿治理和可重复 API/DB/RLS 自动化；multipart 契约已由 3B 关闭。Phase 3B 的 5 项 MEDIUM 已由 3C 全部关闭。Phase 3C 的 4 项 MEDIUM 全部纳入 3D：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板/断线重连组件级测试。
+9. Phase 3D 候选镜像由 GitHub Actions 发布到 GHCR；`futures` VPS 只按 digest pull、备份、迁移、验证 RLS/对象持久化和最终 E2E，不上传源码常规 build。
+10. 独立 Evaluator PASS 后使用普通 merge commit 合并 `main`，禁止 squash/rebase；创建实际完成日期 `phase-3-pass-YYYYMMDD`，不创建 `v*`。
+11. 若要进入生产 HTTPS，仍需补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证；该事项不属于 Phase 3D 授权。
 
 ## 已确认的标准发布流程
 
@@ -184,8 +189,7 @@ Phase 3C 实施边界：
 - 生产部署前必须备份数据库；失败时按发布记录中的上一稳定镜像 digest 回滚。
 - 生产密钥不得进入 Git、镜像层、构建日志、构建参数或普通环境变量文件。
 - GitHub Actions / Codex Cloud 通过不能替代 `futures` VPS 验收。
-- 当前只确认流程和文档；GHCR 工作流与只读拉取凭据验证成功前，不切换
-  `futures` VPS 的部署方式。
+- GHCR 工作流已在 SHA `636c8ae036f6ea65e8292bca19f38205db98f4a6` 成功；只有用户提供只读拉取凭据且 Phase 3D 候选镜像成功后，才切换 `futures` VPS 到 digest pull 部署方式。
 
 ## 变更规则
 
