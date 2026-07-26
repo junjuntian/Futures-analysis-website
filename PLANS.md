@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-阶段 3：导入基础；Phase 3A、Phase 3B 已完成并经独立 Evaluator PASS，Phase 3C 已授权并进入实施中，Phase 3D 继续未授权。
+阶段 3：导入基础；Phase 3A、Phase 3B、Phase 3C 均已完成并经独立 Evaluator PASS；Phase 3D 详细计划已形成，当前待用户确认、未授权实现。
 
-状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 已完成实现、本地测试、`futures` VPS Docker/E2E 验证和独立顶层 Evaluator 复核，以 `150194c feat: complete phase 3b import parsing preview mapping` 提交；最终 `BLOCKER=0`、`HIGH=0`。Phase 3C 已获得独立授权并进入实施中；Phase 3D 未授权且未实现。
+状态：Phase 1、Phase 2 均已完成并经 Evaluator PASS。Phase 3 已拆为 3A、3B、3C、3D。Phase 3A 以 `1b089f7 feat: complete phase 3a import upload foundation` 收口。Phase 3B 以 `150194c feat: complete phase 3b import parsing preview mapping` 收口。Phase 3C 实现提交为 `04011ed feat: complete phase 3c validation and async import`，收口提交为 `6e1d46d`，独立 Evaluator 最终 `PASS`、`BLOCKER=0`、`HIGH=0`。Phase 3D 计划见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`，尚待用户确认且未授权实现。
 
 ## 本阶段任务状态
 
@@ -36,8 +36,8 @@
 | Phase 3 Planner 拆分 | 已完成 | `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 已明确 3A/3B/3C/3D 的边界、门禁和退出条件 |
 | Phase 3A：上传与批次基础 | 已完成、已提交、Evaluator PASS | 上传、文件存储抽象、文件哈希、`import_batches` 状态机已实现；提交 `1b089f7`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
-| Phase 3C：校验与异步确认 | 已授权、实施中 | 按第 8.3 节仅实施校验、业务唯一性、四种冲突策略、正式确认入库、PostgreSQL `job_queue`、Worker、SSE、幂等/并发、Workspace/RLS/审计及最小确认进度 UI |
-| Phase 3D：回滚与完整流程 | 未授权、未实现 | 3C PASS 并提交后再单独授权；本轮禁止实现 |
+| Phase 3C：校验与异步确认 | 已完成、已提交、Evaluator PASS | 实现提交 `04011ed`，收口提交 `6e1d46d`；独立 Evaluator `BLOCKER=0`、`HIGH=0` |
+| Phase 3D：回滚与完整流程 | 计划完成、待用户确认、未授权实现 | 详细计划见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`；确认前禁止调用 Generator、创建迁移或实现业务代码 |
 
 ## Phase 3A 收口核验
 
@@ -59,7 +59,7 @@
 | Phase 3A RLS | 上传域 RLS 与跨 Workspace 拒绝验证通过 |
 | 源码一致性 | VPS 部署目录来自源码包 overlay，远端不保留 `.git`，以本地 Git 为唯一源码源头 |
 
-收口结论：Phase 3A 已按限定边界完成并提交；MEDIUM/LOW 发现保留为非阻断后续项。Phase 3B 随后已单独授权并完成；Phase 3C、3D 继续未授权。
+收口结论：Phase 3A 已按限定边界完成并提交；其未关闭 MEDIUM 已明确归入 Phase 3D。Phase 3B、Phase 3C 随后均已单独授权、完成并经 Evaluator PASS；Phase 3D 计划已完成但仍待用户确认、未授权实现。
 
 ## Phase 3B 收口核验
 
@@ -148,9 +148,9 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 - Phase 3A：上传、文件存储抽象、文件哈希、`import_batches` 状态机。
 - Phase 3B（已完成并 PASS）：TXT/CSV/XLS/XLSX 解析，编码/分隔符识别与人工覆盖，Excel 工作表/表头选择，前 50 行预览，字段映射和映射模板，解析错误展示，并修复 Phase 3A 遗留 OpenAPI multipart schema 契约问题。
 - Phase 3C（已完成并 PASS）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
-- Phase 3D（未授权）：原子回滚、补偿批次、前端完整流程、VPS 部署验收。
+- Phase 3D（计划完成，待用户确认、未授权实现）：整批原子回滚、后续修改/依赖冲突检测、补偿批次、审计与来源链、对象一致性治理、完整前端、全量自动化及 VPS/Evaluator 最终验收。详细实施契约见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
 
-明确排除：套利统计和图表、交易与持仓、外部网站采集、OCR、AI、自动回测。
+明确排除：套利统计和图表、交易与持仓、席位分析、外部网站采集、浏览器识别、OCR、AI、自动回测。
 
 Phase 3C 实施边界：
 
@@ -160,12 +160,15 @@ Phase 3C 实施边界：
 - cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决和完整前端继续延期；行情、交易、套利、图表、外部采集、OCR、AI 与回测继续禁止。
 - 本地完整回归、VPS Docker/迁移/四策略 E2E/并发确认/Worker 恢复/SSE 重放/跨 Workspace RLS/审计秘密扫描及独立 Evaluator PASS 均为退出门禁。
 
-## 后续步骤
+## Phase 3D 规划状态与后续步骤
 
-1. Phase 3C 实现提交为 `04011ed feat: complete phase 3c validation and async import`；本地 Rust 47 项、前端 5 项及 VPS 完整 E2E 已通过，独立 Evaluator 最终 `PASS`、`BLOCKER=0`、`HIGH=0`。
-2. Phase 3C 的 4 项非阻断 MEDIUM 明确延期：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板/断线重连组件级测试；后续必须经单独授权排期。
-3. Phase 3D 继续未授权、未实现；不得提前新增 cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决或完整前端流程。
-4. 若要进入生产 HTTPS，需要先补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证。
+1. Phase 3D Planner 契约已创建：`docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`。
+2. 当前授权状态固定为“待用户确认、未授权实现”；本轮不得调用 Generator，不得创建数据库迁移。
+3. Phase 3A 仍需归入 3D 的 MEDIUM 为对象孤儿治理和可重复 API/DB/RLS 自动化；multipart 契约已由 3B 关闭。Phase 3B 的 5 项 MEDIUM 已由 3C 全部关闭。
+4. Phase 3C 的 4 项 MEDIUM 全部纳入 3D：SSE OpenAPI 帧 schema、跨 Workspace 公平轮询、长连接周期性重验会话、确认面板/断线重连组件级测试。
+5. 用户需确认回滚执行模式、对象物理删除边界、`cancel`/人工 dead-letter replay/冲突候选人工合并是否继续排除，以及 Phase 3 完成后的 main 合并和标签方案。
+6. 用户明确确认后，才可调用 Generator；完成本地与 GitHub CI、`futures` VPS 全量 E2E 和独立 Evaluator PASS 后，方可由用户确认 main 合并和 PASS 标签。
+7. 若要进入生产 HTTPS，仍需补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证；该事项不因 Phase 3D 规划而自动获得授权。
 
 ## 变更规则
 
