@@ -223,6 +223,21 @@ jobs:
             local rollback_status=0
             set +e
             echo "ROLLBACK_STARTED"
+            if test -f "$RELEASE_DIR/docker-compose.release.yml"; then
+              docker compose \
+                -f "$RELEASE_DIR/docker-compose.yml" \
+                -f "$RELEASE_DIR/docker-compose.production.yml" \
+                -f "$RELEASE_DIR/docker-compose.release.yml" \
+                ps >"$RELEASE_DIR/failure-compose-ps.txt" 2>&1
+              docker compose \
+                -f "$RELEASE_DIR/docker-compose.yml" \
+                -f "$RELEASE_DIR/docker-compose.production.yml" \
+                -f "$RELEASE_DIR/docker-compose.release.yml" \
+                logs --no-color --tail 200 api worker \
+                >"$RELEASE_DIR/failure-service-logs.txt" 2>&1
+              chmod 600 "$RELEASE_DIR/failure-compose-ps.txt" \
+                "$RELEASE_DIR/failure-service-logs.txt"
+            fi
             if test -n "$BACKUP_PATH" && test -f "$BACKUP_PATH"; then
               docker compose \
                 -f "$RELEASE_DIR/docker-compose.yml" \
@@ -233,9 +248,16 @@ jobs:
                 exec -T postgres psql -X -U futures_app -d futures_platform \
                 -Atq -c "select pg_terminate_backend(pid) from pg_stat_activity where datname='futures_platform' and pid <> pg_backend_pid()" \
                 >/dev/null 2>&1
+              docker compose -f "$RELEASE_DIR/docker-compose.yml" \
+                exec -T postgres dropdb -U futures_app --if-exists futures_platform \
+                >/dev/null 2>&1 || rollback_status=1
+              docker compose -f "$RELEASE_DIR/docker-compose.yml" \
+                exec -T postgres createdb -U futures_app -O futures_app futures_platform \
+                >/dev/null 2>&1 || rollback_status=1
               if ! docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres pg_restore -U futures_app -d futures_platform \
-                --clean --if-exists --no-owner <"$BACKUP_PATH" >/dev/null; then
+                --no-owner --exit-on-error --single-transaction \
+                <"$BACKUP_PATH" >/dev/null; then
                 rollback_status=1
               fi
               docker compose -f "$RELEASE_DIR/docker-compose.yml" \
