@@ -457,7 +457,7 @@ P3C_USER2=$P3C_OWNER_CANDIDATE2
 
 wait_health() {
   for _ in $(seq 1 120); do
-    if curl -fsS "$BASE/api/v1/ready" >/dev/null 2>&1; then return 0; fi
+    if curl -fsS "$BASE/api/v1/health/ready" >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   echo "ASSERT_FAIL label=service_health_timeout" >&2
