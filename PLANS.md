@@ -38,6 +38,7 @@
 | Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3C：校验与异步确认 | 已完成、已提交、Evaluator PASS | 实现提交 `04011ed`，收口提交 `6e1d46d`；独立 Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3D：回滚与完整流程 | 计划完成、待用户确认、未授权实现 | 详细计划见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md`；确认前禁止调用 Generator、创建迁移或实现业务代码 |
+| 标准发布流程 | 已确认 | 本地 Git → GitHub 私有仓库 → Codex Cloud/GitHub Actions 测试 → `linux/amd64` 镜像 → GHCR → `futures` VPS pull/迁移/E2E；VPS 不再承担常规编译 |
 
 ## Phase 3A 收口核验
 
@@ -169,6 +170,22 @@ Phase 3C 实施边界：
 5. 用户需确认回滚执行模式、对象物理删除边界、`cancel`/人工 dead-letter replay/冲突候选人工合并是否继续排除，以及 Phase 3 完成后的 main 合并和标签方案。
 6. 用户明确确认后，才可调用 Generator；完成本地与 GitHub CI、`futures` VPS 全量 E2E 和独立 Evaluator PASS 后，方可由用户确认 main 合并和 PASS 标签。
 7. 若要进入生产 HTTPS，仍需补齐 TLS 入口与 `AUTH_COOKIE_SECURE=true` 的生产部署验证；该事项不因 Phase 3D 规划而自动获得授权。
+
+## 已确认的标准发布流程
+
+确认日期：2026-07-26。
+
+- 本地 Git 仓库是唯一源码源头，所有变更先提交再推送 GitHub 私有仓库。
+- Codex Cloud / GitHub Actions 承担云端编译测试；GitHub Actions 构建并发布
+  `linux/amd64` API、Worker、前端镜像到 GHCR。
+- `futures` VPS 禁止直接修改源码，不再承担常规 Rust 或前端编译，只执行数据库
+  备份、`docker pull`、数据库迁移、真实 RLS/持久化和最终 E2E 验收。
+- 部署只能引用 SHA 标签或完整 digest，不能只使用 `latest`。
+- 生产部署前必须备份数据库；失败时按发布记录中的上一稳定镜像 digest 回滚。
+- 生产密钥不得进入 Git、镜像层、构建日志、构建参数或普通环境变量文件。
+- GitHub Actions / Codex Cloud 通过不能替代 `futures` VPS 验收。
+- 当前只确认流程和文档；GHCR 工作流与只读拉取凭据验证成功前，不切换
+  `futures` VPS 的部署方式。
 
 ## 变更规则
 
