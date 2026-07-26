@@ -133,6 +133,7 @@ jobs:
           API_REF="${API_IMAGE}@${API_DIGEST}"
           WORKER_REF="${WORKER_IMAGE}@${WORKER_DIGEST}"
           FRONTEND_REF="${FRONTEND_IMAGE}@${FRONTEND_DIGEST}"
+          export IMAGE_TAG="sha-${SOURCE_SHA}"
           SUCCESS=0
           SWITCH_STARTED=0
           MIGRATION_STARTED=0
