@@ -6,7 +6,7 @@
 
 验证时间：2026-07-24 21:48 +08:00。
 
-本次部署只包含 Phase 1 工程基础：PostgreSQL、Rust API、Rust Worker、Vue/Vite 前端开发服务和 Nginx。未实现行情、导入、套利、成交、席位、网页采集、OCR 或 AI 业务功能。
+本次部署只包含 Phase 1 工程基础：PostgreSQL、Rust API、Rust Worker、Vue/Vite 前端开发服务和 Nginx。未实现后续阶段的业务功能。
 
 ## VPS 基础状态
 

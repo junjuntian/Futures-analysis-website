@@ -10,16 +10,16 @@ Phase 1 只建立可运行、可测试、可部署的基础工程：
 - Worker 基础：PostgreSQL 连接、任务循环框架、优雅关闭、后续 `job_queue` 接口预留。
 - Vue 3 前端基础：Vite、TypeScript、Pinia、Vue Router、Element Plus、ECharts、健康状态显示、404、全局错误处理。
 - PostgreSQL 迁移基础：系统版本表、RLS 基础设施、UTC/Asia/Shanghai 规则说明、最小权限账户方案。
-- Docker Compose：PostgreSQL、API、Worker、前端或前端开发服务、Nginx；预留 Playwright/noVNC/PaddleOCR。
-- Nginx：前端静态资源、`/api/` 代理、`/events/` SSE、noVNC WebSocket 预留、安全响应头、上传大小和超时。
+- Docker Compose：PostgreSQL、API、Worker、前端或前端开发服务、Nginx。
+- Nginx：前端静态资源、`/api/` 代理、`/events/` SSE、安全响应头、上传大小和超时。
 - CI：Rust、前端、Docker Compose 配置校验。
 - 部署与维护文档：部署、发布、备份恢复、安全和贡献说明。
 
 ## 非目标
 
-- 不实现行情、导入、套利、成交、席位、AI、采集、OCR 等正式业务功能。
+- 不实现行情、导入、套利、成交、席位、AI、采集等正式业务功能。
 - 不创建大量业务表。
-- 不启用三禾数据连接器。
+- 不启用任何外部数据连接器。
 - 不实现任意 URL 通用抓取器。
 - 不实现 Workspace 共享、邀请、自动交易、历史规则回测。
 - 不推送 GitHub，除非已有明确远程地址。
@@ -88,7 +88,7 @@ Phase 1 只建立可运行、可测试、可部署的基础工程：
 - `docker compose config` 通过。
 - API `live` 只检查进程，`ready` 检查数据库连接，`version` 返回版本信息。
 - Worker 可启动、连接数据库并优雅关闭。
-- Nginx 代理、SSE 配置和 noVNC WebSocket 预留配置可被 Compose 校验。
+- Nginx 代理和 SSE 配置可被 Compose 校验。
 - 没有秘密进入 Git、日志或文档。
 - futures VPS 部署结果记录到 `docs/deployments/FUTURES_VPS_PHASE_01.md`。
 

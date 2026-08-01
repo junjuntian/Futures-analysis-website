@@ -2,16 +2,17 @@
 
 ## 1. 架构结论
 
-采用“模块化单体 + 独立受限辅助进程”的架构：
+采用“模块化单体 + 按需 akshare 采集器”的架构：
 
 - `api` 与 `worker` 共享同一 Rust 领域和应用层代码，作为同一后端系统发布。
 - PostgreSQL 同时承载业务数据、事务性任务队列和审计记录。
 - 业务数据归属于个人 Workspace；所有业务查询、写入、任务、文件对象和 AI 工具必须携带服务端解析的 `workspace_id`。
 - 文件通过 `ObjectStorage` 端口访问；第一版实现本地存储适配器。
-- 浏览器采集、静态图表渲染和 OCR 属于不同信任边界，应使用独立容器或独立沙箱，不能共享高权限浏览器上下文。
+- 自动采集由独立 Python akshare 容器执行，按需拉起、跑完退出；容器输出标准化 CSV 后只通过导入 API 入库。
+- PNG/SVG 由 ECharts 前端直接导出，不建设服务端图表渲染辅助进程。
 - AI 通过应用层只读工具访问业务能力，不直接访问数据库。
 
-“模块化单体”指领域与应用代码不拆分为网络服务，不代表 Playwright 和 OCR 必须嵌入 Rust 进程。
+“模块化单体”指领域与应用代码不拆分为网络服务；akshare 采集器是受网络白名单约束的按需数据获取进程，不承载平台领域逻辑。
 
 ## 2. 上下文图
 
@@ -20,7 +21,6 @@ flowchart TB
     U["用户浏览器"] -->|HTTPS| RP["Reverse Proxy"]
     RP --> FE["Vue Web"]
     RP --> API["Rust API"]
-    RP -->|短期授权 noVNC WebSocket| BC
     API --> WC["Workspace Context"]
     API --> DB[("PostgreSQL")]
     API --> FS["ObjectStorage Port"]
@@ -28,15 +28,15 @@ flowchart TB
     JQ --> DB
     WK["Rust Worker"] --> DB
     WK --> FS
-    WK --> BC["Chromium + Playwright + noVNC"]
-    WK --> CR["图表渲染沙箱"]
-    WK --> OCR["OCR 服务"]
+    SCH["盘后调度"] --> COL["akshare Collector（Python，按需）"]
+    COL -->|公开接口与公开文件| EX["五家交易所"]
+    COL -->|标准化 CSV + 导入 API| API
     API --> AIG["AI Gateway"]
     AIG --> LLM["外部模型提供商"]
     FS --> LOCAL["本地文件适配器"]
 ```
 
-反向代理固定采用 Nginx：`/` 提供 Vue 前端，`/api/` 转发 Axum API，`/events/` 支持 SSE，noVNC 使用独立受控路径和 WebSocket 代理。
+反向代理固定采用 Nginx：`/` 提供 Vue 前端，`/api/` 转发 Axum API，`/events/` 支持 SSE。
 
 ## 3. 依赖方向
 
@@ -55,7 +55,7 @@ flowchart LR
 
 约束：
 
-- `domain` 不依赖 Axum、SQLx、Playwright、文件系统或具体 AI SDK。
+- `domain` 不依赖 Axum、SQLx、akshare、文件系统或具体 AI SDK。
 - `application` 定义用例和端口，只依赖 `domain`。
 - `application` 的所有业务用例显式接收 `WorkspaceContext`，仓储方法不得省略 `workspace_id`。
 - `infrastructure`、`database` 和各适配器实现端口。
@@ -85,7 +85,7 @@ sequenceDiagram
     UI->>API: query progress/result
 ```
 
-正式写入前必须完成预览确认；`overwrite` 必须同时记录旧值，才能满足回滚要求。
+手动文件导入在正式写入前必须完成预览确认；`overwrite` 必须同时记录旧值，才能满足回滚要求。白名单自动采集批次使用固定映射模板版本，跳过人工预览与确认；解析或校验失败时隔离为 `failed` 且正式表零写入，质量警告仅记录、不拦截。
 
 回滚开始前必须在同一事务中检查批次后续修改和下游依赖。发现任一冲突时中止整个回滚；不执行部分回滚，纠错通过引用原批次的补偿批次完成。
 
@@ -100,16 +100,16 @@ sequenceDiagram
 - 行情图默认 `price_basis=close`；日终持仓、未实现盈亏和权益默认 `price_basis=settlement`。
 - MVP 不生成连续合约；外部连续合约通过来源与换月规则元数据进入。
 
-### 4.3 网页采集
+### 4.3 akshare 自动采集
 
-`whitelisted connector → isolated Chromium/noVNC session → raw snapshot → extraction preview → human confirmation → import batch`
+`盘后调度 → 按需启动 akshare collector → 五交易所公开接口/文件 → 标准化 CSV → 导入 API → 固定模板校验 → 正式表`
 
-浏览器所有主请求、重定向、子资源、WebSocket 和下载都必须受出口策略约束。
-
-- MVP API 不接受任意目标 URL，只接受已配置的 `data_source_id` 和连接器操作。
-- 每个 `workspace_id + data_source_id` 使用独立 Browser Context。
-- 第一批启用交易所公开数据连接器；三禾连接器保持禁用，直至授权范围获得记录。
-- 提取顺序固定为官方 API、网络请求、HTML 表格、下载文件、OCR；OCR 结果必须人工确认。
+- 采集器是独立 Python 容器，每交易日盘后按需运行，完成后退出，不常驻。
+- 第一批一次覆盖 DCE、SHFE、CZCE、GFEX、CFFEX；东方财富等二手数据源不进入第一批。
+- 数据获取路径固定为 akshare 封装的交易所公开接口与公开文件，不接受任意目标 URL。
+- 采集范围为全市场日行情、全市场席位龙虎榜、交易日历和合约参数；历史回填策略遵循 `DEC-039`。
+- 标准化 CSV 经导入 API 入库，来源、采集任务、导入批次、变更日志和回滚链完整保留。
+- 自动批次按 `DEC-038` 免人工确认、免提取预览；失败批次自动隔离，数据质量警告仅记录、不拦截。
 
 ### 4.4 AI 查询
 
@@ -141,18 +141,25 @@ PostgreSQL 队列使用“至少一次”语义，不声称 exactly-once：
 | 编号 | 原方案问题 | 修正 |
 | --- | --- | --- |
 | `ARC-R01` | 阶段表先做交易持仓，结论又要求先做导入 | 开发计划统一为基础数据与导入优先 |
-| `ARC-R02` | “模块化单体”与多个独立服务表述易混淆 | 领域单体；浏览器/OCR/渲染为受限辅助进程 |
-| `ARC-R03` | 采集与图表均使用 Playwright，复用会扩大权限 | 分离容器、浏览器上下文、网络和凭据 |
-| `ARC-R04` | 任意 URL + 自动发现无法稳定落地 | 只支持授权站点连接器和人工确认 |
+| `ARC-R02` | “模块化单体”与多个独立服务表述易混淆 | 领域单体；仅保留按需 akshare 采集器作为独立数据获取进程 |
+| `ARC-R03` | 旧方案为浏览器采集和服务端图表导出设置高成本隔离进程 | 按 `DEC-031`、`DEC-040` 移除两者；采集改为 akshare，图表改为 ECharts 前端导出 |
+| `ARC-R04` | 任意 URL + 自动发现无法稳定落地 | 固定五交易所白名单和 akshare 封装的公开接口/文件 |
 | `ARC-R05` | PostgreSQL 年/月分区被当作默认方案 | MVP 先以索引和容量指标验证，分区设计待数据量证明 |
-| `ARC-R06` | SSE 与 WebSocket 并列但职责不明 | 普通任务进度和 AI 流式回复使用 SSE；noVNC 使用 WebSocket |
+| `ARC-R06` | SSE 与 WebSocket 并列但职责不明 | 普通任务进度和 AI 流式回复使用 SSE；不再为采集引入 WebSocket |
 | `ARC-R07` | `pgvector` 被提及但未列入已确认技术基线 | 结构化金融数据不使用向量检索；文档和交易笔记才使用 `pgvector` |
+| `ARC-R08` | 手动导入确认规则直接套用自动采集会增加无意义操作 | `DEC-038` 允许白名单结构化自动批次跳过预览/确认，以失败隔离、回滚和质量警告兜底 |
+| `ARC-R09` | 采集阶段过晚，套利开发缺少真实数据 | Phase 4 提前完成五交易所采集与全历史回填，Phase 5 再开发套利与图表 |
 
 ## 8. 主要质量属性
 
 - 正确性优先于采集自动化率。
 - Workspace 强制隔离优先于客户端传参便利性。
 - 数据沿袭优先于缓存统计结果。
-- 隔离优先于复用浏览器基础设施。
+- 采集容器网络最小化优先于开放通用外部访问能力。
 - 幂等和可恢复优先于追求“只执行一次”。
 - 单机可部署，但不以牺牲备份、密钥和审计为代价。
+
+### 8.1 资源结论
+
+- 裁剪后，现有 1GB 内存、25G 磁盘的 VPS 支撑全部阶段；五个核心容器实测内存合计约 310MB。
+- 唯一明确的磁盘增长点是席位全历史数据，估算 5–15GB；磁盘达到 80% 水位时扩容 VPS 磁盘，不更换机器。

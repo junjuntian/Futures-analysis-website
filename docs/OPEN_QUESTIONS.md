@@ -20,16 +20,16 @@
 | `OPEN-DB-002` 数值精度与币种 | `DEC-020` |
 | `OPEN-IMP-001` 回滚冲突 | `DEC-021` |
 | `OPEN-SEC-001` 加密架构和备份分离 | `DEC-022` |
-| `OPEN-COL-001` 远程浏览器交互 | `DEC-023` |
-| `OPEN-COL-002` 数据源访问边界 | `DEC-024` |
+| `OPEN-COL-001` 远程浏览器交互 | `DEC-023` 已由 `DEC-031` 替代：整套登录浏览器基础设施移除，未来需要时另行立项 |
+| `OPEN-COL-002` 数据源访问边界 | `DEC-024`、`DEC-031`：仅五交易所白名单与 akshare 封装公开数据路径 |
 | `OPEN-PRD-003` 用户初始化 | `DEC-026`：`BOOTSTRAP_TOKEN` 一次性初始化，单事务创建管理员、个人 Workspace 和 Owner 关系 |
 | `OPEN-ARC-001` 反向代理 | `DEC-028`：采用 Nginx |
 | `OPEN-SEC-002` 主密钥具体托管 | `DEC-029`：futures VPS 当前使用主机文件 `/etc/futures-platform/secrets/master-key-v1` |
-| `OPEN-COL-003` OCR 运行规格 | `DEC-030`：PaddleOCR 独立 CPU 容器、固定镜像和模型版本 |
-| `OPEN-COL-004` 首批交易所连接器清单 | `DEC-031`：Phase A 为 DCE、SHFE；Phase B 为 CZCE、GFEX、CFFEX |
-| `OPEN-ARC-002` 作业进度协议 | `DEC-032`：普通任务和 AI 流式回复使用 SSE，noVNC 使用 WebSocket |
+| `OPEN-COL-003` OCR 运行规格 | `DEC-030` 已由 `DEC-031` 替代：不建设 OCR 容器 |
+| `OPEN-COL-004` 首批交易所连接器清单 | `DEC-031`：akshare 一次覆盖 DCE、SHFE、CZCE、GFEX、CFFEX，不再分 Phase A/B |
+| `OPEN-ARC-002` 作业进度协议 | `DEC-032`：普通任务和 AI 流式回复使用 SSE；已废止的远程会话协议不再适用 |
 | `OPEN-DB-003` PostgreSQL RLS | `DEC-033`：启用 Workspace 级 RLS |
-| `OPEN-BROWSER-001` noVNC 会话参数 | `DEC-034` |
+| `OPEN-BROWSER-001` noVNC 会话参数 | `DEC-034` 已由 `DEC-031` 替代：不建设远程浏览器会话 |
 | `OPEN-AI-001` 语义检索 | `DEC-035`：结构化金融数据不用向量检索；文档和交易笔记才使用 `pgvector` |
 
 ## 3. P0：相关阶段开始前确认
@@ -60,6 +60,8 @@
 
 问题：用户数、文件大小、每日导入行数、行情总行数、并发任务、接口 P95 目标。
 
+已确定资源结论：裁剪后现有 1GB 内存、25G 磁盘 VPS 支撑全部阶段；五个核心容器实测约 310MB；席位全历史预计增长 5–15GB，磁盘达到 80% 水位时扩盘、不换机器。其余性能目标仍待确认。
+
 影响：上传限制、连接池、分块、索引和是否分区。
 
 ### `OPEN-OPS-002` 备份目标
@@ -68,7 +70,7 @@
 
 ### `OPEN-OPS-003` 数据保留
 
-问题：原始文件、staging、网页快照、加密登录状态、审计、图表和报告分别保留多久。
+问题：原始文件、staging、采集任务及标准化 CSV、审计、图表和报告分别保留多久。
 
 ### `OPEN-SEAT-001` 席位分类治理
 
@@ -79,8 +81,8 @@
 | 编号 | 发现 | 当前处理 |
 | --- | --- | --- |
 | `FIND-001` | 原方案开发顺序冲突 | 已统一为基础数据与导入优先 |
-| `FIND-002` | 模块化单体与辅助服务边界混杂 | 领域单体；浏览器/OCR/渲染为受限辅助进程 |
-| `FIND-003` | Nginx/Caddy、SSE/WebSocket 未选择 | 已由 `DEC-028` 和 `DEC-032` 关闭 |
+| `FIND-002` | 模块化单体与辅助服务边界混杂 | 领域单体；仅保留独立按需 akshare 采集器，图表由前端导出 |
+| `FIND-003` | Nginx/Caddy、SSE/WebSocket 未选择 | 已由 `DEC-028` 和 `DEC-032` 关闭；采集不再需要远程会话 WebSocket |
 | `FIND-004` | `pgvector` 不在确认技术栈 | 已由 `DEC-035` 关闭：结构化金融数据不用向量检索；文档和交易笔记才使用 `pgvector` |
 | `FIND-006` | 无容量证据却预设分区 | MVP 不预设分区 |
 | `FIND-104` | API 错误体、分页、幂等、版本冲突和 CSRF 契约缺失 | 已在 API 设计补充 |

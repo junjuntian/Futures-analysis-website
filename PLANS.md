@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-Phase 3：导入基础已全部完成并收口；Phase 3A、3B、3C、3D 均已实现并经独立 Evaluator PASS，已以普通 merge commit 合入 `main` 并创建 Phase 3 PASS 标签。
+Phase 3 已全部完成并收口。2026-08-02 总方案重审提案已获用户确认并完成决策与设计文档修订；后续路线固定为 Phase 4 至 Phase 9，Phase 4 尚未开始实现。
 
-状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。
+状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038`、`DEC-039`、`DEC-040`。
 
 ## 本阶段任务状态
 
@@ -18,6 +18,7 @@ Phase 3：导入基础已全部完成并收口；Phase 3A、3B、3C、3D 均已�
 | 分阶段计划与验收 | 已完成 | 每阶段均有交付物、准入条件、退出条件和证据要求 |
 | 首批决策同步 | 已完成 | `docs/DECISIONS.md` 与产品、架构、数据、安全、导入、API、计划和验收口径一致 |
 | 剩余技术决策同步 | 已完成 | `DEC-026` 至 `DEC-037` 已新增，相关开放事项已关闭 |
+| 总方案重审决策同步 | 已完成 | 采集域裁剪、akshare、自动采集免确认、全历史回填和前端图表导出已落入 `DEC-023/025/030/031/034/038/039/040` 及各设计文档 |
 | 三 Agent 角色配置 | 已完成 | `.agents/Planner.md`、`.agents/Generator.md`、`.agents/Evaluator.md` |
 | 上下文交接机制 | 已完成 | `docs/handoffs/README.md` 与 `docs/handoffs/LATEST.md` |
 | Phase 0 文档审查 | 已完成 | `docs/reviews/DOC_REVIEW_PHASE_0.md` |
@@ -40,6 +41,8 @@ Phase 3：导入基础已全部完成并收口；Phase 3A、3B、3C、3D 均已�
 | Phase 3D：回滚与完整流程 | 已完成、Evaluator 复核 PASS | 原子回滚、冲突整体中止、补偿/lineage、对象治理、完整前端和全量自动化已完成；候选 `45ee802` 已部署并通过 VPS 验收，复核 `6ff4c2b` PASS |
 | 标准发布流程 | 已确认并实际运行 | GitHub Actions 发布三镜像至 GHCR，`futures` VPS 已按完整 digest pull、备份、迁移和 E2E；Deploy Run `30689392268` success，运行版本 `45ee8028647a1b8e4b8cda043e8012b4e281d739` |
 | Phase 3 版本收口 | 已完成 | 普通 merge `33aa838`；main CI Run `30703979390` success；标签 `phase-3-pass-20260801`；标签镜像 Run `30704223198` success；未重新部署 VPS |
+| Phase 4：akshare 采集与全历史回填 | 待单独规划与授权 | 五交易所一次覆盖；盘后按需容器；标准化 CSV 调用导入 API；自动批次免确认；行情全量与席位分层历史回填 |
+| Phase 5–9 路线 | 已确认、未实施 | 依次为多腿套利与图表、成交/持仓/绩效、席位分析、AI、运维加固与完工事项 |
 
 ## Phase 3A 收口核验
 
@@ -164,14 +167,14 @@ Phase 3 详细边界见 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md`，按以下�
 - Phase 3C（已完成并 PASS）：校验、业务唯一性、`skip`/`overwrite`/`keep_conflict`/`abort`、通用 `imported_records` 正式入库、PostgreSQL `job_queue`、Worker 租约/重试/dead-letter、并发确认与幂等、SSE `Last-Event-ID` 重放、Workspace/RLS/审计及最小确认/进度 UI。
 - Phase 3D（已完成并 PASS）：API 同步全量预检和幂等入队、Worker 异步单事务原子回滚、后续修改/依赖冲突整体中止、补偿批次、审计与来源链、对象 scan/check/quarantine/audit、完整前端、全量自动化及 VPS/Evaluator 最终验收均已完成。详细契约与验收依据见 `docs/phases/PHASE_03D_IMPORT_FINALIZATION.md` 和 `docs/reviews/PHASE_03D_EVALUATION.md`。
 
-明确排除：套利统计和图表、交易与持仓、席位分析、外部网站采集、浏览器识别、OCR、AI、自动回测。
+Phase 3 实施时明确排除：套利统计和图表、交易与持仓、席位分析、外部数据采集、AI、自动回测；后续范围以 2026-08-02 总方案重审决策为准。
 
 Phase 3C 实施边界：
 
 - 以 `docs/phases/PHASE_03_IMPORT_FOUNDATION.md` 第 8.3 节为唯一详细实施契约；正式目标仅为导入域通用 `imported_records`，`keep_conflict` 只把候选保存在 `import_conflict_candidates`，不是 `keep_both`。
 - `/confirm` 必须在单事务内冻结参数、记录幂等请求、唯一入队、写首事件和审计；同键重试返回原结果，并发确认收敛到同一 job。
 - Worker 使用 PostgreSQL `FOR UPDATE SKIP LOCKED`、30 秒租约/10 秒续租、最多 5 次指数退避重试和终态 dead-letter；SSE 使用持久化批次序号与 `Last-Event-ID` 精确重放。
-- cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决和完整前端继续延期；行情、交易、套利、图表、外部采集、OCR、AI 与回测继续禁止。
+- 当时的 Phase 3C 边界将 cancel、人工 dead-letter replay、回滚、补偿、`import_row_changes`、冲突人工解决和完整前端延期到 3D，并将行情、交易、套利、图表、外部采集、AI 与回测排除在 3C 之外。
 - 本地完整回归、VPS Docker/迁移/四策略 E2E/并发确认/Worker 恢复/SSE 重放/跨 Workspace RLS/审计秘密扫描及独立 Evaluator PASS 均为退出门禁。
 
 ## Phase 3D 实现、评审与版本收口记录
@@ -203,7 +206,8 @@ Phase 3C 实施边界：
 
 - MEDIUM-05：VPS 现存 127 个历史测试批次继续如实登记，按用户裁定在项目完工时执行生产库归零重置；未经单独运维授权不得提前清理。
 - TLS：生产 HTTPS 入口与 `AUTH_COOKIE_SECURE=true` 验证按用户裁定延后到项目完工时处理。
-- 下一步：总方案重审（采集域裁剪与 akshare 方案）待用户确认后启动。
+- 备份：备份自动化与 master-key 离线副本纳入 Phase 9 完工事项。
+- 下一步：为 Phase 4“akshare 采集与全历史回填”建立 Planner 契约，实施仍需用户单独授权。
 
 ## 变更规则
 

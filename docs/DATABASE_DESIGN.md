@@ -39,7 +39,7 @@
 | 表 | 关键字段 | 约束与说明 |
 | --- | --- | --- |
 | `stored_objects` | `id`, `workspace_id`, `backend`, `object_key`, `sha256`, `size_bytes`, `mime_type`, `state`, `retention_until` | UUIDv7；`object_key` 随机生成；禁止跨 Workspace 引用 |
-| `encrypted_secrets` | `id`, `workspace_id`, `owner_type`, `owner_id`, `purpose`, `ciphertext`, `wrapped_dek`, `kek_version`, `nonce`, `algorithm`, `expires_at` | 信封加密；Cookie、Storage State、AI Key 均使用该结构 |
+| `encrypted_secrets` | `id`, `workspace_id`, `owner_type`, `owner_id`, `purpose`, `ciphertext`, `wrapped_dek`, `kek_version`, `nonce`, `algorithm`, `expires_at` | 信封加密；AI Key 等敏感配置使用该结构 |
 | `key_version_metadata` | `kek_version`, `status`, `activated_at`, `retired_at` | 只记录版本标识和状态，绝不记录主密钥材料 |
 
 ## 5. 导入域
@@ -126,8 +126,7 @@
 | `chart_templates` | `id`, `workspace_id`, `code`, `version`, `configuration_json` | 模板版本化 |
 | `saved_charts` | `id`, `workspace_id`, `created_by`, `template_id`, `query_json`, `price_basis` | UUIDv7；查询参数和价格口径可复现 |
 | `generated_images` | `id`, `workspace_id`, `saved_chart_id`, `stored_object_id`, `format`, `generated_at` | UUIDv7；SVG 必须安全清洗 |
-| `browser_sessions` | `id`, `workspace_id`, `data_source_id`, `browser_context_key`, `secret_id`, `status`, `expires_at` | UUIDv7；Workspace/数据源独立 Context；登录状态引用密文 |
-| `extraction_jobs` | `id`, `workspace_id`, `data_source_id`, `job_id`, `status`, `method_chain`, `preview_json`, `confirmed_at` | UUIDv7；连接器提取任务元数据；`job_id` 引用 `job_queue.id` |
+| `extraction_jobs` | `id`, `workspace_id`, `data_source_id`, `job_id`, `import_batch_id`, `status`, `collection_scope_json`, `cursor_json`, `output_object_id`, `started_at`, `completed_at` | UUIDv7；akshare 采集任务元数据；`job_id` 引用 `job_queue.id`，标准化 CSV 与导入批次可追溯 |
 | `job_queue` | `id`, `workspace_id`, `job_type`, `payload_version`, `payload_json`, `status`, `idempotency_key`, `available_at`, `lease_expires_at`, `attempt_count` | UUIDv7；`(workspace_id, job_type, idempotency_key)` 条件唯一 |
 | `job_attempts` | `id`, `workspace_id`, `job_id`, `attempt_no`, `worker_id`, `started_at`, `finished_at`, `error_code` | BIGINT identity；每次尝试可审计 |
 | `job_events` | `id`, `workspace_id`, `job_id`, `event_type`, `progress`, `message`, `created_at` | BIGINT identity；用于进度 |
@@ -174,7 +173,7 @@
 
 ## 13. 数据保留与删除
 
-- 原始文件、审计、AI 对话、浏览器会话和 staging 数据的保留周期分别配置。
+- 原始文件、采集任务、审计、AI 对话和 staging 数据的保留周期分别配置。
 - 正式原始数据默认不物理删除；删除请求通过软删除和延迟清理执行。
 - 对象删除前验证无数据库引用且超过保留期。
 - 备份恢复必须验证 `kek_version`、对象完整性、Workspace 引用和数据库引用一致性。

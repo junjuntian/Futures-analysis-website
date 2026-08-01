@@ -8,7 +8,7 @@
 - Cookie Session 用于浏览器登录，不向前端暴露数据库或 AI 凭据。
 - 服务端从 Cookie Session 解析唯一的个人 Workspace；所有业务 API 隐式绑定当前 `workspace_id`。
 - MVP 不提供客户端指定 Workspace、切换 Workspace、邀请成员或共享资源的接口。
-- 普通查询使用 REST；后台任务进度和 AI 流式回复使用 SSE；noVNC 使用 WebSocket。
+- 普通查询使用 REST；后台任务进度和 AI 流式回复使用 SSE。
 
 ## 2. 通用规范
 
@@ -181,22 +181,19 @@
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/v1/charts/preview` | 返回前端图表配置与数据 |
-| `POST` | `/api/v1/charts/render` | 创建静态图任务 |
-| `GET` | `/api/v1/charts/{chart_id}/image` | 获取已生成图像 |
-| `POST` | `/api/v1/browser-sessions` | 创建授权站点会话 |
-| `POST` | `/api/v1/browser-sessions/{session_id}/novnc-token` | 创建与当前应用 session 绑定的短期 noVNC 访问 token |
-| `DELETE` | `/api/v1/browser-sessions/{session_id}` | 撤销并清除会话 |
-| `POST` | `/api/v1/extraction-jobs` | 对已配置的白名单数据源连接器创建提取任务 |
-| `GET` | `/api/v1/extraction-jobs/{job_id}/preview` | 查看提取结果并确认 |
+| `POST` | `/api/v1/extraction-jobs` | 为已配置的五交易所数据源创建 akshare 采集任务元数据并入队 |
+| `GET` | `/api/v1/extraction-jobs/{job_id}` | 查询数据源、采集范围、回填游标、状态和关联导入批次 |
 | `POST` | `/api/v1/ai/chat` | 创建或继续对话 |
 | `POST` | `/api/v1/ai/providers/{provider_id}/test` | 管理员测试提供商 |
 | `GET` | `/api/v1/ai/usage` | 查询用量和费用 |
 
-MVP 不接受任意外部 URL。API 只接受当前 Workspace 下已配置的 `data_source_id` 和连接器操作；服务端验证连接器、域名白名单与授权状态。第一批启用交易所公开数据源，三禾连接器在授权范围确认前返回禁用状态。
+MVP 不接受任意外部 URL。API 只接受当前 Workspace 下已配置的 `data_source_id` 和 akshare 连接器操作；服务端验证连接器与五交易所域名白名单。东方财富等二手数据源不进入第一批。
 
-连接器提取阶段使用固定优先级：官方 API、网络请求、HTML 表格、下载文件、OCR。包含 OCR 的结果必须进入 `waiting_for_user`，经人工确认接口审计通过后才能提交正式导入。
+`extraction-jobs` 仅作为采集任务元数据接口。自动采集产出的标准化 CSV 使用固定映射模板调用导入 API，preview/confirm 环节对自动批次不适用；解析或校验失败时批次为 `failed` 且正式表零写入，质量警告仅记录、不拦截。手动文件导入继续使用第 4 节既有 preview/confirm 接口。
 
-`/api/v1/extraction-jobs` 对应数据库 `extraction_jobs` 元数据表；异步执行由 `job_queue` 承载。API 路径中的 `{job_id}` 使用 `extraction_jobs.id`，响应中可同时返回底层 `job_queue_id` 供运维排查。
+`/api/v1/extraction-jobs` 对应数据库 `extraction_jobs` 采集任务元数据表；异步执行由 `job_queue` 承载。API 路径中的 `{job_id}` 使用 `extraction_jobs.id`，响应中可同时返回底层 `job_queue_id` 和 `import_batch_id` 供追溯与运维排查。
+
+PNG/SVG 不经过服务端渲染接口，由 ECharts 前端直接导出；SVG 在下载前执行安全清洗。
 
 ## 7. 任务与进度
 
