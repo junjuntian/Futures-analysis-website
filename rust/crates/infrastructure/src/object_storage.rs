@@ -500,6 +500,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renamed_object_remains_scannable_after_lost_registration_outcome() {
+        let root = test_root();
+        let storage = LocalObjectStorage::new(&root).await.unwrap();
+        let workspace_id = Uuid::now_v7();
+        let mut upload = storage.begin_upload(workspace_id).await.unwrap();
+        upload
+            .write_chunk(b"rename completed before database failure")
+            .await
+            .unwrap();
+        let committed = upload.commit().await.unwrap();
+
+        // Simulate both a database registration failure and a caller that never
+        // receives the commit response. Governance must still observe the
+        // renamed object; product code has no physical-delete recovery path.
+        let observed = storage.scan_workspace(workspace_id).await.unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].object_key, committed.object_key);
+        assert_eq!(observed[0].sha256, committed.sha256);
+        assert_eq!(observed[0].size_bytes, committed.size_bytes);
+        let _ = fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
     async fn reads_persisted_object_with_size_guard() {
         let root = test_root();
         let storage = LocalObjectStorage::new(&root).await.unwrap();

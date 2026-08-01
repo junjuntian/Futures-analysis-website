@@ -939,19 +939,32 @@ fi
 wait "$SSE_PID" || true
 assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' and event_type='import.events_access_terminated' and metadata->>'reason_code'='auth_required'")" 1 "SSE revocation audit"
 
-# Create an untracked object under the test workspace only. A fresh object must
-# remain protected as commit_outcome_unknown; once stale it becomes an orphan
-# that the governance implementation may move but must never physically delete.
+# Inject the full object fault matrix under the isolated test Workspace only:
+# rename followed by database failure, uncertain commit response, process-abort
+# temporary file, database metadata without an object, and a wrong stored hash.
 "${COMPOSE_CMD[@]}" exec -T -e E2E_WORKSPACE="$WS1" api sh -ceu '
   case "$E2E_WORKSPACE" in
     ????????-????-????-????-????????????) ;;
     *) exit 64 ;;
   esac
   root=${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
-  target="$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-e2e-orphan"
-  mkdir -p "$(dirname "$target")"
-  printf "phase3d orphan fixture\n" >"$target"
+  object_dir="$root/objects/$E2E_WORKSPACE/e2/e2"
+  temporary_dir="$root/.tmp/$E2E_WORKSPACE"
+  mkdir -p "$object_dir" "$temporary_dir"
+  printf "phase3d orphan fixture\n" >"$object_dir/phase3d-e2e-orphan"
+  printf "rename completed before database failure\n" >"$object_dir/phase3d-rename-db-failure"
+  printf "commit response uncertain\n" >"$object_dir/phase3d-commit-uncertain"
+  printf "phase3d hash fixture\n" >"$object_dir/phase3d-hash-mismatch"
+  printf "interrupted temporary upload\n" >"$temporary_dir/phase3d-interrupted.upload"
+  touch -t 200001010000 "$temporary_dir/phase3d-interrupted.upload"
 '
+HASH_FIXTURE_SIZE=$("${COMPOSE_CMD[@]}" exec -T -e E2E_WORKSPACE="$WS1" api sh -ceu '
+  root=${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
+  wc -c <"$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-hash-mismatch" | tr -d " "
+')
+MISSING_OBJECT_ID=$(new_uuid)
+HASH_OBJECT_ID=$(new_uuid)
+psqlq "insert into stored_objects(id,workspace_id,object_key,sha256,size_bytes,mime_type,backend,state,retention_until,created_by) values ('$MISSING_OBJECT_ID','$WS1','objects/$WS1/e2/e2/phase3d-database-missing','$(printf '1%.0s' {1..64})',1,'text/plain','local','available',null,'$USER1'),('$HASH_OBJECT_ID','$WS1','objects/$WS1/e2/e2/phase3d-hash-mismatch','$(printf '0%.0s' {1..64})',$HASH_FIXTURE_SIZE,'text/plain','local','available',null,'$USER1')" >/dev/null
 OBJECT_COUNT_BEFORE_SCAN=$(object_file_count "$WS1")
 UNCERTAIN_SCAN_KEY="phase3d-object-scan-$RUN_MARK-uncertain"
 assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$UNCERTAIN_SCAN_KEY" "$WORK/object-uncertain-scan.json")" 202 "uncertain object scan queued"
@@ -959,15 +972,20 @@ UNCERTAIN_SCAN_RUN=$(jq -r '.data.run_id' "$WORK/object-uncertain-scan.json")
 UNCERTAIN_SCAN_JOB=$(jq -r '.data.job_id' "$WORK/object-uncertain-scan.json")
 wait_governance_job "$UNCERTAIN_SCAN_JOB" succeeded
 assert_eq "$(api_get "$TOKEN1" "/api/v1/object-consistency/scans/$UNCERTAIN_SCAN_RUN" "$WORK/object-uncertain-report.json")" 200 "uncertain object scan report"
-assert_json "$WORK/object-uncertain-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="commit_outcome_unknown" and .quarantine_eligible==false)]|length) == 1' "fresh object grace period"
+assert_json "$WORK/object-uncertain-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="commit_outcome_unknown" and .quarantine_eligible==false)]|length) == 3 and ([.data.findings[]|select(.finding_type=="database_object_missing")]|length) == 1 and ([.data.findings[]|select(.finding_type=="sha256_mismatch")]|length) == 1 and ([.data.findings[]|select(.finding_type=="stale_temporary_object")]|length) == 1' "object fault injection matrix"
 "${COMPOSE_CMD[@]}" exec -T -e E2E_WORKSPACE="$WS1" api sh -ceu '
   case "$E2E_WORKSPACE" in
     ????????-????-????-????-????????????) ;;
     *) exit 64 ;;
   esac
   root=${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
-  target="$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-e2e-orphan"
-  touch -t 200001010000 "$target"
+  for target in \
+    "$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-e2e-orphan" \
+    "$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-rename-db-failure" \
+    "$root/objects/$E2E_WORKSPACE/e2/e2/phase3d-commit-uncertain"
+  do
+    touch -t 200001010000 "$target"
+  done
 '
 SCAN_KEY="phase3d-object-scan-$RUN_MARK"
 assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$SCAN_KEY" "$WORK/object-scan.json")" 202 "object scan queued"
@@ -975,13 +993,26 @@ SCAN_RUN=$(jq -r '.data.run_id' "$WORK/object-scan.json")
 SCAN_JOB=$(jq -r '.data.job_id' "$WORK/object-scan.json")
 wait_governance_job "$SCAN_JOB" succeeded
 assert_eq "$(api_get "$TOKEN1" "/api/v1/object-consistency/scans/$SCAN_RUN" "$WORK/object-report.json")" 200 "object scan report"
-assert_json "$WORK/object-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="orphan_object" and .quarantine_eligible==true)]|length) == 1' "orphan finding"
-FINDING_ID=$(jq -r '.data.findings[]|select(.finding_type=="orphan_object" and .quarantine_eligible==true)|.finding_id' "$WORK/object-report.json")
+assert_json "$WORK/object-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="orphan_object" and .quarantine_eligible==true)]|length) == 3 and ([.data.findings[]|select(.finding_type=="database_object_missing")]|length) == 1 and ([.data.findings[]|select(.finding_type=="sha256_mismatch")]|length) == 1 and ([.data.findings[]|select(.finding_type=="stale_temporary_object")]|length) == 1' "stale object fault matrix"
+FINDING_ID=$(jq -r '[.data.findings[]|select(.finding_type=="orphan_object" and .quarantine_eligible==true)][0].finding_id' "$WORK/object-report.json")
+REPLAYED_SCAN_COUNT=$(psqlq "select count(*) from object_consistency_runs where workspace_id='$WS1'")
+assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$SCAN_KEY" "$WORK/object-scan-replayed.json")" 200 "object scan idempotent replay"
+assert_json "$WORK/object-scan-replayed.json" ".data.replayed == true and .data.run_id == \"$SCAN_RUN\" and .data.job_id == \"$SCAN_JOB\"" "object scan replay identity"
+assert_eq "$(psqlq "select count(*) from object_consistency_runs where workspace_id='$WS1'")" "$REPLAYED_SCAN_COUNT" "object scan replay row count"
+REPEAT_SCAN_KEY="phase3d-object-scan-$RUN_MARK-repeat"
+assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$REPEAT_SCAN_KEY" "$WORK/object-repeat-scan.json")" 202 "repeated object scan queued"
+REPEAT_SCAN_RUN=$(jq -r '.data.run_id' "$WORK/object-repeat-scan.json")
+REPEAT_SCAN_JOB=$(jq -r '.data.job_id' "$WORK/object-repeat-scan.json")
+wait_governance_job "$REPEAT_SCAN_JOB" succeeded
+assert_eq "$(api_get "$TOKEN1" "/api/v1/object-consistency/scans/$REPEAT_SCAN_RUN" "$WORK/object-repeat-report.json")" 200 "repeated object scan report"
+assert_json "$WORK/object-repeat-report.json" '.data.run.status == "completed" and ([.data.findings[]|select(.finding_type=="orphan_object")]|length) == 3 and ([.data.findings[]|select(.finding_type=="database_object_missing")]|length) == 1 and ([.data.findings[]|select(.finding_type=="sha256_mismatch")]|length) == 1 and ([.data.findings[]|select(.finding_type=="stale_temporary_object")]|length) == 1' "repeated scan deterministic findings"
 QUARANTINE_KEY="phase3d-quarantine-$RUN_MARK"
 assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/findings/$FINDING_ID/quarantine" '{}' "$QUARANTINE_KEY" "$WORK/quarantine.json")" 202 "quarantine queued"
 QUARANTINE_JOB=$(jq -r '.data.job_id' "$WORK/quarantine.json")
 wait_governance_job "$QUARANTINE_JOB" succeeded
 assert_eq "$(psqlq "select count(*) from object_quarantines where workspace_id='$WS1' and finding_id='$FINDING_ID' and disposition_status='quarantined'")" 1 "quarantine record"
+assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/findings/$FINDING_ID/quarantine" '{}' "$QUARANTINE_KEY" "$WORK/quarantine-replayed.json")" 200 "quarantine idempotent replay"
+assert_json "$WORK/quarantine-replayed.json" ".data.replayed == true and .data.job_id == \"$QUARANTINE_JOB\"" "quarantine replay identity"
 assert_eq "$(object_file_count "$WS1")" "$OBJECT_COUNT_BEFORE_SCAN" "governance physical delete count zero"
 
 # Persistence/recovery uses the deployed images only. A queued import survives
@@ -1008,7 +1039,7 @@ for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
   "$ROLLBACK_KEY" "$SOFT_DELETE_KEY" "$SOFT_CONFLICT_KEY" "$COMP_KEY" \
   "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" "$DEEP_COMP_KEY" \
   "$FAIRNESS_KEY_PREFIX" \
-  "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
+  "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$REPEAT_SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2
     exit 1
