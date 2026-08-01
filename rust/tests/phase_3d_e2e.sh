@@ -711,7 +711,8 @@ SOFT_DELETE_KEY="phase3d-rollback-$RUN_MARK-soft-delete"
 assert_eq "$(rollback_request "$SOFT_DELETE_ID" "$WORK/soft-delete-check.json" "$SOFT_DELETE_KEY" "$WORK/soft-delete-rollback.json")" 202 "soft-delete rollback queued"
 "${COMPOSE_CMD[@]}" up -d --scale worker=1 worker >/dev/null
 wait_batch "$TOKEN1" "$SOFT_DELETE_ID" rolled_back
-assert_eq "$(psqlq "select (record_data->>'value') || ':' || source_import_batch_id::text from imported_records where workspace_id='$WS1' and business_key='2026-09-10|P3D-SD1'")" "30:$SOFT_BASELINE_ID" "soft-delete restores before snapshot"
+SOFT_DELETE_RESTORED="$(psqlq "select (record_data->>'value') || ':' || source_import_batch_id::text from imported_records where workspace_id='$WS1' and business_key='2026-09-10|P3D-SD1'")"
+assert_eq "$SOFT_DELETE_RESTORED" "30:$SOFT_BASELINE_ID" "soft-delete restores before snapshot"
 
 cat >"$WORK/soft-conflict-baseline.csv" <<'CSV'
 date,code,name,value
@@ -737,8 +738,10 @@ psqlq "update imported_records set record_data=jsonb_set(record_data,'{value}','
 SOFT_CONFLICT_BEFORE=$(database_snapshot "$SOFT_CONFLICT_ID")
 "${COMPOSE_CMD[@]}" up -d --scale worker=1 worker >/dev/null
 wait_batch "$TOKEN1" "$SOFT_CONFLICT_ID" rollback_conflict
-assert_eq "$(database_snapshot "$SOFT_CONFLICT_ID")" "$SOFT_CONFLICT_BEFORE" "soft-delete worker conflict zero business change"
-assert_eq "$(psqlq "select status || ':' || conflict_count::text from import_rollback_requests where workspace_id='$WS1' and import_batch_id='$SOFT_CONFLICT_ID'")" "worker_conflict:2" "soft-delete worker conflict persisted"
+SOFT_CONFLICT_AFTER=$(database_snapshot "$SOFT_CONFLICT_ID")
+assert_eq "$SOFT_CONFLICT_AFTER" "$SOFT_CONFLICT_BEFORE" "soft-delete worker conflict zero business change"
+SOFT_CONFLICT_PERSISTED="$(psqlq "select status || ':' || conflict_count::text from import_rollback_requests where workspace_id='$WS1' and import_batch_id='$SOFT_CONFLICT_ID'")"
+assert_eq "$SOFT_CONFLICT_PERSISTED" "worker_conflict:3" "soft-delete worker conflict persisted"
 
 # Precheck pagination: 105 later modifications produce a complete second page.
 printf 'date,code,name,value\n' >"$WORK/conflicts.csv"
@@ -828,7 +831,8 @@ COMP_OBJECT_SNAPSHOT="$(psqlq "select count(*) from stored_objects where workspa
 # grow, including when several same-key requests wait on the advisory lock.
 assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "phase3d corrective batch $RUN_MARK" "$COMP_KEY" "$WORK/compensation-replay.json")" 200 "compensation same-parameter replay"
 assert_json "$WORK/compensation-replay.json" ".data.replayed == true and .data.compensation_import_id == \"$COMP_ID\"" "compensation replay result"
-assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$COMP_OBJECT_SNAPSHOT" "compensation replay object counts"
+COMP_REPLAY_OBJECT_SNAPSHOT="$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")"
+assert_eq "$COMP_REPLAY_OBJECT_SNAPSHOT" "$COMP_OBJECT_SNAPSHOT" "compensation replay object counts"
 
 assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "different compensation reason" "$COMP_KEY" "$WORK/compensation-key-reused.json")" 409 "compensation same key different parameters"
 assert_json "$WORK/compensation-key-reused.json" '.data.code == "idempotency_key_reused"' "compensation idempotency mismatch code"
@@ -1098,6 +1102,8 @@ echo "api_image=$API_IMAGE api_digest=$API_DIGEST"
 echo "worker_image=$WORKER_IMAGE worker_digest=$WORKER_DIGEST"
 echo "frontend_image=$FRONTEND_IMAGE frontend_digest=$FRONTEND_DIGEST"
 echo "format_smoke=txt,csv,xls,xlsx xls_fixture_sha256=$XLS_FIXTURE_SHA"
+echo "compensation_replay_objects_before=$COMP_OBJECT_SNAPSHOT after=$COMP_REPLAY_OBJECT_SNAPSHOT rejection_and_concurrency_snapshot=$NOT_ALLOWED_SNAPSHOT unchanged=PASS"
+echo "soft_delete_restore=$SOFT_DELETE_RESTORED worker_conflict=$SOFT_CONFLICT_PERSISTED zero_business_change=PASS"
 echo "governance_physical_delete_count=0"
 echo "migration_list=$WORK/migrations.txt"
 echo "evidence_dir=$WORK"
