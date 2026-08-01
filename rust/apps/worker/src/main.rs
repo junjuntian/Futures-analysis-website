@@ -1,6 +1,9 @@
+mod import_jobs;
+mod object_governance;
+
 use common::AppConfig;
-use tokio::time::{Duration, interval};
-use tracing::{info, warn};
+use tracing::info;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -11,20 +14,16 @@ async fn main() -> anyhow::Result<()> {
         database_url = config.redacted_database_url(),
         "worker connected to database"
     );
-
-    let mut ticks = interval(Duration::from_secs(5));
-    loop {
-        tokio::select! {
-            _ = ticks.tick() => {
-                if !database::check_ready(&pool).await {
-                    warn!("database readiness check failed");
-                }
-            }
-            _ = shutdown_signal() => {
-                info!("worker shutdown requested");
-                break;
-            }
-        }
+    let worker_config = import_jobs::ImportWorkerConfig::from_env()?;
+    let storage_root =
+        std::env::var("OBJECT_STORAGE_ROOT").unwrap_or_else(|_| "./data/object-storage".into());
+    let storage = std::sync::Arc::new(
+        infrastructure::object_storage::LocalObjectStorage::new(storage_root).await?,
+    );
+    let worker_id = format!("worker-{}", Uuid::now_v7());
+    tokio::select! {
+        result = import_jobs::run(pool, storage, worker_id, worker_config) => result?,
+        _ = shutdown_signal() => info!("worker shutdown requested"),
     }
 
     Ok(())

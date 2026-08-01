@@ -37,9 +37,14 @@ services:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8088}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       BOOTSTRAP_TOKEN_FILE: ${BOOTSTRAP_TOKEN_FILE:-/run/secrets/bootstrap-token}
+      OBJECT_STORAGE_ROOT: ${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
+      IMPORT_MAX_BYTES: ${IMPORT_MAX_BYTES:-52428800}
+      IMPORT_SSE_REVALIDATE_SECONDS: ${IMPORT_SSE_REVALIDATE_SECONDS:-15}
+      IMPORT_IDEMPOTENCY_PEPPER_FILE: ${IMPORT_IDEMPOTENCY_PEPPER_FILE:-/run/secrets/import-idempotency-pepper}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ${FUTURES_SECRETS_HOST_DIR:-/etc/futures-platform/secrets}:/run/secrets:ro
+      - object_storage_data:/var/lib/futures-platform/objects
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,9 +67,12 @@ services:
       APP_VERSION: ${APP_VERSION:-0.1.0}
       BIND_ADDR: 0.0.0.0:8081
       DATABASE_URL_FILE: ${DATABASE_URL_FILE:-/run/secrets/database-url}
+      OBJECT_STORAGE_ROOT: ${OBJECT_STORAGE_ROOT:-/var/lib/futures-platform/objects}
+      OBJECT_STALE_SECONDS: ${OBJECT_STALE_SECONDS:-3600}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ${FUTURES_SECRETS_HOST_DIR:-/etc/futures-platform/secrets}:/run/secrets:ro
+      - object_storage_data:/var/lib/futures-platform/objects
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +107,7 @@ services:
 
 volumes:
   postgres_data:
+  object_storage_data:
   frontend_node_modules:
   root_node_modules:
 

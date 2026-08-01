@@ -20,11 +20,14 @@ version = "0.1.0"
 anyhow = "1.0"
 application = { path = "crates/application" }
 argon2 = "0.5"
-axum = "0.8"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
+calamine = "0.26"
 common = { path = "crates/common" }
 database = { path = "crates/database" }
 domain = { path = "crates/domain" }
+encoding_rs = "0.8"
 infrastructure = { path = "crates/infrastructure" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -34,7 +37,8 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 subtle = "2.6"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros", "serde", "serde-well-known"] }
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "time", "net"] }
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "time", "net"] }
+tokio-stream = "0.1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "request-id", "util"] }
 tracing = "0.1"

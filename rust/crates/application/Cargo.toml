@@ -6,6 +6,11 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+calamine.workspace = true
+domain.workspace = true
+encoding_rs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 time.workspace = true
 utoipa.workspace = true
+uuid.workspace = true

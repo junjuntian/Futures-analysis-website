@@ -1,0 +1,33 @@
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: !reset null
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    volumes:
+      - ${FUTURES_SECRETS_HOST_DIR:-/etc/futures-platform/secrets}:/run/secrets:ro
+
+  api:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/junjuntian/futures-analysis-website}-api:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}
+    build: !reset null
+    environment:
+      APP_ENV: production
+
+  worker:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/junjuntian/futures-analysis-website}-worker:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}
+    build: !reset null
+    environment:
+      APP_ENV: production
+
+  frontend:
+    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/junjuntian/futures-analysis-website}-frontend:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}
+    profiles: !reset []
+    working_dir: !reset null
+    command: !reset null
+    volumes: !reset []
+
+  nginx:
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started

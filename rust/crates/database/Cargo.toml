@@ -6,5 +6,13 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+application.workspace = true
+domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
 tracing.workspace = true
+uuid.workspace = true
