@@ -549,6 +549,7 @@ pub enum ImportWorkflowErrorCode {
     RollbackIdempotencyKeyReused,
     CompensationNotAllowed,
     CompensationCycle,
+    CompensationLineageTooDeep,
     ObjectConsistencyError,
 }
 
@@ -573,6 +574,7 @@ impl ImportWorkflowErrorCode {
             Self::RollbackIdempotencyKeyReused => "rollback_idempotency_key_reused",
             Self::CompensationNotAllowed => "compensation_not_allowed",
             Self::CompensationCycle => "compensation_cycle",
+            Self::CompensationLineageTooDeep => "compensation_lineage_too_deep",
             Self::ObjectConsistencyError => "object_consistency_error",
         }
     }
@@ -1379,6 +1381,10 @@ mod tests {
             (
                 ImportWorkflowErrorCode::CompensationCycle,
                 "compensation_cycle",
+            ),
+            (
+                ImportWorkflowErrorCode::CompensationLineageTooDeep,
+                "compensation_lineage_too_deep",
             ),
             (
                 ImportWorkflowErrorCode::ObjectConsistencyError,

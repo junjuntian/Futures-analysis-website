@@ -826,6 +826,40 @@ assert_eq "$(rollback_check "$ORIGINAL_ID" "$WORK/dependency-check.json")" 200 "
 assert_json "$WORK/dependency-check.json" '.data.can_rollback == false and .data.compensation_recommended == true and ([.data.conflicts[].conflict_type]|index("downstream_dependency") != null)' "dependency blocks rollback"
 assert_eq "$(rollback_request "$ORIGINAL_ID" "$WORK/dependency-check.json" "phase3d-rollback-$RUN_MARK-dependency" "$WORK/dependency-rollback.json")" 409 "dependency rollback rejected"
 assert_json "$WORK/dependency-rollback.json" '.data.code == "rollback_conflict"' "dependency rollback code"
+
+# The public lineage and compensation creation paths share a bounded recursive
+# traversal. A synthetic, isolated chain beyond the supported 32 edges must
+# return one stable error and must not commit the uploaded corrective object.
+DEEP_ROOT=$(new_uuid)
+DEEP_LEAF=$(psqlq "select md5('$WS1:phase3d-depth:33')::uuid")
+psql_admin -q <<SQL
+insert into import_batches(id,workspace_id,status,dataset_type,created_by)
+values ('$DEEP_ROOT','$WS1','succeeded','generic','$USER1');
+do \$depth\$
+declare
+  parent_id uuid := '$DEEP_ROOT';
+  child_id uuid;
+  level integer;
+begin
+  for level in 1..33 loop
+    child_id := md5('$WS1:phase3d-depth:' || level::text)::uuid;
+    insert into import_batches(
+      id,workspace_id,status,dataset_type,created_by,compensates_batch_id
+    ) values (
+      child_id,'$WS1','succeeded','generic','$USER1',parent_id
+    );
+    parent_id := child_id;
+  end loop;
+end
+\$depth\$;
+SQL
+assert_eq "$(api_get "$TOKEN1" "/api/v1/imports/$DEEP_LEAF/lineage" "$WORK/deep-lineage.json")" 409 "deep lineage rejected"
+assert_json "$WORK/deep-lineage.json" '.data.code == "compensation_lineage_too_deep"' "deep lineage stable error"
+DEEP_OBJECT_SNAPSHOT="$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")"
+DEEP_COMP_KEY="phase3d-compensation-$RUN_MARK-too-deep"
+assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$DEEP_LEAF" "$WORK/compensation.csv" "lineage depth limit" "$DEEP_COMP_KEY" "$WORK/deep-compensation.json")" 409 "deep compensation rejected"
+assert_json "$WORK/deep-compensation.json" '.data.code == "compensation_lineage_too_deep"' "deep compensation stable error"
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$DEEP_OBJECT_SNAPSHOT" "deep compensation object counts"
 assert_eq "$(database_snapshot "$ORIGINAL_ID")" "$DEPENDENCY_BEFORE" "dependency zero business change"
 
 # Cross-workspace API and forced-RLS probes.
@@ -928,7 +962,7 @@ assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$
 "${COMPOSE_CMD[@]}" logs --no-color --since 30m api worker nginx >"$WORK/service.log"
 for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
   "$ROLLBACK_KEY" "$SOFT_DELETE_KEY" "$SOFT_CONFLICT_KEY" "$COMP_KEY" \
-  "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" \
+  "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" "$DEEP_COMP_KEY" \
   "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2

@@ -11,6 +11,7 @@ use uuid::Uuid;
 const COMPENSATION_IDEMPOTENCY_LOCK_SQL: &str = "select pg_advisory_xact_lock(
     hashtextextended($1::text || ':compensation:' || $2::text, 0)
 )";
+pub const MAX_COMPENSATION_LINEAGE_DEPTH: i32 = 32;
 
 #[derive(Debug, Clone)]
 pub struct NewCompensationUpload {
@@ -40,6 +41,8 @@ pub enum CompensationRepositoryError {
     NotAllowed,
     #[error("compensation lineage would contain a cycle")]
     Cycle,
+    #[error("compensation lineage exceeds the supported depth")]
+    LineageDepthExceeded,
     #[error("compensation idempotency key was reused")]
     IdempotencyKeyReused,
     #[error("invalid stored compensation state")]
@@ -117,6 +120,11 @@ pub async fn prepare_compensation_upload<'a>(
         "succeeded" | "rollback_conflict" | "rolled_back" | "rollback_failed"
     ) {
         return Err(CompensationRepositoryError::NotAllowed);
+    }
+    let (_, original_depth) =
+        load_lineage_root(&mut tx, upload.workspace_id, upload.original_import_id).await?;
+    if original_depth >= MAX_COMPENSATION_LINEAGE_DEPTH {
+        return Err(CompensationRepositoryError::LineageDepthExceeded);
     }
 
     Ok(CompensationUploadPreparation::Ready(
@@ -319,39 +327,31 @@ pub async fn get_lineage(
 ) -> Result<ImportLineageResponse, CompensationRepositoryError> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let root_import_id = sqlx::query_scalar::<_, Uuid>(
-        "with recursive ancestors(id, compensates_batch_id, depth) as (
-            select id, compensates_batch_id, 0
-              from import_batches
-             where workspace_id = $1 and id = $2
-            union all
-            select parent.id, parent.compensates_batch_id, child.depth + 1
-              from import_batches parent
-              join ancestors child on child.compensates_batch_id = parent.id
-             where parent.workspace_id = $1
-         )
-         select id from ancestors order by depth desc limit 1",
-    )
-    .bind(workspace_id)
-    .bind(import_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(CompensationRepositoryError::NotFound)?;
+    let (root_import_id, _) = load_lineage_root(&mut tx, workspace_id, import_id).await?;
     let rows = sqlx::query(
-        "with recursive lineage(id, depth) as (
-            select $2::uuid, 0
+        "with recursive lineage(id, depth, path, cycle) as (
+            select $2::uuid, 0, array[$2::uuid], false
             union all
-            select child.id, parent.depth + 1
+            select child.id, parent.depth + 1, parent.path || child.id,
+                   child.id = any(parent.path)
               from import_batches child
               join lineage parent on child.compensates_batch_id = parent.id
              where child.workspace_id = $1
+               and parent.depth < $3
+               and not parent.cycle
          )
          select batch.id, batch.status::text as status, batch.compensates_batch_id,
                 batch.created_by, batch.confirmed_by, batch.rollback_capability,
                 batch.created_at, batch.confirmed_at, batch.rolled_back_at,
                 mapping.id as mapping_id, compensation.reason,
                 file.id as file_id, file.stored_object_id, file.original_filename,
-                file.detected_format, file.sha256, file.size_bytes, object.state as object_state
+                file.detected_format, file.sha256, file.size_bytes, object.state as object_state,
+                lineage.depth, lineage.cycle,
+                exists(
+                    select 1 from import_batches child
+                     where child.workspace_id = $1
+                       and child.compensates_batch_id = batch.id
+                ) as has_children
            from lineage
            join import_batches batch
              on batch.workspace_id = $1 and batch.id = lineage.id
@@ -369,8 +369,18 @@ pub async fn get_lineage(
     )
     .bind(workspace_id)
     .bind(root_import_id)
+    .bind(MAX_COMPENSATION_LINEAGE_DEPTH)
     .fetch_all(&mut *tx)
     .await?;
+    if rows.iter().any(|row| row.get::<bool, _>("cycle")) {
+        return Err(CompensationRepositoryError::Cycle);
+    }
+    if rows.iter().any(|row| {
+        row.get::<i32, _>("depth") >= MAX_COMPENSATION_LINEAGE_DEPTH
+            && row.get::<bool, _>("has_children")
+    }) {
+        return Err(CompensationRepositoryError::LineageDepthExceeded);
+    }
     let mut nodes = Vec::with_capacity(rows.len());
     for row in rows {
         let batch_id = row.get::<Uuid, _>("id");
@@ -414,6 +424,49 @@ pub async fn get_lineage(
         nodes,
         audits,
     })
+}
+
+async fn load_lineage_root(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<(Uuid, i32), CompensationRepositoryError> {
+    let rows = sqlx::query(
+        "with recursive ancestors(id, compensates_batch_id, depth, path, cycle) as (
+            select id, compensates_batch_id, 0, array[id], false
+              from import_batches
+             where workspace_id = $1 and id = $2
+            union all
+            select parent.id, parent.compensates_batch_id, child.depth + 1,
+                   child.path || parent.id, parent.id = any(child.path)
+              from import_batches parent
+              join ancestors child on child.compensates_batch_id = parent.id
+             where parent.workspace_id = $1
+               and child.depth < $3
+               and not child.cycle
+         )
+         select id, compensates_batch_id, depth, cycle
+           from ancestors
+          order by depth",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .bind(MAX_COMPENSATION_LINEAGE_DEPTH)
+    .fetch_all(&mut **tx)
+    .await?;
+    let last = rows.last().ok_or(CompensationRepositoryError::NotFound)?;
+    if rows.iter().any(|row| row.get::<bool, _>("cycle")) {
+        return Err(CompensationRepositoryError::Cycle);
+    }
+    let depth = last.get::<i32, _>("depth");
+    if depth >= MAX_COMPENSATION_LINEAGE_DEPTH
+        && last
+            .get::<Option<Uuid>, _>("compensates_batch_id")
+            .is_some()
+    {
+        return Err(CompensationRepositoryError::LineageDepthExceeded);
+    }
+    Ok((last.get("id"), depth))
 }
 
 async fn load_lineage_jobs(
@@ -659,9 +712,13 @@ mod tests {
             .split("async fn load_lineage_jobs")
             .next()
             .unwrap();
-        assert!(lineage.contains("with recursive ancestors"));
+        assert!(SOURCE.contains("with recursive ancestors"));
         assert!(lineage.contains("with recursive lineage"));
         assert!(lineage.contains("workspace_id = $1"));
+        assert!(SOURCE.contains("MAX_COMPENSATION_LINEAGE_DEPTH"));
+        assert!(SOURCE.contains("parent.depth < $3"));
+        assert!(SOURCE.contains("child.depth < $3"));
+        assert!(SOURCE.contains("LineageDepthExceeded"));
         for forbidden in ["object_key", "mapping_json", "payload", "metadata"] {
             assert!(!lineage.contains(forbidden));
         }

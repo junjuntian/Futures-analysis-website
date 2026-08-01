@@ -830,7 +830,8 @@ pub async fn create_compensation(
         (status = 200, body = ImportLineageResponse),
         (status = 401, body = ImportErrorBody),
         (status = 403, body = ImportErrorBody),
-        (status = 404, body = ImportErrorBody)
+        (status = 404, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody)
     )
 )]
 pub async fn lineage(
@@ -2251,6 +2252,9 @@ fn map_compensation_error(error: CompensationRepositoryError, request_id: Uuid) 
         }
         CompensationRepositoryError::Cycle => {
             ImportApiError::conflict("compensation_cycle", request_id)
+        }
+        CompensationRepositoryError::LineageDepthExceeded => {
+            ImportApiError::conflict("compensation_lineage_too_deep", request_id)
         }
         CompensationRepositoryError::IdempotencyKeyReused => {
             ImportApiError::conflict("idempotency_key_reused", request_id)
