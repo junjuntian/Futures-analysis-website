@@ -12,7 +12,9 @@ use axum::{
     },
 };
 use common::ApiResponse;
-use database::compensations::{CompensationRepositoryError, NewCompensationUpload};
+use database::compensations::{
+    CompensationRepositoryError, CompensationUploadPreparation, NewCompensationUpload,
+};
 use database::imports::{
     ImportRepositoryError, ImportUploadRecord, InspectionUpdate, NewImportUpload,
     PreviewInputSnapshot, PreviewSave, QueueRollbackResult, RollbackPrecheck,
@@ -623,7 +625,8 @@ pub async fn create_compensation(
             .filter(|value| (16..=200).contains(&value.len()))
             .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))?;
         let mut reason: Option<String> = None;
-        let mut pending_upload: Option<(Box<dyn ObjectUpload>, ValidatedUpload, String)> = None;
+        let mut pending_upload: Option<(Box<dyn ObjectUpload>, ValidatedUpload, String, String)> =
+            None;
         while let Some(mut field) = multipart
             .next_field()
             .await
@@ -672,6 +675,7 @@ pub async fn create_compensation(
                         .begin_upload(context.workspace_id())
                         .await
                         .map_err(|error| map_storage_error(error, request_id))?;
+                    let mut staged_hasher = Sha256::new();
                     while let Some(chunk) = field.chunk().await.map_err(|_| {
                         ImportApiError::bad_request("upload_interrupted", request_id)
                     })? {
@@ -682,11 +686,17 @@ pub async fn create_compensation(
                             .write_chunk(&chunk)
                             .await
                             .map_err(|error| map_storage_error(error, request_id))?;
+                        staged_hasher.update(&chunk);
                     }
                     let validated = validator
                         .finish()
                         .map_err(|error| map_validation_error(error, request_id))?;
-                    pending_upload = Some((object_upload, validated, filename));
+                    pending_upload = Some((
+                        object_upload,
+                        validated,
+                        filename,
+                        format!("{:x}", staged_hasher.finalize()),
+                    ));
                 }
                 _ => {
                     return Err(ImportApiError::bad_request(
@@ -699,28 +709,21 @@ pub async fn create_compensation(
         let reason = reason.ok_or_else(|| {
             ImportApiError::bad_request("compensation_reason_required", request_id)
         })?;
-        let (object_upload, validated, filename) = pending_upload
+        let (object_upload, validated, filename, staged_sha256) = pending_upload
             .ok_or_else(|| ImportApiError::bad_request("single_file_required", request_id))?;
-        let stored = object_upload
-            .commit()
-            .await
-            .map_err(|error| map_storage_error(error, request_id))?;
-        // A committed object is never physically deleted by the import path. If registration
-        // fails or this upload replays an existing request, object governance will detect and
-        // quarantine the unreferenced object.
-        if stored.size_bytes != validated.size_bytes {
-            return Err(ImportApiError::internal(request_id));
-        }
-        let size_bytes = match i64::try_from(stored.size_bytes) {
+        let size_bytes = match i64::try_from(validated.size_bytes) {
             Ok(size_bytes) => size_bytes,
-            Err(_) => return Err(ImportApiError::too_large(request_id)),
+            Err(_) => {
+                let _ = object_upload.abort().await;
+                return Err(ImportApiError::too_large(request_id));
+            }
         };
         let idempotency_key_hash = digest(&[&state.idempotency_pepper, raw_key]);
         let request_hash = digest(&[
             &context.workspace_id().to_string(),
             &original_import_id.to_string(),
             &reason,
-            &stored.sha256,
+            &staged_sha256,
             &filename,
             &validated.declared_mime_type,
             &context.user_id().to_string(),
@@ -733,8 +736,8 @@ pub async fn create_compensation(
             actor_user_id: context.user_id(),
             original_import_id,
             reason,
-            object_key: stored.object_key.clone(),
-            sha256: stored.sha256,
+            object_key: object_upload.object_key().to_string(),
+            sha256: staged_sha256,
             size_bytes,
             original_filename: filename,
             declared_mime_type: validated.declared_mime_type,
@@ -743,10 +746,40 @@ pub async fn create_compensation(
             request_hash: request_hash.clone(),
             audit_request_id: request_id,
         };
-        let response =
-            match database::compensations::create_compensation_upload(&state.auth.pool, &upload)
+        let preparation =
+            match database::compensations::prepare_compensation_upload(&state.auth.pool, &upload)
                 .await
             {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    let _ = object_upload.abort().await;
+                    return Err(map_compensation_error(error, request_id));
+                }
+            };
+        let prepared = match preparation {
+            CompensationUploadPreparation::Replay(response) => {
+                let _ = object_upload.abort().await;
+                return Ok(
+                    (StatusCode::OK, Json(ApiResponse::new(response, request_id))).into_response(),
+                );
+            }
+            CompensationUploadPreparation::Ready(prepared) => prepared,
+        };
+        let stored = object_upload
+            .commit()
+            .await
+            .map_err(|error| map_storage_error(error, request_id))?;
+        // The database visibility, status and idempotency decision is complete while this
+        // object is still temporary. A committed object is never physically deleted by the
+        // import path; failures after this boundary remain visible to object governance.
+        if stored.object_key != upload.object_key
+            || stored.sha256 != upload.sha256
+            || stored.size_bytes != validated.size_bytes
+        {
+            return Err(ImportApiError::internal(request_id));
+        }
+        let response =
+            match database::compensations::create_compensation_upload(prepared, &upload).await {
                 Ok(response) => response,
                 Err(error) => {
                     match database::compensations::recover_compensation(
@@ -2445,6 +2478,24 @@ mod phase_3d_compensation_contract {
             .expect("compensation handler end");
         assert!(compensation.contains(".commit()"));
         assert!(!compensation.contains(".delete(&stored.object_key)"));
+    }
+
+    #[test]
+    fn compensation_decides_visibility_and_idempotency_before_commit() {
+        let compensation = SOURCE
+            .split("pub async fn create_compensation")
+            .nth(1)
+            .expect("compensation handler")
+            .split("pub async fn lineage")
+            .next()
+            .expect("compensation handler end");
+        let prepare = compensation
+            .find("prepare_compensation_upload")
+            .expect("database preparation");
+        let commit = compensation.find(".commit()").expect("object commit");
+        assert!(prepare < commit);
+        assert!(compensation.contains("CompensationUploadPreparation::Replay"));
+        assert!(compensation.matches("object_upload.abort().await").count() >= 3);
     }
 
     #[test]

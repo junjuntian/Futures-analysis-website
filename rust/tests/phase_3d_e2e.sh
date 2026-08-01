@@ -721,6 +721,41 @@ CSV
 COMP_KEY="phase3d-compensation-$RUN_MARK"
 assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "phase3d corrective batch $RUN_MARK" "$COMP_KEY" "$WORK/compensation-upload.json")" 201 "compensation upload"
 COMP_ID=$(jq -r '.data.compensation_import_id' "$WORK/compensation-upload.json")
+COMP_OBJECT_SNAPSHOT="$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")"
+
+# Every idempotent replay and business rejection is decided while the new file
+# is still a temporary upload. Neither registered nor physical object counts may
+# grow, including when several same-key requests wait on the advisory lock.
+assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "phase3d corrective batch $RUN_MARK" "$COMP_KEY" "$WORK/compensation-replay.json")" 200 "compensation same-parameter replay"
+assert_json "$WORK/compensation-replay.json" ".data.replayed == true and .data.compensation_import_id == \"$COMP_ID\"" "compensation replay result"
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$COMP_OBJECT_SNAPSHOT" "compensation replay object counts"
+
+assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "different compensation reason" "$COMP_KEY" "$WORK/compensation-key-reused.json")" 409 "compensation same key different parameters"
+assert_json "$WORK/compensation-key-reused.json" '.data.code == "idempotency_key_reused"' "compensation idempotency mismatch code"
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$COMP_OBJECT_SNAPSHOT" "compensation key mismatch object counts"
+
+INVISIBLE_COMP_KEY="phase3d-compensation-$RUN_MARK-invisible"
+assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$(new_uuid)" "$WORK/compensation.csv" "invisible original" "$INVISIBLE_COMP_KEY" "$WORK/compensation-invisible.json")" 404 "compensation invisible original"
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$COMP_OBJECT_SNAPSHOT" "compensation invisible object counts"
+
+assert_eq "$(upload_file "$TOKEN1" "$CSRF1" "$WORK/compensation.csv" text/csv "$WORK/compensation-not-allowed-upload.json")" 201 "compensation not-allowed fixture upload"
+NOT_ALLOWED_ID=$(jq -r '.data.id' "$WORK/compensation-not-allowed-upload.json")
+NOT_ALLOWED_SNAPSHOT="$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")"
+NOT_ALLOWED_COMP_KEY="phase3d-compensation-$RUN_MARK-not-allowed"
+assert_eq "$(compensation_upload "$TOKEN1" "$CSRF1" "$NOT_ALLOWED_ID" "$WORK/compensation.csv" "not allowed original" "$NOT_ALLOWED_COMP_KEY" "$WORK/compensation-not-allowed.json")" 409 "compensation not-allowed original status"
+assert_json "$WORK/compensation-not-allowed.json" '.data.code == "compensation_not_allowed"' "compensation not-allowed code"
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$NOT_ALLOWED_SNAPSHOT" "compensation not-allowed object counts"
+
+for i in $(seq 1 8); do
+  (compensation_upload "$TOKEN1" "$CSRF1" "$ORIGINAL_ID" "$WORK/compensation.csv" "phase3d corrective batch $RUN_MARK" "$COMP_KEY" "$WORK/compensation-concurrent-$i.json" >"$WORK/compensation-concurrent-$i.status") &
+done
+wait
+for i in $(seq 1 8); do
+  assert_eq "$(cat "$WORK/compensation-concurrent-$i.status")" 200 "concurrent compensation replay"
+  assert_json "$WORK/compensation-concurrent-$i.json" ".data.replayed == true and .data.compensation_import_id == \"$COMP_ID\"" "concurrent compensation result"
+done
+assert_eq "$(psqlq "select count(*) from stored_objects where workspace_id='$WS1'"):$(object_file_count "$WS1")" "$NOT_ALLOWED_SNAPSHOT" "concurrent compensation object counts"
+
 assert_eq "$(api_json "$TOKEN1" "$CSRF1" POST "/api/v1/imports/$COMP_ID/inspect" '{}' "$WORK/compensation-inspect.json")" 200 "compensation inspect"
 assert_eq "$(api_json "$TOKEN1" "$CSRF1" PUT "/api/v1/imports/$COMP_ID/mapping" "$DEFAULT_MAPPING" "$WORK/compensation-mapping.json")" 200 "compensation mapping"
 assert_eq "$(api_json "$TOKEN1" "$CSRF1" POST "/api/v1/imports/$COMP_ID/preview" '{}' "$WORK/compensation-preview.json")" 200 "compensation preview"
@@ -836,7 +871,8 @@ assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' an
 assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$WS1' and event_type in ('rollback_queued','rollback_running','rolled_back')")" 3 "rollback event chain"
 "${COMPOSE_CMD[@]}" logs --no-color --since 30m api worker nginx >"$WORK/service.log"
 for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
-  "$ROLLBACK_KEY" "$COMP_KEY" "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
+  "$ROLLBACK_KEY" "$COMP_KEY" "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" \
+  "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2
     exit 1

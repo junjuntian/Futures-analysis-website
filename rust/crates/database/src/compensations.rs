@@ -48,10 +48,20 @@ pub enum CompensationRepositoryError {
     Database(#[from] sqlx::Error),
 }
 
-pub async fn create_compensation_upload(
-    pool: &PgPool,
+pub enum CompensationUploadPreparation<'a> {
+    Ready(PreparedCompensationUpload<'a>),
+    Replay(ImportCompensationResponse),
+}
+
+pub struct PreparedCompensationUpload<'a> {
+    tx: Transaction<'a, Postgres>,
+    dataset_type: String,
+}
+
+pub async fn prepare_compensation_upload<'a>(
+    pool: &'a PgPool,
     upload: &NewCompensationUpload,
-) -> Result<ImportCompensationResponse, CompensationRepositoryError> {
+) -> Result<CompensationUploadPreparation<'a>, CompensationRepositoryError> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, upload.workspace_id).await?;
     sqlx::query(COMPENSATION_IDEMPOTENCY_LOCK_SQL)
@@ -82,10 +92,12 @@ pub async fn create_compensation_upload(
         )
         .await?;
         tx.commit().await?;
-        return Ok(ImportCompensationResponse {
-            replayed: true,
-            ..existing.response
-        });
+        return Ok(CompensationUploadPreparation::Replay(
+            ImportCompensationResponse {
+                replayed: true,
+                ..existing.response
+            },
+        ));
     }
 
     let original = sqlx::query(
@@ -106,6 +118,23 @@ pub async fn create_compensation_upload(
     ) {
         return Err(CompensationRepositoryError::NotAllowed);
     }
+
+    Ok(CompensationUploadPreparation::Ready(
+        PreparedCompensationUpload {
+            tx,
+            dataset_type: original.get("dataset_type"),
+        },
+    ))
+}
+
+pub async fn create_compensation_upload(
+    prepared: PreparedCompensationUpload<'_>,
+    upload: &NewCompensationUpload,
+) -> Result<ImportCompensationResponse, CompensationRepositoryError> {
+    let PreparedCompensationUpload {
+        mut tx,
+        dataset_type,
+    } = prepared;
 
     sqlx::query(
         "insert into stored_objects
@@ -129,7 +158,7 @@ pub async fn create_compensation_upload(
     )
     .bind(upload.compensation_import_id)
     .bind(upload.workspace_id)
-    .bind(original.get::<String, _>("dataset_type"))
+    .bind(&dataset_type)
     .bind(upload.actor_user_id)
     .bind(upload.original_import_id)
     .execute(&mut *tx)
@@ -573,7 +602,7 @@ mod tests {
         assert!(create.contains("insert into import_batches"));
         assert!(create.contains("insert into import_files"));
         assert!(create.contains("compensates_batch_id"));
-        assert_eq!(create.matches("tx.commit().await?").count(), 2);
+        assert_eq!(create.matches("tx.commit().await?").count(), 1);
     }
 
     #[test]
@@ -585,6 +614,18 @@ mod tests {
 
     #[test]
     fn compensation_and_rollback_serialize_on_the_original_batch() {
+        let prepare = SOURCE
+            .split("pub async fn prepare_compensation_upload")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn create_compensation_upload")
+            .next()
+            .unwrap();
+        let original_lock = prepare.find("from import_batches").unwrap();
+        let for_update = prepare[original_lock..]
+            .find("for update")
+            .map(|offset| original_lock + offset)
+            .unwrap();
         let create = SOURCE
             .split("pub async fn create_compensation_upload")
             .nth(1)
@@ -592,14 +633,10 @@ mod tests {
             .split("pub async fn recover_compensation")
             .next()
             .unwrap();
-        let original_lock = create.find("from import_batches").unwrap();
-        let for_update = create[original_lock..]
-            .find("for update")
-            .map(|offset| original_lock + offset)
-            .unwrap();
         let compensation_insert = create.find("insert into import_compensations").unwrap();
-        assert!(for_update < compensation_insert);
-        assert!(create.contains("\"rolled_back\""));
+        assert!(for_update > original_lock);
+        assert!(compensation_insert > 0);
+        assert!(prepare.contains("\"rolled_back\""));
 
         let rollback_source = include_str!("imports.rs");
         let evaluation = rollback_source
