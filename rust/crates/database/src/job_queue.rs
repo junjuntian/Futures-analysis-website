@@ -62,6 +62,8 @@ pub enum JobQueueError {
     InvalidFrozenImport,
     #[error("abort policy encountered a conflict")]
     AbortConflict,
+    #[error("an automatic source changed an existing immutable revision")]
+    SourceRevisionConflict,
     #[error("event stream is not visible")]
     EventNotVisible,
     #[error("event cursor is invalid")]
@@ -86,6 +88,7 @@ impl JobQueueError {
             Self::UnsupportedJobType => "unsupported_job_type",
             Self::InvalidFrozenImport => "invalid_frozen_import",
             Self::AbortConflict => "abort_conflict",
+            Self::SourceRevisionConflict => "source_revision_conflict",
             Self::EventNotVisible => "event_not_visible",
             Self::EventIdInvalid => "event_id_invalid",
         }
@@ -231,6 +234,14 @@ pub async fn claim_next_import_job(
                  updated_at = now()
              where workspace_id = $1 and id = $2
                and status in ('confirmed', 'importing')",
+        )
+        .bind(workspace_id)
+        .bind(aggregate_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "update extraction_jobs set status = 'running'
+              where workspace_id = $1 and import_batch_id = $2 and status = 'queued'",
         )
         .bind(workspace_id)
         .bind(aggregate_id)
@@ -400,6 +411,9 @@ pub async fn execute_import_job(
 ) -> Result<(), JobQueueError> {
     if job.job_type != "import_confirm" {
         return Err(JobQueueError::UnsupportedJobType);
+    }
+    if is_automatic_import(pool, job).await? {
+        return execute_automatic_import_job(pool, job, worker_id).await;
     }
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, job.workspace_id).await?;
@@ -894,6 +908,659 @@ pub async fn execute_import_job(
     Ok(())
 }
 
+async fn is_automatic_import(pool: &PgPool, job: &ClaimedJob) -> Result<bool, JobQueueError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, job.workspace_id).await?;
+    let automatic = sqlx::query_scalar::<_, bool>(
+        "select ingestion_mode = 'automatic'
+           from import_batches where workspace_id = $1 and id = $2",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    tx.commit().await?;
+    Ok(automatic)
+}
+
+async fn execute_automatic_import_job(
+    pool: &PgPool,
+    job: &ClaimedJob,
+    worker_id: &str,
+) -> Result<(), JobQueueError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, job.workspace_id).await?;
+    let lease = sqlx::query(
+        "select status, leased_by, lease_expires_at, lease_generation
+           from job_queue where workspace_id = $1 and id = $2",
+    )
+    .bind(job.workspace_id)
+    .bind(job.id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(JobQueueError::LeaseLost)?;
+    if !lease_allows_execution(
+        lease.get("status"),
+        lease.get::<Option<String>, _>("leased_by").as_deref(),
+        lease.get("lease_expires_at"),
+        lease.get("lease_generation"),
+        job.lease_generation,
+        worker_id,
+        OffsetDateTime::now_utc(),
+    ) {
+        return Err(JobQueueError::LeaseLost);
+    }
+    let batch = sqlx::query(
+        "select status::text as status, ingestion_mode, dataset_type, conflict_policy,
+                validation_version, validated_mapping_id, validated_staging_version,
+                staging_version, confirmed_by, rollback_capability, change_log_version,
+                data_source_id, collection_date,
+                (select file.id from import_files file
+                  where file.workspace_id = import_batches.workspace_id
+                    and file.import_batch_id = import_batches.id) as source_file_id
+           from import_batches where workspace_id = $1 and id = $2",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let dataset_type: String = batch.get("dataset_type");
+    let validation_version: Option<i32> = batch.get("validation_version");
+    let mapping_id: Option<Uuid> = batch.get("validated_mapping_id");
+    let staging_version: i64 = batch.get("staging_version");
+    let actor_user_id = confirmed_actor(batch.get("confirmed_by"))?;
+    let source_id = batch
+        .get::<Option<Uuid>, _>("data_source_id")
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let source_file_id = batch
+        .get::<Option<Uuid>, _>("source_file_id")
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    if batch.get::<String, _>("status") != "importing"
+        || batch.get::<String, _>("ingestion_mode") != "automatic"
+        || !matches!(
+            dataset_type.as_str(),
+            "futures_catalog_v1"
+                | "trading_calendar_v1"
+                | "daily_market_prices_v1"
+                | "seat_positions_v1"
+        )
+        || batch.get::<Option<String>, _>("conflict_policy").as_deref() != Some("skip")
+        || validation_version.is_none()
+        || mapping_id.is_none()
+        || batch.get::<Option<i64>, _>("validated_staging_version") != Some(staging_version)
+        || batch.get::<String, _>("rollback_capability") != "compensation_only"
+        || batch.get::<Option<i32>, _>("change_log_version").is_some()
+    {
+        return Err(JobQueueError::InvalidFrozenImport);
+    }
+    let collection_date: time::Date = batch
+        .get::<Option<time::Date>, _>("collection_date")
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let rows = sqlx::query(
+        "select id, row_number, business_key, record_data, is_file_duplicate
+           from import_staging_rows
+          where workspace_id = $1 and import_batch_id = $2
+            and validation_version = $3 and business_key is not null and record_data is not null
+          order by business_key, row_number, id",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(validation_version)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut counters = ImportCounters {
+        total: rows.len() as i64,
+        ..Default::default()
+    };
+    let mut change_sequence = ChangeSequence::default();
+    for row in rows {
+        counters.processed += 1;
+        if row.get::<bool, _>("is_file_duplicate") {
+            counters.skipped += 1;
+            continue;
+        }
+        let row_number: i32 = row.get("row_number");
+        let staging_row_id: Uuid = row.get("id");
+        let business_key: String = row.get("business_key");
+        let record_data: Value = row.get("record_data");
+        if let Some(row_date) = record_string(&record_data, "trade_date")
+            && row_date != collection_date.to_string()
+        {
+            return Err(JobQueueError::InvalidFrozenImport);
+        }
+        if matches!(
+            dataset_type.as_str(),
+            "daily_market_prices_v1" | "seat_positions_v1"
+        ) && resolve_contract(&mut tx, job.workspace_id, &record_data)
+            .await?
+            .is_none()
+        {
+            insert_unknown_contract(
+                &mut tx,
+                job,
+                staging_row_id,
+                row_number,
+                staging_version,
+                validation_version.expect("checked"),
+                actor_user_id,
+            )
+            .await?;
+            counters.skipped += 1;
+            continue;
+        }
+        let existing = sqlx::query(
+            "select id, record_data from imported_records
+              where workspace_id = $1 and dataset_type = $2 and business_key = $3
+              for update",
+        )
+        .bind(job.workspace_id)
+        .bind(&dataset_type)
+        .bind(&business_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            if existing.get::<Value, _>("record_data") != record_data {
+                return Err(JobQueueError::SourceRevisionConflict);
+            }
+            counters.skipped += 1;
+            continue;
+        }
+        let record_id = Uuid::now_v7();
+        let inserted = sqlx::query(
+            "insert into imported_records
+                (id, workspace_id, dataset_type, business_key, record_data,
+                 source_import_batch_id, source_row_number, row_version, created_by)
+             values ($1, $2, $3, $4, $5, $6, $7, 1, $8)
+             on conflict (workspace_id, dataset_type, business_key) do nothing
+             returning id, record_data, source_import_batch_id, source_row_number, row_version",
+        )
+        .bind(record_id)
+        .bind(job.workspace_id)
+        .bind(&dataset_type)
+        .bind(&business_key)
+        .bind(&record_data)
+        .bind(job.aggregate_id)
+        .bind(row_number)
+        .bind(actor_user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(inserted) = inserted else {
+            return Err(JobQueueError::SourceRevisionConflict);
+        };
+        match dataset_type.as_str() {
+            "futures_catalog_v1" => {
+                insert_catalog_projection(&mut tx, job.workspace_id, record_id, &record_data)
+                    .await?;
+            }
+            "trading_calendar_v1" => {
+                insert_calendar_projection(
+                    &mut tx,
+                    job,
+                    actor_user_id,
+                    source_id,
+                    record_id,
+                    row_number,
+                    &record_data,
+                )
+                .await?;
+            }
+            "daily_market_prices_v1" => {
+                insert_market_projection(
+                    &mut tx,
+                    job,
+                    source_id,
+                    record_id,
+                    row_number,
+                    &record_data,
+                )
+                .await?;
+            }
+            "seat_positions_v1" => {
+                insert_seat_projection(
+                    &mut tx,
+                    job,
+                    source_id,
+                    record_id,
+                    row_number,
+                    &record_data,
+                )
+                .await?;
+            }
+            _ => return Err(JobQueueError::InvalidFrozenImport),
+        }
+        append_row_change(
+            &mut tx,
+            job,
+            change_sequence.next(),
+            record_id,
+            "insert",
+            None,
+            imported_record_snapshot(&inserted),
+            1,
+            source_file_id,
+            row_number,
+        )
+        .await?;
+        counters.inserted += 1;
+    }
+
+    let final_lease = sqlx::query(
+        "select status, leased_by, lease_expires_at, lease_generation
+           from job_queue where workspace_id = $1 and id = $2 for update",
+    )
+    .bind(job.workspace_id)
+    .bind(job.id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(JobQueueError::LeaseLost)?;
+    if !lease_allows_execution(
+        final_lease.get("status"),
+        final_lease.get::<Option<String>, _>("leased_by").as_deref(),
+        final_lease.get("lease_expires_at"),
+        final_lease.get("lease_generation"),
+        job.lease_generation,
+        worker_id,
+        OffsetDateTime::now_utc(),
+    ) {
+        return Err(JobQueueError::LeaseLost);
+    }
+    let batch_updated = sqlx::query(
+        "update import_batches
+            set status = 'succeeded', processed_count = $1, imported_count = $2,
+                skipped_count = $3, overwritten_count = 0, conflict_result_count = 0,
+                rollback_capability = 'direct', change_log_version = 1,
+                committed_at = now(), updated_at = now()
+          where workspace_id = $4 and id = $5 and status = 'importing'
+            and ingestion_mode = 'automatic' and dataset_type = $6
+            and validated_mapping_id = $7 and validated_staging_version = $8",
+    )
+    .bind(counters.processed)
+    .bind(counters.inserted)
+    .bind(counters.skipped)
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(&dataset_type)
+    .bind(mapping_id)
+    .bind(staging_version)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    require_single_fenced_update(batch_updated)?;
+    let job_updated = sqlx::query(
+        "update job_queue
+            set status = 'succeeded', leased_by = null, lease_expires_at = null,
+                last_error_code = null, finished_at = now(), updated_at = now()
+          where workspace_id = $1 and id = $2 and status = 'running' and leased_by = $3
+            and lease_generation = $4",
+    )
+    .bind(job.workspace_id)
+    .bind(job.id)
+    .bind(worker_id)
+    .bind(job.lease_generation)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if job_updated != 1 {
+        return Err(JobQueueError::LeaseLost);
+    }
+    sqlx::query(
+        "update extraction_jobs
+            set status = 'succeeded', completed_at = now(), stable_error_code = null
+          where workspace_id = $1 and import_batch_id = $2 and status in ('queued', 'running')",
+    )
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .execute(&mut *tx)
+    .await?;
+    append_event(
+        &mut tx,
+        job.workspace_id,
+        job.aggregate_id,
+        job.id,
+        "succeeded",
+        "succeeded",
+        counters,
+        None,
+    )
+    .await?;
+    insert_audit(
+        &mut tx,
+        job,
+        actor_user_id,
+        "import.worker_succeeded",
+        "success",
+        counters,
+        None,
+        Some("skip"),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+fn record_string(record: &Value, field: &str) -> Option<String> {
+    record
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn required_string(record: &Value, field: &str) -> Result<String, JobQueueError> {
+    record_string(record, field).ok_or(JobQueueError::InvalidFrozenImport)
+}
+
+async fn resolve_exchange(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    record: &Value,
+) -> Result<Option<Uuid>, JobQueueError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "select id from exchanges where workspace_id = $1 and code = $2",
+    )
+    .bind(workspace_id)
+    .bind(required_string(record, "exchange_code")?.to_ascii_uppercase())
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn resolve_contract(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    record: &Value,
+) -> Result<Option<Uuid>, JobQueueError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "select contract.id
+           from contracts contract
+           join instruments instrument on instrument.workspace_id = contract.workspace_id
+                                      and instrument.id = contract.instrument_id
+           join exchanges exchange on exchange.workspace_id = instrument.workspace_id
+                                  and exchange.id = instrument.exchange_id
+          where contract.workspace_id = $1 and contract.code = $2 and exchange.code = $3",
+    )
+    .bind(workspace_id)
+    .bind(required_string(record, "contract_code")?.to_ascii_uppercase())
+    .bind(required_string(record, "exchange_code")?.to_ascii_uppercase())
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn insert_catalog_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    record_id: Uuid,
+    record: &Value,
+) -> Result<(), JobQueueError> {
+    let exchange_code = required_string(record, "exchange_code")?.to_ascii_uppercase();
+    let exchange_id = sqlx::query_scalar::<_, Uuid>(
+        "insert into exchanges (id, workspace_id, code, name, timezone, source_record_id)
+         values ($1, $2, $3, $4, $5, $6)
+         on conflict (workspace_id, code) do nothing returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(&exchange_code)
+    .bind(required_string(record, "exchange_name")?)
+    .bind(required_string(record, "timezone")?)
+    .bind(record_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .or(resolve_exchange(tx, workspace_id, record).await?)
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let instrument_code = required_string(record, "instrument_code")?.to_ascii_uppercase();
+    let instrument_id = sqlx::query_scalar::<_, Uuid>(
+        "insert into instruments
+            (id, workspace_id, exchange_id, code, name, currency_code,
+             contract_multiplier, price_tick, source_record_id)
+         values ($1, $2, $3, $4, $5, $6,
+                 nullif($7, '')::numeric, nullif($8, '')::numeric, $9)
+         on conflict (workspace_id, exchange_id, code) do nothing returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(exchange_id)
+    .bind(&instrument_code)
+    .bind(required_string(record, "instrument_name")?)
+    .bind(required_string(record, "currency_code")?.to_ascii_uppercase())
+    .bind(record_string(record, "contract_multiplier").unwrap_or_default())
+    .bind(record_string(record, "price_tick").unwrap_or_default())
+    .bind(record_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .or(sqlx::query_scalar::<_, Uuid>(
+        "select id from instruments
+              where workspace_id = $1 and exchange_id = $2 and code = $3",
+    )
+    .bind(workspace_id)
+    .bind(exchange_id)
+    .bind(&instrument_code)
+    .fetch_optional(&mut **tx)
+    .await?)
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    sqlx::query(
+        "insert into contracts
+            (id, workspace_id, instrument_id, code, delivery_month, listed_at,
+             expires_at, source_record_id)
+         values ($1, $2, $3, $4, nullif($5, ''), nullif($6, '')::date,
+                 nullif($7, '')::date, $8)
+         on conflict (workspace_id, instrument_id, code) do nothing",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(instrument_id)
+    .bind(required_string(record, "contract_code")?.to_ascii_uppercase())
+    .bind(record_string(record, "delivery_month").unwrap_or_default())
+    .bind(record_string(record, "listed_at").unwrap_or_default())
+    .bind(record_string(record, "expires_at").unwrap_or_default())
+    .bind(record_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_calendar_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    actor_user_id: Uuid,
+    source_id: Uuid,
+    record_id: Uuid,
+    row_number: i32,
+    record: &Value,
+) -> Result<(), JobQueueError> {
+    let exchange_id = resolve_exchange(tx, job.workspace_id, record)
+        .await?
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let version_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into trading_calendar_versions
+            (id, workspace_id, exchange_id, version, source_id, effective_from,
+             created_by, source_record_id)
+         values ($1, $2, $3, $4, $5, $6::date, $7, $8)",
+    )
+    .bind(version_id)
+    .bind(job.workspace_id)
+    .bind(exchange_id)
+    .bind(required_string(record, "calendar_version")?)
+    .bind(source_id)
+    .bind(required_string(record, "effective_from")?)
+    .bind(actor_user_id)
+    .bind(record_id)
+    .execute(&mut **tx)
+    .await?;
+    let day_json: Value = serde_json::from_str(&required_string(record, "day_session_json")?)
+        .map_err(|_| JobQueueError::InvalidFrozenImport)?;
+    let night_json: Value = serde_json::from_str(&required_string(record, "night_session_json")?)
+        .map_err(|_| JobQueueError::InvalidFrozenImport)?;
+    let is_trading_day = required_string(record, "is_trading_day")?
+        .parse::<bool>()
+        .map_err(|_| JobQueueError::InvalidFrozenImport)?;
+    sqlx::query(
+        "insert into trading_calendar_days
+            (workspace_id, calendar_version_id, trade_date, is_trading_day,
+             day_session_json, night_session_json, source_import_batch_id,
+             source_row_number, source_record_id)
+         values ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(job.workspace_id)
+    .bind(version_id)
+    .bind(required_string(record, "trade_date")?)
+    .bind(is_trading_day)
+    .bind(day_json)
+    .bind(night_json)
+    .bind(job.aggregate_id)
+    .bind(row_number)
+    .bind(record_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_market_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    source_id: Uuid,
+    record_id: Uuid,
+    row_number: i32,
+    record: &Value,
+) -> Result<(), JobQueueError> {
+    let contract_id = resolve_contract(tx, job.workspace_id, record)
+        .await?
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let exchange_id = resolve_exchange(tx, job.workspace_id, record)
+        .await?
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let calendar_id = sqlx::query_scalar::<_, Uuid>(
+        "select id from trading_calendar_versions
+          where workspace_id = $1 and exchange_id = $2 and version = $3 and source_id = $4",
+    )
+    .bind(job.workspace_id)
+    .bind(exchange_id)
+    .bind(required_string(record, "calendar_version")?)
+    .bind(source_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    sqlx::query(
+        "insert into market_prices
+            (workspace_id, source_id, contract_id, trade_date, session_type, observed_at,
+             granularity, close_price, settlement_price, currency_code, calendar_version_id,
+             revision_no, source_import_batch_id, source_row_number, source_record_id)
+         values ($1, $2, $3, $4::date, $5, $6::timestamptz, $7,
+                 nullif($8, '')::numeric, nullif($9, '')::numeric, $10, $11,
+                 $12::integer, $13, $14, $15)",
+    )
+    .bind(job.workspace_id)
+    .bind(source_id)
+    .bind(contract_id)
+    .bind(required_string(record, "trade_date")?)
+    .bind(required_string(record, "session_type")?)
+    .bind(required_string(record, "observed_at")?)
+    .bind(required_string(record, "granularity")?)
+    .bind(record_string(record, "close_price").unwrap_or_default())
+    .bind(record_string(record, "settlement_price").unwrap_or_default())
+    .bind(required_string(record, "currency_code")?.to_ascii_uppercase())
+    .bind(calendar_id)
+    .bind(required_string(record, "revision_no")?)
+    .bind(job.aggregate_id)
+    .bind(row_number)
+    .bind(record_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_seat_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    source_id: Uuid,
+    record_id: Uuid,
+    row_number: i32,
+    record: &Value,
+) -> Result<(), JobQueueError> {
+    let contract_id = resolve_contract(tx, job.workspace_id, record)
+        .await?
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let seat_name = required_string(record, "seat_name")?;
+    let seat_id = sqlx::query_scalar::<_, Uuid>(
+        "insert into seat_entities
+            (id, workspace_id, canonical_name, status, source_record_id)
+         values ($1, $2, $3, 'unreviewed', $4)
+         on conflict (workspace_id, canonical_name) do nothing returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(job.workspace_id)
+    .bind(&seat_name)
+    .bind(record_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .or(sqlx::query_scalar::<_, Uuid>(
+        "select id from seat_entities where workspace_id = $1 and canonical_name = $2",
+    )
+    .bind(job.workspace_id)
+    .bind(&seat_name)
+    .fetch_optional(&mut **tx)
+    .await?)
+    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    sqlx::query(
+        "insert into seat_positions
+            (workspace_id, trade_date, contract_id, seat_id, rank_type, rank,
+             volume, long_position, short_position, source_id, source_import_batch_id,
+             source_row_number, source_record_id)
+         values ($1, $2::date, $3, $4, $5, $6::integer,
+                 nullif($7, '')::bigint, nullif($8, '')::bigint, nullif($9, '')::bigint,
+                 $10, $11, $12, $13)",
+    )
+    .bind(job.workspace_id)
+    .bind(required_string(record, "trade_date")?)
+    .bind(contract_id)
+    .bind(seat_id)
+    .bind(required_string(record, "rank_type")?)
+    .bind(required_string(record, "rank")?)
+    .bind(record_string(record, "volume").unwrap_or_default())
+    .bind(record_string(record, "long_position").unwrap_or_default())
+    .bind(record_string(record, "short_position").unwrap_or_default())
+    .bind(source_id)
+    .bind(job.aggregate_id)
+    .bind(row_number)
+    .bind(record_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_unknown_contract(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    staging_row_id: Uuid,
+    row_number: i32,
+    staging_version: i64,
+    validation_version: i32,
+    actor_user_id: Uuid,
+) -> Result<(), JobQueueError> {
+    sqlx::query(
+        "insert into import_errors
+            (id, workspace_id, import_batch_id, staging_row_id, row_number,
+             field_name, severity, error_code, raw_value, message, created_by,
+             staging_version, validation_version, error_kind)
+         values ($1, $2, $3, $4, $5, 'contract_code', 'error', 'unknown_contract',
+                 null, '合约未在目录中建档，已跳过本行', $6, $7, $8, 'validation')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(staging_row_id)
+    .bind(row_number)
+    .bind(actor_user_id)
+    .bind(staging_version)
+    .bind(validation_version)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn record_job_failure(
     pool: &PgPool,
     job: &ClaimedJob,
@@ -993,6 +1660,17 @@ pub async fn record_job_failure(
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(JobQueueError::InvalidFrozenImport)?;
+            sqlx::query(
+                "update extraction_jobs
+                    set status = 'failed', stable_error_code = $1, completed_at = now()
+                  where workspace_id = $2 and import_batch_id = $3
+                    and status in ('queued', 'running')",
+            )
+            .bind(error.code())
+            .bind(job.workspace_id)
+            .bind(job.aggregate_id)
+            .execute(&mut *tx)
+            .await?;
             append_event(
                 &mut tx,
                 job.workspace_id,
@@ -1561,7 +2239,7 @@ mod tests {
             .split("pub async fn execute_import_job")
             .nth(1)
             .expect("execute function")
-            .split("pub async fn record_job_failure")
+            .split("async fn is_automatic_import")
             .next()
             .expect("execute function end");
         assert_eq!(
@@ -1577,7 +2255,7 @@ mod tests {
             .split("pub async fn execute_import_job")
             .nth(1)
             .expect("execute function")
-            .split("pub async fn record_job_failure")
+            .split("async fn is_automatic_import")
             .next()
             .expect("execute function end");
         assert_eq!(execute_body.matches("tx.commit().await?").count(), 1);

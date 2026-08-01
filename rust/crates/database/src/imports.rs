@@ -10,7 +10,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use std::collections::HashSet;
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 const CONFIRM_BATCH_SQL: &str = "update import_batches
@@ -36,6 +36,22 @@ pub struct NewImportUpload {
     pub declared_mime_type: String,
     pub detected_format: String,
     pub request_id: Uuid,
+    pub automatic: Option<AutomaticImportMetadata>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomaticImportMetadata {
+    pub dataset_type: String,
+    pub data_source_code: String,
+    pub collection_date: Date,
+    pub fixed_template_code: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomaticImportContext {
+    pub dataset_type: String,
+    pub fixed_template_code: String,
+    pub collection_date: Date,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +139,8 @@ pub enum ImportRepositoryError {
     InvalidTransition,
     #[error("invalid import status stored in database")]
     InvalidStoredStatus,
+    #[error("automatic import metadata is invalid")]
+    InvalidAutomaticMetadata,
     #[error("database operation failed")]
     Database(#[from] sqlx::Error),
     #[error("invalid template configuration stored in database")]
@@ -271,14 +289,79 @@ pub async fn register_upload(
     .bind(upload.actor_user_id)
     .execute(&mut *tx)
     .await?;
+    let source_id = if let Some(metadata) = &upload.automatic {
+        let (name, domain, allowed_domains) = official_source(&metadata.data_source_code)
+            .ok_or(ImportRepositoryError::InvalidAutomaticMetadata)?;
+        let source_id = sqlx::query_scalar::<_, Uuid>(
+            "insert into data_sources
+                    (id, workspace_id, code, name, source_type, base_domain,
+                     authorization_status, connector_code, priority)
+                 values ($1, $2, $3, $4, 'exchange_public', $5,
+                         'whitelisted', 'akshare_v1', 100)
+                 on conflict (workspace_id, code) do update
+                    set name = excluded.name, base_domain = excluded.base_domain,
+                        updated_at = now()
+                  where data_sources.source_type = 'exchange_public'
+                    and data_sources.authorization_status = 'whitelisted'
+                    and data_sources.connector_code = 'akshare_v1'
+                 returning id",
+        )
+        .bind(Uuid::now_v7())
+        .bind(upload.workspace_id)
+        .bind(&metadata.data_source_code)
+        .bind(name)
+        .bind(domain)
+        .fetch_one(&mut *tx)
+        .await?;
+        for allowed_domain in allowed_domains {
+            sqlx::query(
+                "insert into data_source_allowed_domains
+                    (id, workspace_id, data_source_id, domain)
+                 values ($1, $2, $3, $4)
+                 on conflict (workspace_id, data_source_id, domain) do nothing",
+            )
+            .bind(Uuid::now_v7())
+            .bind(upload.workspace_id)
+            .bind(source_id)
+            .bind(allowed_domain)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Some(source_id)
+    } else {
+        None
+    };
+    let dataset_type = upload
+        .automatic
+        .as_ref()
+        .map(|metadata| metadata.dataset_type.as_str())
+        .unwrap_or("generic");
     let batch_row = sqlx::query(
-        "insert into import_batches (id, workspace_id, status, dataset_type, created_by)
-         values ($1, $2, 'uploaded', 'generic', $3)
+        "insert into import_batches
+            (id, workspace_id, status, dataset_type, created_by, ingestion_mode,
+             data_source_id, collection_date, fixed_template_code)
+         values ($1, $2, 'uploaded', $3, $4,
+                 case when $5::uuid is null then 'manual' else 'automatic' end,
+                 $5, $6, $7)
          returning created_at, updated_at",
     )
     .bind(upload.import_id)
     .bind(upload.workspace_id)
+    .bind(dataset_type)
     .bind(upload.actor_user_id)
+    .bind(source_id)
+    .bind(
+        upload
+            .automatic
+            .as_ref()
+            .map(|metadata| metadata.collection_date),
+    )
+    .bind(
+        upload
+            .automatic
+            .as_ref()
+            .map(|metadata| metadata.fixed_template_code.as_str()),
+    )
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -299,6 +382,24 @@ pub async fn register_upload(
     .bind(upload.actor_user_id)
     .execute(&mut *tx)
     .await?;
+    if let (Some(metadata), Some(source_id)) = (&upload.automatic, source_id) {
+        sqlx::query(
+            "insert into extraction_jobs
+                (id, workspace_id, data_source_id, import_batch_id, status, dataset_type,
+                 collection_scope_json, output_object_id)
+             values ($1, $2, $3, $4, 'uploaded', $5,
+                     jsonb_build_object('date', $6::date), $7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(upload.workspace_id)
+        .bind(source_id)
+        .bind(upload.import_id)
+        .bind(&metadata.dataset_type)
+        .bind(metadata.collection_date)
+        .bind(upload.object_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "insert into audit_logs
             (id, workspace_id, actor_user_id, event_type, outcome, request_id, metadata)
@@ -344,6 +445,154 @@ pub async fn register_upload(
         overwritten_count: 0,
         conflict_result_count: 0,
     })
+}
+
+fn official_source(code: &str) -> Option<(&'static str, &'static str, &'static [&'static str])> {
+    match code {
+        "akshare_dce_official" => Some((
+            "大连商品交易所",
+            "www.dce.com.cn",
+            &["www.dce.com.cn", "portal.dce.com.cn"],
+        )),
+        "akshare_shfe_official" => Some((
+            "上海期货交易所",
+            "www.shfe.com.cn",
+            &["www.shfe.com.cn", "tsite.shfe.com.cn"],
+        )),
+        "akshare_czce_official" => {
+            Some(("郑州商品交易所", "www.czce.com.cn", &["www.czce.com.cn"]))
+        }
+        "akshare_gfex_official" => {
+            Some(("广州期货交易所", "www.gfex.com.cn", &["www.gfex.com.cn"]))
+        }
+        "akshare_cffex_official" => Some((
+            "中国金融期货交易所",
+            "www.cffex.com.cn",
+            &["www.cffex.com.cn"],
+        )),
+        _ => None,
+    }
+}
+
+pub async fn automatic_import_context(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<AutomaticImportContext, ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let row = sqlx::query(
+        "select ingestion_mode, dataset_type, fixed_template_code, collection_date
+           from import_batches
+          where workspace_id = $1 and id = $2",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ImportRepositoryError::NotFound)?;
+    tx.commit().await?;
+    if row.get::<String, _>("ingestion_mode") != "automatic" {
+        return Err(ImportRepositoryError::InvalidAutomaticMetadata);
+    }
+    Ok(AutomaticImportContext {
+        dataset_type: row.get("dataset_type"),
+        fixed_template_code: row
+            .get::<Option<String>, _>("fixed_template_code")
+            .ok_or(ImportRepositoryError::InvalidAutomaticMetadata)?,
+        collection_date: row
+            .get::<Option<Date>, _>("collection_date")
+            .ok_or(ImportRepositoryError::InvalidAutomaticMetadata)?,
+    })
+}
+
+pub async fn import_ingestion_mode(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<String, ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let mode = sqlx::query_scalar::<_, String>(
+        "select ingestion_mode from import_batches where workspace_id = $1 and id = $2",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ImportRepositoryError::NotFound)?;
+    tx.commit().await?;
+    Ok(mode)
+}
+
+pub async fn fail_automatic_import(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor_user_id: Uuid,
+    import_id: Uuid,
+    stable_error_code: &str,
+) -> Result<(), ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let affected = sqlx::query(
+        "update import_batches
+            set status = 'failed', updated_at = now()
+          where workspace_id = $1 and id = $2 and ingestion_mode = 'automatic'
+            and status in ('uploaded', 'inspected', 'mapped', 'preview_ready')",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if affected == 1 {
+        sqlx::query(
+            "update extraction_jobs
+                set status = 'failed', stable_error_code = $1, completed_at = now()
+              where workspace_id = $2 and import_batch_id = $3
+                and status in ('uploaded', 'queued', 'running')",
+        )
+        .bind(stable_error_code)
+        .bind(workspace_id)
+        .bind(import_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "insert into audit_logs
+                (id, workspace_id, actor_user_id, event_type, outcome, request_id, metadata)
+             values ($1, $2, $3, 'import.automatic_failed', 'failure', $4,
+                     jsonb_build_object('import_id', $5::text, 'reason_code', $6::text))",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(actor_user_id)
+        .bind(Uuid::now_v7())
+        .bind(import_id)
+        .bind(stable_error_code)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn mark_automatic_queued(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    import_id: Uuid,
+) -> Result<(), ImportRepositoryError> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    sqlx::query(
+        "update extraction_jobs set status = 'queued'
+          where workspace_id = $1 and import_batch_id = $2 and status = 'uploaded'",
+    )
+    .bind(workspace_id)
+    .bind(import_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn record_upload_denied(

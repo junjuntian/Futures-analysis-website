@@ -198,3 +198,62 @@ mod phase_3d_schema_contract {
         assert!(!FAIRNESS_MIGRATION.contains("disable row level security"));
     }
 }
+
+#[cfg(test)]
+mod phase_4a_schema_contract {
+    const MIGRATION: &str =
+        include_str!("../../../migrations/202608020001_phase_4a_collection_schema.sql");
+
+    #[test]
+    fn all_phase_4a_business_tables_force_workspace_rls() {
+        for table in [
+            "data_sources",
+            "data_source_allowed_domains",
+            "exchanges",
+            "instruments",
+            "contracts",
+            "trading_calendar_versions",
+            "trading_calendar_days",
+            "market_prices",
+            "seat_entities",
+            "seat_positions",
+            "extraction_jobs",
+        ] {
+            assert!(MIGRATION.contains(&format!("alter table {table} enable row level security;")));
+            assert!(MIGRATION.contains(&format!("alter table {table} force row level security;")));
+            assert!(MIGRATION.contains(&format!(
+                "create policy {table}_workspace_isolation on {table}"
+            )));
+        }
+    }
+
+    #[test]
+    fn formal_facts_have_business_keys_and_import_provenance() {
+        for table in ["trading_calendar_days", "market_prices", "seat_positions"] {
+            let section = MIGRATION
+                .split(&format!("create table {table}"))
+                .nth(1)
+                .expect("table")
+                .split("create table")
+                .next()
+                .expect("table end");
+            assert!(section.contains("business_identity unique"));
+            assert!(section.contains("source_import_batch_id"));
+            assert!(section.contains("source_row_number"));
+            assert!(section.contains("source_record_id"));
+        }
+    }
+
+    #[test]
+    fn automatic_metadata_is_fixed_to_four_versioned_datasets() {
+        assert!(MIGRATION.contains("fixed_template_code = dataset_type || '@1'"));
+        for dataset in [
+            "futures_catalog_v1",
+            "trading_calendar_v1",
+            "daily_market_prices_v1",
+            "seat_positions_v1",
+        ] {
+            assert!(MIGRATION.contains(dataset));
+        }
+    }
+}

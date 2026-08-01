@@ -27,6 +27,17 @@ use uuid::Uuid;
 
 pub const CSRF_HEADER: &str = "x-csrf-token";
 
+const COLLECTOR_ACCOUNT_USERNAME: &str = "collector-service";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectorCredentialFile {
+    base_url: String,
+    origin: String,
+    username: String,
+    password: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub cookie_name: String,
@@ -120,6 +131,113 @@ impl AuthConfig {
         .map_err(|_| AuthError::Internal)?;
         Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
     }
+}
+
+pub async fn provision_collector_account(pool: &PgPool, config: &AuthConfig) -> anyhow::Result<()> {
+    let path = env::var("COLLECTOR_CREDENTIALS_FILE")
+        .unwrap_or_else(|_| "/run/secrets/collector-credentials".to_string());
+    let raw = fs::read_to_string(&path)?;
+    let credential: CollectorCredentialFile = serde_json::from_str(&raw)?;
+    if credential.username != COLLECTOR_ACCOUNT_USERNAME
+        || credential.base_url.trim().is_empty()
+        || credential.origin.trim().is_empty()
+    {
+        anyhow::bail!("collector credential metadata is invalid");
+    }
+    validate_password(&credential.password)
+        .map_err(|_| anyhow::anyhow!("collector credential password violates policy"))?;
+
+    let mut tx = pool.begin().await?;
+    let workspaces = sqlx::query_scalar::<_, Uuid>("select id from workspaces order by created_at")
+        .fetch_all(&mut *tx)
+        .await?;
+    let [workspace_id] = workspaces.as_slice() else {
+        anyhow::bail!("collector provisioning requires exactly one workspace");
+    };
+    let existing = sqlx::query(
+        "select id, password_hash, disabled_at from users where username_normalized = $1 for update",
+    )
+    .bind(COLLECTOR_ACCOUNT_USERNAME)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let user_id = if let Some(row) = existing {
+        if row
+            .get::<Option<OffsetDateTime>, _>("disabled_at")
+            .is_some()
+            || !verify_password(config, &credential.password, row.get("password_hash"))
+                .map_err(|_| anyhow::anyhow!("collector account verification failed"))?
+        {
+            anyhow::bail!("existing collector account does not match the credential file");
+        }
+        row.get("id")
+    } else {
+        let user_id = Uuid::now_v7();
+        let password_hash = hash_password(config, &credential.password)
+            .map_err(|_| anyhow::anyhow!("collector password hashing failed"))?;
+        sqlx::query(
+            "insert into users
+                (id, username, username_normalized, password_hash, password_params_version)
+             values ($1, $2, $2, $3, $4)",
+        )
+        .bind(user_id)
+        .bind(COLLECTOR_ACCOUNT_USERNAME)
+        .bind(password_hash)
+        .bind(config.password_params_version)
+        .execute(&mut *tx)
+        .await?;
+        user_id
+    };
+
+    sqlx::query(
+        "insert into workspace_memberships (id, workspace_id, user_id, role)
+         values ($1, $2, $3, 'owner')
+         on conflict (user_id) do nothing",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let membership_workspace = sqlx::query_scalar::<_, Uuid>(
+        "select workspace_id from workspace_memberships where user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if membership_workspace != *workspace_id {
+        anyhow::bail!("collector account belongs to a different workspace");
+    }
+    sqlx::query(
+        "insert into user_roles (user_id, role_name) values ($1, 'analyst')
+         on conflict (user_id, role_name) do nothing",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let roles = sqlx::query_scalar::<_, String>(
+        "select role_name from user_roles where user_id = $1 order by role_name",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if roles != ["analyst"] {
+        anyhow::bail!("collector account must have only the analyst role");
+    }
+    set_workspace(&mut tx, *workspace_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("collector workspace context failed"))?;
+    insert_audit(
+        &mut tx,
+        *workspace_id,
+        Some(user_id),
+        "auth.collector_account_provisioned",
+        "success",
+        Uuid::now_v7(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("collector provisioning audit failed"))?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -317,6 +435,10 @@ impl AuthContext {
 
     pub(crate) fn workspace_id(&self) -> Uuid {
         self.workspace_id
+    }
+
+    pub(crate) fn is_collector_account(&self) -> bool {
+        self.username == COLLECTOR_ACCOUNT_USERNAME && self.roles == ["analyst"]
     }
 
     pub(crate) fn require_permission(&self, permission: Permission) -> Result<(), AuthError> {
@@ -1327,6 +1449,24 @@ mod tests {
                 .iter()
                 .all(|permission| !permission.starts_with("import."))
         );
+    }
+
+    #[test]
+    fn automatic_collection_identity_is_exact_not_role_only() {
+        let mut context = AuthContext {
+            session_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            username: COLLECTOR_ACCOUNT_USERNAME.to_string(),
+            workspace_id: Uuid::now_v7(),
+            workspace_name: "test".to_string(),
+            roles: vec!["analyst".to_string()],
+        };
+        assert!(context.is_collector_account());
+        context.username = "ordinary-analyst".to_string();
+        assert!(!context.is_collector_account());
+        context.username = COLLECTOR_ACCOUNT_USERNAME.to_string();
+        context.roles.push("admin".to_string());
+        assert!(!context.is_collector_account());
     }
 
     #[test]
