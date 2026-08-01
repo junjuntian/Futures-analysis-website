@@ -2,7 +2,7 @@
 
 本项目面向个人或小团队，建设一个本地部署的期货数据研究、套利分析、交易复盘、席位分析和 AI 辅助分析平台。平台只提供数据管理与分析能力，不连接期货账户自动下单。
 
-当前处于 Phase 1：工程基础建设。已创建 Rust API/Worker、Vue 前端、PostgreSQL 迁移基础、Docker Compose、Nginx 和 CI 配置；尚未实现正式业务功能。
+当前已完成 Phase 1 至 Phase 3 并完成版本收口：工程基础、身份与个人 Workspace 安全、TXT/CSV/XLS/XLSX 导入、映射/预览/校验、异步入库、SSE、原子回滚、补偿 lineage 和对象一致性治理均已实现并经独立 Evaluator PASS。Phase 3 已以普通 merge commit `33aa838` 合入 `main`，标签为 `phase-3-pass-20260801`。
 
 ## 已确认技术基线
 
@@ -78,7 +78,7 @@
 - [当前计划](PLANS.md)
 - [原始设计方案](docs/reference/期货与套利数据分析平台_完整设计方案_v1.0.docx)
 
-## Phase 1 本地启动
+## 本地启动与验证
 
 准备环境：
 
@@ -123,4 +123,7 @@ http://localhost:8088
 - 已完成方案内容审阅、Markdown 设计拆分和 `ce-doc-review` 文档审查。
 - 架构与业务口径已确认并写入 `docs/DECISIONS.md`。
 - 尚未确定的实现细节集中在 `docs/OPEN_QUESTIONS.md`。
-- 当前只允许推进 Phase 1 工程基础；不得提前实现行情、导入、套利、成交、席位、网页采集、OCR 或 AI 业务功能。
+- Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS；Phase 3 main CI Run `30703979390` success。
+- 标准 GHCR digest 发布与 VPS 验收链路已经实跑；`futures` VPS 当前保持运行候选版本 `45ee8028647a1b8e4b8cda043e8012b4e281d739`，Phase 3 版本收口没有重新部署。
+- VPS 的 127 个历史测试批次生产库归零重置，以及 TLS / `AUTH_COOKIE_SECURE=true` 生产验证，按用户裁定延后到项目完工时处理。
+- 下一步：总方案重审（采集域裁剪与 akshare 方案）待用户确认后启动。
