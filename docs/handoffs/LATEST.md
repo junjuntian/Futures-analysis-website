@@ -1,11 +1,12 @@
 # 最新交接状态
 
-- 最新交接文档：`docs/handoffs/HANDOFF_20260801_2248.md`
-- 当前阶段：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS；Phase 3 已以普通 merge commit `33aa838c9ef3f39c4e32bb5749982d82d358bf7a` 合入 `main`，标签为 `phase-3-pass-20260801`。
-- 当前分支：`main`；phase 分支最终 HEAD 为 `6ff4c2b`，使命结束，不再回灌状态文档。
-- 收口证据：main CI Run `30703979390` success；标签自动触发的 Container images Run `30704223198` 三镜像发布 success；唯一 merge 冲突为 `.github/workflows/deploy-futures.yml`，已显式采用 phase 版本，没有其他冲突。
-- VPS 状态：2026-08-01 只读核对仍运行 `45ee8028647a1b8e4b8cda043e8012b4e281d739`，五容器 running、API/PostgreSQL healthy、Phase 3D 迁移 2/2、`users=31`、`import_batches=127`、bootstrap-token absent；本单未重新部署或清理数据。
-- 延后事项：MEDIUM-05 的 127 个历史测试批次生产库归零重置，以及 TLS / `AUTH_COOKIE_SECURE=true` 生产验证，均按用户裁定在项目完工时处理。
-- 下一步：总方案重审（采集域裁剪与 akshare 方案）待用户确认后启动。
+- 最新交接文档：`docs/handoffs/HANDOFF_20260801_2327.md`
+- 当前阶段：Phase 1 至 Phase 3 已完成并收口；2026-08-02 总方案重审已确认并完成决策/设计文档同步，Phase 4 尚未开始实现。
+- DEC 变更：废止 `DEC-023`、`DEC-030`、`DEC-034`；修订 `DEC-025`、`DEC-031`；新增 `DEC-038`、`DEC-039`、`DEC-040`。
+- 路线：Phase 4 akshare 采集与全历史回填 → Phase 5 多腿套利与图表 → Phase 6 成交/持仓/绩效 → Phase 7 席位分析 → Phase 8 AI → Phase 9 运维加固与完工事项。
+- Git/CI：`7f2e7e6` 的 main CI Run `30705219493` success；`decbadc` 的 main CI Run `30705776449` success；最后交接提交的 CI 在推送后核验。
+- 资源结论：现有 1GB/25G VPS 支撑全部阶段；五核心容器实测约 310MB；席位全历史预计 5–15GB，磁盘达到 80% 时扩盘、不换机器。
+- VPS/数据库：本单未实时连接、未部署、未清数据、未执行迁移；不得把上一交接的运行态记录冒充本次核验。
+- 下一步：为 Phase 4“akshare 采集与全历史回填”创建 Planner 详细契约，等待用户单独授权实施。
 
-接管者必须阅读完整交接文档 `HANDOFF_20260801_2248.md`，并以 Git、Actions 与运行环境实态为准；不得把待确认的采集域裁剪或 akshare 提案写成已确认 DEC。
+接管者必须阅读完整交接文档 `HANDOFF_20260801_2327.md`，以 Git 和当前运行环境实态为准；不得恢复已废止基础设施，也不得把纯文档同步视为 Phase 4 实施授权。
