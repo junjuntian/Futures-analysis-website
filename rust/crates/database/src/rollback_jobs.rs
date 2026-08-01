@@ -164,7 +164,7 @@ pub async fn execute_rollback_job(
                     return Err(JobQueueError::InvalidFrozenImport);
                 }
             }
-            "update" => {
+            "update" | "soft_delete" => {
                 let before_json = change
                     .get::<Option<Value>, _>("before_json")
                     .ok_or(JobQueueError::InvalidFrozenImport)?;
@@ -602,7 +602,7 @@ mod tests {
     fn rollback_applies_changes_in_reverse_and_versions_restored_updates() {
         assert!(SOURCE.contains("order by sequence_no desc, id desc"));
         assert!(SOURCE.contains("\"insert\" =>"));
-        assert!(SOURCE.contains("\"update\" =>"));
+        assert!(SOURCE.contains("\"update\" | \"soft_delete\" =>"));
         assert!(SOURCE.contains(".checked_add(1)"));
         assert!(SOURCE.contains("insert into import_data_invalidations"));
     }

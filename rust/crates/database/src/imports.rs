@@ -1882,6 +1882,7 @@ pub(crate) async fn evaluate_rollback(
         let target_kind = change.get::<String, _>("target_kind");
         let target_id = change.get::<Uuid, _>("target_id");
         let operation = change.get::<String, _>("operation");
+        let before_json = change.get::<Option<serde_json::Value>, _>("before_json");
         let after_json = change.get::<Option<serde_json::Value>, _>("after_json");
         let expected_row_version = change.get::<i64, _>("target_row_version");
         let source_valid = change.get::<bool, _>("source_valid");
@@ -1895,7 +1896,7 @@ pub(crate) async fn evaluate_rollback(
             "target_kind": target_kind,
             "target_id": target_id,
             "operation": operation,
-            "before_json": change.get::<Option<serde_json::Value>, _>("before_json"),
+            "before_json": before_json,
             "after_json": after_json,
             "target_row_version": expected_row_version,
             "source_file_id": change.get::<Uuid, _>("source_file_id"),
@@ -1940,7 +1941,7 @@ pub(crate) async fn evaluate_rollback(
             );
             continue;
         }
-        if !matches!(operation.as_str(), "insert" | "update") {
+        if !matches!(operation.as_str(), "insert" | "update" | "soft_delete") {
             push_rollback_conflict(
                 &mut conflicts,
                 ImportRollbackConflictType::IllegalChange,
@@ -1950,6 +1951,26 @@ pub(crate) async fn evaluate_rollback(
                 None,
                 None,
                 "unsupported_change_operation",
+            );
+        }
+        let snapshot_valid = match operation.as_str() {
+            "insert" => before_json.is_none() && after_json.as_ref().is_some_and(valid_snapshot),
+            "update" | "soft_delete" => {
+                before_json.as_ref().is_some_and(valid_snapshot)
+                    && after_json.as_ref().is_some_and(valid_snapshot)
+            }
+            _ => false,
+        };
+        if !snapshot_valid {
+            push_rollback_conflict(
+                &mut conflicts,
+                ImportRollbackConflictType::IllegalChange,
+                target_label,
+                Some(target_id),
+                expected_version,
+                None,
+                None,
+                "invalid_change_snapshot",
             );
         }
 
@@ -2111,6 +2132,27 @@ pub(crate) async fn evaluate_rollback(
         conflicts,
         fingerprint_material,
     )
+}
+
+fn valid_snapshot(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.len() == 4
+        && object.contains_key("record_data")
+        && object
+            .get("source_import_batch_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| Uuid::parse_str(value).is_ok())
+        && object
+            .get("source_row_number")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .is_some_and(|value| value > 0)
+        && object
+            .get("row_version")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|value| value > 0)
 }
 
 fn finalize_rollback_evaluation(
@@ -2896,6 +2938,24 @@ async fn set_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rollback_snapshot_validation_accepts_controlled_soft_delete_snapshots() {
+        let snapshot = json!({
+            "record_data": {"value": "before"},
+            "source_import_batch_id": Uuid::now_v7(),
+            "source_row_number": 1,
+            "row_version": 2,
+        });
+        assert!(valid_snapshot(&snapshot));
+        assert!(!valid_snapshot(&json!({
+            "record_data": {},
+            "source_import_batch_id": Uuid::now_v7(),
+            "source_row_number": 1,
+            "row_version": 2,
+            "uncontrolled": true,
+        })));
+    }
 
     const IMPORTS_SOURCE: &str = include_str!("imports.rs");
 

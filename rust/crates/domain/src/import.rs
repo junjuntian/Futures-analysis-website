@@ -1321,6 +1321,16 @@ mod tests {
     }
 
     #[test]
+    fn soft_delete_is_a_first_class_change_operation() {
+        assert_eq!(
+            ImportChangeOperation::parse("soft_delete"),
+            Some(ImportChangeOperation::SoftDelete)
+        );
+        assert_eq!(ImportChangeOperation::SoftDelete.as_str(), "soft_delete");
+        assert_eq!(ImportChangeOperation::ALL.len(), 3);
+    }
+
+    #[test]
     fn only_async_rollback_states_require_a_job() {
         assert!(!ImportRollbackRequestStatus::Prechecked.requires_job());
         assert!(!ImportRollbackRequestStatus::PrecheckConflict.requires_job());

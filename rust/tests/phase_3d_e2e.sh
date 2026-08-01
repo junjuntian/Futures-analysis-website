@@ -640,6 +640,62 @@ wait_batch "$TOKEN1" "$DIRECT_ID" succeeded
 assert_eq "$(psqlq "select rollback_capability || ':' || change_log_version::text from import_batches where workspace_id='$WS1' and id='$DIRECT_ID'")" "direct:1" "direct change log capability"
 assert_eq "$(psqlq "select count(*) from import_row_changes where workspace_id='$WS1' and import_batch_id='$DIRECT_ID'")" 2 "direct change log count"
 
+# A soft-delete change uses the same controlled snapshots and version fence as
+# update, but remains a distinct contract operation. The first fixture proves
+# inverse restoration; the second changes the row after enqueue so the Worker
+# must persist a conflict while committing zero target changes.
+cat >"$WORK/soft-delete-baseline.csv" <<'CSV'
+date,code,name,value
+2026-09-10,P3D-SD1,Soft delete baseline,30
+CSV
+SOFT_BASELINE_ID=$(prepare_batch "$TOKEN1" "$CSRF1" "$WORK/soft-delete-baseline.csv" soft-delete-baseline)
+assert_eq "$(confirm_batch "$TOKEN1" "$CSRF1" "$SOFT_BASELINE_ID" "phase3d-confirm-$RUN_MARK-soft-delete-baseline" "$WORK/soft-delete-baseline-confirm.json")" 202 "soft-delete baseline confirm"
+wait_batch "$TOKEN1" "$SOFT_BASELINE_ID" succeeded
+cat >"$WORK/soft-delete.csv" <<'CSV'
+date,code,name,value
+2026-09-10,P3D-SD1,Soft deleted state,31
+CSV
+SOFT_DELETE_ID=$(prepare_batch "$TOKEN1" "$CSRF1" "$WORK/soft-delete.csv" soft-delete)
+assert_eq "$(confirm_batch "$TOKEN1" "$CSRF1" "$SOFT_DELETE_ID" "phase3d-confirm-$RUN_MARK-soft-delete" "$WORK/soft-delete-confirm.json" overwrite)" 202 "soft-delete fixture confirm"
+wait_batch "$TOKEN1" "$SOFT_DELETE_ID" succeeded
+psqlq "set session_replication_role=replica; update import_row_changes set operation='soft_delete' where workspace_id='$WS1' and import_batch_id='$SOFT_DELETE_ID' and operation='update'; reset session_replication_role" >/dev/null
+assert_eq "$(psqlq "select operation from import_row_changes where workspace_id='$WS1' and import_batch_id='$SOFT_DELETE_ID'")" soft_delete "soft-delete change log operation"
+assert_eq "$(rollback_check "$SOFT_DELETE_ID" "$WORK/soft-delete-check.json")" 200 "soft-delete rollback check"
+assert_json "$WORK/soft-delete-check.json" '.data.can_rollback == true and .data.affected_count == 1 and .data.conflict_count == 0' "soft-delete rollback allowed"
+"${COMPOSE_CMD[@]}" stop worker >/dev/null
+SOFT_DELETE_KEY="phase3d-rollback-$RUN_MARK-soft-delete"
+assert_eq "$(rollback_request "$SOFT_DELETE_ID" "$WORK/soft-delete-check.json" "$SOFT_DELETE_KEY" "$WORK/soft-delete-rollback.json")" 202 "soft-delete rollback queued"
+"${COMPOSE_CMD[@]}" up -d --scale worker=1 worker >/dev/null
+wait_batch "$TOKEN1" "$SOFT_DELETE_ID" rolled_back
+assert_eq "$(psqlq "select (record_data->>'value') || ':' || source_import_batch_id::text from imported_records where workspace_id='$WS1' and business_key='2026-09-10|P3D-SD1'")" "30:$SOFT_BASELINE_ID" "soft-delete restores before snapshot"
+
+cat >"$WORK/soft-conflict-baseline.csv" <<'CSV'
+date,code,name,value
+2026-09-11,P3D-SD2,Soft conflict baseline,40
+CSV
+SOFT_CONFLICT_BASELINE_ID=$(prepare_batch "$TOKEN1" "$CSRF1" "$WORK/soft-conflict-baseline.csv" soft-conflict-baseline)
+assert_eq "$(confirm_batch "$TOKEN1" "$CSRF1" "$SOFT_CONFLICT_BASELINE_ID" "phase3d-confirm-$RUN_MARK-soft-conflict-baseline" "$WORK/soft-conflict-baseline-confirm.json")" 202 "soft conflict baseline confirm"
+wait_batch "$TOKEN1" "$SOFT_CONFLICT_BASELINE_ID" succeeded
+cat >"$WORK/soft-conflict.csv" <<'CSV'
+date,code,name,value
+2026-09-11,P3D-SD2,Soft conflict state,41
+CSV
+SOFT_CONFLICT_ID=$(prepare_batch "$TOKEN1" "$CSRF1" "$WORK/soft-conflict.csv" soft-conflict)
+assert_eq "$(confirm_batch "$TOKEN1" "$CSRF1" "$SOFT_CONFLICT_ID" "phase3d-confirm-$RUN_MARK-soft-conflict" "$WORK/soft-conflict-confirm.json" overwrite)" 202 "soft conflict fixture confirm"
+wait_batch "$TOKEN1" "$SOFT_CONFLICT_ID" succeeded
+psqlq "set session_replication_role=replica; update import_row_changes set operation='soft_delete' where workspace_id='$WS1' and import_batch_id='$SOFT_CONFLICT_ID' and operation='update'; reset session_replication_role" >/dev/null
+assert_eq "$(rollback_check "$SOFT_CONFLICT_ID" "$WORK/soft-conflict-check.json")" 200 "soft conflict initial check"
+assert_json "$WORK/soft-conflict-check.json" '.data.can_rollback == true and .data.affected_count == 1 and .data.conflict_count == 0' "soft conflict initially allowed"
+"${COMPOSE_CMD[@]}" stop worker >/dev/null
+SOFT_CONFLICT_KEY="phase3d-rollback-$RUN_MARK-soft-conflict"
+assert_eq "$(rollback_request "$SOFT_CONFLICT_ID" "$WORK/soft-conflict-check.json" "$SOFT_CONFLICT_KEY" "$WORK/soft-conflict-rollback.json")" 202 "soft conflict rollback queued"
+psqlq "update imported_records set record_data=jsonb_set(record_data,'{value}','\"worker-conflict\"'),row_version=row_version+1 where workspace_id='$WS1' and source_import_batch_id='$SOFT_CONFLICT_ID'" >/dev/null
+SOFT_CONFLICT_BEFORE=$(database_snapshot "$SOFT_CONFLICT_ID")
+"${COMPOSE_CMD[@]}" up -d --scale worker=1 worker >/dev/null
+wait_batch "$TOKEN1" "$SOFT_CONFLICT_ID" rollback_conflict
+assert_eq "$(database_snapshot "$SOFT_CONFLICT_ID")" "$SOFT_CONFLICT_BEFORE" "soft-delete worker conflict zero business change"
+assert_eq "$(psqlq "select status || ':' || conflict_count::text from import_rollback_requests where workspace_id='$WS1' and import_batch_id='$SOFT_CONFLICT_ID'")" "worker_conflict:2" "soft-delete worker conflict persisted"
+
 # Precheck pagination: 105 later modifications produce a complete second page.
 printf 'date,code,name,value\n' >"$WORK/conflicts.csv"
 for i in $(seq -w 1 105); do
@@ -868,10 +924,11 @@ assert_eq "$(psqlq "select count(*) from imported_records where workspace_id='$W
 # high-confidence credential/private-key patterns without printing matches.
 assert_eq "$(psqlq "select count(distinct event_type) from audit_logs where workspace_id='$WS1' and event_type in ('import.rollback_check','import.rollback_queued','import.rollback_worker_succeeded','import.compensation_created','object.scan_queued','object.scan_completed','object.quarantine_queued','object.quarantined','import.events_access_terminated')")" 9 "Phase 3D audit coverage"
 assert_eq "$(psqlq "select count(*) from audit_logs where workspace_id='$WS1' and exists (select 1 from jsonb_object_keys(metadata) key where key in ('password','token','cookie','csrf','idempotency_key','object_key','raw_value','secret'))")" 0 "audit metadata secret free"
-assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$WS1' and event_type in ('rollback_queued','rollback_running','rolled_back')")" 3 "rollback event chain"
+assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$WS1' and event_type in ('rollback_queued','rollback_running','rolled_back')")" 8 "rollback success and conflict event chains"
 "${COMPOSE_CMD[@]}" logs --no-color --since 30m api worker nginx >"$WORK/service.log"
 for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
-  "$ROLLBACK_KEY" "$COMP_KEY" "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" \
+  "$ROLLBACK_KEY" "$SOFT_DELETE_KEY" "$SOFT_CONFLICT_KEY" "$COMP_KEY" \
+  "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" \
   "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2
