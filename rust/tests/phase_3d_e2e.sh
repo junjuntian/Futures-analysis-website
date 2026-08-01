@@ -482,8 +482,12 @@ wait_batch() {
 }
 wait_governance_job() {
   local job_id=$1 expected=$2
+  wait_workspace_governance_job "$WS1" "$job_id" "$expected"
+}
+wait_workspace_governance_job() {
+  local workspace=$1 job_id=$2 expected=$3
   for _ in $(seq 1 360); do
-    [ "$(psqlq "select status from object_governance_jobs where workspace_id='$WS1' and id='$job_id'")" = "$expected" ] && return 0
+    [ "$(psqlq "select status from object_governance_jobs where workspace_id='$workspace' and id='$job_id'")" = "$expected" ] && return 0
     sleep 0.25
   done
   echo "ASSERT_FAIL label=governance_job_timeout" >&2
@@ -573,7 +577,7 @@ values
   ('$(new_uuid)','$WS1','$USER1','owner'),
   ('$(new_uuid)','$WS2','$USER2','owner');
 insert into user_roles(user_id,role_name)
-values ('$USER1','admin'),('$USER2','viewer');
+values ('$USER1','admin'),('$USER2','admin');
 insert into sessions
   (id,user_id,token_hash,csrf_hash,absolute_expires_at,idle_expires_at,user_agent)
 values
@@ -581,6 +585,46 @@ values
   ('$SESSION2','$USER2','$TOKEN2_HASH','$CSRF2_HASH',now()+interval '2 hours',now()+interval '2 hours','phase3d-e2e'),
   ('$SSE_SESSION','$USER1','$SSE_TOKEN_HASH','$SSE_CSRF_HASH',now()+interval '2 hours',now()+interval '2 hours','phase3d-e2e-sse');
 SQL
+
+# Real PostgreSQL fairness under sustained cross-Workspace load. Sixteen jobs
+# are queued for WS1 before WS2, then WS1 keeps receiving jobs while two actual
+# Worker containers compete through reserve_next_work and SKIP LOCKED.
+"${COMPOSE_CMD[@]}" stop worker >/dev/null
+FAIRNESS_STARTED=$(psqlq "select clock_timestamp()")
+FAIRNESS_KEY_PREFIX="phase3d-fairness-$RUN_MARK"
+for i in $(seq 1 16); do
+  key="$FAIRNESS_KEY_PREFIX-initial-$i"
+  assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$key" "$WORK/fairness-initial-$i.json")" 202 "fairness initial WS1 queue"
+done
+FAIR_WS2_KEY="$FAIRNESS_KEY_PREFIX-ws2"
+assert_eq "$(api_idempotent_json "$TOKEN2" "$CSRF2" POST "/api/v1/object-consistency/scans" '{}' "$FAIR_WS2_KEY" "$WORK/fairness-ws2.json")" 202 "fairness WS2 queue"
+FAIR_WS2_JOB=$(jq -r '.data.job_id' "$WORK/fairness-ws2.json")
+(
+  for i in $(seq 17 64); do
+    key="$FAIRNESS_KEY_PREFIX-sustained-$i"
+    assert_eq "$(api_idempotent_json "$TOKEN1" "$CSRF1" POST "/api/v1/object-consistency/scans" '{}' "$key" "$WORK/fairness-sustained-$i.json")" 202 "fairness sustained WS1 queue"
+  done
+) &
+FAIRNESS_PRODUCER_PID=$!
+"${COMPOSE_CMD[@]}" up -d --scale worker=2 worker >/dev/null
+for _ in $(seq 1 120); do
+  [ "$("${COMPOSE_CMD[@]}" ps -q worker | wc -l | tr -d ' ')" = 2 ] && break
+  sleep 0.25
+done
+assert_eq "$("${COMPOSE_CMD[@]}" ps -q worker | wc -l | tr -d ' ')" 2 "two concurrent workers"
+wait_workspace_governance_job "$WS2" "$FAIR_WS2_JOB" succeeded
+wait "$FAIRNESS_PRODUCER_PID"
+for _ in $(seq 1 720); do
+  FAIRNESS_PENDING=$(psqlq "select count(*) from object_governance_jobs where workspace_id in ('$WS1','$WS2') and created_at >= '$FAIRNESS_STARTED' and status not in ('succeeded','failed','dead_letter')")
+  [ "$FAIRNESS_PENDING" = 0 ] && break
+  sleep 0.25
+done
+assert_eq "$FAIRNESS_PENDING" 0 "fairness jobs reach terminal state"
+assert_eq "$(psqlq "select count(*) from object_governance_jobs where workspace_id in ('$WS1','$WS2') and created_at >= '$FAIRNESS_STARTED' and status='succeeded'")" 65 "fairness jobs succeeded"
+assert_eq "$(psqlq "select (count(*) > 0)::text from object_governance_jobs ws1_job join object_governance_jobs ws2_job on ws2_job.id='$FAIR_WS2_JOB' and ws2_job.workspace_id='$WS2' where ws1_job.workspace_id='$WS1' and ws1_job.created_at >= '$FAIRNESS_STARTED' and ws1_job.finished_at > ws2_job.finished_at")" true "WS2 served before sustained WS1 drain"
+assert_eq "$(psqlq "select (count(*) = 65 and min(attempt_count)=1 and max(attempt_count)=1)::text from object_governance_jobs where workspace_id in ('$WS1','$WS2') and created_at >= '$FAIRNESS_STARTED'")" true "fairness jobs claimed exactly once"
+assert_eq "$(psqlq "select (min(object_job_last_served_ticket) > 0)::text from workspaces where id in ('$WS1','$WS2')")" true "persistent cross-workspace dispatch tickets"
+"${COMPOSE_CMD[@]}" up -d --scale worker=1 worker >/dev/null
 
 # Current-candidate format smoke. CSV is exercised throughout the Phase 3D
 # scenarios; these three batches prevent PASS when TXT/XLS/XLSX regresses.
@@ -963,6 +1007,7 @@ assert_eq "$(psqlq "select count(*) from import_job_events where workspace_id='$
 for secret in "$TOKEN1" "$TOKEN2" "$SSE_TOKEN" "$CSRF1" "$CSRF2" "$SSE_CSRF" \
   "$ROLLBACK_KEY" "$SOFT_DELETE_KEY" "$SOFT_CONFLICT_KEY" "$COMP_KEY" \
   "$INVISIBLE_COMP_KEY" "$NOT_ALLOWED_COMP_KEY" "$DEEP_COMP_KEY" \
+  "$FAIRNESS_KEY_PREFIX" \
   "$UNCERTAIN_SCAN_KEY" "$SCAN_KEY" "$QUARANTINE_KEY"; do
   if grep -F "$secret" "$WORK/service.log" "$WORK"/*.json "$WORK"/*.txt >/dev/null 2>&1; then
     echo "ASSERT_FAIL label=ephemeral_secret_in_evidence_or_logs" >&2
