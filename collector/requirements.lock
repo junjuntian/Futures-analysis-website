@@ -32,4 +32,3 @@ tzdata==2026.3
 urllib3==2.7.0
 webencodings==0.5.1
 xlrd==2.0.2
-
