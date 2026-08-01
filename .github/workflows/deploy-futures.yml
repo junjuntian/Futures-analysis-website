@@ -411,8 +411,7 @@ jobs:
             unset line value
           }
           ensure_legacy_secret /etc/futures-platform/secrets/postgres-password POSTGRES_PASSWORD
-          ensure_legacy_secret /etc/futures-platform/secrets/bootstrap-token BOOTSTRAP_TOKEN
-          for required in database-url import-idempotency-pepper master-key-v1 postgres-password bootstrap-token; do
+          for required in database-url import-idempotency-pepper master-key-v1 postgres-password; do
             test -s "/etc/futures-platform/secrets/$required"
             test "$(stat -c %a "/etc/futures-platform/secrets/$required")" = 400
           done
