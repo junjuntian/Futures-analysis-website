@@ -1,0 +1,164 @@
+name: Provision collector account
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: Exact 40-character candidate Git SHA
+        required: true
+        type: string
+      api_digest:
+        description: Immutable API sha256 digest containing the management command
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: futures-production
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      FUTURES_SSH_HOST: ${{ secrets.FUTURES_SSH_HOST }}
+      FUTURES_SSH_PORT: ${{ secrets.FUTURES_SSH_PORT }}
+      FUTURES_SSH_USER: ${{ secrets.FUTURES_SSH_USER }}
+    steps:
+      - name: Validate immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.git_sha }}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${{ inputs.api_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+      - name: Install strict SSH identity
+        shell: bash
+        env:
+          FUTURES_SSH_PRIVATE_KEY: ${{ secrets.FUTURES_SSH_PRIVATE_KEY }}
+          FUTURES_SSH_KNOWN_HOSTS: ${{ secrets.FUTURES_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$FUTURES_SSH_PRIVATE_KEY" >"$RUNNER_TEMP/futures-key"
+          printf '%s\n' "$FUTURES_SSH_KNOWN_HOSTS" >"$RUNNER_TEMP/futures-known-hosts"
+          chmod 600 "$RUNNER_TEMP/futures-key" "$RUNNER_TEMP/futures-known-hosts"
+          ssh-keygen -y -f "$RUNNER_TEMP/futures-key" >/dev/null
+
+      - name: Prepare management program
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >"$RUNNER_TEMP/provision-collector.sh" <<'REMOTE_SCRIPT'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          umask 077
+          SOURCE_SHA=$1
+          API_DIGEST=$2
+          GHCR_USER=$3
+          API_IMAGE=ghcr.io/junjuntian/futures-analysis-website-api
+          API_REF="${API_IMAGE}@${API_DIGEST}"
+          STATE_FILE=/var/lib/futures-platform/deployments/stable.env
+          CREDENTIAL_FILE=/etc/futures-platform/secrets/collector-credentials
+
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$API_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          IFS= read -r GHCR_TOKEN || test -n "${GHCR_TOKEN:-}"
+          test -n "${GHCR_TOKEN:-}"
+          DOCKER_CONFIG=$(mktemp -d /tmp/futures-collector-provision.XXXXXX)
+          cleanup() {
+            docker --config "$DOCKER_CONFIG" logout ghcr.io >/dev/null 2>&1 || true
+            case "$DOCKER_CONFIG" in
+              /tmp/futures-collector-provision.*) rm -rf -- "$DOCKER_CONFIG" ;;
+            esac
+            unset GHCR_TOKEN
+            test "$0" = /tmp/provision-collector.sh && rm -f -- /tmp/provision-collector.sh
+          }
+          trap cleanup EXIT
+          printf '%s' "$GHCR_TOKEN" | docker --config "$DOCKER_CONFIG" login ghcr.io \
+            --username "$GHCR_USER" --password-stdin >/dev/null 2>&1
+          docker --config "$DOCKER_CONFIG" pull "$API_REF" >/dev/null
+          test "$(docker image inspect --format '{{.Architecture}}' "$API_REF")" = amd64
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$API_REF")" = "$SOURCE_SHA"
+
+          test -r "$STATE_FILE"
+          # shellcheck disable=SC1090
+          . "$STATE_FILE"
+          case "$previous_release_dir" in
+            /opt/futures-platform-releases/*) ;;
+            *) echo "COLLECTOR_PROVISION_FAIL unsafe_release" >&2; exit 1 ;;
+          esac
+          COMPOSE=(
+            docker compose
+            -f "$previous_release_dir/docker-compose.yml"
+            -f "$previous_release_dir/docker-compose.production.yml"
+            -f "$previous_release_dir/docker-compose.release.yml"
+          )
+          public_origin=$("${COMPOSE[@]}" config --format json |
+            jq -r '.services.api.environment.PUBLIC_ORIGIN')
+          [[ "$public_origin" =~ ^https?://[A-Za-z0-9._:-]+$ ]]
+
+          if test ! -s "$CREDENTIAL_FILE"; then
+            password=$(openssl rand -base64 48 | tr -d '\n' | tr '+/' '-_')
+            temporary=$(mktemp /etc/futures-platform/secrets/.collector.XXXXXX)
+            printf '{"base_url":"http://api:8080","origin":"%s","username":"collector-service","password":"%s"}' \
+              "$public_origin" "$password" >"$temporary"
+            chown root:root "$temporary"
+            chmod 400 "$temporary"
+            mv "$temporary" "$CREDENTIAL_FILE"
+            unset password
+          fi
+          test "$(stat -c %U:%G "$CREDENTIAL_FILE")" = root:root
+          test "$(stat -c %a "$CREDENTIAL_FILE")" = 400
+
+          docker run --rm \
+            --network futures-analysis-platform_backend \
+            --read-only --tmpfs /tmp:size=16m,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -e APP_ENV=acceptance \
+            -e DATABASE_URL_FILE=/run/secrets/database-url \
+            -e COLLECTOR_CREDENTIALS_FILE=/run/secrets/collector-credentials \
+            -e PUBLIC_ORIGIN="$public_origin" \
+            -v /etc/futures-platform/secrets:/run/secrets:ro \
+            "$API_REF" /app/api --provision-collector-account >/dev/null
+
+          test "$("${COMPOSE[@]}" exec -T postgres psql -X -U futures_app \
+            -d futures_platform -Atq -v ON_ERROR_STOP=1 \
+            -c "select count(*) from users u join user_roles r on r.user_id=u.id where u.username_normalized='collector-service' and u.disabled_at is null and r.role_name='analyst'")" = 1
+          echo COLLECTOR_PROVISION_PASS
+          REMOTE_SCRIPT
+          chmod 700 "$RUNNER_TEMP/provision-collector.sh"
+
+      - name: Run management flow on VPS
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${FUTURES_SSH_USER}@${FUTURES_SSH_HOST}"
+          options=(
+            -i "$RUNNER_TEMP/futures-key"
+            -p "$FUTURES_SSH_PORT"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$RUNNER_TEMP/futures-known-hosts"
+          )
+          scp -i "$RUNNER_TEMP/futures-key" -P "$FUTURES_SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/futures-known-hosts" \
+            "$RUNNER_TEMP/provision-collector.sh" "$target:/tmp/provision-collector.sh"
+          printf '%s' "$GHCR_TOKEN" | ssh "${options[@]}" "$target" \
+            "bash /tmp/provision-collector.sh '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${GITHUB_ACTOR}'"
+          ssh "${options[@]}" "$target" "rm -f -- /tmp/provision-collector.sh"
+          unset GHCR_TOKEN
+
+      - name: Remove runner SSH material
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/futures-key" "$RUNNER_TEMP/futures-known-hosts" "$RUNNER_TEMP/provision-collector.sh"

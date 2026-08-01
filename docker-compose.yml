@@ -79,6 +79,29 @@ services:
     networks:
       - backend
 
+  collector:
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
+    profiles:
+      - collector
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      COLLECTOR_CREDENTIALS_FILE: /run/secrets/collector-credentials
+    volumes:
+      - ${COLLECTOR_CREDENTIALS_FILE:-/etc/futures-platform/secrets/collector-credentials}:/run/secrets/collector-credentials:ro
+    networks:
+      - edge
+    mem_limit: 512m
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   frontend:
     image: node:24.18.0-bookworm-slim
     restart: unless-stopped
