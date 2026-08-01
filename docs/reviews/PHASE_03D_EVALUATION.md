@@ -205,3 +205,71 @@
 - HIGH：2
 - 需要 Generator 修复 HIGH-01、HIGH-02，并补充相应 API/对象计数、soft-delete PostgreSQL/Worker/VPS 回归；随后由独立 Evaluator 复核。
 - MEDIUM-01 至 MEDIUM-05 也应在最终 PASS 前给出关闭证据或由用户明确重新裁定范围；不得以既有 CI/VPS PASS 覆盖本报告发现。
+
+## 复核（2026-08-01）
+
+### 复核基线与边界
+
+- 本节由新的独立 Evaluator 按 `.agents/Evaluator.md` 与 `DEC-036` 追加；首轮报告正文及其中的 FAIL、HIGH 2 / MEDIUM 5 / LOW 1 原样保留。
+- 首轮报告基线为 `12716d2abac0e145e2b849a8ae1934fb12823e70`；代码复核范围为 `6dfea789aa2dd0085524d9a6beacef095039fa01..45ee8028647a1b8e4b8cda043e8012b4e281d739`，重点复核修复提交 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`。
+- 当前远端 phase 分支头为文档提交 `8d0777e`；`git diff --exit-code 45ee802..8d0777e -- rust frontend .github deploy docker-compose.yml docker-compose.production.yml` 为 exit 0，故部署与代码结论仍严格截止 `45ee802`。
+- 本次不采信 Generator 交接结论，只将其用于定位证据；结论来自 Git 差异、实现与测试审阅、本地门禁复跑、GitHub Actions 只读取证和 `futures` VPS 只读实态。
+- 用户已裁定 MEDIUM-05 延后到项目完工时执行生产库归零重置，不阻断本轮 PASS。本节不删除、不改写首轮 MEDIUM-05，仅核实其记录和 VPS 实态仍准确。
+
+### 首轮缺陷逐项复核
+
+| 缺陷 | 复核结论 | 关闭证据 |
+| --- | --- | --- |
+| HIGH-01 补偿重放/拒绝路径提交孤儿对象 | **CLOSED** | `bf5baab` 把数据库决议拆为 `prepare_compensation_upload`：同 Workspace advisory transaction lock、幂等键、原批次可见性/状态和 lineage 深度均在临时对象 `commit()` 前完成；Replay 和各类业务拒绝均 `abort()` 临时上传。全仓只有 `/api/v1/imports/{id}/compensations` 这一入口调用创建函数，`create_compensation_upload` 只接受持有未提交事务的 `PreparedCompensationUpload`，未发现绕过 prepare 的新路径。VPS HTTP E2E 覆盖同参重放、同键异参、不可见原批次、不允许状态及 8 路并发重放；计数由 PostgreSQL `stored_objects` 实际行数与容器对象根 `objects/.tmp/quarantine` 的 `find -type f` 实际文件数拼接，不是恒真断言。保留输出为 `13:13 → 13:13`，拒绝夹具后的 `14:14` 在拒绝与并发重放后仍不增长。 |
+| HIGH-02 合法 `soft_delete` 无法预检或回滚 | **CLOSED** | `1b4c06b` 使预检接受 `soft_delete`，并要求受控 before/after snapshot 均含 `record_data`、`source_import_batch_id`、`source_row_number`、`row_version`；当前目标仍以 `target_row_version` 和完整 after snapshot 双重比较。Worker 将 `soft_delete` 与 update 一样在单事务内恢复 before snapshot，并用 `where row_version = expected` 加完整 after snapshot 作执行 fence，回滚动作写入新版本 `expected + 1`，符合契约 7.2。冲突分支在任何 delete/update 前持久化完整冲突并返回；E2E 在入队后制造版本变化，业务摘要前后相等，最终 `worker_conflict:3`（两个行级冲突加陈旧预检指纹）由 `45ee802` 校正并通过。领域枚举测试、snapshot 预检单测、执行器逆序/原子性测试以及 VPS soft-delete 恢复和冲突零变更 E2E 四层齐备；VPS 恢复值为 `30`，`zero_business_change=PASS`。 |
+| MEDIUM-01 lineage 递归无深度上限 | **CLOSED** | `f13b17d` 固定 `MAX_COMPENSATION_LINEAGE_DEPTH=32`；祖先和后继递归均有数据库深度谓词、path/cycle 检测和稳定 `compensation_lineage_too_deep` 错误，创建第 33 层补偿也在对象 commit 前拒绝。VPS 构造 33 层隔离链，lineage 与补偿上传均返回 409，数据库/物理对象计数不增长。 |
+| MEDIUM-02 公平轮询缺少真实 PostgreSQL 持续负载证明 | **CLOSED** | `3aa200c` 的 VPS E2E 停止 Worker 后为 Workspace A 预置 16 个治理任务、为 Workspace B 入队任务，并在后台继续为 A 灌入 48 个任务；随后启动两个真实 Worker，经 PostgreSQL `reserve_next_work`、Workspace 行锁和 `SKIP LOCKED` 竞争。断言 B 在 A 排空前完成、65 个任务全部成功且每个只领取一次、两 Workspace 的持久 dispatch ticket 均推进。该测试执行了真实数据库和双 Worker 路径，不是原先的内存候选循环。 |
+| MEDIUM-03 对象治理故障注入矩阵不完整 | **CLOSED** | `5b67393` 增加本地对象存储测试，实际 commit/rename 后丢失登记结果仍可被 scan 发现；VPS 隔离 Workspace 注入 rename 后数据库失败、commit 响应不确定、进程中断遗留的过期临时文件、数据库记录缺对象、SHA-256 错误和孤儿对象。fresh/stale scan 分别断言 `commit_outcome_unknown`、`orphan_object`、`database_object_missing`、`sha256_mismatch`、`stale_temporary_object`，并覆盖同键重放、不同键重复 scan、重复 quarantine。对象总数前后相等，保留输出 `governance_physical_delete_count=0`。 |
+| MEDIUM-04 前端缺少 Phase 3D 完整退出交互矩阵 | **CLOSED** | `1c32ab4` 新增的 5 个用例使用 Vue Test Utils 实际挂载 `ImportCenterView`，而非仅测试 API client 或源码字符串；分别验证请求 pending 时重复回滚按钮禁用且只调用一次、冲突游标第二页追加不覆盖首屏、陈旧预检清理确认状态并允许重检、Worker 错误终态及稳定错误码、从冲突打开补偿面板，以及临时请求失败后按钮恢复并可成功重试。连同既有确认、SSE 断线重放和撤权停止组件测试，首轮列出的退出矩阵已有直接执行证据。 |
+| LOW-01 `git diff --check` 非零 | **CLOSED** | `49fc930` 只去除 Phase 3B/3C 评审文档 6 处行尾空白；本次实跑 `git diff --check 6dfea78..45ee802` 为 exit 0。 |
+
+MEDIUM-05 没有被删除或改写：首轮正文仍完整登记 127 个历史测试批次及其来源判断。本次 VPS 只读聚合仍为 `users=31`、`import_batches=127`，批次状态仍为 uploaded 5、preview_ready 25、succeeded 90、failed 7；自最终部署开始时间起，users/import_batches 的 created/updated 行数均为 0，现存批次最新 `updated_at` 仍为 2026-07-25。该项按用户裁定继续留待项目完工时生产库归零重置，不计入本轮剩余缺陷。
+
+### 授权追加范围复核
+
+`c87b26f` 对 `.github/workflows/deploy-futures.yml` 的代码差异严格限于两个授权点：删除从旧 `.env` 重建 `/etc/futures-platform/secrets/bootstrap-token` 的调用，以及从日常部署必需文件列表移除 `bootstrap-token`。工作流仍在验收成功后从旧 `.env` 清除 `BOOTSTRAP_TOKEN`，没有新增生成、复制、下载或恢复 token 的路径。该改动使已完成初始化且 token 已销毁的 VPS 可部署，符合 DEC-026；VPS 当前 `bootstrap-token=absent`。
+
+### 本地与 GitHub 回归输出摘要
+
+| 命令/证据 | 结果 | 实际摘要 |
+| --- | --- | --- |
+| `cargo +stable fmt --check` | PASS | exit 0，无格式差异。 |
+| `cargo +stable clippy --workspace --all-targets -- -D warnings` | PASS | exit 0，7 个 workspace crate、全部 target，0 warning。 |
+| `cargo +stable test --workspace` | PASS | 119 passed、0 failed；分组为 20、12、61、13、8、5，doc-tests 均通过。 |
+| `pnpm lint` | PASS | `vue-tsc --noEmit` exit 0。 |
+| `pnpm test` | PASS | 宿主权限复跑为 6 files / 18 tests passed，新增 `ImportCenterView.test.ts` 为 5/5。首次沙箱运行因 esbuild 无权读取工作区父目录而在 Vitest 启动前失败，没有执行断言；原命令受控复跑通过。 |
+| `pnpm build` | PASS | 1468 modules transformed，约 3.91 秒；仅有既存的单 chunk 大于 500 kB warning。 |
+| `git diff --check 6dfea78..45ee802` | PASS | exit 0，无输出。 |
+| CI Run `30688920855` | PASS | push，head SHA 为完整 `45ee8028647...`；validate 的 Rust fmt/clippy/test、pnpm install/lint/test/build、Compose config 全部 success，API/Worker/Frontend 三个无发布构建 job 也全部 success。 |
+| Container images Run `30689138347` | PASS | workflow_dispatch，同一完整 SHA；API、Worker、Frontend 三个 publish job 的 build、publish、不可变 digest 记录全部 success。 |
+| Deploy Run `30689392268` | PASS | workflow_dispatch，同一完整 SHA；不可变输入校验、精确 checkout、部署/迁移/VPS 验收、证据记录和临时 registry 凭据清理全部 success。 |
+
+### `futures` VPS 只读实证
+
+- 最新 release 目录为 `/opt/futures-platform-releases/45ee8028647a1b8e4b8cda043e8012b4e281d739-30689392268-1`；最新部署报告 `status=PASS`，`/api/v1/version` 返回完整 `git_sha=45ee8028647a1b8e4b8cda043e8012b4e281d739`。
+- 运行容器与配置引用、镜像 ID 三者逐一相等：API `sha256:e4b3dae73713759bae3cbf2acea6b42a5147c7d5fa968820b978c4eaad7fdacf`，Worker `sha256:ae19760fed45fc4b4f64d381fca9f320b33bcfad24bdf78b1add4e22acb2d716`，Frontend `sha256:ee15b17dc20bbdd667c961808c8c479d42d3c4ea01ce639b320e4e70b827078b`。API、Frontend、Nginx、PostgreSQL、Worker 均 running，API/PostgreSQL healthy。
+- `schema_versions` 实际顺序包含 `202607240001`、`202607240002`、`202607250001` 至 `202607250009`、`202607260001`、`202607260002`；Phase 3D 两个迁移各存在一次。
+- 最新 evidence 目录的 Phase 3C、Phase 3D stdout 各恰好一个 PASS marker，`PHASE3D_SCHEMA_INVARIANTS_PASS` 也恰好一个；Phase 3D stdout SHA-256 为 `8a33017d1fbc0a47c5add41674e2d5ee651a8e89d60c7961e3351ae14964ddc1`。部署脚本记录的 Phase 3D harness SHA-256 为 `a6dfe7865fbebffbcb7865189c79f3cb717f7df05a7134b3e106ecd630b361df`，与本地 `45ee802` 文件实算一致。
+- 部署报告同时记录 `runtime_digest_match=PASS`、`registry_auth_cleanup=PASS`、`service_log_secret_scan=PASS`；现场复核 persistent GHCR auth absent、bootstrap-token absent。
+- 数据只读复核为 `users=31`、`import_batches=127` 且状态分布未变；部署时间之后没有 users/import_batches 的新增或更新，证明最终验收的 UUID 隔离夹具已清理且既有 127 个历史测试批次未被本轮修改。
+
+### main 分叉事实复查（供后续收口单）
+
+- 远端实态为 `origin/main=78f06731161913fb4ccae7c98ca4666137f32c5b`、`origin/phase/03-import-foundation=8d0777eca2e3b2b7c926b790c55d542881c680f1`，merge base 仍为 `6dfea789aa2dd0085524d9a6beacef095039fa01`；`git rev-list --count --left-right` 为 main 独有 8、phase 独有 48。
+- 首轮第 10 节关于两条独立 CI/部署提交历史和 merge 后必须重跑 main CI 的判断仍准确；`container-images.yml` 内容仍相同，`ci.yml` 仍由 phase 分支包含更完整门禁。
+- 首轮“`deploy-futures.yml` 内容一致、merge-tree 无 conflict marker”已因授权提交 `c87b26f` 而不再准确。当前 `deploy-futures.yml` 仅有上述两个 bootstrap-token 授权点的内容差异；只读 `git merge-tree` 在该处产生一个冲突块（3 条 marker）。后续普通 merge 必须显式采用符合 DEC-026 的 phase 版本并在 main 重新运行 CI/部署门禁，不能自动判同。
+- 本复核单没有合并 main、没有打标签、没有修改 `PLANS.md`。
+
+### 最终判定
+
+**PASS**
+
+- 首轮要求复核的 HIGH-01、HIGH-02、MEDIUM-01 至 MEDIUM-04、LOW-01 全部 **CLOSED**。
+- MEDIUM-05 仍如实保留，并按用户明确裁定延后，不阻断本轮 PASS。
+- 本轮剩余缺陷：BLOCKER 0、HIGH 0、MEDIUM 0、LOW 0；未发现由修复提交引入的新缺陷。
+- Phase 3D 现可进入下一张版本收口单；本单不授权也未执行 main 合并、标签或 `PLANS.md` 更新。
