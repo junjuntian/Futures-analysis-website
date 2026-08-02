@@ -341,7 +341,7 @@ jobs:
             for log in "$EVIDENCE_DIR"/phase4a-work/*.log; do
               test -f "$log" || continue
               grep -Eh \
-                '^(INFO|ERROR) (collector_start_failed|exchange_failed|dataset_failed|batch_failed|batch_succeeded) ' \
+                '^(INFO|ERROR) (collector_start_failed|exchange_failed|dataset_collected|dataset_failed|batch_failed|batch_succeeded) ' \
                 "$log" || true
             done
           }

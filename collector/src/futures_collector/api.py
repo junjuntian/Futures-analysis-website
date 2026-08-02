@@ -22,6 +22,26 @@ class ImportResult:
     skipped: int
 
 
+class PlatformRequestError(RuntimeError):
+    def __init__(self, stage: str, response: httpx.Response) -> None:
+        code = "http_error"
+        try:
+            payload = response.json()
+            candidate = payload.get("data", {}).get("code")
+            if isinstance(candidate, str) and candidate:
+                code = candidate
+        except (ValueError, AttributeError):
+            code = "http_error"
+        self.safe_code = f"{stage}:{response.status_code}:{code}"
+        self.code = code
+        super().__init__(self.safe_code)
+
+
+def require_success(response: httpx.Response, stage: str) -> None:
+    if response.is_error:
+        raise PlatformRequestError(stage, response)
+
+
 class PlatformClient:
     def __init__(self, credentials: Credentials, timeout: float = 60.0) -> None:
         self.credentials = credentials
@@ -41,12 +61,12 @@ class PlatformClient:
                 "password": self.credentials.password,
             },
         )
-        response.raise_for_status()
+        require_success(response, "login")
         roles = response.json().get("data", {}).get("user", {}).get("roles", [])
         if "analyst" not in roles:
             raise RuntimeError("collector service account must have the analyst role")
         csrf = self.client.get("/api/v1/auth/csrf")
-        csrf.raise_for_status()
+        require_success(csrf, "csrf")
         self.csrf = str(csrf.json()["data"]["csrf_token"])
         return self
 
@@ -82,7 +102,7 @@ class PlatformClient:
                 "file": (f"{source.code}-{dataset_type}-{collection_date}.csv", content, "text/csv")
             },
         )
-        upload.raise_for_status()
+        require_success(upload, "upload")
         import_id = str(upload.json()["data"]["id"])
         confirm = self.client.post(
             f"/api/v1/imports/{import_id}/automatic-confirm",
@@ -91,7 +111,7 @@ class PlatformClient:
                 "Idempotency-Key": f"collector:{source.code}:{dataset_type}:{collection_date}",
             },
         )
-        confirm.raise_for_status()
+        require_success(confirm, "automatic_confirm")
         return self.wait(import_id)
 
     def record_failure(
@@ -105,16 +125,15 @@ class PlatformClient:
         row["source_record_ref"] = f"{source.code}:source-unavailable:{collection_date}"
         try:
             self.submit(source, dataset_type, collection_date, [row])
-        except httpx.HTTPStatusError as error:
-            body = error.response.json()
-            return str(body.get("data", {}).get("code", "automatic_source_failed"))
+        except PlatformRequestError as error:
+            return error.code
         return "automatic_source_failed"
 
     def wait(self, import_id: str, timeout: float = 180.0) -> ImportResult:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response = self.client.get(f"/api/v1/imports/{import_id}")
-            response.raise_for_status()
+            require_success(response, "poll")
             payload: dict[str, Any] = response.json()["data"]
             status = str(payload["status"])
             if status in {"succeeded", "failed", "dead_letter"}:

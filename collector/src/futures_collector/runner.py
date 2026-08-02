@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from futures_collector.api import PlatformClient
+from futures_collector.api import PlatformClient, PlatformRequestError
 from futures_collector.normalize import (
     normalize_calendar,
     normalize_catalog,
@@ -77,6 +77,12 @@ class CollectionRunner:
                     )
                 else:
                     raise ValueError("unsupported dataset")
+                LOG.info(
+                    "dataset_collected exchange=%s dataset=%s rows=%d",
+                    source.code,
+                    dataset_type,
+                    len(rows),
+                )
                 result = self.platform.submit(source, dataset_type, collection_date, rows)
                 LOG.info(
                     "batch_succeeded exchange=%s dataset=%s import_id=%s "
@@ -93,7 +99,7 @@ class CollectionRunner:
                     "dataset_failed exchange=%s dataset=%s error=%s",
                     source.code,
                     dataset_type,
-                    type(error).__name__,
+                    _safe_error_code(error),
                 )
                 reason = self.platform.record_failure(source, dataset_type, collection_date)
                 LOG.error(
@@ -113,3 +119,9 @@ def _dataset_type(dataset: str) -> str:
         "market": "daily_market_prices_v1",
         "seats": "seat_positions_v1",
     }[dataset]
+
+
+def _safe_error_code(error: Exception) -> str:
+    if isinstance(error, PlatformRequestError):
+        return error.safe_code
+    return type(error).__name__
