@@ -47,7 +47,7 @@ VPS host cron
 - `collector` 非常驻、无 restart policy、不加入数据库内部网络，只加入可到达平台 API 的 edge 网络；初始内存限制 `512m`。
 - 凭据文件固定为宿主机 `/etc/futures-platform/secrets/collector-credentials`，权限 `0400 root:root`，只读挂载到 collector 的 `/run/secrets/collector-credentials`。文件只包含平台 API 地址、服务账号标识和密码；不进入 Git、镜像、标准化 CSV、批次元数据或日志。
 - collector 日志只能记录日期、交易所、数据集、行数、批次 ID、状态和稳定错误码；禁止记录请求 Cookie、CSRF 值、密码、完整认证响应或凭据文件内容。
-- 服务账号由既有管理员流程创建，角色固定为 `analyst`。本阶段不新增隐藏管理员、bootstrap token 或数据库账号路径。
+- 服务账号由既有管理员流程创建，角色固定为 `analyst`。管理命令只绑定唯一启用的 admin 所有者 Workspace；历史验收产生的 analyst/viewer Workspace 不参与选择，候选为零或多个时必须失败，不得隐式选择首行。本阶段不新增隐藏管理员、bootstrap token 或数据库账号路径。
 - collector 先登录取得 session cookie，再取得 CSRF，随后上传和自动确认。自动确认仍执行 `Origin`、CSRF、Workspace、RBAC、来源白名单和固定模板校验。
 - 自动批次的来源错误按“交易所 × 数据集 × 日期”隔离。一个交易所断网或解析失败会登记对应批次为 `failed` 且正式表零写入，其他交易所继续运行。
 

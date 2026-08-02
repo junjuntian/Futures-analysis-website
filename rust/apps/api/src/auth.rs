@@ -148,11 +148,18 @@ pub async fn provision_collector_account(pool: &PgPool, config: &AuthConfig) -> 
         .map_err(|_| anyhow::anyhow!("collector credential password violates policy"))?;
 
     let mut tx = pool.begin().await?;
-    let workspaces = sqlx::query_scalar::<_, Uuid>("select id from workspaces order by created_at")
-        .fetch_all(&mut *tx)
-        .await?;
+    let workspaces = sqlx::query_scalar::<_, Uuid>(
+        "select w.id
+           from workspaces w
+           join users u on u.id = w.owner_user_id
+           join user_roles ur on ur.user_id = u.id and ur.role_name = 'admin'
+          where u.disabled_at is null
+          order by w.created_at",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let [workspace_id] = workspaces.as_slice() else {
-        anyhow::bail!("collector provisioning requires exactly one workspace");
+        anyhow::bail!("collector provisioning requires exactly one enabled admin-owned workspace");
     };
     let existing = sqlx::query(
         "select id, password_hash, disabled_at from users where username_normalized = $1 for update",
