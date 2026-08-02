@@ -165,6 +165,7 @@ jobs:
           BACKUP_PATH=
           PREVIOUS_STABLE=
           PREVIOUS_RUNTIME=
+          EVIDENCE_DIR=
 
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
@@ -334,10 +335,22 @@ jobs:
             return "$rollback_status"
           }
 
+          emit_phase4a_failure_diagnostics() {
+            local log
+            test -n "$EVIDENCE_DIR" || return 0
+            for log in "$EVIDENCE_DIR"/phase4a-work/*.log; do
+              test -f "$log" || continue
+              grep -Eh \
+                '^(INFO|ERROR) (exchange_failed|dataset_failed|batch_failed|batch_succeeded) ' \
+                "$log" || true
+            done
+          }
+
           on_exit() {
             local status=$?
             trap - EXIT
             if test "$status" -ne 0 && test "$SWITCH_STARTED" -eq 1; then
+              emit_phase4a_failure_diagnostics
               rollback_deployment || status=1
             fi
             cleanup_registry
