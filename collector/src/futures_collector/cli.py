@@ -34,12 +34,18 @@ def main(argv: list[str] | None = None) -> int:
     datasets = (
         ["catalog", "calendar", "market", "seats"] if args.dataset == "all" else [args.dataset]
     )
-    credentials = load_credentials()
-    with PlatformClient(credentials) as platform:
-        failures = CollectionRunner(AkshareAdapter(), platform).run(
-            args.date,
-            exchanges,
-            datasets,
-            injected_failure_exchange=args.inject_failure_exchange,
+    try:
+        credentials = load_credentials()
+        with PlatformClient(credentials) as platform:
+            failures = CollectionRunner(AkshareAdapter(), platform).run(
+                args.date,
+                exchanges,
+                datasets,
+                injected_failure_exchange=args.inject_failure_exchange,
+            )
+    except Exception as error:
+        logging.getLogger("futures_collector").error(
+            "collector_start_failed error=%s", type(error).__name__
         )
+        return 1
     return 0 if failures == 0 else 1
