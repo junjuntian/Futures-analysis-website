@@ -508,6 +508,15 @@ jobs:
                 item.nspname, item.relname);
             end loop;
             for item in
+              select n.nspname, c.relname
+                from pg_class c join pg_namespace n on n.oid=c.relnamespace
+               where n.nspname in ('public','app')
+                 and c.relkind = 'S'
+            loop
+              execute format('alter sequence %I.%I owner to futures_migrator',
+                item.nspname, item.relname);
+            end loop;
+            for item in
               select n.nspname, p.proname,
                      pg_get_function_identity_arguments(p.oid) args,
                      p.prokind
