@@ -75,8 +75,10 @@ run_collector_with_peak() {
     fi
     sleep 1
   done
-  wait "$pid"
+  local status=0
+  wait "$pid" || status=$?
   printf '%s\n' "$peak" >"${output}.peak-bytes"
+  return "$status"
 }
 
 echo "PHASE4A_E2E_STAGE first_run_started"
