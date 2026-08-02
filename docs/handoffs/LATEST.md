@@ -1,12 +1,11 @@
 # 最新交接状态
 
-- 最新交接文档：`docs/handoffs/HANDOFF_20260801_2327.md`
-- 当前阶段：Phase 1 至 Phase 3 已完成并收口；2026-08-02 总方案重审已确认并完成决策/设计文档同步，Phase 4 尚未开始实现。
-- DEC 变更：废止 `DEC-023`、`DEC-030`、`DEC-034`；修订 `DEC-025`、`DEC-031`；新增 `DEC-038`、`DEC-039`、`DEC-040`。
-- 路线：Phase 4 akshare 采集与全历史回填 → Phase 5 多腿套利与图表 → Phase 6 成交/持仓/绩效 → Phase 7 席位分析 → Phase 8 AI → Phase 9 运维加固与完工事项。
-- Git/CI：`7f2e7e6` 的 main CI Run `30705219493` success；`decbadc` 的 main CI Run `30705776449` success；最后交接提交的 CI 在推送后核验。
-- 资源结论：现有 1GB/25G VPS 支撑全部阶段；五核心容器实测约 310MB；席位全历史预计 5–15GB，磁盘达到 80% 时扩盘、不换机器。
-- VPS/数据库：本单未实时连接、未部署、未清数据、未执行迁移；不得把上一交接的运行态记录冒充本次核验。
-- 下一步：为 Phase 4“akshare 采集与全历史回填”创建 Planner 详细契约，等待用户单独授权实施。
+- 最新交接文档：`docs/handoffs/HANDOFF_20260803_0008.md`
+- 当前阶段：Phase 1 至 Phase 3 已收口；Phase 4A 已实现、CI/四镜像/VPS E2E 全部通过，候选 `944a4de` 等待全新独立 Evaluator；Phase 4B 未实施。
+- 决策依据：`DEC-031`、`DEC-038`、`DEC-039`、`DEC-041`；DCE 官方优先/Sina fallback 例外仅限 DCE。
+- Git/CI：分支 `phase/04-akshare-collection`，业务候选 `944a4de`；CI Run `30753685223`、Container images Run `30753724067`、Deploy Run `30754021926` 全部 success。
+- VPS：运行版本 `944a4defe578d5922b9f1ea83f951ddbd6fb005e`，`PHASE4A_E2E_PASS`；collector 峰值 `130641920` bytes；工作日 17:30/21:30 cron 已安装；未清理手动批次或其他数据。
+- 数据库：迁移 `202608020001`、`202608020002` 已执行；真实 `2026-07-30` 五交易所采集、DCE fallback 追溯、幂等、故障隔离、RLS 和来源链均 PASS。
+- 下一步：由全新的独立 Evaluator 对 Git 范围、测试和 futures VPS 实态做 Phase 4A 只读审查；不得启动 Phase 4B，不得合并 main 或打标签。
 
-接管者必须阅读完整交接文档 `HANDOFF_20260801_2327.md`，以 Git 和当前运行环境实态为准；不得恢复已废止基础设施，也不得把纯文档同步视为 Phase 4 实施授权。
+接管者必须完整阅读 `HANDOFF_20260803_0008.md`，并以 Git、当前测试和 VPS 实态独立取证；不得输出密钥，不得恢复已废止基础设施，不得为 DCE 之外交易所引入聚合 fallback。

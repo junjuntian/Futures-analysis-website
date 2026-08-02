@@ -2,7 +2,7 @@
 
 本项目面向个人或小团队，建设一个本地部署的期货数据研究、套利分析、交易复盘、席位分析和 AI 辅助分析平台。平台只提供数据管理与分析能力，不连接期货账户自动下单。
 
-当前已完成 Phase 1 至 Phase 3 并完成版本收口：工程基础、身份与个人 Workspace 安全、TXT/CSV/XLS/XLSX 导入、映射/预览/校验、异步入库、SSE、原子回滚、补偿 lineage 和对象一致性治理均已实现并经独立 Evaluator PASS。Phase 3 已以普通 merge commit `33aa838` 合入 `main`，标签为 `phase-3-pass-20260801`。
+Phase 1 至 Phase 3 已完成版本收口并经独立 Evaluator PASS。Phase 4A 的五交易所 akshare 单日自动采集、正式业务表入库、DCE 官方优先/Sina fallback、幂等重跑、故障隔离与 VPS 定时调度也已完成实现和部署，候选 `944a4de` 等待独立 Evaluator；Phase 4B 全历史回填尚未实施。Phase 3 已以普通 merge commit `33aa838` 合入 `main`，标签为 `phase-3-pass-20260801`。
 
 ## 已确认技术基线
 
@@ -51,7 +51,7 @@
 - 普通业务实体使用 UUIDv7，高频时间序列与明细使用 BIGINT identity。
 - 金融最终存储使用确定的 `numeric` 精度，MVP 仅开放 CNY。
 - 批次仅在无后续修改和依赖时整批原子回滚；纠错使用补偿批次。
-- 敏感数据使用信封加密；自动采集容器仅允许访问五交易所域名白名单。
+- 敏感数据使用信封加密；自动采集容器仅允许访问五交易所域名白名单；仅 DCE 可在官方 412 等失败后切换到 DEC-041 许可的新浪域名白名单，并如实记录聚合来源。
 - 白名单结构化自动批次免人工确认、免提取预览，失败批次隔离且不写正式表；手动文件导入流程不变。
 - PNG/SVG 由 ECharts 前端直接导出，SVG 继续执行安全清洗。
 
@@ -59,7 +59,7 @@
 
 ## 建议实施顺序
 
-`Phase 1–3 基础、权限与导入（已完成） → Phase 4 akshare 采集与全历史回填 → Phase 5 多腿套利与图表 → Phase 6 成交/持仓/绩效 → Phase 7 席位分析 → Phase 8 AI → Phase 9 运维加固与完工事项`
+`Phase 1–3 基础、权限与导入（已完成） → Phase 4A 单日 akshare 采集（已实现，待 Evaluator） → Phase 4B 全历史回填（未实施） → Phase 5 多腿套利与图表 → Phase 6 成交/持仓/绩效 → Phase 7 席位分析 → Phase 8 AI → Phase 9 运维加固与完工事项`
 
 该顺序修正了原方案“阶段 2 先做交易持仓、阶段 3 再做导入”与结论“先建设导入和数据层”的冲突。
 
@@ -126,7 +126,7 @@ http://localhost:8088
 - 架构与业务口径已确认并写入 `docs/DECISIONS.md`。
 - 尚未确定的实现细节集中在 `docs/OPEN_QUESTIONS.md`。
 - Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS；Phase 3 main CI Run `30703979390` success。
-- 标准 GHCR digest 发布与 VPS 验收链路已经实跑；`futures` VPS 当前保持运行候选版本 `45ee8028647a1b8e4b8cda043e8012b4e281d739`，Phase 3 版本收口没有重新部署。
-- VPS 的 127 个历史测试批次生产库归零重置，以及 TLS / `AUTH_COOKIE_SECURE=true` 生产验证，按用户裁定延后到项目完工时处理。
-- 2026-08-02 总方案重审已确认：废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-040`。
-- Phase 4 将建设 akshare 采集与全历史回填；本次仅修订文档，尚未开始实现或部署。
+- Phase 4A 候选 `944a4de` 的 CI Run `30753685223`、Container images Run `30753724067`、Deploy Run `30754021926` 全部 success；`futures` VPS 已运行该候选并返回 `PHASE4A_E2E_PASS`，现等待独立 Evaluator。
+- Phase 4A 覆盖指定日期单次采集；Phase 4B 全历史回填、套利/分析/图表、AI 与新前端页面仍未实施。
+- VPS 原 127 个历史测试批次仍未清理；部署前实态为 144 个手动批次，全部由数量与稳定行指纹保护。生产库归零重置，以及 TLS / `AUTH_COOKIE_SECURE=true` 生产验证，按用户裁定延后到项目完工时处理。
+- 2026-08-02 总方案重审已确认：废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-041`。

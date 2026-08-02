@@ -1,6 +1,6 @@
 # Phase 4 akshare 采集与回填
 
-状态：Phase 4A Planner 契约已确认；本单授权在契约提交推送后直接实施 Phase 4A。
+状态：Phase 4A 已完成实现、CI、四镜像发布与 VPS E2E，候选 `944a4de` 待独立 Evaluator；Phase 4B 未实施。
 基线：`main@2a6e6d5`。
 依据：`DEC-031`、`DEC-038`、`DEC-039`、`DEC-041`、`DEVELOPMENT_PLAN.md` 第 5 节、`DATABASE_DESIGN.md` 第 5、6、9、11 节。
 
