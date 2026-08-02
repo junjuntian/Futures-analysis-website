@@ -43,7 +43,7 @@ class FakePlatform:
 
 def test_one_exchange_failure_does_not_stop_another_exchange() -> None:
     platform = FakePlatform()
-    failures = CollectionRunner(FakeAdapter(), platform).run(
+    failures = CollectionRunner(FakeAdapter(), platform, retry_delay_seconds=0).run(
         date(2026, 8, 1), ["SHFE", "DCE"], ["catalog"]
     )
     assert failures == 1
@@ -53,7 +53,7 @@ def test_one_exchange_failure_does_not_stop_another_exchange() -> None:
 
 def test_explicit_fault_injection_isolates_one_exchange() -> None:
     platform = FakePlatform()
-    failures = CollectionRunner(FakeAdapter(), platform).run(
+    failures = CollectionRunner(FakeAdapter(), platform, retry_delay_seconds=0).run(
         date(2026, 8, 1),
         ["SHFE", "DCE"],
         ["catalog"],
@@ -83,9 +83,34 @@ class DceFallbackAdapter(FakeAdapter):
 
 def test_dce_official_failure_is_audited_before_sina_fallback_succeeds() -> None:
     platform = FakePlatform()
-    failures = CollectionRunner(DceFallbackAdapter(), platform).run(
+    failures = CollectionRunner(
+        DceFallbackAdapter(), platform, retry_delay_seconds=0
+    ).run(
         date(2026, 8, 1), ["DCE"], ["catalog"]
     )
     assert failures == 0
     assert platform.failed == ["DCE:futures_catalog_v1"]
     assert platform.submitted == ["akshare_sina_dce_fallback:futures_catalog_v1:1"]
+
+
+class TransientGfexAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def catalog(self, source, collection_date):
+        self.calls += 1
+        if self.calls < 3:
+            raise ValueError("transient empty response")
+        return super().catalog(source, collection_date)
+
+
+def test_non_dce_official_source_recovers_from_transient_response() -> None:
+    adapter = TransientGfexAdapter()
+    platform = FakePlatform()
+    failures = CollectionRunner(adapter, platform, retry_delay_seconds=0).run(
+        date(2026, 8, 1), ["GFEX"], ["catalog"]
+    )
+    assert failures == 0
+    assert adapter.calls == 3
+    assert platform.failed == []
+    assert platform.submitted == ["akshare_gfex_official:futures_catalog_v1:1"]

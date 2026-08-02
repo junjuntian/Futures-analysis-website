@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 
 from futures_collector.api import PlatformClient, safe_error_code
@@ -21,9 +22,16 @@ LOG = logging.getLogger("futures_collector")
 
 
 class CollectionRunner:
-    def __init__(self, adapter: AkshareAdapter, platform: PlatformClient) -> None:
+    def __init__(
+        self,
+        adapter: AkshareAdapter,
+        platform: PlatformClient,
+        *,
+        retry_delay_seconds: float = 1.0,
+    ) -> None:
         self.adapter = adapter
         self.platform = platform
+        self.retry_delay_seconds = retry_delay_seconds
 
     def run(
         self,
@@ -61,7 +69,9 @@ class CollectionRunner:
             dataset_type = _dataset_type(dataset)
             effective_source = source
             try:
-                rows = self._collect(source, collection_date, dataset, fallback=False)
+                rows = self._collect_with_retries(
+                    source, collection_date, dataset, fallback=False
+                )
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",
@@ -85,7 +95,7 @@ class CollectionRunner:
                     DCE_FALLBACK_SOURCE.source_code,
                 )
                 try:
-                    rows = self._collect(
+                    rows = self._collect_with_retries(
                         DCE_FALLBACK_SOURCE,
                         collection_date,
                         dataset,
@@ -140,6 +150,35 @@ class CollectionRunner:
                 result.skipped,
             )
         return failures
+
+    def _collect_with_retries(
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        dataset: str,
+        *,
+        fallback: bool,
+    ) -> list[dict[str, str]]:
+        max_attempts = 1 if source.code == "DCE" and not fallback else 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._collect(source, collection_date, dataset, fallback=fallback)
+            except Exception as error:
+                if attempt == max_attempts:
+                    raise
+                LOG.warning(
+                    "dataset_retry exchange=%s dataset=%s source=%s attempt=%d "
+                    "max_attempts=%d error=%s",
+                    source.code,
+                    _dataset_type(dataset),
+                    source.source_code,
+                    attempt,
+                    max_attempts,
+                    safe_error_code(error),
+                )
+                if self.retry_delay_seconds > 0:
+                    time.sleep(self.retry_delay_seconds * attempt)
+        raise AssertionError("retry loop exhausted without returning or raising")
 
     def _collect(
         self,
