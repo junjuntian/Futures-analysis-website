@@ -48,7 +48,10 @@ psql_value() {
 
 legacy_batches_before=$(psql_value -c \
   "select count(*) from import_batches where ingestion_mode='manual'")
+automatic_batches_before=$(psql_value -c \
+  "select count(*) from import_batches where ingestion_mode='automatic'")
 users_before=$(psql_value -c "select count(*) from users")
+echo "PHASE4A_E2E_BASELINE manual_batches=$legacy_batches_before automatic_batches=$automatic_batches_before users=$users_before"
 test "$legacy_batches_before" = 127
 echo "PHASE4A_E2E_STAGE baseline_counts_passed"
 
