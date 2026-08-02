@@ -69,9 +69,7 @@ class CollectionRunner:
             dataset_type = _dataset_type(dataset)
             effective_source = source
             try:
-                rows = self._collect_with_retries(
-                    source, collection_date, dataset, fallback=False
-                )
+                rows = self._collect_with_retries(source, collection_date, dataset, fallback=False)
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",

@@ -83,9 +83,7 @@ class DceFallbackAdapter(FakeAdapter):
 
 def test_dce_official_failure_is_audited_before_sina_fallback_succeeds() -> None:
     platform = FakePlatform()
-    failures = CollectionRunner(
-        DceFallbackAdapter(), platform, retry_delay_seconds=0
-    ).run(
+    failures = CollectionRunner(DceFallbackAdapter(), platform, retry_delay_seconds=0).run(
         date(2026, 8, 1), ["DCE"], ["catalog"]
     )
     assert failures == 0
