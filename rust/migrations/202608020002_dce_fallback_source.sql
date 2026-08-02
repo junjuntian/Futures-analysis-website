@@ -14,4 +14,8 @@ alter table data_sources
         (source_type = 'aggregator_public' and authorization_status = 'whitelisted_exception')
     );
 
+insert into schema_versions (version, description)
+values ('202608020002', 'DCE audited aggregator fallback source')
+on conflict (version) do nothing;
+
 commit;

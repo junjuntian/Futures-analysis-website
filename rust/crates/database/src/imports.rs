@@ -3299,6 +3299,18 @@ mod tests {
         let migration = include_str!("../../../migrations/202608020002_dce_fallback_source.sql");
         assert!(migration.contains("source_type = 'aggregator_public'"));
         assert!(migration.contains("authorization_status = 'whitelisted_exception'"));
+        assert!(migration.contains("values ('202608020002'"));
+
+        let deployment = include_str!("../../../../.github/workflows/deploy-futures.yml");
+        assert_eq!(
+            deployment
+                .matches("202608020002_dce_fallback_source.sql")
+                .count(),
+            2
+        );
+        assert!(
+            deployment.contains("migrations=202607260001,202607260002,202608020001,202608020002")
+        );
     }
 
     #[test]

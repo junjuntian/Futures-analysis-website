@@ -126,6 +126,7 @@ jobs:
             rust/migrations/202607260001_phase_3d_rollback_and_object_governance.sql \
             rust/migrations/202607260002_phase_3d_worker_fairness.sql \
             rust/migrations/202608020001_phase_4a_collection_schema.sql \
+            rust/migrations/202608020002_dce_fallback_source.sql \
             "${RELEASE_BUNDLE}/migrations/"
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
 
@@ -541,7 +542,8 @@ jobs:
           for migration in \
             202607260001_phase_3d_rollback_and_object_governance.sql \
             202607260002_phase_3d_worker_fairness.sql \
-            202608020001_phase_4a_collection_schema.sql
+            202608020001_phase_4a_collection_schema.sql \
+            202608020002_dce_fallback_source.sql
           do
             version=${migration%%_*}
             applied=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
@@ -555,7 +557,7 @@ jobs:
           done
           test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
             psql -X -U futures_app -d futures_platform -Atq \
-            -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001')")" = 3
+            -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001','202608020002')")" = 4
 
           if test "$PROVISION_COLLECTOR" = true; then
             "${COMPOSE[@]}" run --rm --no-deps api \
@@ -649,7 +651,7 @@ jobs:
             echo "worker_ref=$WORKER_REF"
             echo "frontend_ref=$FRONTEND_REF"
             echo "collector_ref=$COLLECTOR_REF"
-            echo "migrations=202607260001,202607260002,202608020001"
+            echo "migrations=202607260001,202607260002,202608020001,202608020002"
             echo "phase3c_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
             echo "phase3d_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
             echo "phase4a_e2e=PASS"
