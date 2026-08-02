@@ -3313,6 +3313,8 @@ mod tests {
         );
         assert_eq!(deployment.matches("ServerAliveInterval=30").count(), 1);
         assert_eq!(deployment.matches("ServerAliveCountMax=6").count(), 1);
+        assert!(deployment.contains("for version_attempt in {1..20}"));
+        assert!(deployment.contains("test \"$VERSION_VERIFIED\" -eq 1"));
     }
 
     #[test]

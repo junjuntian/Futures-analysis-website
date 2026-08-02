@@ -567,10 +567,19 @@ jobs:
           "${COMPOSE[@]}" up -d --no-build --remove-orphans
           timeout 240 bash -c "until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null; do sleep 3; done"
           VERSION_JSON=$(mktemp)
-          curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON"
-          jq -e --arg sha "$SOURCE_SHA" '.data.git_sha == $sha and .data.git_sha != "local"' \
-            "$VERSION_JSON" >/dev/null
+          VERSION_VERIFIED=0
+          for version_attempt in {1..20}; do
+            if curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON" &&
+               jq -e --arg sha "$SOURCE_SHA" \
+                 '.data.git_sha == $sha and .data.git_sha != "local"' \
+                 "$VERSION_JSON" >/dev/null; then
+              VERSION_VERIFIED=1
+              break
+            fi
+            sleep 3
+          done
           rm -f "$VERSION_JSON"
+          test "$VERSION_VERIFIED" -eq 1
 
           for spec in "api:$API_REF" "worker:$WORKER_REF" "frontend:$FRONTEND_REF"; do
             service=${spec%%:*}
