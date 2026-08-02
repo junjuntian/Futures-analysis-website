@@ -221,6 +221,50 @@ pub struct ConfirmedImport {
     pub replayed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportConfirmationMode {
+    Manual,
+    Automatic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportConfirmationScope {
+    pub mode: ImportConfirmationMode,
+    pub policy: ImportConflictPolicy,
+}
+
+impl ImportConfirmationScope {
+    pub fn manual(policy: ImportConflictPolicy) -> Self {
+        Self {
+            mode: ImportConfirmationMode::Manual,
+            policy,
+        }
+    }
+
+    pub fn automatic() -> Self {
+        Self {
+            mode: ImportConfirmationMode::Automatic,
+            policy: ImportConflictPolicy::Skip,
+        }
+    }
+}
+
+fn confirmation_scope_allowed(
+    mode: ImportConfirmationMode,
+    ingestion_mode: &str,
+    dataset_type: &str,
+    policy: ImportConflictPolicy,
+) -> bool {
+    match mode {
+        ImportConfirmationMode::Manual => ingestion_mode == "manual" && dataset_type == "generic",
+        ImportConfirmationMode::Automatic => {
+            ingestion_mode == "automatic"
+                && dataset_type != "generic"
+                && policy == ImportConflictPolicy::Skip
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RollbackPrecheck {
     pub import_id: Uuid,
@@ -1349,7 +1393,7 @@ pub async fn confirm_import(
     workspace_id: Uuid,
     actor_user_id: Uuid,
     import_id: Uuid,
-    policy: ImportConflictPolicy,
+    scope: ImportConfirmationScope,
     idempotency_key_hash: &str,
     request_hash: &str,
 ) -> Result<ConfirmedImport, ImportRepositoryError> {
@@ -1365,7 +1409,7 @@ pub async fn confirm_import(
         .execute(&mut *tx)
         .await?;
     let batch = sqlx::query(
-        "select status::text as status, dataset_type, staging_version,
+        "select status::text as status, ingestion_mode, dataset_type, staging_version,
                 validated_staging_version, validation_version, validated_mapping_id,
                 blocking_error_count, duplicate_count, conflict_count,
                 confirmation_fingerprint
@@ -1505,10 +1549,15 @@ pub async fn confirm_import(
     if batch.get::<i32, _>("blocking_error_count") > 0 {
         return Err(ImportRepositoryError::BlockingErrorsPresent);
     }
-    if batch.get::<String, _>("dataset_type") != "generic" {
+    if !confirmation_scope_allowed(
+        scope.mode,
+        &batch.get::<String, _>("ingestion_mode"),
+        &batch.get::<String, _>("dataset_type"),
+        scope.policy,
+    ) {
         return Err(ImportRepositoryError::ConflictPolicyNotAllowed);
     }
-    if policy == ImportConflictPolicy::Abort
+    if scope.policy == ImportConflictPolicy::Abort
         && (batch.get::<i32, _>("duplicate_count") > 0 || batch.get::<i32, _>("conflict_count") > 0)
     {
         return Err(ImportRepositoryError::BlockingErrorsPresent);
@@ -1528,7 +1577,7 @@ pub async fn confirm_import(
     .execute(&mut *tx)
     .await?;
     sqlx::query(CONFIRM_BATCH_SQL)
-        .bind(policy.as_str())
+        .bind(scope.policy.as_str())
         .bind(request_hash)
         .bind(actor_user_id)
         .bind(workspace_id)
@@ -3187,6 +3236,46 @@ async fn set_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmation_mode_keeps_manual_and_automatic_scopes_disjoint() {
+        assert!(confirmation_scope_allowed(
+            ImportConfirmationMode::Manual,
+            "manual",
+            "generic",
+            ImportConflictPolicy::Skip,
+        ));
+        assert!(!confirmation_scope_allowed(
+            ImportConfirmationMode::Manual,
+            "automatic",
+            "market_prices",
+            ImportConflictPolicy::Skip,
+        ));
+        assert!(confirmation_scope_allowed(
+            ImportConfirmationMode::Automatic,
+            "automatic",
+            "market_prices",
+            ImportConflictPolicy::Skip,
+        ));
+        assert!(!confirmation_scope_allowed(
+            ImportConfirmationMode::Automatic,
+            "automatic",
+            "generic",
+            ImportConflictPolicy::Skip,
+        ));
+        assert!(!confirmation_scope_allowed(
+            ImportConfirmationMode::Automatic,
+            "manual",
+            "market_prices",
+            ImportConflictPolicy::Skip,
+        ));
+        assert!(!confirmation_scope_allowed(
+            ImportConfirmationMode::Automatic,
+            "automatic",
+            "market_prices",
+            ImportConflictPolicy::Overwrite,
+        ));
+    }
 
     #[test]
     fn rollback_snapshot_validation_accepts_controlled_soft_delete_snapshots() {

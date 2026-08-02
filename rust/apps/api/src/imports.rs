@@ -1437,7 +1437,7 @@ pub async fn confirm(
             context.workspace_id(),
             context.user_id(),
             import_id,
-            request.conflict_policy,
+            database::imports::ImportConfirmationScope::manual(request.conflict_policy),
             &idempotency_key_hash,
             &request_hash,
         )
@@ -1682,7 +1682,7 @@ pub async fn automatic_confirm(
             context.workspace_id(),
             context.user_id(),
             import_id,
-            ImportConflictPolicy::Skip,
+            database::imports::ImportConfirmationScope::automatic(),
             &idempotency_key_hash,
             &request_hash,
         )
