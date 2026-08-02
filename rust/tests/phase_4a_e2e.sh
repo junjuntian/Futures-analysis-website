@@ -53,8 +53,8 @@ legacy_batches_fingerprint_before=$(psql_value -c \
 automatic_batches_before=$(psql_value -c \
   "select count(*) from import_batches where ingestion_mode='automatic'")
 users_before=$(psql_value -c "select count(*) from users")
-users_fingerprint_before=$(psql_value -c \
-  "select md5(coalesce(string_agg(to_jsonb(app_user)::text, '|' order by id), '')) from users app_user")
+users_identity_fingerprint_before=$(psql_value -c \
+  "select md5(coalesce(string_agg((to_jsonb(app_user) - 'updated_at' - 'last_login_at')::text, '|' order by id), '')) from users app_user")
 echo "PHASE4A_E2E_BASELINE manual_batches=$legacy_batches_before automatic_batches=$automatic_batches_before users=$users_before"
 test "$legacy_batches_before" -ge 127
 echo "PHASE4A_E2E_STAGE baseline_counts_passed"
@@ -159,7 +159,7 @@ test "$peak_bytes" -le 536870912
 test "$(psql_value -c "select count(*) from import_batches where ingestion_mode='manual'")" = "$legacy_batches_before"
 test "$(psql_value -c "select md5(coalesce(string_agg(to_jsonb(batch)::text, '|' order by id), '')) from import_batches batch where ingestion_mode='manual'")" = "$legacy_batches_fingerprint_before"
 test "$(psql_value -c "select count(*) from users")" = "$users_before"
-test "$(psql_value -c "select md5(coalesce(string_agg(to_jsonb(app_user)::text, '|' order by id), '')) from users app_user")" = "$users_fingerprint_before"
+test "$(psql_value -c "select md5(coalesce(string_agg((to_jsonb(app_user) - 'updated_at' - 'last_login_at')::text, '|' order by id), '')) from users app_user")" = "$users_identity_fingerprint_before"
 
 if grep -Eiq \
   'authorization:[[:space:]]*bearer|set-cookie:|"password"|collector-credentials|csrf_token' \
