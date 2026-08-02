@@ -239,6 +239,7 @@ VPS 部署后 E2E 必须：
 - 抽查 RLS 跨 Workspace 拒绝、正式记录到 import batch/data source/CSV 行的追溯、自动批次无 preview、整批 rollback-check 可用。
 - 证明 cron 两个时点已安装、flock 生效、collector 内存峰值已记录。
 - 前后对比确认既有 users 和 127 个测试 import batches 未被清理或篡改；Phase 4A 新批次的增加必须逐项可解释。
+- Phase 4A 生产部署不得重跑会向生产库保留新手动批次的 Phase 3C/3D 历史 E2E；其回归由本地/CI 与既有 Phase 3 收口证据覆盖。VPS 只运行本阶段 E2E，部署报告必须如实标记历史 E2E 未重跑。
 
 ## 11. 回滚方案
 
