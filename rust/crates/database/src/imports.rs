@@ -3311,6 +3311,8 @@ mod tests {
         assert!(
             deployment.contains("migrations=202607260001,202607260002,202608020001,202608020002")
         );
+        assert_eq!(deployment.matches("ServerAliveInterval=30").count(), 1);
+        assert_eq!(deployment.matches("ServerAliveCountMax=6").count(), 1);
     }
 
     #[test]

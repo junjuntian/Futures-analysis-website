@@ -718,6 +718,9 @@ jobs:
             -o IdentitiesOnly=yes
             -o StrictHostKeyChecking=yes
             -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=6
+            -o TCPKeepAlive=yes
           )
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
