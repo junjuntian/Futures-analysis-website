@@ -194,7 +194,7 @@ AKShare 每个原始排名行可能同时给出不同会员的成交量、持买
 
 - `docker-compose.yml` 增加 `collector` 一次性 service，不设 `restart`、`depends_on: postgres` 或数据库网络；`mem_limit: 512m`，凭据单文件只读挂载。
 - `docker-compose.production.yml` 将 collector 指向 `...-collector:sha-<git_sha>`/不可变 digest。发布工作流增加 collector 镜像矩阵项，部署工作流增加 collector digest 输入、校验、拉取、release compose 固定和取证。
-- 部署不改写凭据内容；部署前只校验宿主凭据文件存在、owner/mode 正确。若不存在，停止并由管理员在管理流程中创建服务账号和文件。
+- 部署默认不改写凭据内容；部署前只校验宿主凭据文件存在、owner/mode 正确。若不存在，停止并由管理员执行管理流程。首次上线允许部署者显式传入 `provision_collector=true`，在服务切换前调用同一受控管理命令一次性创建 root:0400 文件与固定 analyst 账号；默认值必须为 `false`，已存在账号只校验、不重置口令。
 - host cron 配置文件由发布包提供并在 VPS 安装，至少包含北京时间 17:30、21:30 两条；使用 flock 防止重叠，日志进入受控 journald/轮转文件且不含凭据。
 - 记录 `docker stats --no-stream`/cgroup 峰值；若真实峰值接近 512m，只能基于证据调整并在交接列明。
 

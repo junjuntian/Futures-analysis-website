@@ -27,6 +27,11 @@ on:
         description: Recent completed trading date for Phase 4A acceptance (YYYY-MM-DD)
         required: true
         type: string
+      provision_collector:
+        description: Explicitly run the one-time collector credential/account management flow
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -147,6 +152,7 @@ jobs:
           RUN_URL=$7
           RELEASE_DIR=$8
           COLLECTION_DATE=$9
+          PROVISION_COLLECTOR=${10}
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
@@ -171,6 +177,7 @@ jobs:
 
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$PROVISION_COLLECTOR" = true || "$PROVISION_COLLECTOR" = false ]]
           for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
@@ -450,6 +457,19 @@ jobs:
           done
 
           COLLECTOR_CREDENTIAL_FILE=/etc/futures-platform/secrets/collector-credentials
+          if test "$PROVISION_COLLECTOR" = true && test ! -s "$COLLECTOR_CREDENTIAL_FILE"; then
+            public_origin=$("${COMPOSE[@]}" config --format json |
+              jq -r '.services.api.environment.PUBLIC_ORIGIN')
+            [[ "$public_origin" =~ ^https?://[A-Za-z0-9._:-]+$ ]]
+            collector_password=$(openssl rand -base64 48 | tr -d '\n' | tr '+/' '-_')
+            credential_tmp=$(mktemp /etc/futures-platform/secrets/.collector.XXXXXX)
+            printf '{"base_url":"http://api:8080","origin":"%s","username":"collector-service","password":"%s"}' \
+              "$public_origin" "$collector_password" >"$credential_tmp"
+            chown root:root "$credential_tmp"
+            chmod 400 "$credential_tmp"
+            mv "$credential_tmp" "$COLLECTOR_CREDENTIAL_FILE"
+            unset collector_password
+          fi
           test -s "$COLLECTOR_CREDENTIAL_FILE"
           test "$(stat -c %U:%G "$COLLECTOR_CREDENTIAL_FILE")" = root:root
           test "$(stat -c %a "$COLLECTOR_CREDENTIAL_FILE")" = 400
@@ -523,6 +543,11 @@ jobs:
           test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
             psql -X -U futures_app -d futures_platform -Atq \
             -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001')")" = 3
+
+          if test "$PROVISION_COLLECTOR" = true; then
+            "${COMPOSE[@]}" run --rm --no-deps api \
+              /app/api --provision-collector-account >/dev/null
+          fi
 
           "${COMPOSE[@]}" up -d --no-build --remove-orphans
           timeout 240 bash -c "until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null; do sleep 3; done"
@@ -661,6 +686,7 @@ jobs:
             echo "version_git_sha=$SOURCE_SHA"
             echo "runtime_digest_match=PASS"
             echo "collector_image_verified=PASS"
+            echo "collector_management_flow=$PROVISION_COLLECTOR"
             echo "registry_auth_cleanup=PASS"
             echo "service_log_secret_scan=PASS"
             echo "evidence_dir=$EVIDENCE_DIR"
@@ -723,7 +749,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
