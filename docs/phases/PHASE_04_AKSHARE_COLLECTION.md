@@ -2,7 +2,7 @@
 
 状态：Phase 4A Planner 契约已确认；本单授权在契约提交推送后直接实施 Phase 4A。
 基线：`main@2a6e6d5`。
-依据：`DEC-031`、`DEC-038`、`DEC-039`、`DEVELOPMENT_PLAN.md` 第 5 节、`DATABASE_DESIGN.md` 第 5、6、9、11 节。
+依据：`DEC-031`、`DEC-038`、`DEC-039`、`DEC-041`、`DEVELOPMENT_PLAN.md` 第 5 节、`DATABASE_DESIGN.md` 第 5、6、9、11 节。
 
 ## 1. 阶段边界
 
@@ -64,9 +64,12 @@ VPS host cron
 | CFFEX | `futures_contract_info_cffex(date)` | `get_cffex_daily(date)` | `get_cffex_rank_table(date)` | `www.cffex.com.cn` |
 
 - 不调用聚合入口 `get_futures_daily` 或 `get_rank_sum`，以便单交易所失败可独立归因和隔离。
-- 不调用新浪、东方财富、生意社等二手源。当前实现不存在待用户裁定的聚合源。
+- `DEC-041` 只为 DCE 增加官方失败后的新浪 fallback；SHFE、CZCE、GFEX、CFFEX 仍不得调用新浪、东方财富、生意社等二手源。
+- DCE fallback 函数固定为：`futures_symbol_mark()` 取得 DCE 品种目录，`futures_zh_realtime(symbol)` 取得当前活跃合约，`futures_contract_detail(contract)` 取得合约参数，`futures_zh_daily_sina(contract)` 取得含收盘价与结算价的历史日行情，`futures_hold_pos_sina(kind, contract, date)` 分别取得成交量、持买和持卖排名。允许域名固定为 `vip.stock.finance.sina.com.cn`、`finance.sina.com.cn`、`stock2.finance.sina.com.cn`；重定向仍须落在该集合。
+- 选择新浪而非东方财富的依据：锁定版 AKShare 的 `futures_zh_daily_sina` 返回 `close` 与 `settle`，且 `futures_hold_pos_sina` 覆盖 DEC-039 要求的三类逐合约席位排名；东方财富 `futures_hist_em` 不返回结算价，数据完整性不足。
+- 每个 DCE 数据集都必须先尝试上表官方函数。仅在官方请求或解析失败时 fallback；不能以空结果静默切换，非交易日仍按原规则失败隔离。官方失败尝试必须生成 `failed` 审计批次，fallback 另建 `succeeded` 批次。
 - akshare 自带交易日判断只用于拒绝明显非交易日参数；正式 `trading_calendar_days` 的 4A 记录由该交易所目录/行情官方响应共同证明，不能仅凭 akshare 本地静态日历入库。
-- 五个来源代码固定为 `akshare_dce_official`、`akshare_shfe_official`、`akshare_czce_official`、`akshare_gfex_official`、`akshare_cffex_official`；`source_type=exchange_public`、`authorization_status=whitelisted`、`connector_code=akshare_v1`。
+- 官方来源代码固定为 `akshare_dce_official`、`akshare_shfe_official`、`akshare_czce_official`、`akshare_gfex_official`、`akshare_cffex_official`；`source_type=exchange_public`、`authorization_status=whitelisted`、`connector_code=akshare_v1`。DCE fallback 来源代码固定为 `akshare_sina_dce_fallback`，`source_type=aggregator_public`、`authorization_status=whitelisted_exception`、`connector_code=akshare_v1`；其批次和正式事实表的 `source_id` 不得指向 `akshare_dce_official`。
 
 ## 4. 标准化 CSV 契约
 
@@ -233,7 +236,7 @@ CI 必须在当前 Phase 4A 分支成功；`container-images` 必须发布 api�
 VPS 部署后 E2E 必须：
 
 - 证明运行版本和四镜像 digest 与发布候选一致，且未泄露凭据。
-- 对最近交易日真实运行一次，五交易所行情与席位批次均 `succeeded`；`market_prices`、`seat_positions` 行数均大于 0；目录和当日日历存在。
+- 对最近交易日真实运行一次，五交易所行情与席位批次均 `succeeded`；DCE 允许在官方失败后由新浪 fallback 批次成功，但 E2E 必须断言其 `data_source_code=akshare_sina_dce_fallback`，且 `market_prices.source_id`、`seat_positions.source_id` 与该真实来源一致并可追溯；`market_prices`、`seat_positions` 行数均大于 0；目录和当日日历存在。
 - 重跑同日后两张正式表计数不变，业务唯一键重复数为 0。
 - 以受控网络故障注入一个交易所，对应来源批次 `failed` 且正式表零写，其余交易所成功且不受影响。
 - 抽查 RLS 跨 Workspace 拒绝、正式记录到 import batch/data source/CSV 行的追溯、自动批次无 preview、整批 rollback-check 可用。
