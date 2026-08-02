@@ -10,7 +10,12 @@ from futures_collector.normalize import (
     normalize_market,
     normalize_seats,
 )
-from futures_collector.sources import SOURCES, AkshareAdapter, ExchangeSource
+from futures_collector.sources import (
+    DCE_FALLBACK_SOURCE,
+    SOURCES,
+    AkshareAdapter,
+    ExchangeSource,
+)
 
 LOG = logging.getLogger("futures_collector")
 
@@ -52,48 +57,11 @@ class CollectionRunner:
         self, source: ExchangeSource, collection_date: date, datasets: list[str]
     ) -> int:
         failures = 0
-        market_rows: list[dict[str, str]] | None = None
         for dataset in datasets:
             dataset_type = _dataset_type(dataset)
+            effective_source = source
             try:
-                if dataset == "catalog":
-                    rows = normalize_catalog(
-                        source, collection_date, self.adapter.catalog(source, collection_date)
-                    )
-                elif dataset == "market":
-                    market_rows = normalize_market(
-                        source, collection_date, self.adapter.market(source, collection_date)
-                    )
-                    rows = market_rows
-                elif dataset == "calendar":
-                    if market_rows is None:
-                        market_rows = normalize_market(
-                            source, collection_date, self.adapter.market(source, collection_date)
-                        )
-                    rows = normalize_calendar(source, collection_date)
-                elif dataset == "seats":
-                    rows = normalize_seats(
-                        source, collection_date, self.adapter.seats(source, collection_date)
-                    )
-                else:
-                    raise ValueError("unsupported dataset")
-                LOG.info(
-                    "dataset_collected exchange=%s dataset=%s rows=%d",
-                    source.code,
-                    dataset_type,
-                    len(rows),
-                )
-                result = self.platform.submit(source, dataset_type, collection_date, rows)
-                LOG.info(
-                    "batch_succeeded exchange=%s dataset=%s import_id=%s "
-                    "rows=%d inserted=%d skipped=%d",
-                    source.code,
-                    dataset_type,
-                    result.import_id,
-                    len(rows),
-                    result.inserted,
-                    result.skipped,
-                )
+                rows = self._collect(source, collection_date, dataset, fallback=False)
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",
@@ -108,8 +76,109 @@ class CollectionRunner:
                     dataset_type,
                     reason,
                 )
+                if source.code != "DCE":
+                    failures += 1
+                    continue
+                LOG.warning(
+                    "fallback_activated exchange=DCE dataset=%s source=%s",
+                    dataset_type,
+                    DCE_FALLBACK_SOURCE.source_code,
+                )
+                try:
+                    rows = self._collect(
+                        DCE_FALLBACK_SOURCE,
+                        collection_date,
+                        dataset,
+                        fallback=True,
+                    )
+                except Exception as fallback_error:
+                    LOG.error(
+                        "fallback_failed exchange=DCE dataset=%s error=%s",
+                        dataset_type,
+                        _safe_error_code(fallback_error),
+                    )
+                    fallback_reason = self.platform.record_failure(
+                        DCE_FALLBACK_SOURCE, dataset_type, collection_date
+                    )
+                    LOG.error(
+                        "batch_failed exchange=DCE dataset=%s source=%s reason=%s",
+                        dataset_type,
+                        DCE_FALLBACK_SOURCE.source_code,
+                        fallback_reason,
+                    )
+                    failures += 1
+                    continue
+                effective_source = DCE_FALLBACK_SOURCE
+            LOG.info(
+                "dataset_collected exchange=%s dataset=%s source=%s rows=%d",
+                effective_source.code,
+                dataset_type,
+                effective_source.source_code,
+                len(rows),
+            )
+            try:
+                result = self.platform.submit(effective_source, dataset_type, collection_date, rows)
+            except Exception as error:
+                LOG.error(
+                    "dataset_submit_failed exchange=%s dataset=%s source=%s error=%s",
+                    effective_source.code,
+                    dataset_type,
+                    effective_source.source_code,
+                    _safe_error_code(error),
+                )
                 failures += 1
+                continue
+            LOG.info(
+                "batch_succeeded exchange=%s dataset=%s source=%s import_id=%s "
+                "rows=%d inserted=%d skipped=%d",
+                effective_source.code,
+                dataset_type,
+                effective_source.source_code,
+                result.import_id,
+                len(rows),
+                result.inserted,
+                result.skipped,
+            )
         return failures
+
+    def _collect(
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        dataset: str,
+        *,
+        fallback: bool,
+    ) -> list[dict[str, str]]:
+        if dataset == "catalog":
+            frame = (
+                self.adapter.fallback_catalog(source, collection_date)
+                if fallback
+                else self.adapter.catalog(source, collection_date)
+            )
+            return normalize_catalog(source, collection_date, frame)
+        if dataset == "market":
+            frame = (
+                self.adapter.fallback_market(source, collection_date)
+                if fallback
+                else self.adapter.market(source, collection_date)
+            )
+            return normalize_market(source, collection_date, frame)
+        if dataset == "calendar":
+            frame = (
+                self.adapter.fallback_market(source, collection_date)
+                if fallback
+                else self.adapter.market(source, collection_date)
+            )
+            normalize_market(source, collection_date, frame)
+            return normalize_calendar(source, collection_date)
+        if dataset == "seats":
+            tables = (
+                self.adapter.fallback_seats(source, collection_date)
+                if fallback
+                else self.adapter.seats(source, collection_date)
+            )
+            return normalize_seats(source, collection_date, tables)
+        raise ValueError("unsupported dataset")
 
 
 def _dataset_type(dataset: str) -> str:

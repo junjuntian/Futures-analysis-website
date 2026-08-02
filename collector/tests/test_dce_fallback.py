@@ -1,0 +1,82 @@
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from futures_collector.sources import SOURCES, AkshareAdapter
+
+
+def test_sina_fallback_discovers_dce_contract_market_and_three_seat_ranks(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "futures_collector.sources.akshare.futures_symbol_mark",
+        lambda: pd.DataFrame(
+            [
+                {"exchange": "大连商品交易所", "symbol": "豆一", "mark": "dce_a"},
+                {"exchange": "上海期货交易所", "symbol": "铜", "mark": "shfe_cu"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "futures_collector.sources.akshare.futures_zh_realtime",
+        lambda symbol: pd.DataFrame([{"symbol": "A2609"}, {"symbol": "A0"}]),
+    )
+    monkeypatch.setattr(
+        "futures_collector.sources.akshare.futures_contract_detail",
+        lambda symbol: pd.DataFrame(
+            [
+                {"item": "交易单位", "value": "10吨/手"},
+                {"item": "最小变动价位", "value": "1元/吨"},
+                {"item": "上市日期", "value": "2025-09-15"},
+                {"item": "最后交易日", "value": "2026-09-14"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "futures_collector.sources.akshare.futures_zh_daily_sina",
+        lambda symbol: pd.DataFrame(
+            [
+                {"date": "2026-07-30", "close": 3999, "settle": 4000},
+                {"date": "2026-07-31", "close": 4001, "settle": 4002},
+            ]
+        ),
+    )
+
+    def seats(symbol, contract, date):
+        values = {
+            "成交量": ("成交量", 10),
+            "多单持仓": ("多单持仓", 20),
+            "空单持仓": ("空单持仓", 30),
+        }
+        column, value = values[symbol]
+        return pd.DataFrame([{"名次": 1, "会员简称": "会员甲", column: value}])
+
+    monkeypatch.setattr("futures_collector.sources.akshare.futures_hold_pos_sina", seats)
+
+    adapter = AkshareAdapter()
+    collection_date = date(2026, 7, 31)
+    catalog = adapter.fallback_catalog(SOURCES["DCE"], collection_date)
+    market = adapter.fallback_market(SOURCES["DCE"], collection_date)
+    positions = adapter.fallback_seats(SOURCES["DCE"], collection_date)
+
+    assert catalog["合约"].tolist() == ["A2609"]
+    assert market[["symbol", "close", "settle"]].to_dict("records") == [
+        {"symbol": "A2609", "close": 4001, "settle": 4002}
+    ]
+    assert set(positions) == {"A2609"}
+    assert set(positions["A2609"].columns) >= {
+        "vol_party_name",
+        "vol",
+        "long_party_name",
+        "long_open_interest",
+        "short_party_name",
+        "short_open_interest",
+    }
+
+
+def test_sina_fallback_is_rejected_for_every_non_dce_exchange() -> None:
+    adapter = AkshareAdapter()
+    for code in ("SHFE", "CZCE", "GFEX", "CFFEX"):
+        with pytest.raises(ValueError, match="only authorized for DCE"):
+            adapter.fallback_catalog(SOURCES[code], date(2026, 7, 31))

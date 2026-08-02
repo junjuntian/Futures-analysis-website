@@ -108,7 +108,9 @@ class PlatformClient:
             f"/api/v1/imports/{import_id}/automatic-confirm",
             headers={
                 **self._write_headers(),
-                "Idempotency-Key": f"collector:{source.code}:{dataset_type}:{collection_date}",
+                "Idempotency-Key": (
+                    f"collector:{source.source_code}:{dataset_type}:{collection_date}"
+                ),
             },
         )
         require_success(confirm, "automatic_confirm")

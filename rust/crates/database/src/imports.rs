@@ -334,30 +334,32 @@ pub async fn register_upload(
     .execute(&mut *tx)
     .await?;
     let source_id = if let Some(metadata) = &upload.automatic {
-        let (name, domain, allowed_domains) = official_source(&metadata.data_source_code)
+        let definition = automatic_source(&metadata.data_source_code)
             .ok_or(ImportRepositoryError::InvalidAutomaticMetadata)?;
         let source_id = sqlx::query_scalar::<_, Uuid>(
             "insert into data_sources
                     (id, workspace_id, code, name, source_type, base_domain,
                      authorization_status, connector_code, priority)
-                 values ($1, $2, $3, $4, 'exchange_public', $5,
-                         'whitelisted', 'akshare_v1', 100)
+                 values ($1, $2, $3, $4, $5, $6, $7, 'akshare_v1', $8)
                  on conflict (workspace_id, code) do update
                     set name = excluded.name, base_domain = excluded.base_domain,
-                        updated_at = now()
-                  where data_sources.source_type = 'exchange_public'
-                    and data_sources.authorization_status = 'whitelisted'
+                        priority = excluded.priority, updated_at = now()
+                  where data_sources.source_type = excluded.source_type
+                    and data_sources.authorization_status = excluded.authorization_status
                     and data_sources.connector_code = 'akshare_v1'
                  returning id",
         )
         .bind(Uuid::now_v7())
         .bind(upload.workspace_id)
         .bind(&metadata.data_source_code)
-        .bind(name)
-        .bind(domain)
+        .bind(definition.name)
+        .bind(definition.source_type)
+        .bind(definition.base_domain)
+        .bind(definition.authorization_status)
+        .bind(definition.priority)
         .fetch_one(&mut *tx)
         .await?;
-        for allowed_domain in allowed_domains {
+        for allowed_domain in definition.allowed_domains {
             sqlx::query(
                 "insert into data_source_allowed_domains
                     (id, workspace_id, data_source_id, domain)
@@ -491,29 +493,70 @@ pub async fn register_upload(
     })
 }
 
-fn official_source(code: &str) -> Option<(&'static str, &'static str, &'static [&'static str])> {
+#[derive(Debug, Clone, Copy)]
+struct AutomaticSourceDefinition {
+    name: &'static str,
+    source_type: &'static str,
+    base_domain: &'static str,
+    authorization_status: &'static str,
+    priority: i32,
+    allowed_domains: &'static [&'static str],
+}
+
+fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
     match code {
-        "akshare_dce_official" => Some((
-            "大连商品交易所",
-            "www.dce.com.cn",
-            &["www.dce.com.cn", "portal.dce.com.cn"],
-        )),
-        "akshare_shfe_official" => Some((
-            "上海期货交易所",
-            "www.shfe.com.cn",
-            &["www.shfe.com.cn", "tsite.shfe.com.cn"],
-        )),
-        "akshare_czce_official" => {
-            Some(("郑州商品交易所", "www.czce.com.cn", &["www.czce.com.cn"]))
-        }
-        "akshare_gfex_official" => {
-            Some(("广州期货交易所", "www.gfex.com.cn", &["www.gfex.com.cn"]))
-        }
-        "akshare_cffex_official" => Some((
-            "中国金融期货交易所",
-            "www.cffex.com.cn",
-            &["www.cffex.com.cn"],
-        )),
+        "akshare_dce_official" => Some(AutomaticSourceDefinition {
+            name: "大连商品交易所",
+            source_type: "exchange_public",
+            base_domain: "www.dce.com.cn",
+            authorization_status: "whitelisted",
+            priority: 100,
+            allowed_domains: &["www.dce.com.cn", "portal.dce.com.cn"],
+        }),
+        "akshare_sina_dce_fallback" => Some(AutomaticSourceDefinition {
+            name: "新浪财经（DCE 聚合）",
+            source_type: "aggregator_public",
+            base_domain: "vip.stock.finance.sina.com.cn",
+            authorization_status: "whitelisted_exception",
+            priority: 200,
+            allowed_domains: &[
+                "vip.stock.finance.sina.com.cn",
+                "finance.sina.com.cn",
+                "stock2.finance.sina.com.cn",
+            ],
+        }),
+        "akshare_shfe_official" => Some(AutomaticSourceDefinition {
+            name: "上海期货交易所",
+            source_type: "exchange_public",
+            base_domain: "www.shfe.com.cn",
+            authorization_status: "whitelisted",
+            priority: 100,
+            allowed_domains: &["www.shfe.com.cn", "tsite.shfe.com.cn"],
+        }),
+        "akshare_czce_official" => Some(AutomaticSourceDefinition {
+            name: "郑州商品交易所",
+            source_type: "exchange_public",
+            base_domain: "www.czce.com.cn",
+            authorization_status: "whitelisted",
+            priority: 100,
+            allowed_domains: &["www.czce.com.cn"],
+        }),
+        "akshare_gfex_official" => Some(AutomaticSourceDefinition {
+            name: "广州期货交易所",
+            source_type: "exchange_public",
+            base_domain: "www.gfex.com.cn",
+            authorization_status: "whitelisted",
+            priority: 100,
+            allowed_domains: &["www.gfex.com.cn"],
+        }),
+        "akshare_cffex_official" => Some(AutomaticSourceDefinition {
+            name: "中国金融期货交易所",
+            source_type: "exchange_public",
+            base_domain: "www.cffex.com.cn",
+            authorization_status: "whitelisted",
+            priority: 100,
+            allowed_domains: &["www.cffex.com.cn"],
+        }),
         _ => None,
     }
 }
@@ -3236,6 +3279,27 @@ async fn set_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dce_fallback_is_the_only_aggregator_in_the_automatic_source_allowlist() {
+        let fallback = automatic_source("akshare_sina_dce_fallback").unwrap();
+        assert_eq!(fallback.source_type, "aggregator_public");
+        assert_eq!(fallback.authorization_status, "whitelisted_exception");
+        assert_eq!(fallback.priority, 200);
+        assert_eq!(
+            fallback.allowed_domains,
+            [
+                "vip.stock.finance.sina.com.cn",
+                "finance.sina.com.cn",
+                "stock2.finance.sina.com.cn",
+            ]
+        );
+        assert!(automatic_source("akshare_sina_shfe_fallback").is_none());
+
+        let migration = include_str!("../../../migrations/202608020002_dce_fallback_source.sql");
+        assert!(migration.contains("source_type = 'aggregator_public'"));
+        assert!(migration.contains("authorization_status = 'whitelisted_exception'"));
+    }
 
     #[test]
     fn confirmation_mode_keeps_manual_and_automatic_scopes_disjoint() {

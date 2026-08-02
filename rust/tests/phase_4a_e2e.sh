@@ -74,6 +74,11 @@ for dataset in daily_market_prices_v1 seat_positions_v1; do
   test "$succeeded" = 5
 done
 
+test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='akshare_sina_dce_fallback' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='akshare_v1'")" = 1
+for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
+  test "$(psql_value -c "select count(*) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and source.code='akshare_sina_dce_fallback'")" -ge 1
+done
+
 market_before=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
 seats_before=$(psql_value -c \
@@ -82,6 +87,10 @@ test "$market_before" -gt 0
 test "$seats_before" -gt 0
 test "$(psql_value -c "select count(*) from exchanges where workspace_id='$workspace_id'")" -ge 5
 test "$(psql_value -c "select count(*) from contracts where workspace_id='$workspace_id'")" -gt 0
+test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id join contracts contract on contract.workspace_id=price.workspace_id and contract.id=price.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='akshare_sina_dce_fallback'")" -gt 0
+test "$(psql_value -c "select count(*) from seat_positions position join data_sources source on source.workspace_id=position.workspace_id and source.id=position.source_id join contracts contract on contract.workspace_id=position.workspace_id and contract.id=position.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where position.workspace_id='$workspace_id' and position.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='akshare_sina_dce_fallback'")" -gt 0
+test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and source.code='akshare_dce_official'")" = 0
+test "$(psql_value -c "select count(*) from seat_positions position join data_sources source on source.workspace_id=position.workspace_id and source.id=position.source_id where position.workspace_id='$workspace_id' and position.trade_date=date '$COLLECTION_DATE' and source.code='akshare_dce_official'")" = 0
 
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,contract_id,trade_date,session_type,granularity,revision_no,count(*) from market_prices where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade_date,contract_id,seat_id,rank_type,rank,count(*) from seat_positions where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
@@ -141,6 +150,7 @@ fi
   echo "source_failure_isolation=PASS"
   echo "rls=PASS"
   echo "provenance=PASS"
+  echo "dce_fallback_provenance=PASS"
 } >"$EVIDENCE_DIR/result.env"
 chmod 600 "$EVIDENCE_DIR/result.env"
 echo PHASE4A_E2E_PASS
