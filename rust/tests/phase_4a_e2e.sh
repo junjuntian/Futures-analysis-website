@@ -67,10 +67,15 @@ run_collector_with_peak() {
     collector --date "$COLLECTION_DATE" "$@" >"$output" 2>&1 &
   local pid=$!
   while kill -0 "$pid" 2>/dev/null; do
-    current=$(docker stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" \
-      2>/dev/null | awk -F/ 'NR==1 {gsub(/ /,"",$1); print $1}' || true)
-    if test -n "$current"; then
+    current=$(docker exec "$CONTAINER_NAME" sh -c \
+      'if test -r /sys/fs/cgroup/memory.peak; then cat /sys/fs/cgroup/memory.peak; elif test -r /sys/fs/cgroup/memory/memory.max_usage_in_bytes; then cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes; fi' \
+      2>/dev/null || true)
+    if ! [[ "$current" =~ ^[0-9]+$ ]]; then
+      current=$(docker stats --no-stream --format '{{.MemUsage}}' "$CONTAINER_NAME" \
+        2>/dev/null | awk -F/ 'NR==1 {gsub(/ /,"",$1); print $1}' || true)
       current=$(numfmt --from=iec "$current" 2>/dev/null || echo 0)
+    fi
+    if [[ "$current" =~ ^[0-9]+$ ]]; then
       test "$current" -gt "$peak" && peak=$current
     fi
     sleep 1
@@ -148,6 +153,7 @@ peak_fault=$(cat "$EVIDENCE_DIR/fault-run.log.peak-bytes")
 peak_bytes=$peak_first
 test "$peak_replay" -gt "$peak_bytes" && peak_bytes=$peak_replay
 test "$peak_fault" -gt "$peak_bytes" && peak_bytes=$peak_fault
+echo "PHASE4A_E2E_MEMORY peak_bytes=$peak_bytes limit_bytes=536870912"
 test "$peak_bytes" -gt 0
 test "$peak_bytes" -le 536870912
 test "$(psql_value -c "select count(*) from import_batches where ingestion_mode='manual'")" = "$legacy_batches_before"
