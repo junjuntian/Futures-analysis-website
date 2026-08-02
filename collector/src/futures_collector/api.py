@@ -114,8 +114,8 @@ class PlatformClient:
             f"/api/v1/imports/{import_id}/automatic-confirm",
             headers={
                 **self._write_headers(),
-                "Idempotency-Key": (
-                    f"collector:{source.source_code}:{dataset_type}:{collection_date}"
+                "Idempotency-Key": confirmation_idempotency_key(
+                    source, dataset_type, collection_date, import_id
                 ),
             },
         )
@@ -168,3 +168,12 @@ def render_csv(dataset_type: str, rows: list[dict[str, str]]) -> bytes:
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue().encode("utf-8")
+
+
+def confirmation_idempotency_key(
+    source: ExchangeSource,
+    dataset_type: str,
+    collection_date: date,
+    import_id: str,
+) -> str:
+    return f"collector:{source.source_code}:{dataset_type}:{collection_date}:{import_id}"
