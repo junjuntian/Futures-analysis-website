@@ -42,6 +42,12 @@ def require_success(response: httpx.Response, stage: str) -> None:
         raise PlatformRequestError(stage, response)
 
 
+def safe_error_code(error: Exception) -> str:
+    if isinstance(error, PlatformRequestError):
+        return error.safe_code
+    return type(error).__name__
+
+
 class PlatformClient:
     def __init__(self, credentials: Credentials, timeout: float = 60.0) -> None:
         self.credentials = credentials

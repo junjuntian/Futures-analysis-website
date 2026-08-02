@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from futures_collector.api import PlatformClient, PlatformRequestError
+from futures_collector.api import PlatformClient, safe_error_code
 from futures_collector.normalize import (
     normalize_calendar,
     normalize_catalog,
@@ -67,7 +67,7 @@ class CollectionRunner:
                     "dataset_failed exchange=%s dataset=%s error=%s",
                     source.code,
                     dataset_type,
-                    _safe_error_code(error),
+                    safe_error_code(error),
                 )
                 reason = self.platform.record_failure(source, dataset_type, collection_date)
                 LOG.error(
@@ -95,7 +95,7 @@ class CollectionRunner:
                     LOG.error(
                         "fallback_failed exchange=DCE dataset=%s error=%s",
                         dataset_type,
-                        _safe_error_code(fallback_error),
+                        safe_error_code(fallback_error),
                     )
                     fallback_reason = self.platform.record_failure(
                         DCE_FALLBACK_SOURCE, dataset_type, collection_date
@@ -124,7 +124,7 @@ class CollectionRunner:
                     effective_source.code,
                     dataset_type,
                     effective_source.source_code,
-                    _safe_error_code(error),
+                    safe_error_code(error),
                 )
                 failures += 1
                 continue
@@ -188,9 +188,3 @@ def _dataset_type(dataset: str) -> str:
         "market": "daily_market_prices_v1",
         "seats": "seat_positions_v1",
     }[dataset]
-
-
-def _safe_error_code(error: Exception) -> str:
-    if isinstance(error, PlatformRequestError):
-        return error.safe_code
-    return type(error).__name__

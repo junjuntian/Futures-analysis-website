@@ -4,7 +4,7 @@ import argparse
 import logging
 from datetime import date
 
-from futures_collector.api import PlatformClient
+from futures_collector.api import PlatformClient, safe_error_code
 from futures_collector.config import load_credentials
 from futures_collector.runner import CollectionRunner
 from futures_collector.sources import SOURCES, AkshareAdapter
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     except Exception as error:
         logging.getLogger("futures_collector").error(
-            "collector_start_failed error=%s", type(error).__name__
+            "collector_start_failed error=%s", safe_error_code(error)
         )
         return 1
     return 0 if failures == 0 else 1
