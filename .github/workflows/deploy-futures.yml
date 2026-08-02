@@ -580,6 +580,7 @@ jobs:
           done
           rm -f "$VERSION_JSON"
           test "$VERSION_VERIFIED" -eq 1
+          echo "DEPLOY_STAGE version_verified"
 
           for spec in "api:$API_REF" "worker:$WORKER_REF" "frontend:$FRONTEND_REF"; do
             service=${spec%%:*}
@@ -590,6 +591,7 @@ jobs:
             test "$(docker inspect --format '{{.Image}}' "$cid")" = "$expected"
           done
           docker image inspect "$COLLECTOR_REF" >/dev/null
+          echo "DEPLOY_STAGE runtime_images_verified"
 
           install -m 700 "$RELEASE_DIR/deploy/collector/run-collector.sh" \
             /usr/local/sbin/run-futures-collector
@@ -597,10 +599,12 @@ jobs:
             /etc/cron.d/futures-collector
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
             /etc/logrotate.d/futures-collector
+          echo "DEPLOY_STAGE collector_schedule_installed"
 
           EVIDENCE_DIR="$EVIDENCE_ROOT/${SOURCE_SHA}-${timestamp}"
           install -d -m 700 "$EVIDENCE_DIR"
           set -o pipefail
+          echo "DEPLOY_STAGE phase4a_e2e_started"
           PHASE4A_RELEASE_DIR="$RELEASE_DIR" \
           PHASE4A_COLLECTION_DATE="$COLLECTION_DATE" \
           PHASE4A_EVIDENCE_DIR="$EVIDENCE_DIR/phase4a-work" \

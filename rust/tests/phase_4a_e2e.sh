@@ -2,6 +2,13 @@
 set -Eeuo pipefail
 umask 077
 
+report_failure() {
+  local status=$? line=$1
+  echo "PHASE4A_E2E_FAIL line=$line status=$status" >&2
+  exit "$status"
+}
+trap 'report_failure "$LINENO"' ERR
+
 RELEASE_DIR=${PHASE4A_RELEASE_DIR:?set PHASE4A_RELEASE_DIR}
 COLLECTION_DATE=${PHASE4A_COLLECTION_DATE:?set PHASE4A_COLLECTION_DATE}
 EVIDENCE_DIR=${PHASE4A_EVIDENCE_DIR:?set PHASE4A_EVIDENCE_DIR}
@@ -15,6 +22,7 @@ case "$RELEASE_DIR" in
   *) echo "PHASE4A_E2E_FAIL unsafe_release_dir" >&2; exit 1 ;;
 esac
 [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+echo "PHASE4A_E2E_STAGE preconditions"
 install -d -m 700 "$EVIDENCE_DIR"
 test -s /etc/futures-platform/secrets/collector-credentials
 test "$(stat -c %U:%G /etc/futures-platform/secrets/collector-credentials)" = root:root
@@ -23,6 +31,7 @@ test "$(stat -c %a /etc/cron.d/futures-collector)" = 600
 test "$(grep -c '^30 17 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
 test "$(grep -c '^30 21 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
 test -x /usr/local/sbin/run-futures-collector
+echo "PHASE4A_E2E_STAGE preconditions_passed"
 
 COMPOSE=(
   docker compose
@@ -41,6 +50,7 @@ legacy_batches_before=$(psql_value -c \
   "select count(*) from import_batches where ingestion_mode='manual'")
 users_before=$(psql_value -c "select count(*) from users")
 test "$legacy_batches_before" = 127
+echo "PHASE4A_E2E_STAGE baseline_counts_passed"
 
 run_collector_with_peak() {
   local output=$1
@@ -62,7 +72,9 @@ run_collector_with_peak() {
   printf '%s\n' "$peak" >"${output}.peak-bytes"
 }
 
+echo "PHASE4A_E2E_STAGE first_run_started"
 run_collector_with_peak "$EVIDENCE_DIR/first-run.log"
+echo "PHASE4A_E2E_STAGE first_run_completed"
 
 workspace_id=$(psql_value -c \
   "select workspace_id from import_batches where ingestion_mode='automatic' and collection_date=date '$COLLECTION_DATE' order by created_at desc limit 1")
@@ -95,7 +107,9 @@ test "$(psql_value -c "select count(*) from seat_positions position join data_so
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,contract_id,trade_date,session_type,granularity,revision_no,count(*) from market_prices where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade_date,contract_id,seat_id,rank_type,rank,count(*) from seat_positions where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 
+echo "PHASE4A_E2E_STAGE replay_run_started"
 run_collector_with_peak "$EVIDENCE_DIR/replay-run.log"
+echo "PHASE4A_E2E_STAGE replay_run_completed"
 market_after=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
 seats_after=$(psql_value -c \
