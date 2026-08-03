@@ -145,4 +145,8 @@ alter table extraction_jobs
     add constraint extraction_jobs_skipped_source_item_count_nonnegative
         check (skipped_source_item_count >= 0);
 
+insert into schema_versions (version, description)
+values ('202608030001', 'Phase 4A evaluator defect fixes')
+on conflict (version) do nothing;
+
 commit;
