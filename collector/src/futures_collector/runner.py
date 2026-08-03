@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 
 from futures_collector.api import PlatformClient, safe_error_code
 from futures_collector.normalize import (
@@ -69,8 +69,15 @@ class CollectionRunner:
         for dataset in datasets:
             dataset_type = _dataset_type(dataset)
             effective_source = source
+            observed_at = datetime.now(UTC)
             try:
-                rows = self._collect_with_retries(source, collection_date, dataset, fallback=False)
+                rows = self._collect_with_retries(
+                    source,
+                    collection_date,
+                    dataset,
+                    observed_at,
+                    fallback=False,
+                )
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",
@@ -98,6 +105,7 @@ class CollectionRunner:
                         DCE_FALLBACK_SOURCE,
                         collection_date,
                         dataset,
+                        observed_at,
                         fallback=True,
                     )
                 except Exception as fallback_error:
@@ -163,13 +171,20 @@ class CollectionRunner:
         source: ExchangeSource,
         collection_date: date,
         dataset: str,
+        observed_at: datetime,
         *,
         fallback: bool,
     ) -> list[dict[str, str]]:
         max_attempts = 1 if source.code == "DCE" and not fallback else 3
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._collect(source, collection_date, dataset, fallback=fallback)
+                return self._collect(
+                    source,
+                    collection_date,
+                    dataset,
+                    observed_at,
+                    fallback=fallback,
+                )
             except Exception as error:
                 if attempt == max_attempts:
                     raise
@@ -192,6 +207,7 @@ class CollectionRunner:
         source: ExchangeSource,
         collection_date: date,
         dataset: str,
+        observed_at: datetime,
         *,
         fallback: bool,
     ) -> list[dict[str, str]]:
@@ -208,14 +224,14 @@ class CollectionRunner:
                 if fallback
                 else self.adapter.market(source, collection_date)
             )
-            return normalize_market(source, collection_date, frame)
+            return normalize_market(source, collection_date, frame, observed_at)
         if dataset == "calendar":
             frame = (
                 self.adapter.fallback_market(source, collection_date)
                 if fallback
                 else self.adapter.market(source, collection_date)
             )
-            normalize_market(source, collection_date, frame)
+            normalize_market(source, collection_date, frame, observed_at)
             return normalize_calendar(source, collection_date)
         if dataset == "seats":
             tables = (

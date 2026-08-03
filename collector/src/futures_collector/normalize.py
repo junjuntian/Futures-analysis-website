@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -130,11 +130,16 @@ def normalize_calendar(source: ExchangeSource, collection_date: date) -> list[di
 
 
 def normalize_market(
-    source: ExchangeSource, collection_date: date, frame: pd.DataFrame
+    source: ExchangeSource,
+    collection_date: date,
+    frame: pd.DataFrame,
+    observed_at: datetime,
 ) -> list[dict[str, str]]:
     if frame is None or frame.empty:
         raise ValueError("market response is empty")
-    observed_at = f"{collection_date.isoformat()}T13:30:00Z"
+    if observed_at.tzinfo is None:
+        raise ValueError("observed_at must be timezone-aware")
+    observed_at_text = observed_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
     version = calendar_version(source, collection_date)
     rows: list[dict[str, str]] = []
     for _, raw in frame.iterrows():
@@ -153,7 +158,7 @@ def normalize_market(
                 "contract_code": contract,
                 "trade_date": trade_date,
                 "session_type": "daily",
-                "observed_at": observed_at,
+                "observed_at": observed_at_text,
                 "granularity": "1d",
                 "close_price": close,
                 "settlement_price": settlement,

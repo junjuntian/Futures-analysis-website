@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pandas as pd
 
@@ -53,14 +53,24 @@ def test_market_preserves_close_and_settlement_separately() -> None:
                 "date": "2026-08-01",
                 "close": "800.5",
                 "settle": "799.5",
-            }
+            },
+            {
+                "symbol": "ag2610",
+                "date": "2026-08-01",
+                "close": "900.5",
+                "settle": "899.5",
+            },
         ]
     )
-    rows = normalize_market(SOURCES["SHFE"], date(2026, 8, 1), frame)
+    collection_started_at = datetime.now(UTC)
+    rows = normalize_market(SOURCES["SHFE"], date(2026, 8, 1), frame, collection_started_at)
+    collection_finished_at = datetime.now(UTC)
     assert rows[0]["contract_code"] == "AU2610"
     assert rows[0]["close_price"] == "800.5"
     assert rows[0]["settlement_price"] == "799.5"
-    assert rows[0]["observed_at"] == "2026-08-01T13:30:00Z"
+    observed_at = datetime.fromisoformat(rows[0]["observed_at"].replace("Z", "+00:00"))
+    assert collection_started_at <= observed_at <= collection_finished_at
+    assert {row["observed_at"] for row in rows} == {rows[0]["observed_at"]}
 
 
 def test_seat_row_is_split_into_three_rank_types() -> None:
