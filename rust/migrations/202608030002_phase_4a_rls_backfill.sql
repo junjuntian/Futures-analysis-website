@@ -36,19 +36,6 @@ begin
            and batch.ingestion_mode = 'automatic'
            and record.business_key not like upper(source.code) || '|%';
 
-        update import_staging_rows staging
-           set business_key = upper(source.code) || '|' || staging.business_key
-          from import_batches batch
-          join data_sources source
-            on source.workspace_id = batch.workspace_id
-           and source.id = batch.data_source_id
-         where staging.workspace_id = target_workspace_id
-           and batch.workspace_id = target_workspace_id
-           and staging.import_batch_id = batch.id
-           and batch.ingestion_mode = 'automatic'
-           and staging.business_key is not null
-           and staging.business_key not like upper(source.code) || '|%';
-
         -- Only legacy v1 automatic batches lack formal-projection change rows.
         -- Preserve v2 batches created by the repaired Worker.
         update import_batches

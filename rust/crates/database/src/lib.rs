@@ -297,6 +297,7 @@ mod phase_4a_schema_contract {
         assert!(RLS_BACKFILL.contains("'app.current_workspace_id'"));
         assert!(RLS_BACKFILL.contains("workspace_id = target_workspace_id"));
         assert!(RLS_BACKFILL.contains("change_log_version = 1"));
+        assert!(!RLS_BACKFILL.contains("update import_staging_rows"));
         assert!(!RLS_BACKFILL.contains("disable row level security"));
         assert!(!RLS_BACKFILL.contains("bypassrls"));
     }
