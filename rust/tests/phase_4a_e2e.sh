@@ -98,7 +98,8 @@ automatic_upload() {
     -F "file=@$file;type=text/csv" "$BASE/api/v1/imports"
 }
 wait_batch() {
-  local token=$1 import_id=$2 expected=$3 output="$EVIDENCE_DIR/wait-$import_id.json"
+  local token=$1 import_id=$2 expected=$3
+  local output="$EVIDENCE_DIR/wait-$import_id.json"
   for _ in $(seq 1 360); do
     if test "$(api_get "$token" "/api/v1/imports/$import_id" "$output")" = 200; then
       local status
@@ -114,12 +115,14 @@ wait_batch() {
   exit 1
 }
 confirm_automatic() {
-  local import_id=$1 label=$2 output="$EVIDENCE_DIR/$label-confirm.json"
+  local import_id=$1 label=$2
+  local output="$EVIDENCE_DIR/$label-confirm.json"
   assert_status "$(api_json "$COLLECTOR_TOKEN" "$COLLECTOR_CSRF" POST "/api/v1/imports/$import_id/automatic-confirm" '{}' "$output" "phase4a-$label-confirm-$import_id")" 202 "$label automatic confirm"
   wait_batch "$COLLECTOR_TOKEN" "$import_id" succeeded
 }
 create_automatic_batch() {
-  local file=$1 dataset=$2 source=$3 label=$4 output="$EVIDENCE_DIR/$label-upload.json"
+  local file=$1 dataset=$2 source=$3 label=$4
+  local output="$EVIDENCE_DIR/$label-upload.json"
   assert_status "$(automatic_upload "$COLLECTOR_TOKEN" "$COLLECTOR_CSRF" "$file" "$dataset" "$source" "$output")" 201 "$label automatic upload"
   local import_id
   import_id=$(jq -r '.data.id' "$output")
@@ -131,7 +134,9 @@ rollback_check() {
   api_json "$ADMIN_TOKEN" "$ADMIN_CSRF" POST "/api/v1/imports/$import_id/rollback-check" '{}' "$output"
 }
 rollback_batch() {
-  local import_id=$1 label=$2 check="$EVIDENCE_DIR/$label-rollback-check.json" output="$EVIDENCE_DIR/$label-rollback.json"
+  local import_id=$1 label=$2
+  local check="$EVIDENCE_DIR/$label-rollback-check.json"
+  local output="$EVIDENCE_DIR/$label-rollback.json"
   assert_status "$(rollback_check "$import_id" "$check")" 200 "$label rollback check"
   jq -e '.data.can_rollback == true and .data.conflict_count == 0' "$check" >/dev/null
   local request_id fingerprint
