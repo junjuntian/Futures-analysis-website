@@ -7,6 +7,10 @@ on:
         description: Exact 40-character Git SHA already validated by CI and GHCR
         required: true
         type: string
+      acceptance_sha:
+        description: Exact harness SHA; may differ only in the deploy workflow and Phase 4A E2E
+        required: true
+        type: string
       api_digest:
         description: Immutable API sha256 digest
         required: true
@@ -67,6 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${{ inputs.git_sha }}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${{ inputs.acceptance_sha }}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${{ inputs.api_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.worker_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.frontend_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -76,18 +81,37 @@ jobs:
           [[ "${FUTURES_SSH_HOST}" =~ ^[A-Za-z0-9._:-]+$ ]]
           [[ "${FUTURES_SSH_USER}" =~ ^[A-Za-z0-9._-]+$ ]]
 
-      - name: Checkout exact candidate
+      - name: Checkout exact acceptance harness
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.git_sha }}
+          ref: ${{ inputs.acceptance_sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify checked out candidate
+      - name: Verify runtime and acceptance revisions
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ inputs.git_sha }}"
+          runtime_sha='${{ inputs.git_sha }}'
+          acceptance_sha='${{ inputs.acceptance_sha }}'
+          test "$acceptance_sha" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$acceptance_sha"
+          git cat-file -e "${runtime_sha}^{commit}"
+          git merge-base --is-ancestor "$runtime_sha" "$acceptance_sha"
+          if test "$runtime_sha" != "$acceptance_sha"; then
+            mapfile -t changed_files < <(git diff --name-only "$runtime_sha" "$acceptance_sha")
+            test "${#changed_files[@]}" -gt 0
+            for changed_file in "${changed_files[@]}"; do
+              case "$changed_file" in
+                .github/workflows/deploy-futures.yml|rust/tests/phase_4a_e2e.sh) ;;
+                *)
+                  echo "acceptance-only revision changes forbidden file: $changed_file" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            printf '%s\n' "${changed_files[@]}" | grep -Fx 'rust/tests/phase_4a_e2e.sh' >/dev/null
+          fi
 
       - name: Install strict SSH identity
         shell: bash
@@ -147,6 +171,7 @@ jobs:
           RELEASE_DIR=$8
           COLLECTION_DATE=$9
           PROVISION_COLLECTOR=${10}
+          ACCEPTANCE_SHA=${11}
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
@@ -171,6 +196,7 @@ jobs:
           EVIDENCE_DIR=
 
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ACCEPTANCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
           [[ "$PROVISION_COLLECTOR" = true || "$PROVISION_COLLECTOR" = false ]]
           for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
@@ -661,6 +687,7 @@ jobs:
             echo "status=PASS"
             echo "run_url=$RUN_URL"
             echo "git_sha=$SOURCE_SHA"
+            echo "acceptance_sha=$ACCEPTANCE_SHA"
             echo "deployed_at=$DEPLOYED_AT"
             echo "backup_path=$BACKUP_PATH"
             echo "backup_sha256=$BACKUP_SHA256"
@@ -742,7 +769,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
@@ -790,6 +817,7 @@ jobs:
           {
             echo '### futures production deployment'
             echo
+            echo "- acceptance_sha=${{ inputs.acceptance_sha }}"
             sed 's/^/- /' "${RUNNER_TEMP}/deployment-report.txt"
           } >>"${GITHUB_STEP_SUMMARY}"
 
