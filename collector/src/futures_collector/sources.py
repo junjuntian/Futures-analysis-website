@@ -5,17 +5,21 @@ import ipaddress
 import logging
 import re
 import socket
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import akshare
 import pandas as pd
 import requests
 
 LOG = logging.getLogger("futures_collector.sources")
+MAX_REDIRECTS = 5
+REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+_DNS_GUARD_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -313,17 +317,101 @@ def _find_column(frame: pd.DataFrame, *names: str) -> Any | None:
     return None
 
 
-def _validate_public_host(host: str, allowed_domains: frozenset[str]) -> None:
+def _resolve_public_host(
+    host: str,
+    port: int,
+    allowed_domains: frozenset[str],
+    *,
+    resolver: Any | None = None,
+) -> frozenset[str]:
     normalized = host.rstrip(".").lower()
     if normalized not in allowed_domains:
         raise OutboundPolicyError("outbound host is not in the exchange whitelist")
-    addresses = {item[4][0] for item in socket.getaddrinfo(normalized, None)}
+    resolver = resolver or socket.getaddrinfo
+    try:
+        answers = resolver(normalized, port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        raise OutboundPolicyError("exchange host did not resolve") from error
+    addresses = frozenset(item[4][0] for item in answers)
     if not addresses:
         raise OutboundPolicyError("exchange host did not resolve")
     for address in addresses:
         ip = ipaddress.ip_address(address)
         if not ip.is_global:
             raise OutboundPolicyError("exchange host resolved to a non-public address")
+    return addresses
+
+
+def _validated_url(url: str, allowed_domains: frozenset[str]) -> tuple[str, int, frozenset[str]]:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise OutboundPolicyError("invalid exchange URL")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise OutboundPolicyError("invalid exchange URL") from error
+    normalized = parsed.hostname.rstrip(".").lower()
+    return normalized, port, _resolve_public_host(normalized, port, allowed_domains)
+
+
+def _request_with_dns_fence(
+    original: Any,
+    session: requests.Session,
+    method: str,
+    url: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    allowed_domains: frozenset[str],
+) -> requests.Response:
+    host, port, approved_addresses = _validated_url(url, allowed_domains)
+    original_getaddrinfo = socket.getaddrinfo
+
+    def guarded_getaddrinfo(query_host: str, query_port: Any, *dns_args: Any, **dns_kwargs: Any):
+        answers = original_getaddrinfo(query_host, query_port, *dns_args, **dns_kwargs)
+        normalized_query = str(query_host).rstrip(".").lower()
+        if normalized_query == host:
+            actual_addresses = frozenset(item[4][0] for item in answers)
+            if actual_addresses != approved_addresses:
+                raise OutboundPolicyError("exchange host DNS answer changed before connection")
+            for address in actual_addresses:
+                if not ipaddress.ip_address(address).is_global:
+                    raise OutboundPolicyError(
+                        "exchange host resolved to a non-public address before connection"
+                    )
+        return answers
+
+    # Re-resolve immediately before handing control to urllib3, then keep the
+    # same guard around every resolver call made while the socket is opened.
+    # The lock prevents another request thread from observing the temporary
+    # process-wide socket resolver hook.
+    with _DNS_GUARD_LOCK:
+        confirmed_addresses = _resolve_public_host(
+            host,
+            port,
+            allowed_domains,
+            resolver=original_getaddrinfo,
+        )
+        if confirmed_addresses != approved_addresses:
+            raise OutboundPolicyError("exchange host DNS answer changed before connection")
+        socket.getaddrinfo = guarded_getaddrinfo
+        try:
+            return original(session, method, url, *args, **kwargs)
+        finally:
+            socket.getaddrinfo = original_getaddrinfo
+
+
+def _redirect_method(status_code: int, method: str) -> str:
+    normalized = method.upper()
+    if status_code == 303 and normalized != "HEAD":
+        return "GET"
+    if status_code in {301, 302} and normalized == "POST":
+        return "GET"
+    return normalized
 
 
 @contextlib.contextmanager
@@ -331,16 +419,46 @@ def official_requests_only(allowed_domains: frozenset[str]) -> Iterator[None]:
     original = requests.sessions.Session.request
 
     def guarded(session: requests.Session, method: str, url: str, *args: Any, **kwargs: Any):
-        parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise OutboundPolicyError("invalid exchange URL")
-        _validate_public_host(parsed.hostname, allowed_domains)
-        response = original(session, method, url, *args, **kwargs)
-        final = urlsplit(response.url)
-        if not final.hostname:
-            raise OutboundPolicyError("invalid exchange redirect")
-        _validate_public_host(final.hostname, allowed_domains)
-        return response
+        request_kwargs = dict(kwargs)
+        request_kwargs["allow_redirects"] = False
+        current_url = url
+        current_method = method.upper()
+        history: list[requests.Response] = []
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            response = _request_with_dns_fence(
+                original,
+                session,
+                current_method,
+                current_url,
+                args,
+                request_kwargs,
+                allowed_domains,
+            )
+            location = response.headers.get("location")
+            if response.status_code not in REDIRECT_STATUS_CODES or not location:
+                response.history = history
+                return response
+            if redirect_count == MAX_REDIRECTS:
+                response.close()
+                raise OutboundPolicyError("exchange redirect limit exceeded")
+            next_url = urljoin(current_url, location)
+            # Validate the next hop before even preparing its request. Its DNS
+            # result is checked again immediately before the socket is opened.
+            _validated_url(next_url, allowed_domains)
+            history.append(response)
+            response.close()
+            next_method = _redirect_method(response.status_code, current_method)
+            if next_method == "GET" and current_method != "GET":
+                for field in ("data", "json", "files"):
+                    request_kwargs.pop(field, None)
+                headers = dict(request_kwargs.get("headers") or {})
+                for field in ("Content-Length", "Content-Type", "Transfer-Encoding"):
+                    headers.pop(field, None)
+                    headers.pop(field.lower(), None)
+                request_kwargs["headers"] = headers
+            current_method = next_method
+            current_url = next_url
+        raise OutboundPolicyError("exchange redirect limit exceeded")
 
     requests.sessions.Session.request = guarded
     try:
