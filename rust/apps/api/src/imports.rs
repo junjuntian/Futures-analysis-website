@@ -1498,13 +1498,13 @@ pub async fn automatic_confirm(
     headers: HeaderMap,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    if !context.is_collector_account() {
+        return Err(ImportApiError::forbidden(
+            "automatic_account_required",
+            request_id,
+        ));
+    }
     let result: Result<Response, ImportApiError> = async {
-        if !context.is_collector_account() {
-            return Err(ImportApiError::forbidden(
-                "automatic_account_required",
-                request_id,
-            ));
-        }
         let automatic = database::imports::automatic_import_context(
             &state.auth.pool,
             context.workspace_id(),
@@ -2894,6 +2894,29 @@ mod phase_3d_compensation_contract {
             6
         );
         assert!(SOURCE.contains("automatic_pipeline_untrusted_state"));
+    }
+
+    #[test]
+    fn ordinary_user_automatic_confirm_rejection_has_no_batch_failure_side_effect() {
+        let handler = SOURCE
+            .split("pub async fn automatic_confirm")
+            .nth(1)
+            .expect("automatic confirm handler")
+            .split("#[utoipa::path(")
+            .next()
+            .expect("automatic confirm handler end");
+        let identity_guard = handler
+            .find("if !context.is_collector_account()")
+            .expect("collector identity guard");
+        let fallible_pipeline = handler
+            .find("let result: Result<Response, ImportApiError>")
+            .expect("fallible automatic pipeline");
+        let failure_transition = handler
+            .find("fail_automatic_import")
+            .expect("authenticated collector failure transition");
+
+        assert!(identity_guard < fallible_pipeline);
+        assert!(fallible_pipeline < failure_transition);
     }
 
     #[test]
