@@ -478,6 +478,12 @@ pub async fn upload(
         return Err(audit_upload_denial(&state, &context, request_id, error).await);
     }
     let automatic = automatic_metadata(&headers, request_id)?;
+    if automatic.is_none() && context.is_collector_account() {
+        return Err(ImportApiError::forbidden(
+            "manual_account_required",
+            request_id,
+        ));
+    }
     if automatic.is_some() && !context.is_collector_account() {
         return Err(ImportApiError::forbidden(
             "automatic_account_required",
@@ -1099,6 +1105,7 @@ pub async fn inspect(
     Json(request): Json<ImportInspectRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
     let bytes = state
         .storage
@@ -1162,6 +1169,7 @@ pub async fn save_mapping(
     Json(request): Json<ImportMappingRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let response = database::imports::save_mapping(
         &state.auth.pool,
         context.workspace_id(),
@@ -1201,6 +1209,7 @@ pub async fn preview(
     Json(request): Json<ImportPreviewRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
     let bytes = state
         .storage
@@ -1269,6 +1278,7 @@ pub async fn validate(
     headers: HeaderMap,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let result: Result<Response, ImportApiError> = async {
         let initial_context = database::imports::load_validation_context(
             &state.auth.pool,
@@ -1408,21 +1418,8 @@ pub async fn confirm(
     Json(request): Json<ImportConfirmRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let result: Result<Response, ImportApiError> = async {
-        if database::imports::import_ingestion_mode(
-            &state.auth.pool,
-            context.workspace_id(),
-            import_id,
-        )
-        .await
-        .map_err(|error| map_repository_error(error, request_id))?
-            != "manual"
-        {
-            return Err(ImportApiError::bad_request(
-                "manual_confirmation_required",
-                request_id,
-            ));
-        }
         let raw_key = headers
             .get("idempotency-key")
             .and_then(|value| value.to_str().ok())
@@ -1659,6 +1656,16 @@ pub async fn automatic_confirm(
             }
             record =
                 load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+        } else if matches!(
+            record.status,
+            ImportBatchStatus::Inspected
+                | ImportBatchStatus::Mapped
+                | ImportBatchStatus::PreviewReady
+        ) {
+            return Err(ImportApiError::bad_request(
+                "automatic_pipeline_untrusted_state",
+                request_id,
+            ));
         }
         if !matches!(
             record.status,
@@ -2680,6 +2687,38 @@ async fn require_import_write(
     Ok((request_id, context))
 }
 
+async fn require_manual_batch_endpoint(
+    state: &ImportState,
+    context: &auth::AuthContext,
+    import_id: Uuid,
+    request_id: Uuid,
+) -> Result<(), ImportApiError> {
+    if !manual_endpoint_access_allowed(context.is_collector_account(), "manual") {
+        return Err(ImportApiError::forbidden(
+            "manual_account_required",
+            request_id,
+        ));
+    }
+    let mode = database::imports::import_ingestion_mode(
+        &state.auth.pool,
+        context.workspace_id(),
+        import_id,
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    if !manual_endpoint_access_allowed(false, &mode) {
+        return Err(ImportApiError::forbidden(
+            "automatic_batch_forbidden",
+            request_id,
+        ));
+    }
+    Ok(())
+}
+
+fn manual_endpoint_access_allowed(is_collector_account: bool, ingestion_mode: &str) -> bool {
+    !is_collector_account && ingestion_mode == "manual"
+}
+
 async fn require_import_rollback_write(
     state: &ImportState,
     headers: &HeaderMap,
@@ -2834,11 +2873,28 @@ fn digest(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod phase_3d_compensation_contract {
-    use super::{Uuid, map_object_governance_error};
+    use super::{Uuid, manual_endpoint_access_allowed, map_object_governance_error};
     use database::object_governance::ObjectGovernanceError;
     use std::{convert::Infallible, time::Duration};
 
     const SOURCE: &str = include_str!("imports.rs");
+
+    #[test]
+    fn collector_and_manual_endpoint_matrix_is_deny_by_default() {
+        assert!(manual_endpoint_access_allowed(false, "manual"));
+        assert!(!manual_endpoint_access_allowed(true, "manual"));
+        assert!(!manual_endpoint_access_allowed(false, "automatic"));
+        assert!(!manual_endpoint_access_allowed(true, "automatic"));
+        let production = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert_eq!(
+            production.matches("require_manual_batch_endpoint(").count(),
+            6
+        );
+        assert!(SOURCE.contains("automatic_pipeline_untrusted_state"));
+    }
 
     #[test]
     fn committed_compensation_objects_are_never_physically_deleted() {
