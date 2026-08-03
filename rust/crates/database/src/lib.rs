@@ -205,6 +205,8 @@ mod phase_4a_schema_contract {
         include_str!("../../../migrations/202608020001_phase_4a_collection_schema.sql");
     const EVALUATOR_FIXES: &str =
         include_str!("../../../migrations/202608030001_phase_4a_evaluator_fixes.sql");
+    const RLS_BACKFILL: &str =
+        include_str!("../../../migrations/202608030002_phase_4a_rls_backfill.sql");
 
     #[test]
     fn all_phase_4a_business_tables_force_workspace_rls() {
@@ -286,5 +288,16 @@ mod phase_4a_schema_contract {
         }
         assert!(EVALUATOR_FIXES.contains("ingestion_mode = 'automatic'"));
         assert!(EVALUATOR_FIXES.contains("rollback_capability = 'compensation_only'"));
+    }
+
+    #[test]
+    fn source_identity_backfill_is_tenant_scoped_and_preserves_v2_batches() {
+        assert!(RLS_BACKFILL.contains("select id from workspaces order by id"));
+        assert!(RLS_BACKFILL.contains("set_config("));
+        assert!(RLS_BACKFILL.contains("'app.current_workspace_id'"));
+        assert!(RLS_BACKFILL.contains("workspace_id = target_workspace_id"));
+        assert!(RLS_BACKFILL.contains("change_log_version = 1"));
+        assert!(!RLS_BACKFILL.contains("disable row level security"));
+        assert!(!RLS_BACKFILL.contains("bypassrls"));
     }
 }
