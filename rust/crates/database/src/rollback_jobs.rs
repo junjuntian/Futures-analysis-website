@@ -420,6 +420,44 @@ async fn rollback_projection(
               where workspace_id = $3 and id = $4 and row_version = $5
                 and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $6"
         }
+        "market_price" => {
+            "update market_prices target
+                set source_id = ($1->>'source_id')::uuid,
+                    contract_id = ($1->>'contract_id')::uuid,
+                    trade_date = ($1->>'trade_date')::date,
+                    session_type = $1->>'session_type',
+                    observed_at = ($1->>'observed_at')::timestamptz,
+                    granularity = $1->>'granularity',
+                    close_price = nullif($1->>'close_price', '')::numeric,
+                    settlement_price = nullif($1->>'settlement_price', '')::numeric,
+                    currency_code = $1->>'currency_code',
+                    calendar_version_id = ($1->>'calendar_version_id')::uuid,
+                    revision_no = ($1->>'revision_no')::integer,
+                    source_import_batch_id = ($1->>'source_import_batch_id')::uuid,
+                    source_row_number = ($1->>'source_row_number')::integer,
+                    source_record_id = ($1->>'source_record_id')::uuid,
+                    row_version = $2
+              where workspace_id = $3 and source_record_id = $4 and row_version = $5
+                and to_jsonb(target) - 'workspace_id' - 'created_at' = $6"
+        }
+        "seat_position" => {
+            "update seat_positions target
+                set trade_date = ($1->>'trade_date')::date,
+                    contract_id = ($1->>'contract_id')::uuid,
+                    seat_id = ($1->>'seat_id')::uuid,
+                    rank_type = $1->>'rank_type',
+                    rank = ($1->>'rank')::integer,
+                    volume = nullif($1->>'volume', '')::bigint,
+                    long_position = nullif($1->>'long_position', '')::bigint,
+                    short_position = nullif($1->>'short_position', '')::bigint,
+                    source_id = ($1->>'source_id')::uuid,
+                    source_import_batch_id = ($1->>'source_import_batch_id')::uuid,
+                    source_row_number = ($1->>'source_row_number')::integer,
+                    source_record_id = ($1->>'source_record_id')::uuid,
+                    row_version = $2
+              where workspace_id = $3 and source_record_id = $4 and row_version = $5
+                and to_jsonb(target) - 'workspace_id' - 'created_at' = $6"
+        }
         _ => return Err(JobQueueError::InvalidFrozenImport),
     };
     let updated = sqlx::query(sql)
@@ -760,6 +798,26 @@ mod tests {
         assert!(SOURCE.contains("\"update\" | \"soft_delete\" =>"));
         assert!(SOURCE.contains(".checked_add(1)"));
         assert!(SOURCE.contains("insert into import_data_invalidations"));
+    }
+
+    #[test]
+    fn fact_updates_restore_complete_version_fenced_snapshots() {
+        for table in ["market_prices", "seat_positions"] {
+            let update = format!("update {table} target");
+            let section = SOURCE
+                .split(&update)
+                .nth(1)
+                .expect("fact rollback update")
+                .split("_ =>")
+                .next()
+                .expect("fact rollback update end");
+            assert!(section.contains("source_import_batch_id"));
+            assert!(section.contains("source_row_number"));
+            assert!(section.contains("source_record_id"));
+            assert!(section.contains("row_version = $2"));
+            assert!(section.contains("source_record_id = $4 and row_version = $5"));
+            assert!(section.contains("to_jsonb(target)"));
+        }
     }
 
     #[test]

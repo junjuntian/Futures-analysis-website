@@ -1076,7 +1076,7 @@ async fn execute_automatic_import_job(
                 counters.skipped += 1;
                 continue;
             }
-            if dataset_type != "futures_catalog_v1" {
+            if !automatic_dataset_allows_revision(&dataset_type) {
                 return Err(JobQueueError::SourceRevisionConflict);
             }
             let record_id = existing.get::<Uuid, _>("id");
@@ -1309,6 +1309,13 @@ fn record_string(record: &Value, field: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn automatic_dataset_allows_revision(dataset_type: &str) -> bool {
+    matches!(
+        dataset_type,
+        "futures_catalog_v1" | "daily_market_prices_v1" | "seat_positions_v1"
+    )
 }
 
 fn required_string(record: &Value, field: &str) -> Result<String, JobQueueError> {
@@ -1702,6 +1709,72 @@ async fn insert_market_projection(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let trade_date = required_string(record, "trade_date")?;
+    let session_type = required_string(record, "session_type")?;
+    let observed_at = required_string(record, "observed_at")?;
+    let granularity = required_string(record, "granularity")?;
+    let close_price = record_string(record, "close_price").unwrap_or_default();
+    let settlement_price = record_string(record, "settlement_price").unwrap_or_default();
+    let currency_code = required_string(record, "currency_code")?.to_ascii_uppercase();
+    let revision_no = required_string(record, "revision_no")?;
+    let existing = sqlx::query(
+        "select source_record_id, row_version,
+                to_jsonb(market_row) - 'workspace_id' - 'created_at' as snapshot
+           from market_prices market_row
+          where workspace_id = $1 and source_id = $2 and contract_id = $3
+            and trade_date = $4::date and session_type = $5 and granularity = $6
+            and revision_no = $7::integer
+          for update",
+    )
+    .bind(job.workspace_id)
+    .bind(source_id)
+    .bind(contract_id)
+    .bind(&trade_date)
+    .bind(&session_type)
+    .bind(&granularity)
+    .bind(&revision_no)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing {
+        if existing.get::<Uuid, _>("source_record_id") != record_id {
+            return Err(JobQueueError::SourceRevisionConflict);
+        }
+        let before_json = existing.get("snapshot");
+        let expected_version = existing.get::<i64, _>("row_version");
+        let updated = sqlx::query(
+            "update market_prices market_row
+                set observed_at = $1::timestamptz,
+                    close_price = nullif($2, '')::numeric,
+                    settlement_price = nullif($3, '')::numeric,
+                    currency_code = $4, calendar_version_id = $5,
+                    source_import_batch_id = $6, source_row_number = $7,
+                    row_version = row_version + 1
+              where workspace_id = $8 and source_record_id = $9 and row_version = $10
+              returning row_version,
+                        to_jsonb(market_row) - 'workspace_id' - 'created_at' as snapshot",
+        )
+        .bind(&observed_at)
+        .bind(&close_price)
+        .bind(&settlement_price)
+        .bind(&currency_code)
+        .bind(calendar_id)
+        .bind(job.aggregate_id)
+        .bind(row_number)
+        .bind(job.workspace_id)
+        .bind(record_id)
+        .bind(expected_version)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(JobQueueError::SourceRevisionConflict)?;
+        return Ok(vec![FormalProjectionChange {
+            target_kind: "market_price",
+            target_id: record_id,
+            operation: "update",
+            before_json: Some(before_json),
+            after_json: updated.get("snapshot"),
+            target_row_version: updated.get("row_version"),
+        }]);
+    }
     let inserted = sqlx::query(
         "insert into market_prices
             (workspace_id, source_id, contract_id, trade_date, session_type, observed_at,
@@ -1716,15 +1789,15 @@ async fn insert_market_projection(
     .bind(job.workspace_id)
     .bind(source_id)
     .bind(contract_id)
-    .bind(required_string(record, "trade_date")?)
-    .bind(required_string(record, "session_type")?)
-    .bind(required_string(record, "observed_at")?)
-    .bind(required_string(record, "granularity")?)
-    .bind(record_string(record, "close_price").unwrap_or_default())
-    .bind(record_string(record, "settlement_price").unwrap_or_default())
-    .bind(required_string(record, "currency_code")?.to_ascii_uppercase())
+    .bind(&trade_date)
+    .bind(&session_type)
+    .bind(&observed_at)
+    .bind(&granularity)
+    .bind(&close_price)
+    .bind(&settlement_price)
+    .bind(&currency_code)
     .bind(calendar_id)
-    .bind(required_string(record, "revision_no")?)
+    .bind(&revision_no)
     .bind(job.aggregate_id)
     .bind(row_number)
     .bind(record_id)
@@ -1790,6 +1863,72 @@ async fn insert_seat_projection(
             }),
         )
     };
+    let trade_date = required_string(record, "trade_date")?;
+    let rank_type = required_string(record, "rank_type")?;
+    let rank = required_string(record, "rank")?;
+    let volume = record_string(record, "volume").unwrap_or_default();
+    let long_position = record_string(record, "long_position").unwrap_or_default();
+    let short_position = record_string(record, "short_position").unwrap_or_default();
+    let existing_position = sqlx::query(
+        "select source_record_id, row_version,
+                to_jsonb(position_row) - 'workspace_id' - 'created_at' as snapshot
+           from seat_positions position_row
+          where workspace_id = $1 and source_id = $2 and trade_date = $3::date
+            and contract_id = $4 and seat_id = $5 and rank_type = $6
+            and rank = $7::integer
+          for update",
+    )
+    .bind(job.workspace_id)
+    .bind(source_id)
+    .bind(&trade_date)
+    .bind(contract_id)
+    .bind(seat_id)
+    .bind(&rank_type)
+    .bind(&rank)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing_position {
+        if existing.get::<Uuid, _>("source_record_id") != record_id {
+            return Err(JobQueueError::SourceRevisionConflict);
+        }
+        let before_json = existing.get("snapshot");
+        let expected_version = existing.get::<i64, _>("row_version");
+        let updated = sqlx::query(
+            "update seat_positions position_row
+                set volume = nullif($1, '')::bigint,
+                    long_position = nullif($2, '')::bigint,
+                    short_position = nullif($3, '')::bigint,
+                    source_import_batch_id = $4, source_row_number = $5,
+                    row_version = row_version + 1
+              where workspace_id = $6 and source_record_id = $7 and row_version = $8
+              returning row_version,
+                        to_jsonb(position_row) - 'workspace_id' - 'created_at' as snapshot",
+        )
+        .bind(&volume)
+        .bind(&long_position)
+        .bind(&short_position)
+        .bind(job.aggregate_id)
+        .bind(row_number)
+        .bind(job.workspace_id)
+        .bind(record_id)
+        .bind(expected_version)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(JobQueueError::SourceRevisionConflict)?;
+        let mut changes = Vec::with_capacity(2);
+        if let Some(change) = seat_change {
+            changes.push(change);
+        }
+        changes.push(FormalProjectionChange {
+            target_kind: "seat_position",
+            target_id: record_id,
+            operation: "update",
+            before_json: Some(before_json),
+            after_json: updated.get("snapshot"),
+            target_row_version: updated.get("row_version"),
+        });
+        return Ok(changes);
+    }
     let position = sqlx::query(
         "insert into seat_positions
             (workspace_id, trade_date, contract_id, seat_id, rank_type, rank,
@@ -1802,14 +1941,14 @@ async fn insert_seat_projection(
                    to_jsonb(seat_positions) - 'workspace_id' - 'created_at' as snapshot",
     )
     .bind(job.workspace_id)
-    .bind(required_string(record, "trade_date")?)
+    .bind(&trade_date)
     .bind(contract_id)
     .bind(seat_id)
-    .bind(required_string(record, "rank_type")?)
-    .bind(required_string(record, "rank")?)
-    .bind(record_string(record, "volume").unwrap_or_default())
-    .bind(record_string(record, "long_position").unwrap_or_default())
-    .bind(record_string(record, "short_position").unwrap_or_default())
+    .bind(&rank_type)
+    .bind(&rank)
+    .bind(&volume)
+    .bind(&long_position)
+    .bind(&short_position)
     .bind(source_id)
     .bind(job.aggregate_id)
     .bind(row_number)
@@ -2375,6 +2514,38 @@ mod tests {
     use super::*;
 
     const WORKER_SOURCE: &str = include_str!("job_queue.rs");
+
+    #[test]
+    fn automatic_revision_policy_is_limited_to_controlled_upsert_datasets() {
+        for dataset in [
+            "futures_catalog_v1",
+            "daily_market_prices_v1",
+            "seat_positions_v1",
+        ] {
+            assert!(automatic_dataset_allows_revision(dataset));
+        }
+        for dataset in ["trading_calendar_v1", "generic", "manual_upload"] {
+            assert!(!automatic_dataset_allows_revision(dataset));
+        }
+    }
+
+    #[test]
+    fn fact_revisions_lock_identity_and_emit_versioned_projection_updates() {
+        for section_name in ["insert_market_projection", "insert_seat_projection"] {
+            let section = WORKER_SOURCE
+                .split(&format!("async fn {section_name}"))
+                .nth(1)
+                .expect("projection function")
+                .split("async fn ")
+                .next()
+                .expect("projection function end");
+            assert!(section.contains("for update"));
+            assert!(section.contains("source_record_id\") != record_id"));
+            assert!(section.contains("row_version = row_version + 1"));
+            assert!(section.contains("operation: \"update\""));
+            assert!(section.contains("before_json: Some(before_json)"));
+        }
+    }
 
     #[test]
     fn retry_allowlist_is_deny_by_default_for_business_failures() {
