@@ -346,7 +346,7 @@ roll_market_file="$EVIDENCE_DIR/rollback-market.csv"
 roll_seat_file="$EVIDENCE_DIR/rollback-seat.csv"
 printf '%s\n' \
   'exchange_code,exchange_name,timezone,instrument_code,instrument_name,currency_code,contract_multiplier,price_tick,contract_code,delivery_month,listed_at,expires_at,source_record_ref' \
-  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$ROLL_INSTRUMENT,Phase 4A rollback,CNY,20,0.4,$ROLL_CONTRACT,2609,$COLLECTION_DATE,2099-12-31,e2e-rollback-catalog-$RUN_MARK" \
+  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$ROLL_INSTRUMENT,Phase 4A rollback,CNY,20,0.4,$ROLL_CONTRACT,2026-09,$COLLECTION_DATE,2099-12-31,e2e-rollback-catalog-$RUN_MARK" \
   >"$roll_catalog_file"
 printf '%s\n' \
   'exchange_code,calendar_version,effective_from,trade_date,is_trading_day,day_session_json,night_session_json,source_record_ref' \
