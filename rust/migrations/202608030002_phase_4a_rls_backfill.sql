@@ -1,5 +1,40 @@
 begin;
 
+-- Change-log v2 includes both the imported-record row and every formal
+-- projection row. Completeness is therefore measured by imported-record
+-- changes, while v1 retains the original all-row count contract.
+create or replace function app.enforce_direct_rollback_change_log()
+returns trigger
+language plpgsql
+as $$
+declare
+    change_count bigint;
+begin
+    if new.rollback_capability <> 'direct' then
+        return null;
+    end if;
+    if new.change_log_version = 2 then
+        select count(*)
+          into change_count
+          from import_row_changes change_row
+         where change_row.workspace_id = new.workspace_id
+           and change_row.import_batch_id = new.id
+           and change_row.target_kind = 'imported_record';
+    else
+        select count(*)
+          into change_count
+          from import_row_changes change_row
+         where change_row.workspace_id = new.workspace_id
+           and change_row.import_batch_id = new.id;
+    end if;
+    if change_count <> (new.imported_count::bigint + new.overwritten_count::bigint) then
+        raise exception 'direct rollback requires a complete change log'
+            using errcode = '23514';
+    end if;
+    return null;
+end;
+$$;
+
 -- The Phase 4A tables FORCE RLS.  The preceding migration intentionally runs
 -- as the non-bypass migrator role, so data repairs must establish each tenant
 -- context before touching workspace-scoped rows.

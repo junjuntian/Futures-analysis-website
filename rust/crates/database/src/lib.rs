@@ -292,6 +292,12 @@ mod phase_4a_schema_contract {
 
     #[test]
     fn source_identity_backfill_is_tenant_scoped_and_preserves_v2_batches() {
+        assert!(
+            RLS_BACKFILL
+                .contains("create or replace function app.enforce_direct_rollback_change_log()")
+        );
+        assert!(RLS_BACKFILL.contains("new.change_log_version = 2"));
+        assert!(RLS_BACKFILL.contains("change_row.target_kind = 'imported_record'"));
         assert!(RLS_BACKFILL.contains("select id from workspaces order by id"));
         assert!(RLS_BACKFILL.contains("set_config("));
         assert!(RLS_BACKFILL.contains("'app.current_workspace_id'"));
