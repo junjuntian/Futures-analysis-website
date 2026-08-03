@@ -89,8 +89,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
+      - /work:size=128m,mode=0700,uid=10001,gid=10001
     environment:
       COLLECTOR_CREDENTIALS_FILE: /run/secrets/collector-credentials
+      COLLECTOR_TEMP_ROOT: /work
+      TMPDIR: /work
     volumes:
       - ${COLLECTOR_CREDENTIALS_FILE:-/etc/futures-platform/secrets/collector-credentials}:/run/secrets/collector-credentials:ro
     networks:
