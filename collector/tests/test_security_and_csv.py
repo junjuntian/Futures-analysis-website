@@ -12,7 +12,12 @@ from futures_collector.api import (
     confirmation_idempotency_key,
     render_csv,
 )
-from futures_collector.sources import SOURCES, OutboundPolicyError, official_requests_only
+from futures_collector.sources import (
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    SOURCES,
+    OutboundPolicyError,
+    official_requests_only,
+)
 
 
 def test_csv_uses_fixed_header_and_quotes_values() -> None:
@@ -97,6 +102,25 @@ def test_each_allowed_redirect_hop_is_checked_and_limit_is_enforced(monkeypatch)
         with pytest.raises(OutboundPolicyError, match="limit"):
             requests.get("https://allowed.example/0", timeout=1)
     assert requested == [f"https://allowed.example/{hop}" for hop in range(6)]
+
+
+def test_request_guard_sets_default_timeout_and_preserves_explicit_timeout(monkeypatch) -> None:
+    timeouts: list[object] = []
+
+    def transport(_session, _method, url, *args, **kwargs):
+        del args
+        timeouts.append(kwargs["timeout"])
+        return _response(url, 200)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _public_dns)
+    monkeypatch.setattr(requests.sessions.Session, "request", transport)
+    with official_requests_only(frozenset({"allowed.example"})):
+        requests.get(  # noqa: S113 - the guard supplies the timeout under test
+            "https://allowed.example/default"
+        )
+        requests.get("https://allowed.example/explicit", timeout=(2, 3))
+
+    assert timeouts == [DEFAULT_REQUEST_TIMEOUT_SECONDS, (2, 3)]
 
 
 def test_dns_change_is_rejected_before_transport_receives_request(monkeypatch) -> None:

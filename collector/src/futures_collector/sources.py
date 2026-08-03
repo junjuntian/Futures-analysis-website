@@ -18,6 +18,7 @@ import requests
 
 LOG = logging.getLogger("futures_collector.sources")
 MAX_REDIRECTS = 5
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 _DNS_GUARD_LOCK = threading.RLock()
 
@@ -489,6 +490,8 @@ def official_requests_only(allowed_domains: frozenset[str]) -> Iterator[None]:
     def guarded(session: requests.Session, method: str, url: str, *args: Any, **kwargs: Any):
         request_kwargs = dict(kwargs)
         request_kwargs["allow_redirects"] = False
+        if request_kwargs.get("timeout") is None:
+            request_kwargs["timeout"] = DEFAULT_REQUEST_TIMEOUT_SECONDS
         current_url = url
         current_method = method.upper()
         history: list[requests.Response] = []
