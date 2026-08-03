@@ -293,11 +293,11 @@ manual_probe="$EVIDENCE_DIR/manual-probe.csv"
 printf '%s\n' 'date,code,name,value' "$COLLECTION_DATE,probe,probe,1" >"$manual_probe"
 printf '%s\n' \
   'exchange_code,exchange_name,timezone,instrument_code,instrument_name,currency_code,contract_multiplier,price_tick,contract_code,delivery_month,listed_at,expires_at,source_record_ref' \
-  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$UPSERT_INSTRUMENT,Phase 4A upsert,CNY,,,$UPSERT_CONTRACT,2608,,,e2e-upsert-initial-$RUN_MARK" \
+  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$UPSERT_INSTRUMENT,Phase 4A upsert,CNY,,,$UPSERT_CONTRACT,2026-08,,,e2e-upsert-initial-$RUN_MARK" \
   >"$catalog_upsert_initial"
 printf '%s\n' \
   'exchange_code,exchange_name,timezone,instrument_code,instrument_name,currency_code,contract_multiplier,price_tick,contract_code,delivery_month,listed_at,expires_at,source_record_ref' \
-  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$UPSERT_INSTRUMENT,Phase 4A upsert filled,CNY,10,0.2,$UPSERT_CONTRACT,2608,$COLLECTION_DATE,2099-12-31,e2e-upsert-filled-$RUN_MARK" \
+  "CFFEX,$CFFEX_NAME,$CFFEX_TIMEZONE,$UPSERT_INSTRUMENT,Phase 4A upsert filled,CNY,10,0.2,$UPSERT_CONTRACT,2026-08,$COLLECTION_DATE,2099-12-31,e2e-upsert-filled-$RUN_MARK" \
   >"$catalog_upsert_filled"
 
 assert_status "$(manual_upload "$COLLECTOR_TOKEN" "$COLLECTOR_CSRF" "$manual_probe" "$EVIDENCE_DIR/collector-manual-upload.json")" 403 'collector manual upload'
