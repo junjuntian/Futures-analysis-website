@@ -156,6 +156,11 @@ class AkshareAdapter:
             for contract in contracts:
                 try:
                     frame = akshare.futures_zh_daily_sina(symbol=contract)
+                    if frame is None or frame.empty or "date" not in frame.columns:
+                        raise ValueError("Sina market response is invalid")
+                    dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
+                    if dates.isna().all():
+                        raise ValueError("Sina market dates are invalid")
                 except OutboundPolicyError:
                     raise
                 except Exception:
@@ -166,22 +171,12 @@ class AkshareAdapter:
                         skipped_count,
                     )
                     continue
-                if frame is None or frame.empty or "date" not in frame.columns:
-                    skipped_count += 1
-                    LOG.warning(
-                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
-                        contract,
-                        skipped_count,
-                    )
-                    continue
-                dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
                 selected = frame[dates == collection_date].copy()
                 if selected.empty:
-                    skipped_count += 1
-                    LOG.warning(
-                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
+                    LOG.info(
+                        "dce_fallback_market_contract_not_observed contract=%s collection_date=%s",
                         contract,
-                        skipped_count,
+                        collection_date.isoformat(),
                     )
                     continue
                 selected["symbol"] = contract
@@ -216,6 +211,8 @@ class AkshareAdapter:
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
             for contract in contracts:
                 contract_frames: list[pd.DataFrame] = []
+                unpublished_rank_types: list[str] = []
+                contract_failed = False
                 for kind, party_field, value_field in kinds:
                     try:
                         frame = akshare.futures_hold_pos_sina(
@@ -227,6 +224,7 @@ class AkshareAdapter:
                         raise
                     except Exception:
                         skipped_count += 1
+                        contract_failed = True
                         LOG.warning(
                             "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
                             "skipped_count=%d",
@@ -239,7 +237,14 @@ class AkshareAdapter:
                         frame, contract, party_field, value_field
                     )
                     if normalized.empty:
-                        skipped_count += 1
+                        unpublished_rank_types.append(kind)
+                        continue
+                    contract_frames.append(normalized)
+                if contract_failed:
+                    continue
+                if contract_frames and unpublished_rank_types:
+                    skipped_count += len(unpublished_rank_types)
+                    for kind in unpublished_rank_types:
                         LOG.warning(
                             "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
                             "skipped_count=%d",
@@ -247,10 +252,14 @@ class AkshareAdapter:
                             kind,
                             skipped_count,
                         )
-                        continue
-                    contract_frames.append(normalized)
-                if contract_frames:
+                elif contract_frames:
                     tables[contract] = pd.concat(contract_frames, ignore_index=True)
+                else:
+                    LOG.info(
+                        "dce_fallback_seat_contract_not_published contract=%s collection_date=%s",
+                        contract,
+                        collection_date.isoformat(),
+                    )
         if skipped_count:
             LOG.error(
                 "dce_fallback_dataset_incomplete dataset=seats skipped_count=%d "

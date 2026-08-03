@@ -68,6 +68,8 @@ VPS host cron
 - DCE fallback 函数固定为：`futures_symbol_mark()` 取得 DCE 品种目录，`futures_zh_realtime(symbol)` 取得当前活跃合约，`futures_contract_detail(contract)` 取得合约参数，`futures_zh_daily_sina(contract)` 取得含收盘价与结算价的历史日行情，`futures_hold_pos_sina(kind, contract, date)` 分别取得成交量、持买和持卖排名。允许域名固定为 `vip.stock.finance.sina.com.cn`、`finance.sina.com.cn`、`stock2.finance.sina.com.cn`；重定向仍须落在该集合。
 - 选择新浪而非东方财富的依据：锁定版 AKShare 的 `futures_zh_daily_sina` 返回 `close` 与 `settle`，且 `futures_hold_pos_sina` 覆盖 DEC-039 要求的三类逐合约席位排名；东方财富 `futures_hist_em` 不返回结算价，数据完整性不足。
 - 每个 DCE 数据集都必须先尝试上表官方函数。仅在官方请求或解析失败时 fallback；不能以空结果静默切换，非交易日仍按原规则失败隔离。官方失败尝试必须生成 `failed` 审计批次，fallback 另建 `succeeded` 批次。
+- DCE fallback 完整性以 catalog 合约集为候选闭合基准。行情函数成功返回历史表但目标交易日无记录，表示该合约当日没有必要行情观测，必须登记 `not_observed` 而非伪造事实或记作请求失败；函数请求、响应解析或目标日行解析异常经重试后仍失败，则整个 DCE 行情数据集 `failed`。
+- DCE 席位以“目标日是否实际发布排名”判定必要合约：同一合约成交量、持买、持卖三类均为空时登记 `not_published`；任一类已发布后三类即构成必要闭合，缺少任一类或任一请求/解析异常经重试后仍失败，整个 DCE 席位数据集 `failed`。`not_observed`/`not_published` 不进入正式表，失败 skip 数继续写结构化日志与审计。
 - akshare 自带交易日判断只用于拒绝明显非交易日参数；正式 `trading_calendar_days` 的 4A 记录由该交易所目录/行情官方响应共同证明，不能仅凭 akshare 本地静态日历入库。
 - 官方来源代码固定为 `akshare_dce_official`、`akshare_shfe_official`、`akshare_czce_official`、`akshare_gfex_official`、`akshare_cffex_official`；`source_type=exchange_public`、`authorization_status=whitelisted`、`connector_code=akshare_v1`。DCE fallback 来源代码固定为 `akshare_sina_dce_fallback`，`source_type=aggregator_public`、`authorization_status=whitelisted_exception`、`connector_code=akshare_v1`；其批次和正式事实表的 `source_id` 不得指向 `akshare_dce_official`。
 
