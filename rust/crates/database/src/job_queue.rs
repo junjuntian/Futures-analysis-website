@@ -50,6 +50,16 @@ impl ChangeSequence {
     }
 }
 
+#[derive(Debug)]
+struct FormalProjectionChange {
+    target_kind: &'static str,
+    target_id: Uuid,
+    operation: &'static str,
+    before_json: Option<Value>,
+    after_json: Value,
+    target_row_version: i64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum JobQueueError {
     #[error("database operation failed")]
@@ -1051,7 +1061,8 @@ async fn execute_automatic_import_job(
             continue;
         }
         let existing = sqlx::query(
-            "select id, record_data from imported_records
+            "select id, record_data, source_import_batch_id, source_row_number, row_version
+               from imported_records
               where workspace_id = $1 and dataset_type = $2 and business_key = $3
               for update",
         )
@@ -1060,39 +1071,99 @@ async fn execute_automatic_import_job(
         .bind(&business_key)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(existing) = existing {
-            if existing.get::<Value, _>("record_data") != record_data {
+        let (record_id, record_change) = if let Some(existing) = existing {
+            if existing.get::<Value, _>("record_data") == record_data {
+                counters.skipped += 1;
+                continue;
+            }
+            if dataset_type != "futures_catalog_v1" {
                 return Err(JobQueueError::SourceRevisionConflict);
             }
-            counters.skipped += 1;
-            continue;
-        }
-        let record_id = Uuid::now_v7();
-        let inserted = sqlx::query(
-            "insert into imported_records
+            let record_id = existing.get::<Uuid, _>("id");
+            let before_json = imported_record_snapshot(&existing);
+            let updated = sqlx::query(
+                "update imported_records
+                    set record_data = $1, source_import_batch_id = $2,
+                        source_row_number = $3, row_version = row_version + 1,
+                        updated_at = now()
+                  where workspace_id = $4 and id = $5 and row_version = $6
+                  returning id, record_data, source_import_batch_id,
+                            source_row_number, row_version",
+            )
+            .bind(&record_data)
+            .bind(job.aggregate_id)
+            .bind(row_number)
+            .bind(job.workspace_id)
+            .bind(record_id)
+            .bind(existing.get::<i64, _>("row_version"))
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(JobQueueError::SourceRevisionConflict)?;
+            counters.updated += 1;
+            (
+                record_id,
+                FormalProjectionChange {
+                    target_kind: "imported_record",
+                    target_id: record_id,
+                    operation: "update",
+                    before_json: Some(before_json),
+                    after_json: imported_record_snapshot(&updated),
+                    target_row_version: updated.get("row_version"),
+                },
+            )
+        } else {
+            let record_id = Uuid::now_v7();
+            let inserted = sqlx::query(
+                "insert into imported_records
                 (id, workspace_id, dataset_type, business_key, record_data,
                  source_import_batch_id, source_row_number, row_version, created_by)
              values ($1, $2, $3, $4, $5, $6, $7, 1, $8)
              on conflict (workspace_id, dataset_type, business_key) do nothing
              returning id, record_data, source_import_batch_id, source_row_number, row_version",
-        )
-        .bind(record_id)
-        .bind(job.workspace_id)
-        .bind(&dataset_type)
-        .bind(&business_key)
-        .bind(&record_data)
-        .bind(job.aggregate_id)
-        .bind(row_number)
-        .bind(actor_user_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(inserted) = inserted else {
-            return Err(JobQueueError::SourceRevisionConflict);
+            )
+            .bind(record_id)
+            .bind(job.workspace_id)
+            .bind(&dataset_type)
+            .bind(&business_key)
+            .bind(&record_data)
+            .bind(job.aggregate_id)
+            .bind(row_number)
+            .bind(actor_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(inserted) = inserted else {
+                return Err(JobQueueError::SourceRevisionConflict);
+            };
+            counters.inserted += 1;
+            (
+                record_id,
+                FormalProjectionChange {
+                    target_kind: "imported_record",
+                    target_id: record_id,
+                    operation: "insert",
+                    before_json: None,
+                    after_json: imported_record_snapshot(&inserted),
+                    target_row_version: 1,
+                },
+            )
         };
-        match dataset_type.as_str() {
+        append_row_change(
+            &mut tx,
+            job,
+            change_sequence.next(),
+            record_change.target_id,
+            record_change.operation,
+            record_change.before_json,
+            record_change.after_json,
+            record_change.target_row_version,
+            source_file_id,
+            row_number,
+        )
+        .await?;
+        let projection_changes = match dataset_type.as_str() {
             "futures_catalog_v1" => {
                 insert_catalog_projection(&mut tx, job.workspace_id, record_id, &record_data)
-                    .await?;
+                    .await?
             }
             "trading_calendar_v1" => {
                 insert_calendar_projection(
@@ -1104,7 +1175,7 @@ async fn execute_automatic_import_job(
                     row_number,
                     &record_data,
                 )
-                .await?;
+                .await?
             }
             "daily_market_prices_v1" => {
                 insert_market_projection(
@@ -1115,35 +1186,25 @@ async fn execute_automatic_import_job(
                     row_number,
                     &record_data,
                 )
-                .await?;
+                .await?
             }
             "seat_positions_v1" => {
-                insert_seat_projection(
-                    &mut tx,
-                    job,
-                    source_id,
-                    record_id,
-                    row_number,
-                    &record_data,
-                )
-                .await?;
+                insert_seat_projection(&mut tx, job, source_id, record_id, row_number, &record_data)
+                    .await?
             }
             _ => return Err(JobQueueError::InvalidFrozenImport),
+        };
+        for change in projection_changes {
+            append_projection_change(
+                &mut tx,
+                job,
+                change_sequence.next(),
+                change,
+                source_file_id,
+                row_number,
+            )
+            .await?;
         }
-        append_row_change(
-            &mut tx,
-            job,
-            change_sequence.next(),
-            record_id,
-            "insert",
-            None,
-            imported_record_snapshot(&inserted),
-            1,
-            source_file_id,
-            row_number,
-        )
-        .await?;
-        counters.inserted += 1;
     }
 
     let final_lease = sqlx::query(
@@ -1169,16 +1230,17 @@ async fn execute_automatic_import_job(
     let batch_updated = sqlx::query(
         "update import_batches
             set status = 'succeeded', processed_count = $1, imported_count = $2,
-                skipped_count = $3, overwritten_count = 0, conflict_result_count = 0,
-                rollback_capability = 'direct', change_log_version = 1,
+                skipped_count = $3, overwritten_count = $4, conflict_result_count = 0,
+                rollback_capability = 'direct', change_log_version = 2,
                 committed_at = now(), updated_at = now()
-          where workspace_id = $4 and id = $5 and status = 'importing'
-            and ingestion_mode = 'automatic' and dataset_type = $6
-            and validated_mapping_id = $7 and validated_staging_version = $8",
+          where workspace_id = $5 and id = $6 and status = 'importing'
+            and ingestion_mode = 'automatic' and dataset_type = $7
+            and validated_mapping_id = $8 and validated_staging_version = $9",
     )
     .bind(counters.processed)
     .bind(counters.inserted)
     .bind(counters.skipped)
+    .bind(counters.updated)
     .bind(job.workspace_id)
     .bind(job.aggregate_id)
     .bind(&dataset_type)
@@ -1293,72 +1355,248 @@ async fn insert_catalog_projection(
     workspace_id: Uuid,
     record_id: Uuid,
     record: &Value,
-) -> Result<(), JobQueueError> {
+) -> Result<Vec<FormalProjectionChange>, JobQueueError> {
+    let mut changes = Vec::new();
     let exchange_code = required_string(record, "exchange_code")?.to_ascii_uppercase();
-    let exchange_id = sqlx::query_scalar::<_, Uuid>(
-        "insert into exchanges (id, workspace_id, code, name, timezone, source_record_id)
-         values ($1, $2, $3, $4, $5, $6)
-         on conflict (workspace_id, code) do nothing returning id",
+    let exchange_name = required_string(record, "exchange_name")?;
+    let timezone = required_string(record, "timezone")?;
+    let existing_exchange = sqlx::query(
+        "select id, row_version,
+                to_jsonb(exchange_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+           from exchanges exchange_row
+          where workspace_id = $1 and code = $2
+          for update",
     )
-    .bind(Uuid::now_v7())
     .bind(workspace_id)
     .bind(&exchange_code)
-    .bind(required_string(record, "exchange_name")?)
-    .bind(required_string(record, "timezone")?)
-    .bind(record_id)
     .fetch_optional(&mut **tx)
-    .await?
-    .or(resolve_exchange(tx, workspace_id, record).await?)
-    .ok_or(JobQueueError::InvalidFrozenImport)?;
+    .await?;
+    let exchange_id = if let Some(existing) = existing_exchange {
+        let exchange_id: Uuid = existing.get("id");
+        let before_json: Value = existing.get("snapshot");
+        let updated = sqlx::query(
+            "update exchanges exchange_row
+                set name = $1, timezone = $2, source_record_id = $3,
+                    row_version = row_version + 1, updated_at = now()
+              where workspace_id = $4 and id = $5 and row_version = $6
+                and (name, timezone) is distinct from ($1, $2)
+              returning row_version,
+                        to_jsonb(exchange_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(&exchange_name)
+        .bind(&timezone)
+        .bind(record_id)
+        .bind(workspace_id)
+        .bind(exchange_id)
+        .bind(existing.get::<i64, _>("row_version"))
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(updated) = updated {
+            changes.push(FormalProjectionChange {
+                target_kind: "exchange",
+                target_id: exchange_id,
+                operation: "update",
+                before_json: Some(before_json),
+                after_json: updated.get("snapshot"),
+                target_row_version: updated.get("row_version"),
+            });
+        }
+        exchange_id
+    } else {
+        let exchange_id = Uuid::now_v7();
+        let inserted = sqlx::query(
+            "insert into exchanges (id, workspace_id, code, name, timezone, source_record_id)
+         values ($1, $2, $3, $4, $5, $6)
+         returning row_version,
+                   to_jsonb(exchanges) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(exchange_id)
+        .bind(workspace_id)
+        .bind(&exchange_code)
+        .bind(&exchange_name)
+        .bind(&timezone)
+        .bind(record_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        changes.push(FormalProjectionChange {
+            target_kind: "exchange",
+            target_id: exchange_id,
+            operation: "insert",
+            before_json: None,
+            after_json: inserted.get("snapshot"),
+            target_row_version: inserted.get("row_version"),
+        });
+        exchange_id
+    };
     let instrument_code = required_string(record, "instrument_code")?.to_ascii_uppercase();
-    let instrument_id = sqlx::query_scalar::<_, Uuid>(
+    let instrument_name = required_string(record, "instrument_name")?;
+    let currency_code = required_string(record, "currency_code")?.to_ascii_uppercase();
+    let multiplier = record_string(record, "contract_multiplier").unwrap_or_default();
+    let tick = record_string(record, "price_tick").unwrap_or_default();
+    let existing_instrument = sqlx::query(
+        "select id, row_version,
+                to_jsonb(instrument_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+           from instruments instrument_row
+          where workspace_id = $1 and exchange_id = $2 and code = $3
+          for update",
+    )
+    .bind(workspace_id)
+    .bind(exchange_id)
+    .bind(&instrument_code)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let instrument_id = if let Some(existing) = existing_instrument {
+        let instrument_id: Uuid = existing.get("id");
+        let before_json: Value = existing.get("snapshot");
+        let updated = sqlx::query(
+            "update instruments instrument_row
+                set name = $1, currency_code = $2,
+                    contract_multiplier = coalesce(nullif($3, '')::numeric, contract_multiplier),
+                    price_tick = coalesce(nullif($4, '')::numeric, price_tick),
+                    source_record_id = $5, row_version = row_version + 1, updated_at = now()
+              where workspace_id = $6 and id = $7 and row_version = $8
+                and (name, currency_code, contract_multiplier, price_tick) is distinct from
+                    ($1, $2, coalesce(nullif($3, '')::numeric, contract_multiplier),
+                     coalesce(nullif($4, '')::numeric, price_tick))
+              returning row_version,
+                        to_jsonb(instrument_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(&instrument_name)
+        .bind(&currency_code)
+        .bind(&multiplier)
+        .bind(&tick)
+        .bind(record_id)
+        .bind(workspace_id)
+        .bind(instrument_id)
+        .bind(existing.get::<i64, _>("row_version"))
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(updated) = updated {
+            changes.push(FormalProjectionChange {
+                target_kind: "instrument",
+                target_id: instrument_id,
+                operation: "update",
+                before_json: Some(before_json),
+                after_json: updated.get("snapshot"),
+                target_row_version: updated.get("row_version"),
+            });
+        }
+        instrument_id
+    } else {
+        let instrument_id = Uuid::now_v7();
+        let inserted = sqlx::query(
         "insert into instruments
             (id, workspace_id, exchange_id, code, name, currency_code,
              contract_multiplier, price_tick, source_record_id)
          values ($1, $2, $3, $4, $5, $6,
                  nullif($7, '')::numeric, nullif($8, '')::numeric, $9)
-         on conflict (workspace_id, exchange_id, code) do nothing returning id",
+         returning row_version,
+                   to_jsonb(instruments) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(instrument_id)
+        .bind(workspace_id)
+        .bind(exchange_id)
+        .bind(&instrument_code)
+        .bind(&instrument_name)
+        .bind(&currency_code)
+        .bind(&multiplier)
+        .bind(&tick)
+        .bind(record_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        changes.push(FormalProjectionChange {
+            target_kind: "instrument",
+            target_id: instrument_id,
+            operation: "insert",
+            before_json: None,
+            after_json: inserted.get("snapshot"),
+            target_row_version: inserted.get("row_version"),
+        });
+        instrument_id
+    };
+    let contract_code = required_string(record, "contract_code")?.to_ascii_uppercase();
+    let delivery_month = record_string(record, "delivery_month").unwrap_or_default();
+    let listed_at = record_string(record, "listed_at").unwrap_or_default();
+    let expires_at = record_string(record, "expires_at").unwrap_or_default();
+    let existing_contract = sqlx::query(
+        "select id, row_version,
+                to_jsonb(contract_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+           from contracts contract_row
+          where workspace_id = $1 and instrument_id = $2 and code = $3
+          for update",
     )
-    .bind(Uuid::now_v7())
     .bind(workspace_id)
-    .bind(exchange_id)
-    .bind(&instrument_code)
-    .bind(required_string(record, "instrument_name")?)
-    .bind(required_string(record, "currency_code")?.to_ascii_uppercase())
-    .bind(record_string(record, "contract_multiplier").unwrap_or_default())
-    .bind(record_string(record, "price_tick").unwrap_or_default())
-    .bind(record_id)
+    .bind(instrument_id)
+    .bind(&contract_code)
     .fetch_optional(&mut **tx)
-    .await?
-    .or(sqlx::query_scalar::<_, Uuid>(
-        "select id from instruments
-              where workspace_id = $1 and exchange_id = $2 and code = $3",
-    )
-    .bind(workspace_id)
-    .bind(exchange_id)
-    .bind(&instrument_code)
-    .fetch_optional(&mut **tx)
-    .await?)
-    .ok_or(JobQueueError::InvalidFrozenImport)?;
-    sqlx::query(
-        "insert into contracts
+    .await?;
+    if let Some(existing) = existing_contract {
+        let contract_id: Uuid = existing.get("id");
+        let before_json: Value = existing.get("snapshot");
+        let updated = sqlx::query(
+            "update contracts contract_row
+                set delivery_month = coalesce(nullif($1, ''), delivery_month),
+                    listed_at = coalesce(nullif($2, '')::date, listed_at),
+                    expires_at = coalesce(nullif($3, '')::date, expires_at),
+                    source_record_id = $4, row_version = row_version + 1, updated_at = now()
+              where workspace_id = $5 and id = $6 and row_version = $7
+                and (delivery_month, listed_at, expires_at) is distinct from
+                    (coalesce(nullif($1, ''), delivery_month),
+                     coalesce(nullif($2, '')::date, listed_at),
+                     coalesce(nullif($3, '')::date, expires_at))
+              returning row_version,
+                        to_jsonb(contract_row) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(&delivery_month)
+        .bind(&listed_at)
+        .bind(&expires_at)
+        .bind(record_id)
+        .bind(workspace_id)
+        .bind(contract_id)
+        .bind(existing.get::<i64, _>("row_version"))
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(updated) = updated {
+            changes.push(FormalProjectionChange {
+                target_kind: "contract",
+                target_id: contract_id,
+                operation: "update",
+                before_json: Some(before_json),
+                after_json: updated.get("snapshot"),
+                target_row_version: updated.get("row_version"),
+            });
+        }
+    } else {
+        let contract_id = Uuid::now_v7();
+        let inserted = sqlx::query(
+            "insert into contracts
             (id, workspace_id, instrument_id, code, delivery_month, listed_at,
              expires_at, source_record_id)
          values ($1, $2, $3, $4, nullif($5, ''), nullif($6, '')::date,
                  nullif($7, '')::date, $8)
-         on conflict (workspace_id, instrument_id, code) do nothing",
-    )
-    .bind(Uuid::now_v7())
-    .bind(workspace_id)
-    .bind(instrument_id)
-    .bind(required_string(record, "contract_code")?.to_ascii_uppercase())
-    .bind(record_string(record, "delivery_month").unwrap_or_default())
-    .bind(record_string(record, "listed_at").unwrap_or_default())
-    .bind(record_string(record, "expires_at").unwrap_or_default())
-    .bind(record_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+         returning row_version,
+                   to_jsonb(contracts) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(contract_id)
+        .bind(workspace_id)
+        .bind(instrument_id)
+        .bind(&contract_code)
+        .bind(&delivery_month)
+        .bind(&listed_at)
+        .bind(&expires_at)
+        .bind(record_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        changes.push(FormalProjectionChange {
+            target_kind: "contract",
+            target_id: contract_id,
+            operation: "insert",
+            before_json: None,
+            after_json: inserted.get("snapshot"),
+            target_row_version: inserted.get("row_version"),
+        });
+    }
+    Ok(changes)
 }
 
 async fn insert_calendar_projection(
@@ -1369,16 +1607,18 @@ async fn insert_calendar_projection(
     record_id: Uuid,
     row_number: i32,
     record: &Value,
-) -> Result<(), JobQueueError> {
+) -> Result<Vec<FormalProjectionChange>, JobQueueError> {
     let exchange_id = resolve_exchange(tx, job.workspace_id, record)
         .await?
         .ok_or(JobQueueError::InvalidFrozenImport)?;
     let version_id = Uuid::now_v7();
-    sqlx::query(
+    let version = sqlx::query(
         "insert into trading_calendar_versions
             (id, workspace_id, exchange_id, version, source_id, effective_from,
              created_by, source_record_id)
-         values ($1, $2, $3, $4, $5, $6::date, $7, $8)",
+         values ($1, $2, $3, $4, $5, $6::date, $7, $8)
+         returning row_version,
+                   to_jsonb(trading_calendar_versions) - 'workspace_id' - 'created_at' as snapshot",
     )
     .bind(version_id)
     .bind(job.workspace_id)
@@ -1388,7 +1628,7 @@ async fn insert_calendar_projection(
     .bind(required_string(record, "effective_from")?)
     .bind(actor_user_id)
     .bind(record_id)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
     let day_json: Value = serde_json::from_str(&required_string(record, "day_session_json")?)
         .map_err(|_| JobQueueError::InvalidFrozenImport)?;
@@ -1397,12 +1637,14 @@ async fn insert_calendar_projection(
     let is_trading_day = required_string(record, "is_trading_day")?
         .parse::<bool>()
         .map_err(|_| JobQueueError::InvalidFrozenImport)?;
-    sqlx::query(
+    let day = sqlx::query(
         "insert into trading_calendar_days
             (workspace_id, calendar_version_id, trade_date, is_trading_day,
              day_session_json, night_session_json, source_import_batch_id,
              source_row_number, source_record_id)
-         values ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)",
+         values ($1, $2, $3::date, $4, $5, $6, $7, $8, $9)
+         returning row_version,
+                   to_jsonb(trading_calendar_days) - 'workspace_id' - 'created_at' as snapshot",
     )
     .bind(job.workspace_id)
     .bind(version_id)
@@ -1413,9 +1655,26 @@ async fn insert_calendar_projection(
     .bind(job.aggregate_id)
     .bind(row_number)
     .bind(record_id)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    Ok(())
+    Ok(vec![
+        FormalProjectionChange {
+            target_kind: "trading_calendar_version",
+            target_id: version_id,
+            operation: "insert",
+            before_json: None,
+            after_json: version.get("snapshot"),
+            target_row_version: version.get("row_version"),
+        },
+        FormalProjectionChange {
+            target_kind: "trading_calendar_day",
+            target_id: record_id,
+            operation: "insert",
+            before_json: None,
+            after_json: day.get("snapshot"),
+            target_row_version: day.get("row_version"),
+        },
+    ])
 }
 
 async fn insert_market_projection(
@@ -1425,7 +1684,7 @@ async fn insert_market_projection(
     record_id: Uuid,
     row_number: i32,
     record: &Value,
-) -> Result<(), JobQueueError> {
+) -> Result<Vec<FormalProjectionChange>, JobQueueError> {
     let contract_id = resolve_contract(tx, job.workspace_id, record)
         .await?
         .ok_or(JobQueueError::InvalidFrozenImport)?;
@@ -1443,14 +1702,16 @@ async fn insert_market_projection(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or(JobQueueError::InvalidFrozenImport)?;
-    sqlx::query(
+    let inserted = sqlx::query(
         "insert into market_prices
             (workspace_id, source_id, contract_id, trade_date, session_type, observed_at,
              granularity, close_price, settlement_price, currency_code, calendar_version_id,
              revision_no, source_import_batch_id, source_row_number, source_record_id)
          values ($1, $2, $3, $4::date, $5, $6::timestamptz, $7,
                  nullif($8, '')::numeric, nullif($9, '')::numeric, $10, $11,
-                 $12::integer, $13, $14, $15)",
+                 $12::integer, $13, $14, $15)
+         returning row_version,
+                   to_jsonb(market_prices) - 'workspace_id' - 'created_at' as snapshot",
     )
     .bind(job.workspace_id)
     .bind(source_id)
@@ -1467,9 +1728,16 @@ async fn insert_market_projection(
     .bind(job.aggregate_id)
     .bind(row_number)
     .bind(record_id)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    Ok(())
+    Ok(vec![FormalProjectionChange {
+        target_kind: "market_price",
+        target_id: record_id,
+        operation: "insert",
+        before_json: None,
+        after_json: inserted.get("snapshot"),
+        target_row_version: inserted.get("row_version"),
+    }])
 }
 
 async fn insert_seat_projection(
@@ -1479,39 +1747,59 @@ async fn insert_seat_projection(
     record_id: Uuid,
     row_number: i32,
     record: &Value,
-) -> Result<(), JobQueueError> {
+) -> Result<Vec<FormalProjectionChange>, JobQueueError> {
     let contract_id = resolve_contract(tx, job.workspace_id, record)
         .await?
         .ok_or(JobQueueError::InvalidFrozenImport)?;
     let seat_name = required_string(record, "seat_name")?;
-    let seat_id = sqlx::query_scalar::<_, Uuid>(
+    let existing_seat = sqlx::query(
+        "select id from seat_entities
+          where workspace_id = $1 and canonical_name = $2
+          for update",
+    )
+    .bind(job.workspace_id)
+    .bind(&seat_name)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (seat_id, seat_change) = if let Some(existing) = existing_seat {
+        (existing.get("id"), None)
+    } else {
+        let seat_id = Uuid::now_v7();
+        let inserted = sqlx::query(
         "insert into seat_entities
             (id, workspace_id, canonical_name, status, source_record_id)
          values ($1, $2, $3, 'unreviewed', $4)
-         on conflict (workspace_id, canonical_name) do nothing returning id",
-    )
-    .bind(Uuid::now_v7())
-    .bind(job.workspace_id)
-    .bind(&seat_name)
-    .bind(record_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .or(sqlx::query_scalar::<_, Uuid>(
-        "select id from seat_entities where workspace_id = $1 and canonical_name = $2",
-    )
-    .bind(job.workspace_id)
-    .bind(&seat_name)
-    .fetch_optional(&mut **tx)
-    .await?)
-    .ok_or(JobQueueError::InvalidFrozenImport)?;
-    sqlx::query(
+         returning row_version,
+                   to_jsonb(seat_entities) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot",
+        )
+        .bind(seat_id)
+        .bind(job.workspace_id)
+        .bind(&seat_name)
+        .bind(record_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        (
+            seat_id,
+            Some(FormalProjectionChange {
+                target_kind: "seat_entity",
+                target_id: seat_id,
+                operation: "insert",
+                before_json: None,
+                after_json: inserted.get("snapshot"),
+                target_row_version: inserted.get("row_version"),
+            }),
+        )
+    };
+    let position = sqlx::query(
         "insert into seat_positions
             (workspace_id, trade_date, contract_id, seat_id, rank_type, rank,
              volume, long_position, short_position, source_id, source_import_batch_id,
              source_row_number, source_record_id)
          values ($1, $2::date, $3, $4, $5, $6::integer,
                  nullif($7, '')::bigint, nullif($8, '')::bigint, nullif($9, '')::bigint,
-                 $10, $11, $12, $13)",
+                 $10, $11, $12, $13)
+         returning row_version,
+                   to_jsonb(seat_positions) - 'workspace_id' - 'created_at' as snapshot",
     )
     .bind(job.workspace_id)
     .bind(required_string(record, "trade_date")?)
@@ -1526,9 +1814,21 @@ async fn insert_seat_projection(
     .bind(job.aggregate_id)
     .bind(row_number)
     .bind(record_id)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    Ok(())
+    let mut changes = Vec::with_capacity(2);
+    if let Some(change) = seat_change {
+        changes.push(change);
+    }
+    changes.push(FormalProjectionChange {
+        target_kind: "seat_position",
+        target_id: record_id,
+        operation: "insert",
+        before_json: None,
+        after_json: position.get("snapshot"),
+        target_row_version: position.get("row_version"),
+    });
+    Ok(changes)
 }
 
 async fn insert_unknown_contract(
@@ -1869,6 +2169,38 @@ async fn append_row_change(
     .bind(before_json)
     .bind(after_json)
     .bind(target_row_version)
+    .bind(source_file_id)
+    .bind(source_row_number)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn append_projection_change(
+    tx: &mut Transaction<'_, Postgres>,
+    job: &ClaimedJob,
+    sequence_no: i64,
+    change: FormalProjectionChange,
+    source_file_id: Uuid,
+    source_row_number: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into import_row_changes
+           (id, workspace_id, import_batch_id, sequence_no, target_kind, target_id,
+            operation, before_json, after_json, target_row_version, source_file_id,
+            source_row_number)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(job.workspace_id)
+    .bind(job.aggregate_id)
+    .bind(sequence_no)
+    .bind(change.target_kind)
+    .bind(change.target_id)
+    .bind(change.operation)
+    .bind(change.before_json)
+    .bind(change.after_json)
+    .bind(change.target_row_version)
     .bind(source_file_id)
     .bind(source_row_number)
     .execute(&mut **tx)

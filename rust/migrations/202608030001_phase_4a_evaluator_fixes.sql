@@ -1,5 +1,11 @@
 begin;
 
+update data_sources
+   set priority = 50,
+       updated_at = now()
+ where code = 'akshare_sina_dce_fallback'
+   and priority <> 50;
+
 -- HIGH-02: automatic import identity follows the controlled source identity,
 -- matching the source-aware formal fact keys. Existing Phase 4A records are
 -- rewritten before new source-aware validation keys can be produced.
@@ -78,5 +84,60 @@ select *
  where source_preference_rank = 1;
 
 grant select on preferred_market_prices, preferred_seat_positions to futures_runtime;
+
+-- HIGH-03: only change-log v2 automatic batches have a complete formal
+-- projection chain. Existing Phase 4A batches were written with v1 logs that
+-- contain imported_records only and therefore remain compensation-only.
+update import_batches
+   set rollback_capability = 'compensation_only',
+       change_log_version = null
+ where ingestion_mode = 'automatic'
+   and rollback_capability = 'direct';
+
+alter table import_row_changes
+    drop constraint import_row_changes_target_kind_allowed,
+    add constraint import_row_changes_target_kind_allowed check (
+        target_kind in (
+            'imported_record', 'exchange', 'instrument', 'contract',
+            'trading_calendar_version', 'trading_calendar_day',
+            'market_price', 'seat_entity', 'seat_position'
+        )
+    );
+
+alter table import_rollback_conflicts
+    drop constraint import_rollback_conflicts_target_kind_allowed,
+    add constraint import_rollback_conflicts_target_kind_allowed check (
+        target_kind is null or target_kind in (
+            'imported_record', 'exchange', 'instrument', 'contract',
+            'trading_calendar_version', 'trading_calendar_day',
+            'market_price', 'seat_entity', 'seat_position'
+        )
+    );
+
+alter table import_data_invalidations
+    drop constraint import_data_invalidations_target_kind_allowed,
+    add constraint import_data_invalidations_target_kind_allowed check (
+        target_kind in (
+            'imported_record', 'exchange', 'instrument', 'contract',
+            'trading_calendar_version', 'trading_calendar_day',
+            'market_price', 'seat_entity', 'seat_position'
+        )
+    );
+
+alter table trading_calendar_versions
+    add column row_version bigint not null default 1,
+    add constraint trading_calendar_versions_row_version_positive check (row_version > 0);
+
+alter table trading_calendar_days
+    add column row_version bigint not null default 1,
+    add constraint trading_calendar_days_row_version_positive check (row_version > 0);
+
+alter table market_prices
+    add column row_version bigint not null default 1,
+    add constraint market_prices_row_version_positive check (row_version > 0);
+
+alter table seat_positions
+    add column row_version bigint not null default 1,
+    add constraint seat_positions_row_version_positive check (row_version > 0);
 
 commit;

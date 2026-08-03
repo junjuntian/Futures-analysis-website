@@ -519,7 +519,7 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "aggregator_public",
             base_domain: "vip.stock.finance.sina.com.cn",
             authorization_status: "whitelisted_exception",
-            priority: 200,
+            priority: 50,
             allowed_domains: &[
                 "vip.stock.finance.sina.com.cn",
                 "finance.sina.com.cn",
@@ -2154,7 +2154,7 @@ pub(crate) async fn evaluate_rollback(
             fingerprint_material,
         );
     }
-    if change_log_version != Some(1) {
+    if !matches!(change_log_version, Some(1 | 2)) {
         push_rollback_conflict(
             &mut conflicts,
             ImportRollbackConflictType::ChangeLogIncomplete,
@@ -2188,7 +2188,13 @@ pub(crate) async fn evaluate_rollback(
     .bind(import_id)
     .fetch_all(&mut **tx)
     .await?;
-    if change_rows.len() as i64 != expected_change_count {
+    let imported_change_count = change_rows
+        .iter()
+        .filter(|row| row.get::<String, _>("target_kind") == "imported_record")
+        .count() as i64;
+    if (change_log_version == Some(1) && change_rows.len() as i64 != expected_change_count)
+        || (change_log_version == Some(2) && imported_change_count != expected_change_count)
+    {
         push_rollback_conflict(
             &mut conflicts,
             ImportRollbackConflictType::ChangeLogIncomplete,
@@ -2222,6 +2228,25 @@ pub(crate) async fn evaluate_rollback(
         );
     }
 
+    let logged_targets = change_rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("target_kind"),
+                row.get::<Uuid, _>("target_id"),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let inserted_targets = change_rows
+        .iter()
+        .filter(|row| row.get::<String, _>("operation") == "insert")
+        .map(|row| {
+            (
+                row.get::<String, _>("target_kind"),
+                row.get::<Uuid, _>("target_id"),
+            )
+        })
+        .collect::<HashSet<_>>();
     let mut seen_targets = HashSet::new();
     for change in &change_rows {
         let sequence_no = change.get::<i64, _>("sequence_no");
@@ -2275,6 +2300,146 @@ pub(crate) async fn evaluate_rollback(
             );
         }
         if target_kind != "imported_record" {
+            if change_log_version == Some(2) && is_projection_target(&target_kind) {
+                if !matches!(operation.as_str(), "insert" | "update") {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::IllegalChange,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        None,
+                        None,
+                        "unsupported_projection_operation",
+                    );
+                    continue;
+                }
+                let snapshot_valid = after_json.as_ref().is_some_and(valid_projection_snapshot)
+                    && match operation.as_str() {
+                        "insert" => before_json.is_none(),
+                        "update" => before_json.as_ref().is_some_and(valid_projection_snapshot),
+                        _ => false,
+                    };
+                if !snapshot_valid {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::IllegalChange,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        None,
+                        None,
+                        "invalid_projection_snapshot",
+                    );
+                }
+                let current =
+                    load_projection_snapshot(tx, workspace_id, &target_kind, target_id).await?;
+                let Some((current_row_version, current_snapshot)) = current else {
+                    fingerprint_material.push(json!({
+                        "target_kind": target_kind,
+                        "target_id": target_id,
+                        "current": null,
+                    }));
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::TargetMissing,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        None,
+                        None,
+                        "projection_target_missing",
+                    );
+                    continue;
+                };
+                let current_version = u64::try_from(current_row_version).ok();
+                fingerprint_material.push(json!({
+                    "target_kind": target_kind,
+                    "target_id": target_id,
+                    "current": current_snapshot,
+                }));
+                if current_row_version != expected_row_version {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::TargetVersionChanged,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        current_version,
+                        None,
+                        "projection_row_version_changed",
+                    );
+                } else if after_json.as_ref() != Some(&current_snapshot) {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::TargetDataChanged,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        current_version,
+                        None,
+                        "projection_after_snapshot_mismatch",
+                    );
+                }
+                let later_change_exists = sqlx::query_scalar::<_, bool>(
+                    "select exists(
+                        select 1 from import_row_changes later_change
+                         where later_change.workspace_id = $1
+                           and later_change.target_kind = $2
+                           and later_change.target_id = $3
+                           and later_change.import_batch_id <> $4
+                           and later_change.created_at > $5
+                     )",
+                )
+                .bind(workspace_id)
+                .bind(&target_kind)
+                .bind(target_id)
+                .bind(import_id)
+                .bind(change_created_at)
+                .fetch_one(&mut **tx)
+                .await?;
+                fingerprint_material.push(json!({
+                    "target_kind": target_kind,
+                    "target_id": target_id,
+                    "later_projection_change_exists": later_change_exists,
+                }));
+                if later_change_exists {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::LaterModification,
+                        target_label,
+                        Some(target_id),
+                        expected_version,
+                        current_version,
+                        None,
+                        "later_projection_change_log_exists",
+                    );
+                }
+                if operation == "insert" {
+                    let dependencies =
+                        projection_dependencies(tx, workspace_id, &target_kind, target_id).await?;
+                    fingerprint_material.push(json!({
+                        "target_kind": target_kind,
+                        "target_id": target_id,
+                        "projection_dependencies": dependencies,
+                    }));
+                    for (dependency_kind, dependency_id) in dependencies {
+                        if !inserted_targets.contains(&(dependency_kind.clone(), dependency_id)) {
+                            push_rollback_conflict(
+                                &mut conflicts,
+                                ImportRollbackConflictType::DownstreamDependency,
+                                target_label,
+                                Some(target_id),
+                                expected_version,
+                                current_version,
+                                Some(&dependency_kind),
+                                "formal_projection_downstream_dependency",
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
             push_rollback_conflict(
                 &mut conflicts,
                 ImportRollbackConflictType::IllegalChange,
@@ -2470,6 +2635,35 @@ pub(crate) async fn evaluate_rollback(
         }
     }
 
+    if change_log_version == Some(2) {
+        let imported_targets = change_rows
+            .iter()
+            .filter(|row| row.get::<String, _>("target_kind") == "imported_record")
+            .map(|row| row.get::<Uuid, _>("target_id"))
+            .collect::<Vec<_>>();
+        for record_id in imported_targets {
+            let projections = projections_for_source_record(tx, workspace_id, record_id).await?;
+            fingerprint_material.push(json!({
+                "source_record_id": record_id,
+                "formal_projections": projections,
+            }));
+            for (projection_kind, projection_id) in projections {
+                if !logged_targets.contains(&(projection_kind.clone(), projection_id)) {
+                    push_rollback_conflict(
+                        &mut conflicts,
+                        ImportRollbackConflictType::ChangeLogIncomplete,
+                        Some("imported_record"),
+                        Some(record_id),
+                        None,
+                        None,
+                        Some(&projection_kind),
+                        "formal_projection_change_missing",
+                    );
+                }
+            }
+        }
+    }
+
     finalize_rollback_evaluation(
         import_id,
         rollback_capability,
@@ -2499,6 +2693,218 @@ fn valid_snapshot(value: &serde_json::Value) -> bool {
             .get("row_version")
             .and_then(serde_json::Value::as_i64)
             .is_some_and(|value| value > 0)
+}
+
+fn is_projection_target(target_kind: &str) -> bool {
+    matches!(
+        target_kind,
+        "exchange"
+            | "instrument"
+            | "contract"
+            | "trading_calendar_version"
+            | "trading_calendar_day"
+            | "market_price"
+            | "seat_entity"
+            | "seat_position"
+    )
+}
+
+fn valid_projection_snapshot(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("row_version"))
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|version| version > 0)
+}
+
+async fn load_projection_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    target_kind: &str,
+    target_id: Uuid,
+) -> Result<Option<(i64, serde_json::Value)>, ImportRepositoryError> {
+    let sql = match target_kind {
+        "exchange" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+               from exchanges target where workspace_id = $1 and id = $2 for update"
+        }
+        "instrument" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+               from instruments target where workspace_id = $1 and id = $2 for update"
+        }
+        "contract" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+               from contracts target where workspace_id = $1 and id = $2 for update"
+        }
+        "trading_calendar_version" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' as snapshot
+               from trading_calendar_versions target
+              where workspace_id = $1 and id = $2 for update"
+        }
+        "trading_calendar_day" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' as snapshot
+               from trading_calendar_days target
+              where workspace_id = $1 and source_record_id = $2 for update"
+        }
+        "market_price" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' as snapshot
+               from market_prices target
+              where workspace_id = $1 and source_record_id = $2 for update"
+        }
+        "seat_entity" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' as snapshot
+               from seat_entities target where workspace_id = $1 and id = $2 for update"
+        }
+        "seat_position" => {
+            "select row_version,
+                    to_jsonb(target) - 'workspace_id' - 'created_at' as snapshot
+               from seat_positions target
+              where workspace_id = $1 and source_record_id = $2 for update"
+        }
+        _ => return Ok(None),
+    };
+    Ok(sqlx::query(sql)
+        .bind(workspace_id)
+        .bind(target_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(|row| (row.get("row_version"), row.get("snapshot"))))
+}
+
+async fn projection_dependencies(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    target_kind: &str,
+    target_id: Uuid,
+) -> Result<Vec<(String, Uuid)>, ImportRepositoryError> {
+    let queries: &[(&str, &str)] = match target_kind {
+        "exchange" => &[(
+            "instrument",
+            "select id as target_id from instruments
+              where workspace_id = $1 and exchange_id = $2 for update",
+        )],
+        "instrument" => &[(
+            "contract",
+            "select id as target_id from contracts
+              where workspace_id = $1 and instrument_id = $2 for update",
+        )],
+        "contract" => &[
+            (
+                "market_price",
+                "select source_record_id as target_id from market_prices
+                  where workspace_id = $1 and contract_id = $2 for update",
+            ),
+            (
+                "seat_position",
+                "select source_record_id as target_id from seat_positions
+                  where workspace_id = $1 and contract_id = $2 for update",
+            ),
+        ],
+        "trading_calendar_version" => &[
+            (
+                "trading_calendar_day",
+                "select source_record_id as target_id from trading_calendar_days
+                  where workspace_id = $1 and calendar_version_id = $2 for update",
+            ),
+            (
+                "market_price",
+                "select source_record_id as target_id from market_prices
+                  where workspace_id = $1 and calendar_version_id = $2 for update",
+            ),
+        ],
+        "seat_entity" => &[(
+            "seat_position",
+            "select source_record_id as target_id from seat_positions
+              where workspace_id = $1 and seat_id = $2 for update",
+        )],
+        _ => &[],
+    };
+    let mut dependencies = Vec::new();
+    for (dependency_kind, sql) in queries {
+        let rows = sqlx::query(sql)
+            .bind(workspace_id)
+            .bind(target_id)
+            .fetch_all(&mut **tx)
+            .await?;
+        dependencies.extend(
+            rows.into_iter()
+                .map(|row| ((*dependency_kind).to_string(), row.get("target_id"))),
+        );
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(dependencies)
+}
+
+async fn projections_for_source_record(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace_id: Uuid,
+    source_record_id: Uuid,
+) -> Result<Vec<(String, Uuid)>, ImportRepositoryError> {
+    let queries = [
+        (
+            "exchange",
+            "select id as target_id from exchanges
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "instrument",
+            "select id as target_id from instruments
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "contract",
+            "select id as target_id from contracts
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "trading_calendar_version",
+            "select id as target_id from trading_calendar_versions
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "trading_calendar_day",
+            "select source_record_id as target_id from trading_calendar_days
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "market_price",
+            "select source_record_id as target_id from market_prices
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "seat_entity",
+            "select id as target_id from seat_entities
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+        (
+            "seat_position",
+            "select source_record_id as target_id from seat_positions
+              where workspace_id = $1 and source_record_id = $2 for update",
+        ),
+    ];
+    let mut projections = Vec::new();
+    for (target_kind, sql) in queries {
+        let rows = sqlx::query(sql)
+            .bind(workspace_id)
+            .bind(source_record_id)
+            .fetch_all(&mut **tx)
+            .await?;
+        projections.extend(
+            rows.into_iter()
+                .map(|row| (target_kind.to_string(), row.get("target_id"))),
+        );
+    }
+    projections.sort();
+    projections.dedup();
+    Ok(projections)
 }
 
 fn finalize_rollback_evaluation(
@@ -3290,7 +3696,7 @@ mod tests {
         let fallback = automatic_source("akshare_sina_dce_fallback").unwrap();
         assert_eq!(fallback.source_type, "aggregator_public");
         assert_eq!(fallback.authorization_status, "whitelisted_exception");
-        assert_eq!(fallback.priority, 200);
+        assert_eq!(fallback.priority, 50);
         assert_eq!(
             fallback.allowed_domains,
             [

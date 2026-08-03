@@ -48,9 +48,10 @@ pub async fn execute_rollback_job(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let change_log_version = batch.get::<Option<i32>, _>("change_log_version");
     if batch.get::<String, _>("status") != "rolling_back"
         || batch.get::<String, _>("rollback_capability") != "direct"
-        || batch.get::<Option<i32>, _>("change_log_version") != Some(1)
+        || !matches!(change_log_version, Some(1 | 2))
     {
         return Err(JobQueueError::InvalidFrozenImport);
     }
@@ -133,83 +134,49 @@ pub async fn execute_rollback_job(
     .await?;
     for change in &changes {
         let target_kind = change.get::<String, _>("target_kind");
-        if target_kind != "imported_record" {
-            return Err(JobQueueError::InvalidFrozenImport);
-        }
         let target_id = change.get::<Uuid, _>("target_id");
         let expected_version = change.get::<i64, _>("target_row_version");
         let after_json = change
             .get::<Option<Value>, _>("after_json")
             .ok_or(JobQueueError::InvalidFrozenImport)?;
-        match change.get::<String, _>("operation").as_str() {
-            "insert" => {
-                let deleted = sqlx::query(
-                    "delete from imported_records
-                      where workspace_id = $1 and id = $2 and row_version = $3
-                        and jsonb_build_object(
-                            'record_data', record_data,
-                            'source_import_batch_id', source_import_batch_id,
-                            'source_row_number', source_row_number,
-                            'row_version', row_version
-                        ) = $4
-                      returning id",
-                )
-                .bind(job.workspace_id)
-                .bind(target_id)
-                .bind(expected_version)
-                .bind(&after_json)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if deleted.is_none() {
-                    return Err(JobQueueError::InvalidFrozenImport);
-                }
-            }
-            "update" | "soft_delete" => {
-                let before_json = change
-                    .get::<Option<Value>, _>("before_json")
-                    .ok_or(JobQueueError::InvalidFrozenImport)?;
-                let restore = parse_restore_snapshot(&before_json)?;
-                let rollback_version = expected_version
-                    .checked_add(1)
-                    .ok_or(JobQueueError::InvalidFrozenImport)?;
-                let updated = sqlx::query(
-                    "update imported_records
-                        set record_data = $1, source_import_batch_id = $2,
-                            source_row_number = $3, row_version = $4,
-                            updated_at = now()
-                      where workspace_id = $5 and id = $6 and row_version = $7
-                        and jsonb_build_object(
-                            'record_data', record_data,
-                            'source_import_batch_id', source_import_batch_id,
-                            'source_row_number', source_row_number,
-                            'row_version', row_version
-                        ) = $8",
-                )
-                .bind(restore.record_data)
-                .bind(restore.source_import_batch_id)
-                .bind(restore.source_row_number)
-                .bind(rollback_version)
-                .bind(job.workspace_id)
-                .bind(target_id)
-                .bind(expected_version)
-                .bind(&after_json)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-                require_single_fenced_update(updated)?;
-            }
-            _ => return Err(JobQueueError::InvalidFrozenImport),
+        let operation = change.get::<String, _>("operation");
+        if target_kind == "imported_record" {
+            rollback_imported_record(
+                &mut tx,
+                job.workspace_id,
+                target_id,
+                &operation,
+                change.get::<Option<Value>, _>("before_json"),
+                &after_json,
+                expected_version,
+            )
+            .await?;
+        } else if change_log_version == Some(2) {
+            rollback_projection(
+                &mut tx,
+                job.workspace_id,
+                &target_kind,
+                target_id,
+                &operation,
+                change.get::<Option<Value>, _>("before_json"),
+                &after_json,
+                expected_version,
+            )
+            .await?;
+        } else {
+            return Err(JobQueueError::InvalidFrozenImport);
         }
         sqlx::query(
             "insert into import_data_invalidations
                (id, workspace_id, import_batch_id, rollback_request_id,
                 target_kind, target_id, invalidation_kind)
-             values ($1, $2, $3, $4, 'imported_record', $5, 'import_rollback')",
+             values ($1, $2, $3, $4, $5, $6, 'import_rollback')",
         )
         .bind(Uuid::now_v7())
         .bind(job.workspace_id)
         .bind(job.aggregate_id)
         .bind(rollback_request_id)
+        .bind(&target_kind)
         .bind(target_id)
         .execute(&mut *tx)
         .await?;
@@ -278,6 +245,194 @@ pub async fn execute_rollback_job(
     )
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_imported_record(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    target_id: Uuid,
+    operation: &str,
+    before_json: Option<Value>,
+    after_json: &Value,
+    expected_version: i64,
+) -> Result<(), JobQueueError> {
+    match operation {
+        "insert" => {
+            let deleted = sqlx::query(
+                "delete from imported_records
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and jsonb_build_object(
+                        'record_data', record_data,
+                        'source_import_batch_id', source_import_batch_id,
+                        'source_row_number', source_row_number,
+                        'row_version', row_version
+                    ) = $4
+                  returning id",
+            )
+            .bind(workspace_id)
+            .bind(target_id)
+            .bind(expected_version)
+            .bind(after_json)
+            .fetch_optional(&mut **tx)
+            .await?;
+            if deleted.is_none() {
+                return Err(JobQueueError::InvalidFrozenImport);
+            }
+        }
+        "update" | "soft_delete" => {
+            let restore =
+                parse_restore_snapshot(&before_json.ok_or(JobQueueError::InvalidFrozenImport)?)?;
+            let rollback_version = expected_version
+                .checked_add(1)
+                .ok_or(JobQueueError::InvalidFrozenImport)?;
+            let updated = sqlx::query(
+                "update imported_records
+                    set record_data = $1, source_import_batch_id = $2,
+                        source_row_number = $3, row_version = $4,
+                        updated_at = now()
+                  where workspace_id = $5 and id = $6 and row_version = $7
+                    and jsonb_build_object(
+                        'record_data', record_data,
+                        'source_import_batch_id', source_import_batch_id,
+                        'source_row_number', source_row_number,
+                        'row_version', row_version
+                    ) = $8",
+            )
+            .bind(restore.record_data)
+            .bind(restore.source_import_batch_id)
+            .bind(restore.source_row_number)
+            .bind(rollback_version)
+            .bind(workspace_id)
+            .bind(target_id)
+            .bind(expected_version)
+            .bind(after_json)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+            require_single_fenced_update(updated)?;
+        }
+        _ => return Err(JobQueueError::InvalidFrozenImport),
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_projection(
+    tx: &mut Transaction<'_, Postgres>,
+    workspace_id: Uuid,
+    target_kind: &str,
+    target_id: Uuid,
+    operation: &str,
+    before_json: Option<Value>,
+    after_json: &Value,
+    expected_version: i64,
+) -> Result<(), JobQueueError> {
+    if operation == "insert" {
+        let sql = match target_kind {
+            "exchange" => {
+                "delete from exchanges target
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $4"
+            }
+            "instrument" => {
+                "delete from instruments target
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $4"
+            }
+            "contract" => {
+                "delete from contracts target
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $4"
+            }
+            "trading_calendar_version" => {
+                "delete from trading_calendar_versions target
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' = $4"
+            }
+            "trading_calendar_day" => {
+                "delete from trading_calendar_days target
+                  where workspace_id = $1 and source_record_id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' = $4"
+            }
+            "market_price" => {
+                "delete from market_prices target
+                  where workspace_id = $1 and source_record_id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' = $4"
+            }
+            "seat_entity" => {
+                "delete from seat_entities target
+                  where workspace_id = $1 and id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $4"
+            }
+            "seat_position" => {
+                "delete from seat_positions target
+                  where workspace_id = $1 and source_record_id = $2 and row_version = $3
+                    and to_jsonb(target) - 'workspace_id' - 'created_at' = $4"
+            }
+            _ => return Err(JobQueueError::InvalidFrozenImport),
+        };
+        let deleted = sqlx::query(sql)
+            .bind(workspace_id)
+            .bind(target_id)
+            .bind(expected_version)
+            .bind(after_json)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+        require_single_fenced_update(deleted)?;
+        return Ok(());
+    }
+    if operation != "update" {
+        return Err(JobQueueError::InvalidFrozenImport);
+    }
+    let before_json = before_json.ok_or(JobQueueError::InvalidFrozenImport)?;
+    let rollback_version = expected_version
+        .checked_add(1)
+        .ok_or(JobQueueError::InvalidFrozenImport)?;
+    let sql = match target_kind {
+        "exchange" => {
+            "update exchanges target
+                set name = $1->>'name', timezone = $1->>'timezone',
+                    source_record_id = ($1->>'source_record_id')::uuid,
+                    row_version = $2, updated_at = now()
+              where workspace_id = $3 and id = $4 and row_version = $5
+                and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $6"
+        }
+        "instrument" => {
+            "update instruments target
+                set name = $1->>'name', currency_code = $1->>'currency_code',
+                    contract_multiplier = nullif($1->>'contract_multiplier', '')::numeric,
+                    price_tick = nullif($1->>'price_tick', '')::numeric,
+                    source_record_id = ($1->>'source_record_id')::uuid,
+                    row_version = $2, updated_at = now()
+              where workspace_id = $3 and id = $4 and row_version = $5
+                and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $6"
+        }
+        "contract" => {
+            "update contracts target
+                set delivery_month = nullif($1->>'delivery_month', ''),
+                    listed_at = nullif($1->>'listed_at', '')::date,
+                    expires_at = nullif($1->>'expires_at', '')::date,
+                    source_record_id = ($1->>'source_record_id')::uuid,
+                    row_version = $2, updated_at = now()
+              where workspace_id = $3 and id = $4 and row_version = $5
+                and to_jsonb(target) - 'workspace_id' - 'created_at' - 'updated_at' = $6"
+        }
+        _ => return Err(JobQueueError::InvalidFrozenImport),
+    };
+    let updated = sqlx::query(sql)
+        .bind(before_json)
+        .bind(rollback_version)
+        .bind(workspace_id)
+        .bind(target_id)
+        .bind(expected_version)
+        .bind(after_json)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    require_single_fenced_update(updated)?;
     Ok(())
 }
 

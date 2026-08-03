@@ -203,6 +203,8 @@ mod phase_3d_schema_contract {
 mod phase_4a_schema_contract {
     const MIGRATION: &str =
         include_str!("../../../migrations/202608020001_phase_4a_collection_schema.sql");
+    const EVALUATOR_FIXES: &str =
+        include_str!("../../../migrations/202608030001_phase_4a_evaluator_fixes.sql");
 
     #[test]
     fn all_phase_4a_business_tables_force_workspace_rls() {
@@ -255,5 +257,34 @@ mod phase_4a_schema_contract {
         ] {
             assert!(MIGRATION.contains(dataset));
         }
+    }
+
+    #[test]
+    fn evaluator_fixes_version_every_formal_projection_for_atomic_rollback() {
+        for table in [
+            "trading_calendar_versions",
+            "trading_calendar_days",
+            "market_prices",
+            "seat_positions",
+        ] {
+            assert!(
+                EVALUATOR_FIXES
+                    .contains(&format!("alter table {table}\n    add column row_version"))
+            );
+        }
+        for target in [
+            "'exchange'",
+            "'instrument'",
+            "'contract'",
+            "'trading_calendar_version'",
+            "'trading_calendar_day'",
+            "'market_price'",
+            "'seat_entity'",
+            "'seat_position'",
+        ] {
+            assert!(EVALUATOR_FIXES.contains(target));
+        }
+        assert!(EVALUATOR_FIXES.contains("ingestion_mode = 'automatic'"));
+        assert!(EVALUATOR_FIXES.contains("rollback_capability = 'compensation_only'"));
     }
 }
