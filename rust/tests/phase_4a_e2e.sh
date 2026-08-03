@@ -359,7 +359,7 @@ printf '%s\n' \
   >"$roll_market_file"
 printf '%s\n' \
   'exchange_code,contract_code,trade_date,seat_name,rank_type,rank,volume,long_position,short_position,source_record_ref' \
-  "CFFEX,$ROLL_CONTRACT,$COLLECTION_DATE,$ROLL_SEAT,volume,700001,100,60,40,e2e-rollback-seat-$RUN_MARK" \
+  "CFFEX,$ROLL_CONTRACT,$COLLECTION_DATE,$ROLL_SEAT,volume,700001,100,,,e2e-rollback-seat-$RUN_MARK" \
   >"$roll_seat_file"
 
 roll_catalog_id=$(create_automatic_batch "$roll_catalog_file" futures_catalog_v1 akshare_cffex_official rollback-catalog)
@@ -461,7 +461,7 @@ for scenario in same different; do
       >"$market_file"
     printf '%s\n' \
       'exchange_code,contract_code,trade_date,seat_name,rank_type,rank,volume,long_position,short_position,source_record_ref' \
-      "DCE,$DCE_CONTRACT,$COLLECTION_DATE,$DCE_SEAT,volume,$rank,$volume,0,0,e2e-dce-$scenario-$source_kind-seat-$RUN_MARK" \
+      "DCE,$DCE_CONTRACT,$COLLECTION_DATE,$DCE_SEAT,volume,$rank,$volume,,,e2e-dce-$scenario-$source_kind-seat-$RUN_MARK" \
       >"$seat_file"
     market_batch=$(create_automatic_batch "$market_file" daily_market_prices_v1 "$source_code" "dce-$scenario-$source_kind-market")
     seat_batch=$(create_automatic_batch "$seat_file" seat_positions_v1 "$source_code" "dce-$scenario-$source_kind-seat")
