@@ -298,6 +298,22 @@ mod phase_4a_schema_contract {
         assert!(RLS_BACKFILL.contains("workspace_id = target_workspace_id"));
         assert!(RLS_BACKFILL.contains("change_log_version = 1"));
         assert!(!RLS_BACKFILL.contains("update import_staging_rows"));
+        let lock = RLS_BACKFILL
+            .find("lock table import_batches in access exclusive mode")
+            .expect("exclusive migration lock");
+        let disable = RLS_BACKFILL
+            .find("disable trigger import_batches_enforce_phase_3d_invariants")
+            .expect("maintenance trigger disable");
+        let update = RLS_BACKFILL
+            .find("update import_batches")
+            .expect("legacy batch reclassification");
+        let constraints = RLS_BACKFILL
+            .find("set constraints all immediate")
+            .expect("deferred invariant check");
+        let enable = RLS_BACKFILL
+            .find("enable trigger import_batches_enforce_phase_3d_invariants")
+            .expect("maintenance trigger enable");
+        assert!(lock < disable && disable < update && update < constraints && constraints < enable);
         assert!(!RLS_BACKFILL.contains("disable row level security"));
         assert!(!RLS_BACKFILL.contains("bypassrls"));
     }

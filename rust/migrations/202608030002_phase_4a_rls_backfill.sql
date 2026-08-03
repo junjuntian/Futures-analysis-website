@@ -3,6 +3,16 @@ begin;
 -- The Phase 4A tables FORCE RLS.  The preceding migration intentionally runs
 -- as the non-bypass migrator role, so data repairs must establish each tenant
 -- context before touching workspace-scoped rows.
+--
+-- Legacy automatic v1 batches were incorrectly marked direct even though
+-- their formal projections were not logged.  Reclassification is a one-time
+-- schema repair that the normal post-commit immutability trigger must reject.
+-- Hold an exclusive table lock while that one trigger is disabled so no
+-- concurrent business write can observe the maintenance window.
+lock table import_batches in access exclusive mode;
+alter table import_batches
+    disable trigger import_batches_enforce_phase_3d_invariants;
+
 do $$
 declare
     target_workspace_id uuid;
@@ -47,6 +57,11 @@ begin
            and change_log_version = 1;
     end loop;
 end $$;
+
+set constraints all immediate;
+
+alter table import_batches
+    enable trigger import_batches_enforce_phase_3d_invariants;
 
 insert into schema_versions (version, description)
 values ('202608030002', 'Phase 4A RLS-aware source identity backfill')
