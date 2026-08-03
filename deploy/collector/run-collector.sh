@@ -14,9 +14,6 @@ case "$previous_release_dir" in
   *) echo "COLLECTOR_FAIL unsafe_release_dir" >&2; exit 1 ;;
 esac
 
-COLLECTION_DATE=${1:-$(TZ=Asia/Shanghai date +%F)}
-[[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
-
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
@@ -27,5 +24,13 @@ COMPOSE=(
   -f "$previous_release_dir/docker-compose.release.yml"
   --profile collector
 )
+
+if [ "$#" -gt 0 ]; then
+  COLLECTION_DATE=$1
+else
+  AS_OF_DATE=$(TZ=Asia/Shanghai date +%F)
+  COLLECTION_DATE=$("${COMPOSE[@]}" run --rm --no-deps collector --resolve-date "$AS_OF_DATE")
+fi
+[[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
 
 "${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE"
