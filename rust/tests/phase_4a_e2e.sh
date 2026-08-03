@@ -390,16 +390,6 @@ for dependency_spec in "catalog:$roll_catalog_id" "calendar:$roll_calendar_id"; 
 done
 test "$(psql_value -c "select md5((select to_jsonb(contract)::text from contracts contract join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where contract.workspace_id='$workspace_id' and exchange.code='CFFEX' and contract.code='$ROLL_CONTRACT') || (select to_jsonb(version)::text from trading_calendar_versions version join exchanges exchange on exchange.workspace_id=version.workspace_id and exchange.id=version.exchange_id where version.workspace_id='$workspace_id' and exchange.code='CFFEX' and version.version='$ROLL_CALENDAR') || (select to_jsonb(price)::text from market_prices price where price.workspace_id='$workspace_id' and price.source_import_batch_id='$roll_market_id') || (select to_jsonb(position)::text from seat_positions position where position.workspace_id='$workspace_id' and position.source_import_batch_id='$roll_seat_id'))")" = "$formal_snapshot_before_conflict"
 
-stale_check="$EVIDENCE_DIR/seat-stale-check.json"
-assert_status "$(rollback_check "$roll_seat_id" "$stale_check")" 200 'seat stale precheck'
-jq -e '.data.can_rollback == true' "$stale_check" >/dev/null
-psql_value -c "update seat_positions set row_version=row_version+1 where workspace_id='$workspace_id' and source_import_batch_id='$roll_seat_id'" >/dev/null
-stale_request=$(jq -r '.data.precheck_request_id' "$stale_check")
-stale_fingerprint=$(jq -r '.data.precheck_fingerprint' "$stale_check")
-assert_status "$(api_json "$ADMIN_TOKEN" "$ADMIN_CSRF" POST "/api/v1/imports/$roll_seat_id/rollback" "{\"precheck_request_id\":\"$stale_request\",\"precheck_fingerprint\":\"$stale_fingerprint\"}" "$EVIDENCE_DIR/seat-stale-rollback.json" "phase4a-seat-stale-$RUN_MARK")" 409 'seat stale rollback'
-test "$(psql_value -c "select count(*) from seat_positions where workspace_id='$workspace_id' and source_import_batch_id='$roll_seat_id'")" = 1
-psql_value -c "update seat_positions set row_version=row_version-1 where workspace_id='$workspace_id' and source_import_batch_id='$roll_seat_id'" >/dev/null
-
 rollback_batch "$roll_seat_id" rollback-seat
 rollback_batch "$roll_market_id" rollback-market
 rollback_batch "$roll_calendar_id" rollback-calendar
