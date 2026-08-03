@@ -37,6 +37,7 @@ pub struct ValidationOutcome {
 pub enum ValidationDefinitionError {
     DatasetNotConfirmable,
     InvalidStagingShape,
+    AutomaticSourceRequired,
 }
 
 pub fn allowed_conflict_policies(dataset_type: &str) -> &'static [ImportConflictPolicy] {
@@ -60,7 +61,7 @@ pub fn validate_staging_rows(
     staging_rows: Vec<StagingRowInput>,
 ) -> Result<ValidationOutcome, ValidationDefinitionError> {
     if dataset_type != "generic" {
-        return validate_automatic_rows(dataset_type, staging_rows);
+        return Err(ValidationDefinitionError::AutomaticSourceRequired);
     }
 
     let mut rows = Vec::with_capacity(staging_rows.len());
@@ -233,8 +234,21 @@ pub fn validate_staging_rows(
     })
 }
 
+pub fn validate_automatic_staging_rows(
+    dataset_type: &str,
+    data_source_code: &str,
+    staging_rows: Vec<StagingRowInput>,
+) -> Result<ValidationOutcome, ValidationDefinitionError> {
+    let normalized_source = data_source_code.trim().to_ascii_uppercase();
+    if normalized_source.is_empty() {
+        return Err(ValidationDefinitionError::AutomaticSourceRequired);
+    }
+    validate_automatic_rows(dataset_type, &normalized_source, staging_rows)
+}
+
 fn validate_automatic_rows(
     dataset_type: &str,
+    data_source_code: &str,
     staging_rows: Vec<StagingRowInput>,
 ) -> Result<ValidationOutcome, ValidationDefinitionError> {
     if !matches!(
@@ -372,11 +386,13 @@ fn validate_automatic_rows(
             "futures_catalog_v1" => key(
                 &record_data,
                 &["exchange_code", "instrument_code", "contract_code"],
-            ),
+            )
+            .map(|value| format!("{data_source_code}|{value}")),
             "trading_calendar_v1" => key(
                 &record_data,
                 &["exchange_code", "calendar_version", "trade_date"],
-            ),
+            )
+            .map(|value| format!("{data_source_code}|{value}")),
             "daily_market_prices_v1" => {
                 if normalized_string(record_data.get("close_price")).is_none()
                     && normalized_string(record_data.get("settlement_price")).is_none()
@@ -412,6 +428,7 @@ fn validate_automatic_rows(
                         "revision_no",
                     ],
                 )
+                .map(|value| format!("{data_source_code}|{value}"))
             }
             "seat_positions_v1" => {
                 let rank_type = normalized_string(record_data.get("rank_type"));
@@ -441,6 +458,7 @@ fn validate_automatic_rows(
                         "rank",
                     ],
                 )
+                .map(|value| format!("{data_source_code}|{value}"))
             }
             _ => unreachable!(),
         };
@@ -698,8 +716,9 @@ mod tests {
             "revision_no": "1",
             "source_record_ref": "SHFE:AU2610:2026-08-01:daily"
         });
-        let invalid = validate_staging_rows(
+        let invalid = validate_automatic_staging_rows(
             "daily_market_prices_v1",
+            "akshare_shfe_official",
             vec![StagingRowInput {
                 id: Uuid::now_v7(),
                 row_number: 1,
@@ -711,8 +730,9 @@ mod tests {
         .unwrap();
         assert_eq!(invalid.blocking_error_count, 1);
         values["settlement_price"] = json!("799.5");
-        let valid = validate_staging_rows(
+        let valid = validate_automatic_staging_rows(
             "daily_market_prices_v1",
+            "akshare_shfe_official",
             vec![StagingRowInput {
                 id: Uuid::now_v7(),
                 row_number: 1,
@@ -725,7 +745,65 @@ mod tests {
         assert_eq!(valid.blocking_error_count, 0);
         assert_eq!(
             valid.rows[0].business_key.as_deref(),
-            Some("SHFE|AU2610|2026-08-01|DAILY|1D|1")
+            Some("AKSHARE_SHFE_OFFICIAL|SHFE|AU2610|2026-08-01|DAILY|1D|1")
+        );
+    }
+
+    #[test]
+    fn automatic_fact_keys_keep_official_and_fallback_sources_disjoint() {
+        let fields = json!({
+            "exchange_code": "exchange_code",
+            "contract_code": "contract_code",
+            "trade_date": "trade_date",
+            "session_type": "session_type",
+            "observed_at": "observed_at",
+            "granularity": "granularity",
+            "close_price": "close_price",
+            "settlement_price": "settlement_price",
+            "currency_code": "currency_code",
+            "calendar_version": "calendar_version",
+            "revision_no": "revision_no",
+            "source_record_ref": "source_record_ref"
+        });
+        let values = json!({
+            "exchange_code": "DCE",
+            "contract_code": "A2609",
+            "trade_date": "2026-08-01",
+            "session_type": "daily",
+            "observed_at": "2026-08-01T13:30:00Z",
+            "granularity": "1d",
+            "close_price": "4000",
+            "settlement_price": "3999",
+            "currency_code": "CNY",
+            "calendar_version": "akshare-v1:DCE:2026-08-01",
+            "revision_no": "1",
+            "source_record_ref": "DCE:A2609:2026-08-01:daily"
+        });
+        let row = || StagingRowInput {
+            id: Uuid::now_v7(),
+            row_number: 1,
+            normalized_values: values.clone(),
+            target_fields: fields.clone(),
+            preview_warnings: json!([]),
+        };
+        let fallback = validate_automatic_staging_rows(
+            "daily_market_prices_v1",
+            "akshare_sina_dce_fallback",
+            vec![row()],
+        )
+        .unwrap();
+        let official = validate_automatic_staging_rows(
+            "daily_market_prices_v1",
+            "akshare_dce_official",
+            vec![row()],
+        )
+        .unwrap();
+        assert_ne!(fallback.rows[0].business_key, official.rows[0].business_key);
+        assert!(
+            official.rows[0]
+                .business_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("AKSHARE_DCE_OFFICIAL|"))
         );
     }
 }

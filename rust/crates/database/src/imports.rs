@@ -50,6 +50,7 @@ pub struct AutomaticImportMetadata {
 #[derive(Debug, Clone)]
 pub struct AutomaticImportContext {
     pub dataset_type: String,
+    pub data_source_code: String,
     pub fixed_template_code: String,
     pub collection_date: Date,
 }
@@ -569,9 +570,12 @@ pub async fn automatic_import_context(
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
     let row = sqlx::query(
-        "select ingestion_mode, dataset_type, fixed_template_code, collection_date
-           from import_batches
-          where workspace_id = $1 and id = $2",
+        "select batch.ingestion_mode, batch.dataset_type, batch.fixed_template_code,
+                batch.collection_date, source.code as data_source_code
+           from import_batches batch
+           join data_sources source on source.workspace_id = batch.workspace_id
+                                   and source.id = batch.data_source_id
+          where batch.workspace_id = $1 and batch.id = $2",
     )
     .bind(workspace_id)
     .bind(import_id)
@@ -584,6 +588,7 @@ pub async fn automatic_import_context(
     }
     Ok(AutomaticImportContext {
         dataset_type: row.get("dataset_type"),
+        data_source_code: row.get("data_source_code"),
         fixed_template_code: row
             .get::<Option<String>, _>("fixed_template_code")
             .ok_or(ImportRepositoryError::InvalidAutomaticMetadata)?,

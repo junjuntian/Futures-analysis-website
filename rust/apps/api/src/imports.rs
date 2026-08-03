@@ -1335,6 +1335,9 @@ pub async fn validate(
             application::import_jobs::ValidationDefinitionError::InvalidStagingShape => {
                 ImportApiError::bad_request("validation_stale", request_id)
             }
+            application::import_jobs::ValidationDefinitionError::AutomaticSourceRequired => {
+                ImportApiError::bad_request("automatic_source_required", request_id)
+            }
         })?;
         let saved = database::imports::save_validation(
             &state.auth.pool,
@@ -1632,8 +1635,9 @@ pub async fn automatic_confirm(
             )
             .await
             .map_err(|error| map_repository_error(error, request_id))?;
-            let outcome = application::import_jobs::validate_staging_rows(
+            let outcome = application::import_jobs::validate_automatic_staging_rows(
                 &validation_context.dataset_type,
+                &automatic.data_source_code,
                 validation_context.rows.clone(),
             )
             .map_err(|_| ImportApiError::bad_request("automatic_validation_failed", request_id))?;
