@@ -45,6 +45,7 @@ pub struct AutomaticImportMetadata {
     pub data_source_code: String,
     pub collection_date: Date,
     pub fixed_template_code: String,
+    pub skipped_source_item_count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -433,9 +434,9 @@ pub async fn register_upload(
         sqlx::query(
             "insert into extraction_jobs
                 (id, workspace_id, data_source_id, import_batch_id, status, dataset_type,
-                 collection_scope_json, output_object_id)
+                 collection_scope_json, output_object_id, skipped_source_item_count)
              values ($1, $2, $3, $4, 'uploaded', $5,
-                     jsonb_build_object('date', $6::date), $7)",
+                     jsonb_build_object('date', $6::date), $7, $8)",
         )
         .bind(Uuid::now_v7())
         .bind(upload.workspace_id)
@@ -444,6 +445,7 @@ pub async fn register_upload(
         .bind(&metadata.dataset_type)
         .bind(metadata.collection_date)
         .bind(upload.object_id)
+        .bind(metadata.skipped_source_item_count)
         .execute(&mut *tx)
         .await?;
     }
@@ -653,7 +655,15 @@ pub async fn fail_automatic_import(
             "insert into audit_logs
                 (id, workspace_id, actor_user_id, event_type, outcome, request_id, metadata)
              values ($1, $2, $3, 'import.automatic_failed', 'failure', $4,
-                     jsonb_build_object('import_id', $5::text, 'reason_code', $6::text))",
+                     jsonb_build_object(
+                         'import_id', $5::text,
+                         'reason_code', $6::text,
+                         'skipped_source_item_count', coalesce((
+                             select job.skipped_source_item_count
+                               from extraction_jobs job
+                              where job.workspace_id = $2 and job.import_batch_id = $5
+                         ), 0)
+                     ))",
         )
         .bind(Uuid::now_v7())
         .bind(workspace_id)

@@ -140,4 +140,9 @@ alter table seat_positions
     add column row_version bigint not null default 1,
     add constraint seat_positions_row_version_positive check (row_version > 0);
 
+alter table extraction_jobs
+    add column skipped_source_item_count integer not null default 0,
+    add constraint extraction_jobs_skipped_source_item_count_nonnegative
+        check (skipped_source_item_count >= 0);
+
 commit;

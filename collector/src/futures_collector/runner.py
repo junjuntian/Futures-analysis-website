@@ -15,6 +15,7 @@ from futures_collector.sources import (
     DCE_FALLBACK_SOURCE,
     SOURCES,
     AkshareAdapter,
+    DatasetCompletenessError,
     ExchangeSource,
 )
 
@@ -105,8 +106,16 @@ class CollectionRunner:
                         dataset_type,
                         safe_error_code(fallback_error),
                     )
+                    skipped_count = (
+                        fallback_error.skipped_count
+                        if isinstance(fallback_error, DatasetCompletenessError)
+                        else 0
+                    )
                     fallback_reason = self.platform.record_failure(
-                        DCE_FALLBACK_SOURCE, dataset_type, collection_date
+                        DCE_FALLBACK_SOURCE,
+                        dataset_type,
+                        collection_date,
+                        skipped_source_item_count=skipped_count,
                     )
                     LOG.error(
                         "batch_failed exchange=DCE dataset=%s source=%s reason=%s",

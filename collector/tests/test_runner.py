@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from futures_collector.runner import CollectionRunner
+from futures_collector.sources import DatasetCompletenessError
 
 
 class FakeAdapter:
@@ -31,13 +32,15 @@ class FakePlatform:
     def __init__(self) -> None:
         self.submitted: list[str] = []
         self.failed: list[str] = []
+        self.failure_skips: list[int] = []
 
     def submit(self, source, dataset_type, collection_date, rows):
         self.submitted.append(f"{source.source_code}:{dataset_type}:{len(rows)}")
         return SimpleNamespace(import_id="test", inserted=len(rows), skipped=0)
 
-    def record_failure(self, source, dataset_type, collection_date):
+    def record_failure(self, source, dataset_type, collection_date, *, skipped_source_item_count=0):
         self.failed.append(f"{source.code}:{dataset_type}")
+        self.failure_skips.append(skipped_source_item_count)
         return "automatic_source_failed"
 
 
@@ -112,3 +115,25 @@ def test_non_dce_official_source_recovers_from_transient_response() -> None:
     assert adapter.calls == 3
     assert platform.failed == []
     assert platform.submitted == ["akshare_gfex_official:futures_catalog_v1:1"]
+
+
+class IncompleteDceAdapter(FakeAdapter):
+    def market(self, source, collection_date):
+        raise ConnectionError("official unavailable")
+
+    def fallback_market(self, source, collection_date):
+        raise DatasetCompletenessError("market", 2, 10)
+
+
+def test_dce_incomplete_fallback_fails_whole_dataset_and_audits_skip_count() -> None:
+    platform = FakePlatform()
+    failures = CollectionRunner(IncompleteDceAdapter(), platform, retry_delay_seconds=0).run(
+        date(2026, 8, 1), ["DCE"], ["market"]
+    )
+    assert failures == 1
+    assert platform.failed == [
+        "DCE:daily_market_prices_v1",
+        "DCE:daily_market_prices_v1",
+    ]
+    assert platform.failure_skips == [0, 2]
+    assert platform.submitted == []

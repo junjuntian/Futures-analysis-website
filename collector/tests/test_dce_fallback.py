@@ -3,7 +3,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from futures_collector.sources import SOURCES, AkshareAdapter
+from futures_collector.sources import SOURCES, AkshareAdapter, DatasetCompletenessError
 
 
 def test_sina_fallback_discovers_dce_contract_market_and_three_seat_ranks(
@@ -80,3 +80,50 @@ def test_sina_fallback_is_rejected_for_every_non_dce_exchange() -> None:
     for code in ("SHFE", "CZCE", "GFEX", "CFFEX"):
         with pytest.raises(ValueError, match="only authorized for DCE"):
             adapter.fallback_catalog(SOURCES[code], date(2026, 7, 31))
+
+
+def test_dce_market_rejects_partial_contract_set_after_collecting_skip_count(
+    monkeypatch, caplog
+) -> None:
+    collection_date = date(2026, 7, 31)
+    adapter = AkshareAdapter()
+    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+        [{"合约": "A2609"}, {"合约": "M2609"}]
+    )
+
+    def market(symbol):
+        if symbol == "M2609":
+            raise ConnectionError("injected")
+        return pd.DataFrame([{"date": "2026-07-31", "close": 4000, "settle": 3999}])
+
+    monkeypatch.setattr("futures_collector.sources.akshare.futures_zh_daily_sina", market)
+    with pytest.raises(DatasetCompletenessError) as captured:
+        adapter.fallback_market(SOURCES["DCE"], collection_date)
+    assert captured.value.skipped_count == 1
+    assert "dataset=market skipped_count=1 expected_contracts=2" in caplog.text
+
+
+def test_dce_seats_require_every_contract_and_rank_type(monkeypatch, caplog) -> None:
+    collection_date = date(2026, 7, 31)
+    adapter = AkshareAdapter()
+    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+        [{"合约": "A2609"}, {"合约": "M2609"}]
+    )
+
+    def seats(symbol, contract, date):
+        del date
+        if contract == "M2609" and symbol == "空单持仓":
+            raise ConnectionError("injected")
+        columns = {
+            "成交量": ("成交量", 10),
+            "多单持仓": ("多单持仓", 20),
+            "空单持仓": ("空单持仓", 30),
+        }
+        column, value = columns[symbol]
+        return pd.DataFrame([{"名次": 1, "会员简称": "会员甲", column: value}])
+
+    monkeypatch.setattr("futures_collector.sources.akshare.futures_hold_pos_sina", seats)
+    with pytest.raises(DatasetCompletenessError) as captured:
+        adapter.fallback_seats(SOURCES["DCE"], collection_date)
+    assert captured.value.skipped_count == 1
+    assert "dataset=seats skipped_count=1 expected_requests=6" in caplog.text

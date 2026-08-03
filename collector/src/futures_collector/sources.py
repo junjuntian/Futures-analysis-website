@@ -109,6 +109,14 @@ class OutboundPolicyError(ValueError):
     pass
 
 
+class DatasetCompletenessError(ValueError):
+    def __init__(self, dataset: str, skipped_count: int, expected_count: int) -> None:
+        self.dataset = dataset
+        self.skipped_count = skipped_count
+        self.expected_count = expected_count
+        super().__init__(f"{dataset} incomplete")
+
+
 class AkshareAdapter:
     def __init__(self) -> None:
         self._dce_catalog_cache: dict[date, pd.DataFrame] = {}
@@ -141,26 +149,53 @@ class AkshareAdapter:
         if cached is not None:
             return cached.copy()
         catalog = self._dce_catalog(collection_date)
+        contracts = catalog["合约"].drop_duplicates().tolist()
         frames: list[pd.DataFrame] = []
+        skipped_count = 0
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            for contract in catalog["合约"].drop_duplicates().tolist():
+            for contract in contracts:
                 try:
                     frame = akshare.futures_zh_daily_sina(symbol=contract)
                 except OutboundPolicyError:
                     raise
                 except Exception:
-                    LOG.warning("dce_fallback_market_contract_skipped contract=%s", contract)
+                    skipped_count += 1
+                    LOG.warning(
+                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
+                        contract,
+                        skipped_count,
+                    )
                     continue
                 if frame is None or frame.empty or "date" not in frame.columns:
+                    skipped_count += 1
+                    LOG.warning(
+                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
+                        contract,
+                        skipped_count,
+                    )
                     continue
                 dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
                 selected = frame[dates == collection_date].copy()
                 if selected.empty:
+                    skipped_count += 1
+                    LOG.warning(
+                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
+                        contract,
+                        skipped_count,
+                    )
                     continue
                 selected["symbol"] = contract
                 frames.append(selected)
+        if skipped_count:
+            LOG.error(
+                "dce_fallback_dataset_incomplete dataset=market skipped_count=%d "
+                "expected_contracts=%d",
+                skipped_count,
+                len(contracts),
+            )
+            raise DatasetCompletenessError("market", skipped_count, len(contracts))
         if not frames:
-            raise ValueError("DCE fallback market response is empty")
+            raise DatasetCompletenessError("market", len(contracts), len(contracts))
         result = pd.concat(frames, ignore_index=True)
         self._dce_market_cache[collection_date] = result
         return result.copy()
@@ -170,14 +205,16 @@ class AkshareAdapter:
     ) -> dict[str, pd.DataFrame]:
         self._require_dce(source)
         catalog = self._dce_catalog(collection_date)
+        contracts = catalog["合约"].drop_duplicates().tolist()
         tables: dict[str, pd.DataFrame] = {}
+        skipped_count = 0
         kinds = (
             ("成交量", "vol_party_name", "vol"),
             ("多单持仓", "long_party_name", "long_open_interest"),
             ("空单持仓", "short_party_name", "short_open_interest"),
         )
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            for contract in catalog["合约"].drop_duplicates().tolist():
+            for contract in contracts:
                 contract_frames: list[pd.DataFrame] = []
                 for kind, party_field, value_field in kinds:
                     try:
@@ -189,21 +226,43 @@ class AkshareAdapter:
                     except OutboundPolicyError:
                         raise
                     except Exception:
+                        skipped_count += 1
                         LOG.warning(
-                            "dce_fallback_seat_contract_skipped contract=%s rank_type=%s",
+                            "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
+                            "skipped_count=%d",
                             contract,
                             kind,
+                            skipped_count,
                         )
                         continue
                     normalized = _normalize_sina_seat_table(
                         frame, contract, party_field, value_field
                     )
-                    if not normalized.empty:
-                        contract_frames.append(normalized)
+                    if normalized.empty:
+                        skipped_count += 1
+                        LOG.warning(
+                            "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
+                            "skipped_count=%d",
+                            contract,
+                            kind,
+                            skipped_count,
+                        )
+                        continue
+                    contract_frames.append(normalized)
                 if contract_frames:
                     tables[contract] = pd.concat(contract_frames, ignore_index=True)
+        if skipped_count:
+            LOG.error(
+                "dce_fallback_dataset_incomplete dataset=seats skipped_count=%d "
+                "expected_requests=%d",
+                skipped_count,
+                len(contracts) * len(kinds),
+            )
+            raise DatasetCompletenessError("seats", skipped_count, len(contracts) * len(kinds))
         if not tables:
-            raise ValueError("DCE fallback seat response is empty")
+            raise DatasetCompletenessError(
+                "seats", len(contracts) * len(kinds), len(contracts) * len(kinds)
+            )
         return tables
 
     def _dce_catalog(self, collection_date: date) -> pd.DataFrame:

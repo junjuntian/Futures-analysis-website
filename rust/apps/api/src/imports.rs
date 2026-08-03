@@ -2571,11 +2571,20 @@ fn automatic_metadata(
         format_description!("[year]-[month]-[day]"),
     )
     .map_err(|_| ImportApiError::bad_request("automatic_date_invalid", request_id))?;
+    let skipped_source_item_count = headers
+        .get("x-collection-skip-count")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("0")
+        .parse::<i32>()
+        .ok()
+        .filter(|value| (0..=100_000).contains(value))
+        .ok_or_else(|| ImportApiError::bad_request("automatic_metadata_invalid", request_id))?;
     Ok(Some(AutomaticImportMetadata {
         dataset_type,
         data_source_code: header("x-data-source-code")?,
         collection_date,
         fixed_template_code,
+        skipped_source_item_count,
     }))
 }
 

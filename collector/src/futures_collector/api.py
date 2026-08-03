@@ -92,6 +92,8 @@ class PlatformClient:
         dataset_type: str,
         collection_date: date,
         rows: list[dict[str, str]],
+        *,
+        skipped_source_item_count: int = 0,
     ) -> ImportResult:
         content = render_csv(dataset_type, rows)
         upload = self.client.post(
@@ -103,6 +105,7 @@ class PlatformClient:
                 "x-data-source-code": source.source_code,
                 "x-collection-date": collection_date.isoformat(),
                 "x-template-version": f"{dataset_type}@1",
+                "x-collection-skip-count": str(skipped_source_item_count),
             },
             files={
                 "file": (f"{source.code}-{dataset_type}-{collection_date}.csv", content, "text/csv")
@@ -127,12 +130,20 @@ class PlatformClient:
         source: ExchangeSource,
         dataset_type: str,
         collection_date: date,
+        *,
+        skipped_source_item_count: int = 0,
     ) -> str:
         row = {field: "" for field in DATASET_FIELDS[dataset_type]}
         row["exchange_code"] = source.code
         row["source_record_ref"] = f"{source.code}:source-unavailable:{collection_date}"
         try:
-            self.submit(source, dataset_type, collection_date, [row])
+            self.submit(
+                source,
+                dataset_type,
+                collection_date,
+                [row],
+                skipped_source_item_count=skipped_source_item_count,
+            )
         except PlatformRequestError as error:
             return error.code
         return "automatic_source_failed"
