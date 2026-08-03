@@ -44,7 +44,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy and accept production candidate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, futures-vps]
     timeout-minutes: 180
     environment: production
     env:
