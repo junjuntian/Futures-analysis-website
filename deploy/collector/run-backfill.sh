@@ -445,7 +445,7 @@ COMPOSE=(
 )
 "${COMPOSE[@]}" config --format json | jq -e --arg image "$previous_collector_ref" '
   .services.collector.image == $image
-  and .services.collector.mem_limit == 536870912
+  and (.services.collector.mem_limit | tostring) == "536870912"
 ' >/dev/null || {
   echo "BACKFILL_FAIL collector_runtime_contract_mismatch" >&2; exit 1;
 }
