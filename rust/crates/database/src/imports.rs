@@ -2795,11 +2795,18 @@ async fn projection_dependencies(
     target_id: Uuid,
 ) -> Result<Vec<(String, Uuid)>, ImportRepositoryError> {
     let queries: &[(&str, &str)] = match target_kind {
-        "exchange" => &[(
-            "instrument",
-            "select id as target_id from instruments
-              where workspace_id = $1 and exchange_id = $2 for update",
-        )],
+        "exchange" => &[
+            (
+                "instrument",
+                "select id as target_id from instruments
+                  where workspace_id = $1 and exchange_id = $2 for update",
+            ),
+            (
+                "trading_calendar_version",
+                "select id as target_id from trading_calendar_versions
+                  where workspace_id = $1 and exchange_id = $2 for update",
+            ),
+        ],
         "instrument" => &[(
             "contract",
             "select id as target_id from contracts
@@ -3700,6 +3707,170 @@ async fn set_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Phase 4A formal-projection reverse-FK audit (child FK -> parent precheck edge):
+    // instruments.exchange_id -> exchanges.id => exchange / instrument
+    // trading_calendar_versions.exchange_id -> exchanges.id => exchange / trading_calendar_version
+    // contracts.instrument_id -> instruments.id => instrument / contract
+    // trading_calendar_days.calendar_version_id -> trading_calendar_versions.id
+    //     => trading_calendar_version / trading_calendar_day
+    // market_prices.calendar_version_id -> trading_calendar_versions.id
+    //     => trading_calendar_version / market_price
+    // market_prices.contract_id -> contracts.id => contract / market_price
+    // seat_positions.contract_id -> contracts.id => contract / seat_position
+    // seat_positions.seat_id -> seat_entities.id => seat_entity / seat_position
+    // All other Phase 4A FKs terminate outside the formal-projection graph.
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; CI runs this test explicitly"]
+    async fn postgres_exchange_calendar_dependency_blocks_precheck(pool: PgPool) {
+        for statement in [
+            "create table import_batches (
+                id uuid primary key,
+                workspace_id uuid not null,
+                status text not null,
+                rollback_capability text not null,
+                change_log_version integer,
+                imported_count integer not null,
+                overwritten_count integer not null
+            )",
+            "create table import_rollback_requests (
+                id uuid primary key,
+                workspace_id uuid not null,
+                import_batch_id uuid not null,
+                status text not null
+            )",
+            "create table import_compensations (
+                id uuid primary key,
+                workspace_id uuid not null,
+                original_import_batch_id uuid not null
+            )",
+            "create table import_files (
+                id uuid primary key,
+                workspace_id uuid not null,
+                import_batch_id uuid not null
+            )",
+            "create table import_row_changes (
+                id uuid primary key,
+                workspace_id uuid not null,
+                import_batch_id uuid not null,
+                sequence_no bigint not null,
+                target_kind text not null,
+                target_id uuid not null,
+                operation text not null,
+                before_json jsonb,
+                after_json jsonb,
+                target_row_version bigint not null,
+                source_file_id uuid not null,
+                source_row_number integer not null,
+                created_at timestamptz not null default now()
+            )",
+            "create table exchanges (
+                id uuid primary key,
+                workspace_id uuid not null,
+                row_version bigint not null,
+                created_at timestamptz not null default now(),
+                updated_at timestamptz not null default now(),
+                unique (workspace_id, id)
+            )",
+            "create table instruments (
+                id uuid primary key,
+                workspace_id uuid not null,
+                exchange_id uuid not null
+            )",
+            "create table trading_calendar_versions (
+                id uuid primary key,
+                workspace_id uuid not null,
+                exchange_id uuid not null,
+                constraint test_calendar_exchange_fk
+                    foreign key (workspace_id, exchange_id)
+                    references exchanges(workspace_id, id) on delete restrict
+            )",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        let workspace_id = Uuid::now_v7();
+        let batch_id = Uuid::now_v7();
+        let file_id = Uuid::now_v7();
+        let exchange_id = Uuid::now_v7();
+        let calendar_version_id = Uuid::now_v7();
+
+        sqlx::query(
+            "insert into import_batches
+                (id, workspace_id, status, rollback_capability, change_log_version,
+                 imported_count, overwritten_count)
+             values ($1, $2, 'succeeded', 'direct', 2, 0, 0)",
+        )
+        .bind(batch_id)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into import_files (id, workspace_id, import_batch_id) values ($1, $2, $3)",
+        )
+        .bind(file_id)
+        .bind(workspace_id)
+        .bind(batch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into exchanges (id, workspace_id, row_version) values ($1, $2, 1)")
+            .bind(exchange_id)
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "insert into import_row_changes
+                (id, workspace_id, import_batch_id, sequence_no, target_kind, target_id,
+                 operation, before_json, after_json, target_row_version, source_file_id,
+                 source_row_number)
+             values ($1, $2, $3, 1, 'exchange', $4, 'insert', null,
+                     jsonb_build_object('id', $4::text, 'row_version', 1), 1, $5, 1)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id)
+        .bind(batch_id)
+        .bind(exchange_id)
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into trading_calendar_versions (id, workspace_id, exchange_id)
+             values ($1, $2, $3)",
+        )
+        .bind(calendar_version_id)
+        .bind(workspace_id)
+        .bind(exchange_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        let evaluated = evaluate_rollback(&mut tx, workspace_id, batch_id, "succeeded", None)
+            .await
+            .unwrap();
+
+        assert_eq!(evaluated.conflicts.len(), 1);
+        let conflict = &evaluated.conflicts[0];
+        assert_eq!(
+            conflict.conflict_type,
+            ImportRollbackConflictType::DownstreamDependency
+        );
+        assert_eq!(conflict.target_kind.as_deref(), Some("exchange"));
+        assert_eq!(conflict.target_id, Some(exchange_id));
+        assert_eq!(
+            conflict.dependency_kind.as_deref(),
+            Some("trading_calendar_version")
+        );
+        assert_eq!(
+            conflict.detail_code,
+            "formal_projection_downstream_dependency"
+        );
+    }
 
     #[test]
     fn dce_fallback_is_the_only_aggregator_in_the_automatic_source_allowlist() {

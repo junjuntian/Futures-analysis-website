@@ -14,6 +14,20 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres@localhost:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -40,6 +54,13 @@ jobs:
       - name: Rust tests
         working-directory: rust
         run: cargo test --workspace
+
+      - name: PostgreSQL rollback dependency integration test
+        working-directory: rust
+        run: >-
+          cargo test -p database
+          imports::tests::postgres_exchange_calendar_dependency_blocks_precheck
+          -- --ignored --exact
 
       - name: Install Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

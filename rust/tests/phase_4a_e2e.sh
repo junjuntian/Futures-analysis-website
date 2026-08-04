@@ -347,6 +347,142 @@ test "$(psql_value -c "select count(*) from contracts contract join instruments 
 echo "PHASE4A_E2E_STAGE catalog_upsert_passed"
 
 echo "PHASE4A_E2E_STAGE projection_rollback_started"
+FIRST_EXCHANGE_BATCH=$(new_uuid)
+FIRST_EXCHANGE_FILE=$(new_uuid)
+FIRST_EXCHANGE_RECORD=$(new_uuid)
+FIRST_EXCHANGE_CHANGE_RECORD=$(new_uuid)
+FIRST_EXCHANGE_CHANGE_PROJECTION=$(new_uuid)
+FIRST_EXCHANGE_ID=$(new_uuid)
+FIRST_EXCHANGE_CODE="E2E${RUN_MARK//-/}"
+FIRST_CALENDAR_BATCH=$(new_uuid)
+FIRST_CALENDAR_FILE=$(new_uuid)
+FIRST_CALENDAR_RECORD=$(new_uuid)
+FIRST_CALENDAR_CHANGE_RECORD=$(new_uuid)
+FIRST_CALENDAR_CHANGE_PROJECTION=$(new_uuid)
+FIRST_CALENDAR_ID=$(new_uuid)
+FIRST_CALENDAR_VERSION="phase4a-exchange-dependency-$RUN_MARK"
+CFFEX_SOURCE_ID=$(psql_value -c "select id from data_sources where workspace_id='$workspace_id' and code='akshare_cffex_official'")
+
+# Isolated v2 audit fixtures model the first catalog batch that creates an exchange
+# and a later calendar batch that owns the dependent calendar version. Both batches
+# are rolled back through the public API below, so only their immutable audit trail remains.
+psql_value -c "begin;
+insert into import_batches
+  (id,workspace_id,status,created_by,dataset_type,committed_at,imported_count,
+   rollback_capability,change_log_version,ingestion_mode,data_source_id,collection_date,
+   fixed_template_code)
+values
+  ('$FIRST_EXCHANGE_BATCH','$workspace_id','succeeded','$admin_user_id','futures_catalog_v1',
+   now(),1,'direct',2,'automatic','$CFFEX_SOURCE_ID',date '$COLLECTION_DATE',
+   'futures_catalog_v1@1');
+insert into import_files
+  (id,workspace_id,import_batch_id,stored_object_id,original_filename,declared_mime_type,
+   detected_format,sha256,size_bytes,created_by)
+select '$FIRST_EXCHANGE_FILE',workspace_id,'$FIRST_EXCHANGE_BATCH',stored_object_id,
+       'phase4a-first-exchange.csv',declared_mime_type,detected_format,sha256,size_bytes,
+       '$admin_user_id'
+  from import_files where workspace_id='$workspace_id' order by created_at limit 1;
+insert into imported_records
+  (id,workspace_id,dataset_type,business_key,record_data,source_import_batch_id,
+   source_row_number,created_by)
+values
+  ('$FIRST_EXCHANGE_RECORD','$workspace_id','futures_catalog_v1',
+   'AKSHARE_CFFEX_OFFICIAL|$FIRST_EXCHANGE_CODE','{}'::jsonb,
+   '$FIRST_EXCHANGE_BATCH',1,'$admin_user_id');
+insert into exchanges
+  (id,workspace_id,code,name,timezone,source_record_id)
+values
+  ('$FIRST_EXCHANGE_ID','$workspace_id','$FIRST_EXCHANGE_CODE',
+   'Phase 4A exchange dependency fixture','Asia/Shanghai','$FIRST_EXCHANGE_RECORD');
+insert into import_row_changes
+  (id,workspace_id,import_batch_id,sequence_no,target_kind,target_id,operation,before_json,
+   after_json,target_row_version,source_file_id,source_row_number)
+select '$FIRST_EXCHANGE_CHANGE_RECORD','$workspace_id','$FIRST_EXCHANGE_BATCH',1,
+       'imported_record','$FIRST_EXCHANGE_RECORD','insert',null,
+       jsonb_build_object('record_data',record_data,'source_import_batch_id',source_import_batch_id,
+                          'source_row_number',source_row_number,'row_version',row_version),
+       row_version,'$FIRST_EXCHANGE_FILE',1
+  from imported_records where workspace_id='$workspace_id' and id='$FIRST_EXCHANGE_RECORD';
+insert into import_row_changes
+  (id,workspace_id,import_batch_id,sequence_no,target_kind,target_id,operation,before_json,
+   after_json,target_row_version,source_file_id,source_row_number)
+select '$FIRST_EXCHANGE_CHANGE_PROJECTION','$workspace_id','$FIRST_EXCHANGE_BATCH',2,
+       'exchange','$FIRST_EXCHANGE_ID','insert',null,
+       to_jsonb(exchange_row)-'workspace_id'-'created_at'-'updated_at',row_version,
+       '$FIRST_EXCHANGE_FILE',1
+  from exchanges exchange_row where workspace_id='$workspace_id' and id='$FIRST_EXCHANGE_ID';
+commit;" >/dev/null
+
+psql_value -c "begin;
+insert into import_batches
+  (id,workspace_id,status,created_by,dataset_type,committed_at,imported_count,
+   rollback_capability,change_log_version,ingestion_mode,data_source_id,collection_date,
+   fixed_template_code)
+values
+  ('$FIRST_CALENDAR_BATCH','$workspace_id','succeeded','$admin_user_id','trading_calendar_v1',
+   now(),1,'direct',2,'automatic','$CFFEX_SOURCE_ID',date '$COLLECTION_DATE',
+   'trading_calendar_v1@1');
+insert into import_files
+  (id,workspace_id,import_batch_id,stored_object_id,original_filename,declared_mime_type,
+   detected_format,sha256,size_bytes,created_by)
+select '$FIRST_CALENDAR_FILE',workspace_id,'$FIRST_CALENDAR_BATCH',stored_object_id,
+       'phase4a-first-exchange-calendar.csv',declared_mime_type,detected_format,sha256,
+       size_bytes,'$admin_user_id'
+  from import_files where workspace_id='$workspace_id' order by created_at limit 1;
+insert into imported_records
+  (id,workspace_id,dataset_type,business_key,record_data,source_import_batch_id,
+   source_row_number,created_by)
+values
+  ('$FIRST_CALENDAR_RECORD','$workspace_id','trading_calendar_v1',
+   'AKSHARE_CFFEX_OFFICIAL|$FIRST_EXCHANGE_CODE|$FIRST_CALENDAR_VERSION','{}'::jsonb,
+   '$FIRST_CALENDAR_BATCH',1,'$admin_user_id');
+insert into trading_calendar_versions
+  (id,workspace_id,exchange_id,version,source_id,effective_from,created_by,source_record_id)
+values
+  ('$FIRST_CALENDAR_ID','$workspace_id','$FIRST_EXCHANGE_ID','$FIRST_CALENDAR_VERSION',
+   '$CFFEX_SOURCE_ID',date '$COLLECTION_DATE','$admin_user_id','$FIRST_CALENDAR_RECORD');
+insert into import_row_changes
+  (id,workspace_id,import_batch_id,sequence_no,target_kind,target_id,operation,before_json,
+   after_json,target_row_version,source_file_id,source_row_number)
+select '$FIRST_CALENDAR_CHANGE_RECORD','$workspace_id','$FIRST_CALENDAR_BATCH',1,
+       'imported_record','$FIRST_CALENDAR_RECORD','insert',null,
+       jsonb_build_object('record_data',record_data,'source_import_batch_id',source_import_batch_id,
+                          'source_row_number',source_row_number,'row_version',row_version),
+       row_version,'$FIRST_CALENDAR_FILE',1
+  from imported_records where workspace_id='$workspace_id' and id='$FIRST_CALENDAR_RECORD';
+insert into import_row_changes
+  (id,workspace_id,import_batch_id,sequence_no,target_kind,target_id,operation,before_json,
+   after_json,target_row_version,source_file_id,source_row_number)
+select '$FIRST_CALENDAR_CHANGE_PROJECTION','$workspace_id','$FIRST_CALENDAR_BATCH',2,
+       'trading_calendar_version','$FIRST_CALENDAR_ID','insert',null,
+       to_jsonb(calendar_row)-'workspace_id'-'created_at',row_version,
+       '$FIRST_CALENDAR_FILE',1
+  from trading_calendar_versions calendar_row
+ where workspace_id='$workspace_id' and id='$FIRST_CALENDAR_ID';
+commit;" >/dev/null
+
+first_exchange_snapshot=$(psql_value -c "select md5((select to_jsonb(exchange_row)::text from exchanges exchange_row where workspace_id='$workspace_id' and id='$FIRST_EXCHANGE_ID') || (select to_jsonb(calendar_row)::text from trading_calendar_versions calendar_row where workspace_id='$workspace_id' and id='$FIRST_CALENDAR_ID'))")
+first_exchange_check="$EVIDENCE_DIR/first-exchange-dependency-check.json"
+assert_status "$(rollback_check "$FIRST_EXCHANGE_BATCH" "$first_exchange_check")" 200 "first exchange dependency precheck"
+jq -e --arg exchange_id "$FIRST_EXCHANGE_ID" '
+  .data.can_rollback == false
+  and (.data.conflicts | any(
+    .conflict_type == "downstream_dependency"
+    and .target_kind == "exchange"
+    and .target_id == $exchange_id
+    and .dependency_kind == "trading_calendar_version"
+    and .detail_code == "formal_projection_downstream_dependency"
+  ))
+' "$first_exchange_check" >/dev/null
+first_exchange_request=$(jq -r '.data.precheck_request_id' "$first_exchange_check")
+first_exchange_fingerprint=$(jq -r '.data.precheck_fingerprint' "$first_exchange_check")
+assert_status "$(api_json "$ADMIN_TOKEN" "$ADMIN_CSRF" POST "/api/v1/imports/$FIRST_EXCHANGE_BATCH/rollback" "{\"precheck_request_id\":\"$first_exchange_request\",\"precheck_fingerprint\":\"$first_exchange_fingerprint\"}" "$EVIDENCE_DIR/first-exchange-dependency-rollback.json" "phase4a-first-exchange-conflict-$RUN_MARK")" 409 "first exchange dependency rollback"
+test "$(psql_value -c "select md5((select to_jsonb(exchange_row)::text from exchanges exchange_row where workspace_id='$workspace_id' and id='$FIRST_EXCHANGE_ID') || (select to_jsonb(calendar_row)::text from trading_calendar_versions calendar_row where workspace_id='$workspace_id' and id='$FIRST_CALENDAR_ID'))")" = "$first_exchange_snapshot"
+rollback_batch "$FIRST_CALENDAR_BATCH" first-exchange-calendar
+rollback_batch "$FIRST_EXCHANGE_BATCH" first-exchange-catalog
+test "$(psql_value -c "select count(*) from exchanges where workspace_id='$workspace_id' and id='$FIRST_EXCHANGE_ID'")" = 0
+test "$(psql_value -c "select count(*) from trading_calendar_versions where workspace_id='$workspace_id' and id='$FIRST_CALENDAR_ID'")" = 0
+
 ROLL_INSTRUMENT="E2ER${RUN_MARK}"
 ROLL_CONTRACT="${ROLL_INSTRUMENT}2609"
 ROLL_CALENDAR="phase4a-e2e-cffex-$RUN_MARK"

@@ -130,3 +130,15 @@ futures VPS 主密钥文件：
 - RLS、批次/记录/正式事实表来源链、目录自动建档、手动批次整行指纹及用户稳定身份字段指纹全部通过。服务账号登录允许且仅允许更新 `last_login_at`/`updated_at` 登录元数据。
 - 部署前基线为 144 个手动批次、25 个自动批次、32 个用户；手动批次未删除或篡改。Phase 3C/3D 生产 E2E 未重跑，避免制造新的手动测试批次。
 - 临时 GHCR 登录配置清理通过；collector 日志的密码、Cookie、CSRF、Authorization 与凭据路径模式扫描无命中。
+
+## Deploy self-hosted runner 资源限额（2026-08-04）
+
+- 仓库级 runner 仅承接 `deploy-futures`，标签为 `futures-vps`；CI 与
+  container-images 继续由 GitHub-hosted runner 编译，不把编译负载转移到 1 GB VPS。
+- systemd unit 为
+  `actions.runner.junjuntian-Futures-analysis-website.futures-vps.service`，资源 drop-in
+  为同名 `.service.d/limits.conf`。
+- 因 256 MiB 限额在既有部署验收中触顶并发生 cgroup 限流，已将
+  `MemoryMax` 调整为 384 MiB。执行 `systemctl daemon-reload` 并在 runner 空闲时
+  重启服务后，实态为 `active/running`，`MemoryMax=402653184` bytes。
+- 本次仅调整 runner 服务资源上限，没有触发部署、迁移、E2E 或生产数据修改。
