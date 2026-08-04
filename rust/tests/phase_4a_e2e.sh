@@ -246,6 +246,10 @@ market_before=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
 seats_before=$(psql_value -c \
   "select count(*) from seat_positions where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
+market_keys_before="$EVIDENCE_DIR/replay-market-keys-before.txt"
+seat_keys_before="$EVIDENCE_DIR/replay-seat-keys-before.txt"
+psql_value -c "select concat_ws('|',source_id,contract_id,trade_date,session_type,granularity,revision_no) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE' order by 1" >"$market_keys_before"
+psql_value -c "select concat_ws('|',source_id,trade_date,contract_id,seat_id,rank_type,rank) from seat_positions where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE' order by 1" >"$seat_keys_before"
 test "$market_before" -gt 0
 test "$seats_before" -gt 0
 test "$(psql_value -c "select count(*) from exchanges where workspace_id='$workspace_id'")" -ge 5
@@ -263,8 +267,15 @@ market_after=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
 seats_after=$(psql_value -c \
   "select count(*) from seat_positions where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
-test "$market_after" = "$market_before"
-test "$seats_after" = "$seats_before"
+market_keys_after="$EVIDENCE_DIR/replay-market-keys-after.txt"
+seat_keys_after="$EVIDENCE_DIR/replay-seat-keys-after.txt"
+psql_value -c "select concat_ws('|',source_id,contract_id,trade_date,session_type,granularity,revision_no) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE' order by 1" >"$market_keys_after"
+psql_value -c "select concat_ws('|',source_id,trade_date,contract_id,seat_id,rank_type,rank) from seat_positions where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE' order by 1" >"$seat_keys_after"
+test -z "$(comm -23 "$market_keys_before" "$market_keys_after")"
+test -z "$(comm -23 "$seat_keys_before" "$seat_keys_after")"
+test "$(psql_value -c "select count(*) from (select workspace_id,source_id,contract_id,trade_date,session_type,granularity,revision_no,count(*) from market_prices where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
+test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade_date,contract_id,seat_id,rank_type,rank,count(*) from seat_positions where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
+echo "PHASE4A_E2E_REPLAY market_before=$market_before market_after=$market_after market_new=$((market_after-market_before)) seat_before=$seats_before seat_after=$seats_after seat_new=$((seats_after-seats_before))"
 
 fault_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 if run_collector_with_peak "$EVIDENCE_DIR/fault-run.log" \
