@@ -351,3 +351,136 @@ Python/ruff 使用工作区外的一次性评审虚拟环境和 `collector/requi
 - MEDIUM-01 至 MEDIUM-04 也应在最终 PASS 前关闭或由用户明确重新裁定契约；LOW-01 应补齐 `/work` tmpfs。
 - 既有 CI、镜像、部署和 `PHASE4A_E2E_PASS` 是有效的已覆盖主路径证据，但不能覆盖本报告复现出的安全、来源恢复、回滚和完整性缺陷。
 - 因结论为 FAIL，本评审不授权合并 `main`、打标签或启动 Phase 4B。
+
+## 复核(2026-08-04)
+
+### 复核范围、方法与结论摘要
+
+- 角色与范围：全新独立 Evaluator；首轮报告固定为 `d30b3e3`，复核提交范围固定为 `d30b3e3..6c18fc2`，运行候选固定为 `82cec44`。`HANDOFF_20260804_1215.md` 只用于定位线索，没有采信其结论。
+- 操作边界：本次只做本地静态审查、门禁复跑、GitHub Actions 只读取证和 `futures` VPS 只读查询；没有调用写 API、没有重部署、没有清理或修复生产数据。
+- 结论：首轮十项缺陷中 **9 项 CLOSED、1 项 NOT-CLOSED**。HIGH-01、HIGH-02、HIGH-04、HIGH-05、MEDIUM-01 至 MEDIUM-04、LOW-01 已达到首轮“影响与建议”的关闭标准；HIGH-03 仍漏掉一条正式存在的下游外键依赖，因此 Phase 4A 最终仍为 **FAIL**。
+
+### 十项逐一复核
+
+| 首轮项 | 复核结论 | 验收证据 |
+| --- | --- | --- |
+| HIGH-01 重定向/DNS 绕过 | **CLOSED** | `collector/src/futures_collector/sources.py:389-532` 对每一跳执行 HTTPS、精确白名单域名和公网 IP 校验，关闭 requests 自动重定向，并在实际 transport 调用期间把 `getaddrinfo` 绑定到刚复核的地址集合；连接前二次解析不一致即拒绝。定向 pytest 的私网 302、非白名单公网 302、多跳上限、解析漂移 4 个用例均通过，并分别断言禁用 URL 未进入请求列表或 transport 调用数为 0，而不只是断言最终抛错。 |
+| HIGH-02 fallback→official 业务身份冲突 | **CLOSED** | `rust/crates/application/src/import_jobs.rs:385-461` 的四类自动数据业务键均前缀化受控 `data_source_code`；迁移 `202608030001/02` 在 Workspace/RLS 约束下补齐既有自动记录。E2E `rust/tests/phase_4a_e2e.sh:415-483` 覆盖 fallback→official 相同值和不同值：行情、席位各保留两来源各两行，fallback 历史行不改写，`preferred_*` 视图按 `data_sources.priority` 选择 official。VPS 当前 official priority=100、fallback=50，唯一聚合源仍只有 `akshare_sina_dce_fallback`。 |
+| HIGH-03 正式投影回滚预检 | **NOT-CLOSED** | 八类投影已进入 v2 change log、快照/版本栅栏和逆序回滚；四类成功回滚、现有依赖冲突、陈旧预检、零变更路径均有 E2E，迁移 `496a2cb` 也把 5 个受事实引用的遗留目录批次和 5 个遗留日历批次安全归类为 `compensation_only`。但是 `projection_dependencies()` 对 `exchange` 只枚举 `instruments`，漏掉 schema 中真实的 `trading_calendar_versions(workspace_id,exchange_id) → exchanges` `ON DELETE RESTRICT` 外键。现有 E2E 使用已存在的 CFFEX，目录批次没有插入 exchange，故没有证明该边的“预检结论=执行结果”。详见下节。 |
+| HIGH-04 DCE 部分数据误报成功 | **CLOSED** | DCE fallback 的行情请求/解析缺口、席位部分 rank 发布均累计 skip 后抛出完整性错误；Runner 不上传部分 CSV，记录整个 dataset failed。按用户裁定，不引入 partial；无该交易日 observation、整组合约无发布排名属于显式未发布并被排除，而请求/解析失败或部分发布使整批失败。相关 pytest 与 Deploy E2E fault 分支通过。 |
+| HIGH-05 automatic/manual 授权旁路 | **CLOSED** | 上传入口双向拒绝 collector→manual 与普通用户→automatic；inspect/mapping/preview/validate/manual-confirm 全部调用 `require_manual_batch_endpoint`。`automatic_confirm` 的精确 collector 身份拒绝位于任何 batch failure/状态写入之前（`f8b3f39`），Uploaded 批次无条件执行服务端固定 inspect→mapping→full validation，非可信中间态报 `automatic_pipeline_untrusted_state`。Rust 拒绝先于变更测试和 E2E 身份×mode×endpoint 矩阵均通过。 |
+| MEDIUM-01 交易日推断 | **CLOSED** | 新增版本化 2026 交易日历；无 `--date` 时宿主先以受控日历解析日期，再把显式 `--date` 传入一次性容器，跨年/未受控年份拒绝。节假日、周末、节后首开日和超范围 pytest 均通过。 |
+| MEDIUM-02 `observed_at` 固定值 | **CLOSED** | 每个 exchange/dataset 在网络采集前获取一次 UTC 时间并贯穿该批，normalize 要求 timezone-aware；单测验证时间位于调用窗口且批内一致，E2E 还验证正式行情 observation 不晚于 batch commit。 |
+| MEDIUM-03 目录非空值不补齐 | **CLOSED** | exchange/instrument/contract 采用受控字段 upsert，真实变化递增 `row_version` 并记录 before/after snapshot；E2E 验证参数补齐及回滚恢复原空值。 |
+| MEDIUM-04 E2E 覆盖/断言过宽 | **CLOSED** | 首跑和故障运行均使用精确 expected source set；完整身份矩阵、四类投影成功回滚、依赖冲突零变更及 DCE 双来源恢复已加入。另抽取同等 shell 条件做三项反向验证：缺少一个官方源、peak=0、manual fingerprint 漂移均实际得到 `exit=1 expected=1 => PASS`。该 E2E 仍未捕获 HIGH-03 的特定缺边，但首轮 MEDIUM-04 要求的精确集合和三类恒真/吞错风险本身已经关闭。 |
+| LOW-01 缺少 `/work` tmpfs | **CLOSED** | `docker-compose.yml:92-96` 配置 `/work:size=128m,mode=0700,uid=10001,gid=10001`，并固定 `COLLECTOR_TEMP_ROOT`/`TMPDIR=/work`；E2E 对精确配置作断言。 |
+
+### 剩余 HIGH-03：缺失的 exchange→calendar version 依赖边
+
+**证据**
+
+1. `rust/migrations/202608020001_phase_4a_collection_schema.sql:129-130` 明确定义 `trading_calendar_versions(workspace_id, exchange_id)` 引用 `exchanges(workspace_id,id) ON DELETE RESTRICT`。
+2. `rust/crates/database/src/imports.rs:2791-2853` 的 `projection_dependencies()` 在 `target_kind="exchange"` 分支只查询 `instruments`；没有查询 `trading_calendar_versions`。同一函数已覆盖 instrument→contract、contract→market/seat、calendar version→day/market、seat entity→seat position，说明这不是由通用 FK 枚举自动补足的边。
+3. 预检只把该函数返回且不属于同批 inserted targets 的对象报告为 downstream dependency（`rust/crates/database/src/imports.rs:2429-2449`）。因此缺失边不会出现在 conflict 清单或 fingerprint 中。
+4. Worker 对 insert change 会执行 `delete from exchanges`（`rust/crates/database/src/rollback_jobs.rs:334-341`）；日历版本仍存在时数据库才以 FK restrict 拒绝。结果是“预检可回滚、执行期失败”，不满足首轮要求的预检可信度与零副作用拒绝。
+5. `rust/tests/phase_4a_e2e.sh:349-411` 在既有 CFFEX 上创建 instrument/contract，精确 change-set 断言为 `contract,instrument`，没有 exchange；catalog dependency 检查由后续 contract facts 触发，不能覆盖只剩 calendar version 引用 exchange 的场景。
+
+**只读复现推演**
+
+1. 在空目录的新 Workspace 导入 catalog，使同一批创建 exchange、instrument、contract。
+2. 再导入只引用该 exchange 的 calendar version/day，不创建行情或席位。
+3. 对 catalog 批次执行 rollback-check：instrument 是原 catalog 同批 inserted target，会被忽略；缺失的 calendar-version 查询使 exchange 不产生 downstream conflict，预检可返回 `can_rollback=true`。
+4. 入队执行时先逆序删除同批 contract/instrument，随后删除 exchange；仍存的 calendar version 触发 `trading_calendar_versions_exchange_fk`。事务本身会回滚，但预检结论与执行结果不一致。
+
+**关闭标准**
+
+- 在 exchange 分支锁定并枚举 `trading_calendar_versions`，并审计八类投影的完整反向 FK 图；增加隔离 E2E：新 Workspace 首次 catalog 创建 exchange，后续仅 calendar 引用，catalog rollback-check 必须返回具体 downstream conflict，enqueue 必须拒绝且前后 fingerprint 不变。修复后还应保留现有四类成功回滚、陈旧预检和零变更覆盖。
+
+### 对抗性专项结论
+
+| 专项 | 结论 | 实际证据 |
+| --- | --- | --- |
+| HIGH-01 四个反向目标未收到请求 | PASS | 定向 pytest：`4 passed, 5 deselected`。两个 302 禁止目标断言 requested list 只有初始白名单 URL；多跳在上限前逐跳校验并证明超限下一跳未请求；DNS public→private 漂移断言 transport 调用列表为空。 |
+| HIGH-02 同值/异值来源恢复 | PASS | E2E 为行情/席位分别创建 same/different 两组 fallback→official，事实表保留 4+4 双来源行，8 条 imported record 业务键均带来源；preferred 行为选择 official 的相同值或 official 的新值。生产当前 business-key 唯一重复组 0/0。 |
+| HIGH-03 全投影、依赖、reclassify | **FAIL** | 八类 change log 和四类成功回滚成立；5+5 个此前被事实引用的 v1 目录/日历批次均为 `compensation_only`，没有被伪造为 v2。独立缺边使全部下游 FK 枚举与“预检=执行”仍不成立。 |
+| HIGH-05 身份×mode×endpoint | PASS | collector 创建 manual、普通用户创建 automatic、双方交叉访问五个手动处理端点及两类 confirm 均拒绝；ordinary automatic-confirm 的拒绝在失败状态写入之前，固定流水线不能由 PreviewReady 等中间态绕过。 |
+| MEDIUM-04 三项反向断言 | PASS | 实际输出分别为 `exact-source-set-missing-one: exit=1`、`zero-memory-sample: exit=1`、`manual-batch-fingerprint-drift: exit=1`；没有恒真断言或吞掉退出码。 |
+
+### 本地门禁复跑
+
+环境：`rustc/cargo 1.96.0`、Node `24.18.0`、pnpm `11.9.0`、Python `3.12.13`、ruff `0.14.14`。Python 依赖严格取自 `collector/requirements-dev.lock`，虚拟环境位于系统临时目录，仓库未新增环境文件。
+
+| 门禁 | 实际结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS，exit 0，无差异 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | PASS，4 个主要 crate 检查完成，0 warning/error |
+| `cargo test --workspace --all-targets` | PASS，135 passed、0 failed（24/14/71/13/8/5） |
+| `pnpm lint` | PASS，`vue-tsc --noEmit` exit 0 |
+| `pnpm test` | PASS，6 files、18 tests passed |
+| `pnpm build` | PASS，1468 modules transformed；仅既有 chunk-size warning |
+| `ruff check collector` | PASS，`All checks passed!` |
+| `ruff format --check collector` | PASS，15 files already formatted |
+| `pytest -q collector/tests` | PASS，35 passed in 1.85s |
+| HIGH-01 定向 pytest | PASS，4 passed、5 deselected |
+| `git diff --check d30b3e3..6c18fc2` | PASS，exit 0 |
+| Compose config | 本机无 Docker CLI，不能声称本地执行；同一 runtime SHA 的 CI Run `30813165664` 中开发/生产 Compose config step 均 success，VPS 生效配置另作只读核验。 |
+
+前端 test/build 首次在工作区沙箱内因 Windows 对上层目录拒绝读取而启动失败；在同一 checkout 的受控宿主环境复跑均 exit 0。该失败没有测试用例或编译错误，不计为代码门禁失败。
+
+### GitHub Actions 证据链
+
+| Run | 绑定提交 | 结论与证据 |
+| --- | --- | --- |
+| CI `30813165664` | `82cec44184ffb6ae4bf700afd0210193a081ad0a` | success；validate 的 Rust/Python/前端/Compose 全步骤和 API/Worker/Frontend/Collector build jobs 全部 success。 |
+| Container images `30813606780` | `82cec44184ffb6ae4bf700afd0210193a081ad0a` | success；四个不可变镜像 publish job 及 digest 记录步骤全部 success。 |
+| Deploy `30873823206` | acceptance `579017b`；runtime `82cec44` | self-hosted job success；显式校验 runtime/acceptance revision，应用至 `202608030003`，日志唯一 `PHASE4A_E2E_PASS`，峰值 `135401472` bytes，runtime digest match/registry auth cleanup/service log secret scan 均 PASS。 |
+
+- `579017b` 与 `6c18fc2` 的 hosted CI 分别为 Run `30873793685`、`30877288724`；各 job 的 `steps=[]`，Check annotation 明确为付款失败或 spending limit，未启动任何门禁。按用户裁定这不是缺陷，也不能替代 `82cec44` 已成功的业务候选 CI/镜像证据。
+- `346d542` 之后 Deploy 允许 acceptance harness 与 runtime 分离；运行中 API `/version` 和 release 路径共同证明实际业务镜像仍是 `82cec44`，没有把 `579017b` 的验收脚本修订误当运行代码。
+
+### VPS 只读实证
+
+核数使用 `futures_app`（superuser=true）避免 RLS 无 Workspace 上下文的 0 行假象；本节全部是 `GET`、容器 inspect、systemd/cgroup 读取或 SQL `SELECT`。
+
+| 检查 | 2026-08-04 实际值 |
+| --- | --- |
+| 运行版本 | `/api/v1/version.git_sha=82cec44184ffb6ae4bf700afd0210193a081ad0a` |
+| API digest | `sha256:ead8f733e704412ccebdbb31a83c78ebff76304140fdaf07d588aed752906587` |
+| Worker digest | `sha256:95170cdb58a0977a13c2342d598ec5169523e986e738bfa6d10faa19b654bd2a` |
+| Frontend digest | `sha256:77c93db6cca3deefbcf9932010f03cbfa11fee63775c582f77ee778b413d483e` |
+| Collector digest | `sha256:3bc5ce53760de7ba3e77ce1450aef2a561695b9d612fc526f070e81d02e16544`（release compose 锁定；一次性服务当前无常驻容器） |
+| 迁移 | `schema_versions.version=202608030003` 精确 1 条，applied_at `2026-08-04 03:07:43.965069+00` |
+| 正式事实 | `market_prices=830`，`seat_positions=17806`；两类业务唯一键重复组均为 0 |
+| 来源 | 行情 SHFE 302/CZCE 240/GFEX 48/CFFEX 28/DCE fallback 212；唯一 `aggregator_public` 为 `akshare_sina_dce_fallback`，其余四所没有聚合源 |
+| manual/users | manual batches=144，users=32 |
+| manual 全量 fingerprint | 144 条当前锚点 `83ff6f72e7c3b01841d7a96040249d8f`；Deploy E2E 在 144 基线上做前后全行 fingerprint 相等断言并 PASS |
+| 原 127 条 baseline | 按 Phase 4A 前 created cutoff 仍为 127；fingerprint `8c622394fa847521bf221d2dd17aac2b`；最大 updated_at 仍为 `2026-07-25 17:11:10.755764+00`，cutoff 后更新数 0 |
+| 幂等重放 | Deploy 日志：market `830→830, new=0`；seat `17806→17806, new=0` |
+| 遗留错误 direct 分类 | 受事实引用的 legacy catalog 5、calendar 5 均为 `compensation_only`、`change_log_version IS NULL`，未伪造 v2 change log |
+| Phase 4A 投影 RLS/DELETE | 8/8 投影表 ENABLE RLS、8/8 FORCE RLS；在 11 张 Phase 4A 新表范围内，runtime DELETE 精确只有 exchanges/instruments/contracts/trading_calendar_versions/trading_calendar_days/market_prices/seat_entities/seat_positions 这 8 张投影表。runtime 对 Phase 3 的 imported records/staging/errors 既有 DELETE 不属于本迁移扩权。 |
+| self-hosted runner | service active/running、Result=success、NRestarts=0；MemoryMax=268435456、MemoryPeak=268435456，`memory.events max=105` 如实反映触顶限流；oom/oom_kill/oom_group_kill 均为 0，相关 journal 命中 0 |
+| cron | `/etc/cron.d/futures-collector` 仍为 Asia/Shanghai 工作日 17:30/21:30；没有触发本次复核采集 |
+
+### 越界复核
+
+| 边界 | 结论 | 证据 |
+| --- | --- | --- |
+| 未启动 Phase 4B | PASS | `d30b3e3..6c18fc2` 没有历史日期范围采集/回填入口；文件名中的 `202608030002_phase_4a_rls_backfill.sql` 是 Phase 4A RLS/分类修复，不是业务历史数据回填。 |
+| 未清数据 | PASS | VPS 只执行只读命令；144/127 fingerprints、事实行数和重放证据均保留。 |
+| 未恢复废止设施 | PASS | 差异未重新引入旧部署栈或旧凭据通道；部署迁移到用户授权的 self-hosted runner，不等于恢复废止基础设施。 |
+| 四所无聚合源 | PASS | `aggregator_public` 精确只有 DCE Sina fallback；SHFE/CZCE/GFEX/CFFEX 均只存在 official source。 |
+| 未合并/未标签/未重部署 | PASS | 复核开始时只有 `origin/phase/04-akshare-collection` 包含 `6c18fc2`，没有 tag 包含该提交；本单没有执行 merge、tag、workflow dispatch 或任何部署命令。 |
+
+### 复核最终判定
+
+**FAIL**
+
+- BLOCKER：0
+- HIGH：1（HIGH-03 NOT-CLOSED）
+- MEDIUM：0
+- LOW：0
+- CLOSED：9 / 10
+
+`PHASE4A_E2E_PASS`、CI、不可变镜像和生产数据主路径证据均有效，但不能覆盖缺失的 exchange→calendar version 回滚依赖边。Phase 4A 在补齐该边并增加隔离反向 E2E 前不能判定 PASS。
+
+后续路线：先只修复并重新独立复核 HIGH-03。若后续复核达到 PASS，**仍不立即合并 main**；Phase 4B 在同一分支继续，Phase 4 整体完成后一次收口。届时 hosted CI 额度应已恢复，并在 merge commit 上补跑完整 CI。当前 FAIL 不授权合并 main、打标签、启动 Phase 4B 或重部署。
