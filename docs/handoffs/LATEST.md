@@ -1,11 +1,13 @@
 # 最新交接状态
 
-- 最新交接文档：`docs/handoffs/HANDOFF_20260803_0008.md`
-- 当前阶段：Phase 1 至 Phase 3 已收口；Phase 4A 已实现、CI/四镜像/VPS E2E 全部通过，候选 `944a4de` 等待全新独立 Evaluator；Phase 4B 未实施。
-- 决策依据：`DEC-031`、`DEC-038`、`DEC-039`、`DEC-041`；DCE 官方优先/Sina fallback 例外仅限 DCE。
-- Git/CI：分支 `phase/04-akshare-collection`，业务候选 `944a4de`；CI Run `30753685223`、Container images Run `30753724067`、Deploy Run `30754021926` 全部 success。
-- VPS：运行版本 `944a4defe578d5922b9f1ea83f951ddbd6fb005e`，`PHASE4A_E2E_PASS`；collector 峰值 `130641920` bytes；工作日 17:30/21:30 cron 已安装；未清理手动批次或其他数据。
-- 数据库：迁移 `202608020001`、`202608020002` 已执行；真实 `2026-07-30` 五交易所采集、DCE fallback 追溯、幂等、故障隔离、RLS 和来源链均 PASS。
-- 下一步：由全新的独立 Evaluator 对 Git 范围、测试和 futures VPS 实态做 Phase 4A 只读审查；不得启动 Phase 4B，不得合并 main 或打标签。
+- 最新交接文档：`docs/handoffs/HANDOFF_20260804_1215.md`
+- 当前阶段：Phase 4A Evaluator 报告的 HIGH-01～05、MEDIUM-01～04、LOW-01 已由 Generator 完成修复、发布链和 VPS E2E；等待全新独立 Evaluator 复核，尚未合并 main、打标签或启动 Phase 4B。
+- Git：分支 `phase/04-akshare-collection`；固定业务运行候选 `82cec44184ffb6ae4bf700afd0210193a081ad0a`；最终 acceptance HEAD `579017bdfb15bc67112ea437b014ab94ab8ab2ae`。
+- Actions：CI `30813165664` success；Container images `30813606780` success；Deploy `30873823206` success。
+- VPS：运行版本 `82cec44`，四镜像 digest 匹配，`PHASE4A_E2E_PASS`；market 830、seat 17806、业务重复键 0、lineage 缺失 0；DCE fallback 可追溯，其余四所 official。
+- 数据保护：手动批次 144（原 127 基线仍保留且 fingerprint 未变）、users 32 未变；不清理任何现有数据。
+- 迁移：至 `202608030003` 已执行；8 张 Phase 4A 正式投影 RLS/FORCE RLS，runtime DELETE grant 精确受限于这 8 张表。
+- runner：self-hosted `futures-vps` active，MemoryMax 256 MiB，OOM/重启 0，但到达过上限并被限流，需保留风险记录。
+- 下一步：全新独立 Evaluator 按 `docs/reviews/PHASE_04A_EVALUATION.md` 对 `d30b3e3..HEAD` 和 Run `30873823206` 做只读复核；Generator 不自行宣告 PASS。
 
-接管者必须完整阅读 `HANDOFF_20260803_0008.md`，并以 Git、当前测试和 VPS 实态独立取证；不得输出密钥，不得恢复已废止基础设施，不得为 DCE 之外交易所引入聚合 fallback。
+接管者必须完整阅读最新交接，以 Git、Actions 和 VPS 实态独立取证；不得输出密钥，不得重部署，不得启动 Phase 4B。
