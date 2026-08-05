@@ -13,6 +13,7 @@ export const router = createRouter({
     { path: '/', component: HomeView },
     { path: '/auth', component: AuthView },
     { path: '/imports', component: ImportCenterView },
+    { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
     { path: '/sessions', component: SessionsView },
     { path: '/system', component: SystemView },
     { path: '/:pathMatch(.*)*', component: NotFoundView }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Cpu, HomeFilled, Key, SwitchButton, UploadFilled, User } from '@element-plus/icons-vue'
+import { Cpu, DataAnalysis, HomeFilled, Key, SwitchButton, UploadFilled, User } from '@element-plus/icons-vue'
 import { useAuthStore } from './stores/auth'
 
 const auth = useAuthStore()
@@ -9,7 +9,7 @@ const auth = useAuthStore()
   <el-container class="app-shell">
     <el-aside width="232px" class="sidebar">
       <div class="brand">Futures Analysis</div>
-      <el-menu router default-active="/">
+      <el-menu router :default-active="$route.path">
         <el-menu-item index="/">
           <el-icon><HomeFilled /></el-icon>
           <span>首页</span>
@@ -22,6 +22,16 @@ const auth = useAuthStore()
           <el-icon><UploadFilled /></el-icon>
           <span>导入中心</span>
         </el-menu-item>
+        <el-sub-menu index="spread-analytics">
+          <template #title>
+            <el-icon><DataAnalysis /></el-icon>
+            <span>套利分析</span>
+          </template>
+          <el-menu-item index="/spread-analytics/monitor" disabled>
+            套利监控 <span class="phase-badge">5B</span>
+          </el-menu-item>
+          <el-menu-item index="/spread-analytics/free-spread">自由价差</el-menu-item>
+        </el-sub-menu>
         <el-menu-item index="/sessions">
           <el-icon><User /></el-icon>
           <span>Session</span>

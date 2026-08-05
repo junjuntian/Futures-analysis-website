@@ -47,6 +47,15 @@ body {
   font-weight: 500;
 }
 
+.phase-badge {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #f0efec;
+  color: #8d8c87;
+  font-size: 11px;
+}
+
 .page {
   max-width: 1120px;
   margin: 0 auto;

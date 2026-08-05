@@ -325,6 +325,168 @@ export interface ImportLineage {
   audits: ImportLineageAudit[]
 }
 
+export type SpreadProviderResultKind = 'ok' | 'empty'
+
+export interface SpreadSourceMetadata {
+  provider: 'sanhe'
+  source_code: string
+  source_display_name: string
+  source_type: 'aggregator'
+  fetched_at: string
+  data_cutoff_at?: string | null
+  price_basis: 'upstream_spread'
+  raw_leg_prices_available: false
+  provider_algorithm_version: string
+}
+
+export interface SpreadVariety {
+  market: string
+  name: string
+  symbol: string
+}
+
+export interface SpreadVarietiesResponse {
+  source: SpreadSourceMetadata
+  items: SpreadVariety[]
+  result_kind: SpreadProviderResultKind
+}
+
+export interface SpreadMonthsResponse {
+  source: SpreadSourceMetadata
+  variety: string
+  months: string[]
+  basis?: number | null
+  basis_semantics_confirmed: false
+  result_kind: SpreadProviderResultKind
+}
+
+export interface FreeSpreadLeg {
+  variety: string
+  symbol: string
+  month: string
+}
+
+export interface FreeSpreadQueryRequest {
+  provider: 'sanhe'
+  leg1: FreeSpreadLeg
+  leg2: FreeSpreadLeg
+}
+
+export interface ContinuousSpreadPoint {
+  trade_date: string
+  value: number
+  from_code: string
+  to_code: string
+  segment_no: number
+}
+
+export interface SpreadSegmentBoundary {
+  segment_no: number
+  trade_date: string
+  from_code: string
+  to_code: string
+  previous_from_code?: string | null
+  previous_to_code?: string | null
+  reason: string
+}
+
+export interface SeasonalYearSeries {
+  year: number
+  values: Array<number | null>
+  sample_count: number
+  missing_count: number
+  segment_nos: number[]
+  rule_version: string
+  sample_start?: string | null
+  sample_end?: string | null
+}
+
+export interface MonthlyCell {
+  month: number
+  delta?: number | null
+  sample_count: number
+  is_partial: boolean
+}
+
+export interface SpreadAnalysisTrace {
+  provider: 'sanhe'
+  source_code: string
+  data_cutoff_at?: string | null
+  price_basis: 'upstream_spread'
+  sample_start?: string | null
+  sample_end?: string | null
+  sample_count: number
+  excluded_point_count: number
+  calendar_version_ids: string[]
+  window_algorithm_version: string
+  statistics_algorithm_version: string
+  rule_version: string
+}
+
+export interface FreeSpreadQueryResponse {
+  series_id: string
+  source: SpreadSourceMetadata
+  query: FreeSpreadQueryRequest
+  quality: {
+    status: 'ok' | 'partial' | 'empty'
+    input_point_count: number
+    retained_point_count: number
+    excluded_point_count: number
+    missing_contract_point_count: number
+  }
+  algorithm_versions: {
+    provider: string
+    window: string
+    statistics: string
+    rule: string
+  }
+  continuous_series: {
+    trace: SpreadAnalysisTrace
+    points: ContinuousSpreadPoint[]
+    segment_boundaries: SpreadSegmentBoundary[]
+    current_value?: number | null
+  }
+  seasonal_series: {
+    trace: SpreadAnalysisTrace
+    axis: string[]
+    years: SeasonalYearSeries[]
+    current_year?: number | null
+  }
+  monthly_matrix: {
+    trace: SpreadAnalysisTrace
+    years: Array<{ year: number; months: MonthlyCell[] }>
+    up_ratios: Array<{
+      month: number
+      ratio?: number | null
+      positive_year_count: number
+      eligible_year_count: number
+    }>
+  }
+  segments: Array<{
+    segment_no: number
+    window_year?: number | null
+    from_code: string
+    to_code: string
+    candidate_start: string
+    candidate_end: string
+    window_start?: string | null
+    window_end?: string | null
+    calendar_version_ids: string[]
+    retained_point_count: number
+    excluded_point_count: number
+    boundary_reason: string
+  }>
+}
+
+export interface SpreadFavorite {
+  id: string
+  name: string
+  provider: 'sanhe'
+  leg1: FreeSpreadLeg
+  leg2: FreeSpreadLeg
+  created_at: string
+}
+
 async function parseApiError(response: Response, fallback: string): Promise<ApiError> {
   let payload: unknown
   try {
@@ -448,6 +610,41 @@ export async function createCompensation(
 
 export async function getImportLineage(importId: string): Promise<ApiEnvelope<ImportLineage>> {
   return getJson(`/api/v1/imports/${encodeURIComponent(importId)}/lineage`)
+}
+
+export function getSpreadVarieties(): Promise<ApiEnvelope<SpreadVarietiesResponse>> {
+  return getJson('/api/v1/spread-analytics/providers/sanhe/varieties')
+}
+
+export function getSpreadMonths(variety: string): Promise<ApiEnvelope<SpreadMonthsResponse>> {
+  return getJson(`/api/v1/spread-analytics/providers/sanhe/varieties/${encodeURIComponent(variety)}/months`)
+}
+
+export function queryFreeSpread(
+  request: FreeSpreadQueryRequest,
+  csrfToken: string
+): Promise<ApiEnvelope<FreeSpreadQueryResponse>> {
+  return sendJson('/api/v1/spread-analytics/free-spread/query', request, csrfToken)
+}
+
+export function getSpreadFavorites(): Promise<ApiEnvelope<SpreadFavorite[]>> {
+  return getJson('/api/v1/spread-analytics/favorites')
+}
+
+export function createSpreadFavorite(
+  request: { name: string; provider: 'sanhe'; leg1: FreeSpreadLeg; leg2: FreeSpreadLeg },
+  csrfToken: string
+): Promise<ApiEnvelope<SpreadFavorite>> {
+  return sendJson('/api/v1/spread-analytics/favorites', request, csrfToken)
+}
+
+export async function deleteSpreadFavorite(favoriteId: string, csrfToken: string): Promise<void> {
+  const response = await fetch(`/api/v1/spread-analytics/favorites/${encodeURIComponent(favoriteId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+    headers: { 'x-csrf-token': csrfToken }
+  })
+  if (!response.ok) throw await parseApiError(response, `delete favorite failed: ${response.status}`)
 }
 
 export async function streamImportEvents(

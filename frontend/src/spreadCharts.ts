@@ -1,0 +1,224 @@
+import type { EChartsOption, SeriesOption } from 'echarts'
+import type { FreeSpreadQueryResponse } from './api'
+
+const RED = '#e64b4b'
+const GREEN = '#4f8f22'
+const ORANGE = '#d97706'
+const GREY = '#8d8c87'
+
+export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOption {
+  const points = data.continuous_series.points
+  const boundaries = data.continuous_series.segment_boundaries.slice(1)
+  const current = data.continuous_series.current_value
+  const signedSegments = buildSignedLineSegments(points)
+  const boundaryIndexes = new Map(points.map((point, index) => [point.trade_date, index]))
+  const markLine = {
+    silent: false,
+    symbol: 'none' as const,
+    label: { color: GREY, formatter: '{b}' },
+    data: [
+      { name: '', yAxis: 0, lineStyle: { color: '#aaa9a5', type: 'solid' as const, width: 1 } },
+      ...(current === null || current === undefined ? [] : [{
+        name: formatNumber(current),
+        yAxis: current,
+        lineStyle: { color: ORANGE, type: 'dashed' as const, width: 1.5 },
+        label: { color: ORANGE, formatter: formatNumber(current), position: 'insideEndTop' as const }
+      }]),
+      ...boundaries.flatMap((boundary) => {
+        const index = boundaryIndexes.get(boundary.trade_date)
+        return index === undefined ? [] : [{
+          name: `${boundary.previous_from_code?.toUpperCase() ?? '—'}−${boundary.previous_to_code?.toUpperCase() ?? '—'} → ${boundary.from_code.toUpperCase()}−${boundary.to_code.toUpperCase()}`,
+          xAxis: index,
+          lineStyle: { color: '#c7c6c2', type: 'dashed' as const, width: 1 },
+          label: { show: false }
+        }]
+      })
+    ]
+  }
+  return {
+    animation: false,
+    grid: { left: 54, right: 58, top: 28, bottom: 48 },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: unknown) => {
+        const item = Array.isArray(params) ? params[0] as { axisValue?: number } : undefined
+        const point = item?.axisValue === undefined ? undefined : points[Math.round(item.axisValue)]
+        return point
+          ? `${point.trade_date}<br/>价差 ${formatNumber(point.value)}<br/>${point.from_code.toUpperCase()} − ${point.to_code.toUpperCase()}`
+          : ''
+      }
+    },
+    xAxis: {
+      type: 'value',
+      min: 0,
+      max: Math.max(points.length - 1, 1),
+      minInterval: 1,
+      axisLabel: {
+        color: GREY,
+        hideOverlap: true,
+        formatter: (value: number) => points[Math.round(value)]?.trade_date ?? ''
+      },
+      axisLine: { lineStyle: { color: '#d8d8d5' } },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { color: GREY },
+      splitLine: { lineStyle: { color: '#f0f0ee' } }
+    },
+    series: signedSegments.map((segment, index) => ({
+      name: segment.sign === 'positive' ? '正价差' : '负价差',
+      type: 'line',
+      showSymbol: false,
+      data: segment.points,
+      lineStyle: { width: 2.5, color: segment.sign === 'positive' ? RED : GREEN },
+      itemStyle: { color: segment.sign === 'positive' ? RED : GREEN },
+      markLine: index === 0 ? markLine : undefined
+    } as SeriesOption))
+  }
+}
+
+export interface SignedLineSegment {
+  sign: 'positive' | 'negative'
+  sourceSegment: number
+  points: Array<[number, number]>
+}
+
+/**
+ * Builds a trading-day index axis, breaks every contract roll, and inserts a
+ * linearly interpolated zero at each sign crossing. This prevents both a fake
+ * roll connection and a red/green gradient approximation around zero.
+ */
+export function buildSignedLineSegments(
+  points: FreeSpreadQueryResponse['continuous_series']['points']
+): SignedLineSegment[] {
+  const output: SignedLineSegment[] = []
+  let active: SignedLineSegment | undefined
+  const begin = (sign: SignedLineSegment['sign'], sourceSegment: number, point: [number, number]) => {
+    active = { sign, sourceSegment, points: [point] }
+    output.push(active)
+  }
+  points.forEach((point, index) => {
+    const sign = point.value >= 0 ? 'positive' : 'negative'
+    const coordinate: [number, number] = [index, point.value]
+    const previous = points[index - 1]
+    if (!previous || previous.segment_no !== point.segment_no) {
+      begin(sign, point.segment_no, coordinate)
+      if (point.value === 0) active = undefined
+      return
+    }
+    if (point.value === 0) {
+      if (active) active.points.push(coordinate)
+      else begin('positive', point.segment_no, coordinate)
+      active = undefined
+      return
+    }
+    if (previous.value === 0) {
+      begin(sign, point.segment_no, [index - 1, 0])
+      active?.points.push(coordinate)
+      return
+    }
+    const previousSign = previous.value >= 0 ? 'positive' : 'negative'
+    if (previousSign === sign) {
+      if (!active || active.sourceSegment !== point.segment_no || active.sign !== sign) {
+        begin(sign, point.segment_no, [index - 1, previous.value])
+      }
+      active?.points.push(coordinate)
+      return
+    }
+    const zeroIndex = (index - 1) + Math.abs(previous.value) / (Math.abs(previous.value) + Math.abs(point.value))
+    active?.points.push([zeroIndex, 0])
+    begin(sign, point.segment_no, [zeroIndex, 0])
+    active?.points.push(coordinate)
+  })
+  return output
+}
+
+export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOption {
+  const currentYear = data.seasonal_series.current_year
+  const series: SeriesOption[] = data.seasonal_series.years.map((year) => ({
+    name: String(year.year),
+    type: 'line',
+    showSymbol: false,
+    connectNulls: false,
+    data: year.values,
+    lineStyle: {
+      color: year.year === currentYear ? '#df572d' : '#cacac8',
+      width: year.year === currentYear ? 3.5 : 1.5
+    },
+    itemStyle: { color: year.year === currentYear ? '#df572d' : '#8d8c87' },
+    emphasis: { lineStyle: { width: 3 } },
+    endLabel: year.year === currentYear
+      ? { show: true, formatter: String(year.year), color: '#b44020', fontSize: 15 }
+      : { show: false }
+  }))
+  return {
+    animation: false,
+    color: ['#df572d', '#666560', '#8d8c87', '#aaa9a5'],
+    grid: { left: 54, right: 76, top: 74, bottom: 40 },
+    legend: {
+      top: 8,
+      left: 0,
+      type: 'scroll',
+      textStyle: { color: GREY, fontSize: 13 },
+      selected: Object.fromEntries(data.seasonal_series.years.map((year, index, all) => [
+        String(year.year),
+        year.year === currentYear || index >= all.length - 3
+      ]))
+    },
+    tooltip: { trigger: 'axis' },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: data.seasonal_series.axis.map((value) => value.replace('-', '/')),
+      axisLabel: { color: GREY, hideOverlap: true },
+      axisLine: { lineStyle: { color: '#d8d8d5' } },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { color: GREY },
+      splitLine: { lineStyle: { color: '#f0f0ee' } }
+    },
+    series
+  }
+}
+
+export function sanitizeSvgDataUrl(dataUrl: string): string {
+  if (!dataUrl.startsWith('data:image/svg+xml')) {
+    throw new Error('chart export did not return SVG')
+  }
+  const comma = dataUrl.indexOf(',')
+  if (comma < 0) throw new Error('invalid SVG data URL')
+  const header = dataUrl.slice(0, comma)
+  const encoded = dataUrl.slice(comma + 1)
+  const markup = header.includes(';base64') ? atob(encoded) : decodeURIComponent(encoded)
+  const documentNode = new DOMParser().parseFromString(markup, 'image/svg+xml')
+  if (documentNode.querySelector('parsererror')) throw new Error('invalid SVG document')
+  documentNode.querySelectorAll('script, foreignObject, iframe, object, embed, image, audio, video, style, link')
+    .forEach((node) => node.remove())
+  documentNode.querySelectorAll('*').forEach((node) => {
+    for (const attribute of Array.from(node.attributes)) {
+      const name = attribute.name.toLowerCase()
+      const value = attribute.value.trim().toLowerCase()
+      const isReference = name === 'href' || name.endsWith(':href') || name === 'src'
+      const hasDangerousStyle = name === 'style'
+        && (value.includes('javascript:') || value.includes('expression(')
+          || value.includes('@import') || /url\(\s*["']?(?!#)/.test(value))
+      const hasExternalUrlFunction = ['fill', 'stroke', 'filter', 'clip-path', 'mask', 'cursor']
+        .includes(name) && /url\(\s*["']?(?!#)/.test(value)
+      if (name.startsWith('on') || (isReference && !value.startsWith('#'))
+        || hasDangerousStyle || hasExternalUrlFunction) {
+        node.removeAttribute(attribute.name)
+      }
+    }
+  })
+  const cleaned = new XMLSerializer().serializeToString(documentNode.documentElement)
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(cleaned)}`
+}
+
+export function formatNumber(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 3 }).format(value)
+}
