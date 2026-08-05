@@ -667,3 +667,22 @@ self-hosted CI 的无认证 PostgreSQL 全地址端口发布而不能最终 PASS
 合并 main、打标签、恢复 Phase 4B-1 连续五年回填或启动 Phase 4B-2。修复并独立
 复核 MEDIUM-05 后，若剩余计数归零，再按用户路线恢复 4B-1；Phase 4 整体完成后
 一次合并 main。
+
+### MEDIUM-05 关闭记录（2026-08-05）
+
+- 修复提交：`8018f328bdd5df334f321852b37b80b97f49ca54`。`.github/workflows/ci.yml`
+  仅把 PostgreSQL service 端口改为 `127.0.0.1:5432:5432`，并以一次性测试库
+  `POSTGRES_PASSWORD` 取代 `trust`；`DATABASE_URL` 同步使用该测试认证，不记录口令值。
+- CI Run `30977655724` 绑定 `8018f32`，最终 **success**；validate、
+  `PostgreSQL rollback dependency integration test` 与 API/Worker/Frontend/Collector
+  四个非发布镜像 job 全部 success。
+- service 存活期间在 `futures` VPS 执行 `ss -tlnp '( sport = :5432 )'`，实际唯一
+  listener 为 `127.0.0.1:5432`，进程为 `docker-proxy`；同一时刻 Docker 端口记录为
+  `127.0.0.1:5432->5432/tcp`，没有 `0.0.0.0:5432` 或 `[::]:5432`。
+- 按用户裁定，本记录由主验收人依据代码差异、CI 与 VPS 实态核验关闭 MEDIUM-05；
+  下一独立 Evaluator 只需对该单项复确认，不重新解释已授权的 self-hosted runner
+  与 Docker 组边界。
+
+**Phase 4A 最终状态：PASS。** BLOCKER/HIGH/MEDIUM/LOW 均为 0；首轮十项和终验
+新增 MEDIUM-05 已全部关闭。仍不合并 main、不打标签；Phase 4B 在同一 phase 分支
+继续，Phase 4 整体完成后一次合并 main。

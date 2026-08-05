@@ -1,17 +1,20 @@
 # 最新交接状态
 
-- 最新交接文档：`docs/handoffs/HANDOFF_20260805_1151.md`。
-- 当前阶段：Phase 4A 残留 HIGH-03 的 Generator 完整发布链已完成，等待全新的独立
-  Evaluator 单项终验；在此之前不得宣告 PASS、合并 main 或打标签。
-- Git：分支 `phase/04-akshare-collection`；业务修复 `23e679d`；发布候选
-  `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb`。
-- Actions：CI Run `30969365344`、Container images Run `30970280360`、Deploy Run
-  `30971024520` 均 success；VPS 返回 `PHASE4A_E2E_PASS`。
-- VPS：运行版本 `e627ab8`；runner `MemoryMax=2500M`，`oom=0`、`oom_kill=0`；
-  手动批次 144，正式行情/席位业务重复键均为 0，bootstrap token absent。
-- Phase 4B：驱动已提交，10 日试跑进程已结束但未在本单终验交接；连续五年回填
-  未启动且不得自动恢复，Phase 4B-2 亦未启动。
-- 下一步：独立 Evaluator 以 Git、三个成功 Run 与 VPS release 证据终验 HIGH-03。
+- 最新交接文档：`docs/handoffs/HANDOFF_20260805_1440.md`。
+- Phase 4A：首轮 FAIL（H5/M4/L1）十项、HIGH-03 终验残留及新增 MEDIUM-05 均已
+  关闭；按用户裁定主验收最终为 **PASS**，下一独立 Evaluator 仅复确认 MEDIUM-05。
+- MEDIUM-05：修复提交 `8018f32`，CI Run `30977655724` success；service 存活期
+  `ss` 只见 `127.0.0.1:5432`，没有全地址监听。
+- Phase 4B-1：连续五年回填自 2026-08-05 13:37:50 CST 起后台自治运行，范围
+  2021-08-04..2026-08-03，维持 80 日上限、60 秒限速、保护窗、磁盘 80% 和失败
+  暂停护栏。前两批已完成：2026-08-03 五所成功；2026-07-31 的 DCE 单次超时隔离，
+  其余四所成功，连续失败 streak=1，任务继续。
+- 收尾快照：驱动运行中，水位 `2026-07-16`，累计处理 19 日，失败对 5，磁盘 20%；
+  手动批次 144，行情 10676、席位 216171，两类业务唯一键重复组均为 0。
+- Git：分支 `phase/04-akshare-collection`；运行候选仍为 `e627ab8`；未合并 main、
+  未打标签。Phase 4B-2 未启动。
+- 下一步：无需持续观察；让驱动自治运行。后续检查先只读查看 `--status`、失败清单与
+  磁盘水位，Phase 4B-2 另单执行。
 
-接管者必须完整阅读最新交接，不盲目信任摘要；不得输出秘密、重复发布、清理数据、
-合并 main、打标签或启动 Phase 4B-2。
+接管者必须完整阅读最新交接，不盲目信任摘要；不得输出秘密、重复启动回填、绕过护栏、
+重新部署、清理数据、合并 main、打标签或启动 Phase 4B-2。
