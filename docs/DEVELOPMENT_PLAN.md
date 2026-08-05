@@ -132,8 +132,8 @@ Phase 1 至 Phase 3 已按实际实施编号完成收口。2026-08-02 总方案�
 
 ## 6. Phase 5：套利分析与图表
 
-状态：修订版 Planner 契约待用户确认，未授权实施。详细唯一实施契约见
-`docs/phases/PHASE_05_SPREAD_ANALYTICS.md`。
+状态：修订版 Planner 契约已于 2026-08-05 获用户确认，当前只授权 5A 实施；5A
+收口前不实施 5B。详细唯一实施契约见 `docs/phases/PHASE_05_SPREAD_ANALYTICS.md`。
 
 前置：`DEC-042`、散户可交易窗口、腿对齐、缺失值和统计算法细节已经契约化并获用户确认。
 

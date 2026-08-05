@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 轻量复确认并完成阶段性收口：普通 merge commit `1884583` 已合入 `main`，main CI Run `30990641425` success，标签为 `phase-4a-pass-20260805`。Phase 4B-1 在 main 基线记录为 VPS 自治运行，Phase 4B-2 尚未启动；本 Planner 单不核验或改变其运行实态，用户当前指令为回填保持暂停，恢复须另行授权。Phase 5 已从当前 `main` 新建 `phase/05-spread-analytics`，当前只编写修订版 Planner 契约并等待用户确认，未进入实现。
+Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 轻量复确认并完成阶段性收口：普通 merge commit `1884583` 已合入 `main`，main CI Run `30990641425` success，标签为 `phase-4a-pass-20260805`。Phase 4B-1 在 main 基线记录为 VPS 自治运行，Phase 4B-2 尚未启动；本 Phase 5 单不核验或改变其运行实态，用户当前指令为回填保持暂停，恢复须另行授权。Phase 5 修订版 Planner 契约已于 2026-08-05 获用户确认，当前授权按第 10 节开始 5A 实施；5A 收口前不实施 5B。
 
 状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-040`；Phase 4A 追加 `DEC-041`；Phase 5 Planner 新增有限恢复三禾只读价差 API 的 `DEC-042`。Phase 4A 残留 HIGH-03 修复为 `23e679d`，self-hosted 工作流适配为 `4e39c69`、`d4265c4`、`e627ab8`；候选 `e627ab8` 的 CI Run `30969365344`、四镜像 Run `30970280360`、Deploy Run `30971024520` 全部 success，VPS 返回 `PHASE4A_E2E_PASS`。MEDIUM-05 修复 `8018f32` 通过 CI Run `30977655724` 与 VPS loopback 监听取证，轻量复确认 `814a09a` 未发现新 HIGH；Phase 4A 随后以普通 merge `1884583`、main CI `30990641425` 和标签 `phase-4a-pass-20260805` 阶段性收口，未重新部署 VPS。
 
@@ -19,7 +19,7 @@ Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 �
 | 首批决策同步 | 已完成 | `docs/DECISIONS.md` 与产品、架构、数据、安全、导入、API、计划和验收口径一致 |
 | 剩余技术决策同步 | 已完成 | `DEC-026` 至 `DEC-037` 已新增，相关开放事项已关闭 |
 | 总方案重审决策同步 | 已完成 | 采集域裁剪、akshare、自动采集免确认、全历史回填和前端图表导出已落入 `DEC-023/025/030/031/034/038/039/040` 及各设计文档 |
-| Phase 5 修订版 Planner 契约 | 待用户确认、未实施 | `docs/phases/PHASE_05_SPREAD_ANALYTICS.md`；`DEC-042`；5A/5B 分别设独立 Evaluator 门禁 |
+| Phase 5 修订版 Planner 契约 | 已确认；5A 实施中 | `docs/phases/PHASE_05_SPREAD_ANALYTICS.md`；`DEC-042`；5A/5B 分别设独立 Evaluator 门禁，5A 收口前不动 5B |
 | 三 Agent 角色配置 | 已完成 | `.agents/Planner.md`、`.agents/Generator.md`、`.agents/Evaluator.md` |
 | 上下文交接机制 | 已完成 | `docs/handoffs/README.md` 与 `docs/handoffs/LATEST.md` |
 | Phase 0 文档审查 | 已完成 | `docs/reviews/DOC_REVIEW_PHASE_0.md` |
@@ -44,7 +44,7 @@ Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 �
 | Phase 3 版本收口 | 已完成 | 普通 merge `33aa838`；main CI Run `30703979390` success；标签 `phase-3-pass-20260801`；标签镜像 Run `30704223198` success；未重新部署 VPS |
 | Phase 4A：akshare 单日采集链路 | 已完成、Evaluator PASS、已阶段性收口 | 首轮 FAIL（H5/M4/L1）经修复、9/10 复核、HIGH-03 终验和 MEDIUM-05 复确认后计数归零；普通 merge `1884583`、main CI `30990641425`、标签 `phase-4a-pass-20260805` |
 | Phase 4B：全历史回填 | 4B-1 当前按用户指令保持暂停、运行实态待另单只读核验；4B-2 未启动 | 不在 Phase 5 Planner 单启动、停止或修改；恢复须另行授权，既有 80 日上限、60 秒限速、保护窗、磁盘 80% 护栏不变 |
-| Phase 5–9 路线 | Phase 5 Planner 契约待确认、实现未授权；Phase 6–9 未实施 | Phase 5 拆为 5A 三禾自由价差和 5B 自有库套利监控，各自独立 Evaluator；席位接口仍留 Phase 7，不得操作 Phase 4B 回填 |
+| Phase 5–9 路线 | Phase 5A 已授权实施；5B 与 Phase 6–9 未实施 | Phase 5 拆为 5A 三禾自由价差和 5B 自有库套利监控，各自独立 Evaluator；5A 收口前不动 5B，席位接口仍留 Phase 7，不得操作 Phase 4B 回填 |
 
 ## Phase 3A 收口核验
 
