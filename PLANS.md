@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺陷已修复；残留 HIGH-03 候选 `e627ab8` 已完成 self-hosted CI、四镜像发布、Deploy 与 VPS E2E，等待独立 Evaluator 单项终验，在此之前不得宣告 PASS。Phase 4B-1 已形成回填驱动，10 日试跑进程已结束但未在本单形成终验交接，连续五年回填未启动；Phase 4B-2 尚未启动。后续路线仍为 Phase 5 至 Phase 9。
+Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 轻量复确认并完成阶段性收口：普通 merge commit `1884583` 已合入 `main`，main CI Run `30990641425` success，标签为 `phase-4a-pass-20260805`。Phase 4B-1 连续五年回填正在 VPS 自治运行，Phase 4B-2 尚未启动。Phase 5 已获准从当前 `main` 新建独立分支并行开发；Phase 4B 继续按既有护栏运行，不因 Phase 5 开工而中断。
 
-状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-040`；Phase 4A 追加 `DEC-041`。Phase 4A 残留 HIGH-03 修复为 `23e679d`，self-hosted 工作流适配为 `4e39c69`、`d4265c4`、`e627ab8`；候选 `e627ab8` 的 CI Run `30969365344`、四镜像 Run `30970280360`、Deploy Run `30971024520` 全部 success，VPS 返回 `PHASE4A_E2E_PASS`。
+状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-040`；Phase 4A 追加 `DEC-041`。Phase 4A 残留 HIGH-03 修复为 `23e679d`，self-hosted 工作流适配为 `4e39c69`、`d4265c4`、`e627ab8`；候选 `e627ab8` 的 CI Run `30969365344`、四镜像 Run `30970280360`、Deploy Run `30971024520` 全部 success，VPS 返回 `PHASE4A_E2E_PASS`。MEDIUM-05 修复 `8018f32` 通过 CI Run `30977655724` 与 VPS loopback 监听取证，轻量复确认 `814a09a` 未发现新 HIGH；Phase 4A 随后以普通 merge `1884583`、main CI `30990641425` 和标签 `phase-4a-pass-20260805` 阶段性收口，未重新部署 VPS。
 
 ## 本阶段任务状态
 
@@ -41,9 +41,9 @@ Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺�
 | Phase 3D：回滚与完整流程 | 已完成、Evaluator 复核 PASS | 原子回滚、冲突整体中止、补偿/lineage、对象治理、完整前端和全量自动化已完成；候选 `45ee802` 已部署并通过 VPS 验收，复核 `6ff4c2b` PASS |
 | 标准发布流程 | 已确认并实际运行 | `futures-vps` self-hosted Actions 在 2.5 GiB 总峰值护栏内发布四镜像；Deploy Run `30971024520` 按完整 digest 完成备份、迁移和 E2E，运行版本 `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
 | Phase 3 版本收口 | 已完成 | 普通 merge `33aa838`；main CI Run `30703979390` success；标签 `phase-3-pass-20260801`；标签镜像 Run `30704223198` success；未重新部署 VPS |
-| Phase 4A：akshare 单日采集链路 | 残留 HIGH-03 发布链完成，待独立 Evaluator 单项终验 | `23e679d` 补齐 exchange→calendar version 回滚依赖；候选 `e627ab8` 已通过 CI、四镜像、Deploy 和包含预检拒绝/零变更的 Phase 4A E2E；不得自行宣告 PASS |
-| Phase 4B：全历史回填 | 4B-1 驱动已提交，10 日试跑进程已结束但尚未终验交接，连续任务未启动；4B-2 未启动 | 提交 `222fd3e`、`9900971`；后续须在 Phase 4A 终验及用户授权后另行处理，不在本次发布链中恢复 |
-| Phase 5–9 路线 | 已确认、未实施 | 依次为多腿套利与图表、成交/持仓/绩效、席位分析、AI、运维加固与完工事项 |
+| Phase 4A：akshare 单日采集链路 | 已完成、Evaluator PASS、已阶段性收口 | 首轮 FAIL（H5/M4/L1）经修复、9/10 复核、HIGH-03 终验和 MEDIUM-05 复确认后计数归零；普通 merge `1884583`、main CI `30990641425`、标签 `phase-4a-pass-20260805` |
+| Phase 4B：全历史回填 | 4B-1 连续五年回填自治运行中；4B-2 未启动 | 驱动提交 `222fd3e`、`9900971`，最终运行候选护栏 `8ce831a`；维持 80 日上限、60 秒限速、保护窗、磁盘 80% 与来源失败暂停机制 |
+| Phase 5–9 路线 | Phase 5 获准从 main 开分支并行开发；Phase 6–9 未实施 | Phase 5 为多腿套利与图表；后续依次为成交/持仓/绩效、席位分析、AI、运维加固与完工事项；不得干扰 4B-1 自治回填 |
 
 ## Phase 3A 收口核验
 
@@ -86,15 +86,33 @@ Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺�
 
 非阻断 MEDIUM 已记录到 `docs/reviews/PHASE_03B_EVALUATION.md`，实际共五项而非三项；它们不回退 Phase 3B PASS，并全部纳入 Phase 3C：①同参数 inspect 的前端预览/errors 状态为前端前置修复；②errors API 固定 500 条改为稳定游标分页；③映射写入失败后的 staging/errors/status 一致性为普通数据库事务回归测试，不是批次回滚功能；④模板 `dataset_type` 冻结竞争为并发数据库回归测试；⑤两份脚本的迁移前置注释由 006 更新为实际依赖的 007。
 
+## Phase 4A 阶段性收口
+
+收口日期：2026-08-05。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 最终评审 | `docs/reviews/PHASE_04A_EVALUATION.md`；首轮 H5/M4/L1、HIGH-03 残留及新增 MEDIUM-05 均已关闭，轻量复确认提交 `814a09a` 未发现新 HIGH |
+| 普通 merge | `1884583035798436173c71af5d1225048dcf8633`；父提交为 `2a6e6d5` 与 `814a09a`，未使用 squash/rebase |
+| 冲突处理 | 无冲突；合并后 CI、container-images、deploy-futures workflow 与 phase 分支完全一致 |
+| main CI | Run `30990641425` success；validate 及 API/Worker/Frontend/Collector 五个 job 全部 success |
+| 标签 | `phase-4a-pass-20260805`，精确指向 merge commit `1884583`；未创建 `v*` 标签 |
+| VPS | 本单未部署；继续运行已验收候选 `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
+| Phase 4B-1 | 连续五年回填保持自治运行；收口期间处于 16:30–22:30 保护窗，没有被停止或重启 |
+| 后续并行 | Phase 5 获准从收口后的 `main` 新建分支并行开发；Phase 4B-2 仍待另单 |
+
+收口结论：Phase 4A 已具备独立版本锚点，可作为 Phase 5 并行开发基线；Phase 4B-1
+继续作为数据操作任务运行，不因阶段性代码收口改变或中断。
+
 ## 本地与云端验证结果
 
-最近验证时间：2026-08-05，Phase 4A HIGH-03 终验候选 `e627ab8`。
+最近验证时间：2026-08-05，Phase 4A main merge commit `1884583`。
 
 | 命令 | 结果 | 备注 |
 | --- | --- | --- |
 | `cargo +stable fmt --check` | 通过 | 在 `rust/` 目录执行 |
 | `cargo +stable clippy --workspace --all-targets -- -D warnings` | 通过 | 无 warning |
-| `cargo +stable test --workspace` | 通过 | CI Run `30969365344` success，包含 HIGH-03 PostgreSQL 集成测试 |
+| `cargo +stable test --workspace` | 通过 | main CI Run `30990641425` success，包含 HIGH-03 PostgreSQL 集成测试 |
 | `pnpm lint` | 通过 | `vue-tsc --noEmit` |
 | `pnpm test` | 通过 | 6 files / 18 tests 通过 |
 | `pnpm build` | 通过 | 1468 modules transformed；仅有既存的大 chunk warning |
@@ -102,7 +120,7 @@ Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺�
 | `pytest collector/tests -q` | 通过 | 35 passed |
 | `git diff --check` | 通过 | 当前工作区 exit 0 |
 | `docker --version` | 未通过 | 本机未安装 Docker 或未加入 PATH |
-| `docker compose config/build` | 本机未执行；GitHub Actions 通过 | CI Run `30969365344` 的 Compose config 与四个非发布构建 job success；Container images Run `30970280360` success |
+| `docker compose config/build` | 本机未执行；GitHub Actions 通过 | main CI Run `30990641425` 的 Compose config 与四个非发布构建 job success；部署候选的 Container images Run `30970280360` success |
 
 ## futures VPS 核对结果
 
@@ -119,10 +137,10 @@ Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺�
 | 数据库迁移 | Phase 3D `202607260001`、`202607260002` 与 Phase 4A `202608020001` 至 `202608030003` 已执行 |
 | 受保护数据实态 | `users=32`、手动 `import_batches=144`；E2E 前后手动批次数与整行指纹不变 |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | 当前使用率 19%，可用约 60 GiB；低于 80% 水位 |
+| 根分区 | 阶段性收口核对时使用率 24%；低于 80% 水位，包含 main CI 构建缓存增长 |
 | 内存与 runner | VPS 4 GiB；runner `MemoryMax=2500M`，本轮 `oom=0`、`oom_kill=0` |
 
-部署状态：Phase 4A HIGH-03 候选 `e627ab8` 已通过 Deploy Run `30971024520` 按四个 GHCR 完整 digest 部署并验证，VPS 返回 `PHASE4A_E2E_PASS` 与 `DEPLOYMENT_PASS`。该事实仅证明 Generator 发布链完成，Phase 4A 最终 PASS 仍由独立 Evaluator 判定。
+部署状态：Phase 4A 候选 `e627ab8` 已通过 Deploy Run `30971024520` 按四个 GHCR 完整 digest 部署并验证，VPS 返回 `PHASE4A_E2E_PASS` 与 `DEPLOYMENT_PASS`；独立终验及 MEDIUM-05 轻量复确认均已完成，Phase 4A 最终 PASS。本次阶段性收口只合并 Git、运行 main CI 并打标签，没有重新部署，VPS 继续运行 `e627ab8`。
 
 Phase 4A VPS 与发布证据：
 
@@ -221,7 +239,7 @@ Phase 3C 实施边界：
 - MEDIUM-05：原 127 个历史测试批次未清理；Phase 4A 部署前实际手动批次为 144，全部继续如实登记并受指纹保护。按用户裁定在项目完工时执行生产库归零重置；未经单独运维授权不得提前清理。
 - TLS：生产 HTTPS 入口与 `AUTH_COOKIE_SECURE=true` 验证按用户裁定延后到项目完工时处理。
 - 备份：备份自动化与 master-key 离线副本纳入 Phase 9 完工事项。
-- 下一步：由全新的独立 Evaluator 对 Phase 4A 残留 HIGH-03 做单项终验；在其结论前不得宣告 Phase 4A PASS、合并 main、打标签或启动 Phase 4B-2。Phase 4B-1 连续回填未启动，本次不恢复。
+- 下一步：Phase 4B-1 按既有限速与护栏自治运行，Phase 4B-2 待另单；Phase 5 已获准从 `main` 新建独立分支并行开发。并行开发不得停止回填、重新部署 Phase 4A 或把 Phase 4B-2 视为已启动。
 
 ## 变更规则
 
