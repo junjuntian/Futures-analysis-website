@@ -1,4 +1,5 @@
 pub mod object_storage;
+pub mod sanhe_spread;
 
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 

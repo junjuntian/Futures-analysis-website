@@ -7,10 +7,12 @@ version.workspace = true
 
 [dependencies]
 calamine.workspace = true
+async-trait.workspace = true
 domain.workspace = true
 encoding_rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
+thiserror.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
