@@ -18,9 +18,9 @@ jobs:
       postgres:
         image: postgres:17.6-alpine
         env:
-          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_PASSWORD: phase4a-ci-postgres-20260805
         ports:
-          - 5432:5432
+          - "127.0.0.1:5432:5432"
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
@@ -31,7 +31,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
-      DATABASE_URL: postgres://postgres@localhost:5432/postgres
+      DATABASE_URL: postgres://postgres:phase4a-ci-postgres-20260805@localhost:5432/postgres
       NODE_OPTIONS: --max-old-space-size=768
     steps:
       - name: Checkout
