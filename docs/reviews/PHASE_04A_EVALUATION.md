@@ -484,3 +484,186 @@ Python/ruff 使用工作区外的一次性评审虚拟环境和 `collector/requi
 `PHASE4A_E2E_PASS`、CI、不可变镜像和生产数据主路径证据均有效，但不能覆盖缺失的 exchange→calendar version 回滚依赖边。Phase 4A 在补齐该边并增加隔离反向 E2E 前不能判定 PASS。
 
 后续路线：先只修复并重新独立复核 HIGH-03。若后续复核达到 PASS，**仍不立即合并 main**；Phase 4B 在同一分支继续，Phase 4 整体完成后一次收口。届时 hosted CI 额度应已恢复，并在 merge commit 上补跑完整 CI。当前 FAIL 不授权合并 main、打标签、启动 Phase 4B 或重部署。
+
+## HIGH-03 终验(2026-08-05)
+
+### 终验基线与结论摘要
+
+- 角色：全新独立 Evaluator；复核报告固定为 `c866ff0`，唯一残留为 HIGH-03；
+  业务修复固定为 `23e679db3b7fa3a384e764235e6ea3066d18766f`，发布候选固定为
+  `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb`。当前分支后续的交接文档只作为
+  线索，没有采信其结论。
+- 方法：重新审查迁移、回滚预检、Worker、PostgreSQL 集成测试和 E2E；读取 GitHub
+  Actions 原始 job/step/log；在 `futures` VPS 查询实际 FK catalog、release 证据、
+  systemd/cgroup、Docker 防火墙边界和生产库只读聚合；本地复跑完整门禁。
+- HIGH-03 结论：**CLOSED**。exchange→calendar version 缺边已补齐，Phase 4A 正式
+  投影的 8 条反向 FK 与预检查询逐条一致，没有第三条遗漏；真实 E2E 的首次创建
+  exchange 场景证明预检拒绝、enqueue 409 和零变更断言都实际执行。
+- Phase 4A 总结论：**FAIL**。终验发现一项新的 MEDIUM：迁移到生产 VPS 的
+  self-hosted CI 后，临时 PostgreSQL service 仍以 `trust` 且 `5432:5432` 发布到
+  宿主全部地址，VPS 没有主机级规则阻断该端口。该问题不是用户授权的 runner
+  迁移或 Docker 组权限本身，但属于其必须审查的越权副作用。
+
+### HIGH-03 单项终验证据
+
+`projection_dependencies()` 的 `exchange` 分支现在同时查询 `instruments` 和
+`trading_calendar_versions`，两条查询均以 `(workspace_id, exchange_id)` 过滤并
+使用 `for update` 锁定（`rust/crates/database/src/imports.rs:2795-2808`）。预检仍在
+同一事务内把 dependency 集合写入 fingerprint，并在 dependency 不属于同批 insert
+target 时生成 `formal_projection_downstream_dependency`；Worker 只会在预检/原子
+复核无冲突后按逆序执行带 row-version 和 snapshot fence 的删除。
+
+对迁移文件和 VPS `pg_constraint` 的实际 catalog 各复查一次，正式投影内部全部
+`ON DELETE RESTRICT` 边如下：
+
+| 迁移/运行库 FK | 预检 parent 分支 → dependency kind | 结果 |
+| --- | --- | --- |
+| `instruments.exchange_id → exchanges.id` | `exchange → instrument` | 覆盖并锁定 |
+| `trading_calendar_versions.exchange_id → exchanges.id` | `exchange → trading_calendar_version` | **本次补齐并锁定** |
+| `contracts.instrument_id → instruments.id` | `instrument → contract` | 覆盖并锁定 |
+| `market_prices.contract_id → contracts.id` | `contract → market_price` | 覆盖并锁定 |
+| `seat_positions.contract_id → contracts.id` | `contract → seat_position` | 覆盖并锁定 |
+| `trading_calendar_days.calendar_version_id → trading_calendar_versions.id` | `trading_calendar_version → trading_calendar_day` | 覆盖并锁定 |
+| `market_prices.calendar_version_id → trading_calendar_versions.id` | `trading_calendar_version → market_price` | 覆盖并锁定 |
+| `seat_positions.seat_id → seat_entities.id` | `seat_entity → seat_position` | 覆盖并锁定 |
+
+VPS 查询恰返回上述 8 条 FK，删除动作均为 `r`（restrict）；`202608030001` 至
+`202608030003` 没有增加新的正式投影 FK。其他 Phase 4A 外键指向 workspace、来源、
+批次、imported record 或对象等投影图外实体，由既有导入记录依赖/回滚顺序处理，
+不构成 `projection_dependencies()` 的第三条遗漏。
+
+新增 PostgreSQL 测试
+`postgres_exchange_calendar_dependency_blocks_precheck` 构造 exchange insert change 和
+后续 calendar version，精确断言唯一冲突类型、exchange target、
+`trading_calendar_version` dependency kind 与稳定 detail code。CI Run `30969365344`
+的独立 step 实际输出 `1 passed; 0 failed`，不是 workspace test 中被 ignored 的同名
+占位结果。
+
+E2E `rust/tests/phase_4a_e2e.sh:350-484` 在真实 schema 中创建首次 exchange 批次及
+后续 calendar version 批次，经公共 API 完成以下真实断言：
+
+1. rollback-check 为 HTTP 200 且 `can_rollback=false`，冲突精确指向
+   `exchange → trading_calendar_version`；
+2. 携带真实 precheck request/fingerprint 的 rollback enqueue 返回 HTTP 409，响应
+   code 为 `rollback_conflict`；
+3. 409 前后 exchange 与 calendar version 的联合行 fingerprint 相等；
+4. 先成功回滚 calendar 批次后再成功回滚 catalog 批次，两张表的 fixture 行均为 0。
+
+Deploy Run `30971024520` checkout 的 runtime/acceptance SHA 都是 `e627ab8`；脚本启用
+`set -Eeuo pipefail` 和 ERR trap，任何 `jq -e`、HTTP status 或 fingerprint `test`
+失败都会中止。原始日志已到达 `projection_rollback_passed` 和唯一
+`PHASE4A_E2E_PASS`。release 中的 conflict JSON 再次通过上述精确正向条件；本次
+额外把 dependency kind 故意改为 `instrument`，`jq -e` 按预期失败，记录为
+`reverse_wrong_kind_assertion=PASS`，证明断言不是“存在任意冲突即通过”。
+
+### 范围外改动与 runner 授权边界
+
+- `23e679d` 除业务修复/测试/E2E/部署文档外，在 `ci.yml` 增加 PostgreSQL service
+  与单独测试 step。测试 step 确实执行了 ignored 集成用例；但 service 的端口/认证
+  配置在 self-hosted 迁移后产生下述 MEDIUM，故不能判定“无越权副作用”。
+- `4e39c69`、`d4265c4`、`e627ab8` 把 CI 和 container-images 的 `runs-on` 改为
+  `[self-hosted, futures-vps]`；Cargo 2 jobs/关闭 incremental、Node heap 768 MiB、
+  测试 PostgreSQL 384 MiB、Python 容器 768 MiB、BuildKit 2 GiB、镜像矩阵串行。
+  API/Worker Dockerfile 也固定 `--jobs 2`，改动符合用户的 2.5 GiB 总峰值授权。
+- runner systemd 实态为 active，`MemoryMax=2621440000` bytes，`oom=0`、
+  `oom_kill=0`、`oom_group_kill=0`；Docker 组成员精确只有 `github-runner`，权限没有
+  扩散到其他账号。Docker 组的 root 等价边界和 VPS 承担编译本身均为用户已确认
+  授权，本终验不把它们计为缺陷。
+- deploy-futures 仍是 Actions 入口，SSH、不可变 digest、secrets 与严格 host key
+  路径没有被 runner 迁移提交改写；仓库没有新增绕过 Actions 的 VPS 手工业务编译
+  或源码复制路径。Phase 4B-1 的宿主驱动是另单已授权的数据操作工具，不构建镜像。
+
+### 新增 MEDIUM-05：self-hosted CI 对外发布无认证测试 PostgreSQL
+
+**证据**
+
+1. `.github/workflows/ci.yml:18-30` 设置 `POSTGRES_HOST_AUTH_METHOD: trust`、
+   `ports: 5432:5432`，DATABASE_URL 使用宿主 localhost。
+2. CI Run `30969365344` 的 Initialize containers 原始日志显示实际执行
+   `docker create ... -p 5432:5432 ... -e POSTGRES_HOST_AUTH_METHOD=trust`；PostgreSQL
+   自身同时打印“任何能访问该端口者都无需密码”的警告。
+3. 在普通 Docker `-p host:container` 语义下，未指定 host IP 会发布到宿主所有地址。
+   VPS 实态为 UFW inactive，IPv4/IPv6 `DOCKER-USER` 链均无阻断规则；没有仓库内或
+   主机级证据证明 CI 的数分钟窗口只允许 loopback。
+4. 当前 CI 已结束，因此 5432 当前无 listener；这不否定每次 validate job 创建
+   service 时的重复暴露窗口。
+
+**影响与等级**
+
+临时库没有生产数据或生产凭据，容器有 384 MiB 限额且 job 后删除，因此不升为
+HIGH；但在生产 VPS 公网边界上周期性暴露 PostgreSQL superuser/trust 服务，会允许
+未认证连接干扰集成测试、消耗资源并扩大容器攻击面，属于 **MEDIUM**，阻断 Phase 4A
+最终 PASS。
+
+**关闭标准**
+
+把 service 端口显式绑定到 loopback（例如 Actions 可验证的
+`127.0.0.1:5432:5432`），或使用不发布宿主端口的隔离 job network；同时移除 trust
+或证明认证只在隔离网络内可达。修复后以 Actions 初始化日志证明不再出现
+`-p 5432:5432` 的全地址映射，并复跑 PostgreSQL 专项和完整 CI。该 workflow-only
+修复不要求重新部署未改变的业务镜像，但仍需独立只读复核。
+
+### 本地完整门禁复跑
+
+环境：Rust/Cargo `1.97.1`、Node `24.18.0`、pnpm `11.9.0`、Python `3.12.13`、
+ruff `0.14.14`。Python 使用既有工作区外评审虚拟环境，ruff cache 位于系统临时目录，
+pytest 禁用 cache provider；仓库未产生测试修改。
+
+| 门禁 | 实际结果 |
+| --- | --- |
+| `cargo +stable fmt --all -- --check` | PASS，exit 0，无差异 |
+| `cargo +stable clippy --workspace --all-targets -- -D warnings` | PASS，exit 0，0 warning/error |
+| `cargo +stable test --workspace --all-targets` | PASS，135 passed、0 failed、1 ignored；ignored 项即由 CI 单独实跑的 PostgreSQL 用例 |
+| PostgreSQL 专项（CI 同 SHA） | PASS，1 passed、0 failed，真实 PostgreSQL 17.6 service |
+| `pnpm lint` | PASS，`vue-tsc --noEmit` exit 0 |
+| `pnpm test` | PASS，6 files / 18 tests |
+| `pnpm build` | PASS，1468 modules transformed；仅既有 chunk-size warning |
+| `ruff check src tests` | PASS，`All checks passed!` |
+| `ruff format --check src tests` | PASS，15 files already formatted |
+| `pytest -p no:cacheprovider -q` | PASS，35 passed in 0.58s |
+| `git diff --check c866ff0..e627ab8` | PASS，exit 0 |
+| `git diff --check c866ff0..HEAD` | PASS，exit 0 |
+
+前端首次沙箱执行时 lint 已通过，Vitest 在载入配置前因 Windows 拒绝读取工作区父目录
+而失败；在同一 checkout 的受控宿主身份复跑 test/build 均 exit 0。该事件没有进入
+测试断言或编译阶段，不计为产品缺陷。
+
+### Actions、VPS 与越界实证
+
+| 检查 | 终验事实 |
+| --- | --- |
+| CI Run `30969365344` | `headSha=e627ab8`、success；validate 与四个串行非发布镜像 job 全部 success |
+| Container images Run `30970280360` | `headSha=e627ab8`、success；四个 publish/digest job 全部 success |
+| Deploy Run `30971024520` | runtime/acceptance 均为 `e627ab8`、success；`PHASE4A_E2E_PASS`、`DEPLOYMENT_PASS` |
+| VPS 运行版本 | `/api/v1/version.git_sha=e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
+| 运行镜像 | API `cb9145ec…f3de`、Worker `597fe69d…b0af`、Frontend `54c3c0e7…0f36`；release 锁定 Collector `e07b34a0…1e60` |
+| 数据库迁移 | 18 条，最大版本 `202608030003` |
+| 正式事实 | `market_prices=9020`、`seat_positions=186083`；业务唯一键重复组 `0 / 0` |
+| 受保护数据 | manual batches=144；未清理原 127 批次或其他既有数据 |
+| bootstrap token | absent |
+| Phase 4B 状态 | `driver_finished mode=backfill attempted_dates=10`；`run-futures-backfill` 连续进程 absent，4B-2 未启动 |
+
+Deploy E2E 的基线为 manual 144、automatic 399、users 32；同日重放为 market
+`831→831,new=0`、seat `17806→17806,new=0`，Collector 峰值 `179359744` bytes，
+低于 512 MiB 限额。当前生产总数已包含其后的已授权 10 日试跑，因此高于 Deploy
+当时值，但两类业务键重复仍为 0。
+
+刷新 origin 后，`origin/main` 与 phase 分支 merge base 都是 `2a6e6d5`；只有
+`origin/phase/04-akshare-collection` 包含候选，任何 tag 均不包含 `e627ab8`。本终验
+没有 merge、tag、workflow dispatch、部署、采集、回填启动或数据写操作；唯一仓库
+修改是追加本小节。
+
+### Phase 4A 最终判定
+
+**FAIL**
+
+- BLOCKER：0
+- HIGH：0（HIGH-03 **CLOSED**；首轮 10 / 10 均已关闭）
+- MEDIUM：1（新增 MEDIUM-05）
+- LOW：0
+
+HIGH-03 的代码、PostgreSQL 集成测试和真实 VPS E2E 已达到关闭标准；Phase 4A 仍因
+self-hosted CI 的无认证 PostgreSQL 全地址端口发布而不能最终 PASS。本结论不授权
+合并 main、打标签、恢复 Phase 4B-1 连续五年回填或启动 Phase 4B-2。修复并独立
+复核 MEDIUM-05 后，若剩余计数归零，再按用户路线恢复 4B-1；Phase 4 整体完成后
+一次合并 main。
