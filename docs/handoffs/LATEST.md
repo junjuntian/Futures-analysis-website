@@ -11,9 +11,12 @@
 - main CI：Run `30990641425` success；validate 及 API/Worker/Frontend/Collector
   五个 job 全部成功。标签 `phase-4a-pass-20260805` 精确指向 merge commit
   `1884583`，未创建 `v*` 标签。
-- VPS：本单未部署，继续运行 `e627ab8`。Phase 4B-1 连续五年回填仍由既有脚本自治
-  运行；收口核对时驱动存活并处于 16:30–22:30 保护窗，水位 `2026-07-11`、累计
-  处理 24 日、失败对 6、磁盘 24%，没有被本次 merge/CI/tag 停止或重启。
+- VPS：本单未部署，继续运行 `e627ab8`。最终核验发现旧 `nohup` 回填进程在保护窗
+  等待期无 `driver_finished` 事件退出；内核无 OOM，runner `oom_kill=0`，水位和失败
+  清单未回退。2026-08-05 17:17:32 CST 已用相同区间、80 日上限、60 秒限速及全部
+  既有护栏恢复为独立 `futures-backfill-phase4b1.service`；恢复后 service active、
+  `driver_running=yes` 并继续保护窗等待。当前水位 `2026-07-11`、累计处理 24 日、
+  失败对 6、根分区 25%。
 - Phase 4B-2 仍待另单。Phase 5 已获准从收口后的 `main` 新建独立分支并行开发，
   不得干扰 Phase 4B-1。
 - 下一步：Phase 5 Planner 可从 `main` 建分支开始；4B-1 继续自治，后续只读检查先看

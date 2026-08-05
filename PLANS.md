@@ -98,11 +98,12 @@ Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 �
 | main CI | Run `30990641425` success；validate 及 API/Worker/Frontend/Collector 五个 job 全部 success |
 | 标签 | `phase-4a-pass-20260805`，精确指向 merge commit `1884583`；未创建 `v*` 标签 |
 | VPS | 本单未部署；继续运行已验收候选 `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
-| Phase 4B-1 | 连续五年回填保持自治运行；收口期间处于 16:30–22:30 保护窗，没有被停止或重启 |
+| Phase 4B-1 | 连续五年回填保持自治运行；最终核验发现旧 `nohup` 进程在保护窗等待期无结束事件退出，内核与 runner 均无 OOM；2026-08-05 17:17:32 CST 以相同参数恢复为独立 `futures-backfill-phase4b1.service`，水位未回退且幂等跳过已完成日期 |
 | 后续并行 | Phase 5 获准从收口后的 `main` 新建分支并行开发；Phase 4B-2 仍待另单 |
 
 收口结论：Phase 4A 已具备独立版本锚点，可作为 Phase 5 并行开发基线；Phase 4B-1
-继续作为数据操作任务运行，不因阶段性代码收口改变或中断。
+继续作为数据操作任务运行。旧 `nohup` 进程的无记录退出未造成数据或水位回退，已切换到
+独立 systemd transient service，避免 SSH 会话生命周期影响后续保护窗等待。
 
 ## 本地与云端验证结果
 
@@ -137,7 +138,7 @@ Phase 3 已全部完成并收口。Phase 4A 已通过独立终验与 MEDIUM-05 �
 | 数据库迁移 | Phase 3D `202607260001`、`202607260002` 与 Phase 4A `202608020001` 至 `202608030003` 已执行 |
 | 受保护数据实态 | `users=32`、手动 `import_batches=144`；E2E 前后手动批次数与整行指纹不变 |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | 阶段性收口核对时使用率 24%；低于 80% 水位，包含 main CI 构建缓存增长 |
+| 根分区 | 阶段性收口核对时使用率 25%；低于 80% 水位，包含 main CI 与标签镜像构建缓存增长 |
 | 内存与 runner | VPS 4 GiB；runner `MemoryMax=2500M`，本轮 `oom=0`、`oom_kill=0` |
 
 部署状态：Phase 4A 候选 `e627ab8` 已通过 Deploy Run `30971024520` 按四个 GHCR 完整 digest 部署并验证，VPS 返回 `PHASE4A_E2E_PASS` 与 `DEPLOYMENT_PASS`；独立终验及 MEDIUM-05 轻量复确认均已完成，Phase 4A 最终 PASS。本次阶段性收口只合并 Git、运行 main CI 并打标签，没有重新部署，VPS 继续运行 `e627ab8`。
