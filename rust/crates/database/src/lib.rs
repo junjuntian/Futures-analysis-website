@@ -3,6 +3,7 @@ pub mod imports;
 pub mod job_queue;
 pub mod object_governance;
 pub mod rollback_jobs;
+pub mod spread_analytics;
 pub mod worker_scheduler;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};

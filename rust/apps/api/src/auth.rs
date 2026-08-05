@@ -417,6 +417,8 @@ pub(crate) enum Permission {
     Rollback,
     Compensate,
     GovernObjects,
+    ReadSpreads,
+    ManageSpreadFavorites,
 }
 
 impl Permission {
@@ -427,6 +429,8 @@ impl Permission {
             Self::Rollback => "import.rollback",
             Self::Compensate => "import.compensate",
             Self::GovernObjects => "object.govern",
+            Self::ReadSpreads => "spread.read",
+            Self::ManageSpreadFavorites => "spread.favorite.manage",
         }
     }
 }
@@ -474,6 +478,8 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         Permission::Rollback,
         Permission::Compensate,
         Permission::GovernObjects,
+        Permission::ReadSpreads,
+        Permission::ManageSpreadFavorites,
     ] {
         if roles_allow_permission(roles, permission) {
             permissions.push(permission.as_str().to_string());
@@ -499,6 +505,12 @@ fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst")),
         Permission::GovernObjects => roles.iter().any(|role| role == "admin"),
+        Permission::ReadSpreads => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst" | "viewer")),
+        Permission::ManageSpreadFavorites => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst")),
     }
 }
 

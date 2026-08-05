@@ -1,5 +1,6 @@
 mod auth;
 mod imports;
+mod spread_analytics;
 
 use application::{HealthStatus, VersionInfo};
 use auth::{AuthConfig, AuthState, LoginLimiter};
@@ -56,7 +57,13 @@ use uuid::Uuid;
         imports::errors,
         imports::list_templates,
         imports::list_datasets,
-        imports::create_template
+        imports::create_template,
+        spread_analytics::list_varieties,
+        spread_analytics::list_months,
+        spread_analytics::query_free_spread,
+        spread_analytics::list_favorites,
+        spread_analytics::create_favorite,
+        spread_analytics::delete_favorite
     ),
     components(schemas(
         HealthStatus,
@@ -157,6 +164,33 @@ use uuid::Uuid;
         ,domain::object_governance::ObjectConsistencyFinding
         ,domain::object_governance::ObjectConsistencyReport
         ,domain::object_governance::ObjectQuarantineResponse
+        ,spread_analytics::SpreadErrorBody
+        ,spread_analytics::SourceMetadata
+        ,spread_analytics::VarietiesResponse
+        ,spread_analytics::MonthsResponse
+        ,spread_analytics::FreeSpreadLeg
+        ,spread_analytics::FreeSpreadQueryRequest
+        ,spread_analytics::FreeSpreadQueryResponse
+        ,spread_analytics::FreeSpreadQueryEcho
+        ,spread_analytics::AlgorithmVersions
+        ,spread_analytics::ContinuousSeriesResponse
+        ,spread_analytics::AnalysisTrace
+        ,spread_analytics::SeasonalSeriesResponse
+        ,spread_analytics::MonthlyMatrixResponse
+        ,spread_analytics::CreateFavoriteRequest
+        ,spread_analytics::FavoriteResponse
+        ,application::spread_analytics::ProviderVariety
+        ,application::spread_analytics::ProviderResultKind
+        ,domain::spread_analytics::ContinuousPoint
+        ,domain::spread_analytics::SegmentBoundary
+        ,domain::spread_analytics::WindowSegment
+        ,domain::spread_analytics::WindowQuality
+        ,domain::spread_analytics::SeasonalSeries
+        ,domain::spread_analytics::SeasonalYearSeries
+        ,domain::spread_analytics::MonthlyMatrix
+        ,domain::spread_analytics::MonthlyYearRow
+        ,domain::spread_analytics::MonthlyCell
+        ,domain::spread_analytics::MonthlyUpRatio
     )),
     modifiers(&SecurityAddon)
 )]
@@ -214,8 +248,12 @@ async fn main() -> anyhow::Result<()> {
         idempotency_pepper: load_idempotency_pepper().await?,
         sse_revalidate_seconds: load_sse_revalidate_seconds()?,
     });
+    let spread_state = Arc::new(spread_analytics::SpreadAnalyticsState {
+        auth: state.clone(),
+        provider: Arc::new(infrastructure::sanhe_spread::SanheSpreadSeriesProvider::new()),
+    });
 
-    let app = router(state, import_state);
+    let app = router(state, import_state, spread_state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -268,7 +306,11 @@ async fn load_idempotency_pepper() -> anyhow::Result<String> {
     }
 }
 
-fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Router {
+fn router(
+    state: Arc<AuthState>,
+    import_state: Arc<imports::ImportState>,
+    spread_state: Arc<spread_analytics::SpreadAnalyticsState>,
+) -> Router {
     let auth_routes = Router::new()
         .route("/api/v1/auth/bootstrap", post(auth::bootstrap))
         .route("/api/v1/auth/login", post(auth::login))
@@ -350,6 +392,28 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
         )
         .layer(DefaultBodyLimit::max(import_body_limit))
         .with_state(import_state);
+    let spread_routes = Router::new()
+        .route(
+            "/api/v1/spread-analytics/providers/sanhe/varieties",
+            get(spread_analytics::list_varieties),
+        )
+        .route(
+            "/api/v1/spread-analytics/providers/sanhe/varieties/{variety}/months",
+            get(spread_analytics::list_months),
+        )
+        .route(
+            "/api/v1/spread-analytics/free-spread/query",
+            post(spread_analytics::query_free_spread),
+        )
+        .route(
+            "/api/v1/spread-analytics/favorites",
+            get(spread_analytics::list_favorites).post(spread_analytics::create_favorite),
+        )
+        .route(
+            "/api/v1/spread-analytics/favorites/{favorite_id}",
+            delete(spread_analytics::delete_favorite),
+        )
+        .with_state(spread_state);
 
     Router::new()
         .route("/api/v1/health/live", get(live))
@@ -358,6 +422,7 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
         .route("/api-docs/openapi.json", get(openapi))
         .merge(auth_routes)
         .merge(import_routes)
+        .merge(spread_routes)
         .with_state(state)
         .layer(
             ServiceBuilder::new()
@@ -648,5 +713,51 @@ mod tests {
             );
         }
         assert!(operation["responses"]["202"].is_object());
+    }
+
+    #[test]
+    fn openapi_exposes_only_the_phase_5a_spread_surface() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let paths = document["paths"].as_object().expect("OpenAPI paths");
+        for (path, method) in [
+            ("/api/v1/spread-analytics/providers/sanhe/varieties", "get"),
+            (
+                "/api/v1/spread-analytics/providers/sanhe/varieties/{variety}/months",
+                "get",
+            ),
+            ("/api/v1/spread-analytics/free-spread/query", "post"),
+            ("/api/v1/spread-analytics/favorites", "get"),
+            ("/api/v1/spread-analytics/favorites", "post"),
+            ("/api/v1/spread-analytics/favorites/{favorite_id}", "delete"),
+        ] {
+            let operation = &paths[path][method];
+            assert_eq!(
+                operation["security"][0]["session_cookie"],
+                serde_json::json!([])
+            );
+            assert!(operation["responses"]["401"].is_object());
+            assert!(operation["responses"]["403"].is_object());
+        }
+        assert!(!paths.keys().any(|path| path.contains("broker")));
+        assert!(!paths.keys().any(|path| path.contains("backtest")));
+        assert!(!paths.keys().any(|path| path.contains("monitor")));
+
+        let query = &paths["/api/v1/spread-analytics/free-spread/query"]["post"];
+        let parameters = query["parameters"].as_array().expect("query headers");
+        for header in ["x-csrf-token", "Origin"] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == header)
+            );
+        }
+        for schema in [
+            "AnalysisTrace",
+            "ContinuousSeriesResponse",
+            "SeasonalSeriesResponse",
+            "MonthlyMatrixResponse",
+        ] {
+            assert!(document["components"]["schemas"][schema].is_object());
+        }
     }
 }
