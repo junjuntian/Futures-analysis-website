@@ -1,0 +1,34 @@
+akshare==1.18.81
+akracer==0.0.13; sys_platform == "linux"
+anyio==4.14.2
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+curl-cffi==0.16.0
+decorator==5.3.1
+et-xmlfile==2.0.0
+h11==0.16.0
+html5lib==1.1
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.18
+jsonpath==0.82.2
+lxml==6.1.1
+mini-racer==0.14.1; sys_platform != "linux"
+numpy==2.5.1
+openpyxl==3.1.5
+pandas==3.0.5
+py-mini-racer==0.6.0; sys_platform == "linux"
+pycparser==3.0
+python-dateutil==2.9.0.post0
+requests==2.34.2
+six==1.17.0
+soupsieve==2.9.1
+tabulate==0.10.0
+tqdm==4.70.0
+typing-extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+webencodings==0.5.1
+xlrd==2.0.2

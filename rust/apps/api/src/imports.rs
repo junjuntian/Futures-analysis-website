@@ -16,16 +16,17 @@ use database::compensations::{
     CompensationRepositoryError, CompensationUploadPreparation, NewCompensationUpload,
 };
 use database::imports::{
-    ImportRepositoryError, ImportUploadRecord, InspectionUpdate, NewImportUpload,
-    PreviewInputSnapshot, PreviewSave, QueueRollbackResult, RollbackPrecheck,
+    AutomaticImportMetadata, ImportRepositoryError, ImportUploadRecord, InspectionUpdate,
+    NewImportUpload, PreviewInputSnapshot, PreviewSave, QueueRollbackResult, RollbackPrecheck,
 };
 use domain::import::{
     ImportBatchStatus, ImportCompensationResponse, ImportConfirmRequest, ImportConflictPolicy,
     ImportDatasetDefinition, ImportErrorsResponse, ImportInspectRequest, ImportInspectResponse,
-    ImportLineageResponse, ImportMappingRequest, ImportMappingResponse, ImportPreviewRequest,
-    ImportRollbackCheckResponse, ImportRollbackConflictsResponse, ImportRollbackRequest,
-    ImportRollbackResponse, ImportTemplateCreateRequest, ImportTemplateSummary,
-    ImportTemplateVersionResponse, RollbackCapability, import_dataset_definitions,
+    ImportLineageResponse, ImportMappingField, ImportMappingRequest, ImportMappingResponse,
+    ImportPreviewRequest, ImportRollbackCheckResponse, ImportRollbackConflictsResponse,
+    ImportRollbackRequest, ImportRollbackResponse, ImportTemplateCreateRequest,
+    ImportTemplateSummary, ImportTemplateVersionResponse, RollbackCapability,
+    import_dataset_definitions,
 };
 use domain::object_governance::{
     ObjectConsistencyReport, ObjectConsistencyRun, ObjectQuarantineResponse,
@@ -34,7 +35,7 @@ use infrastructure::object_storage::{ObjectStorage, ObjectStorageError, ObjectUp
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
-use time::OffsetDateTime;
+use time::{Date, OffsetDateTime, macros::format_description};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -290,6 +291,15 @@ impl ImportApiError {
         }
     }
 
+    fn forbidden(code: &'static str, request_id: Uuid) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code,
+            message: "request is forbidden",
+            request_id,
+        }
+    }
+
     fn unsupported(code: &'static str, request_id: Uuid) -> Self {
         Self {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -467,6 +477,19 @@ pub async fn upload(
     if let Err(error) = context.require_permission(Permission::Upload) {
         return Err(audit_upload_denial(&state, &context, request_id, error).await);
     }
+    let automatic = automatic_metadata(&headers, request_id)?;
+    if automatic.is_none() && context.is_collector_account() {
+        return Err(ImportApiError::forbidden(
+            "manual_account_required",
+            request_id,
+        ));
+    }
+    if automatic.is_some() && !context.is_collector_account() {
+        return Err(ImportApiError::forbidden(
+            "automatic_account_required",
+            request_id,
+        ));
+    }
     let mut field = multipart
         .next_field()
         .await
@@ -560,6 +583,7 @@ pub async fn upload(
         declared_mime_type: validated.declared_mime_type,
         detected_format: validated.format.as_str().to_string(),
         request_id,
+        automatic,
     };
     let result = match database::imports::register_upload(&state.auth.pool, &record).await {
         Ok(result) => result,
@@ -1081,6 +1105,7 @@ pub async fn inspect(
     Json(request): Json<ImportInspectRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
     let bytes = state
         .storage
@@ -1144,6 +1169,7 @@ pub async fn save_mapping(
     Json(request): Json<ImportMappingRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let response = database::imports::save_mapping(
         &state.auth.pool,
         context.workspace_id(),
@@ -1183,6 +1209,7 @@ pub async fn preview(
     Json(request): Json<ImportPreviewRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let record = load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
     let bytes = state
         .storage
@@ -1251,6 +1278,7 @@ pub async fn validate(
     headers: HeaderMap,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let result: Result<Response, ImportApiError> = async {
         let initial_context = database::imports::load_validation_context(
             &state.auth.pool,
@@ -1316,6 +1344,9 @@ pub async fn validate(
             }
             application::import_jobs::ValidationDefinitionError::InvalidStagingShape => {
                 ImportApiError::bad_request("validation_stale", request_id)
+            }
+            application::import_jobs::ValidationDefinitionError::AutomaticSourceRequired => {
+                ImportApiError::bad_request("automatic_source_required", request_id)
             }
         })?;
         let saved = database::imports::save_validation(
@@ -1387,6 +1418,7 @@ pub async fn confirm(
     Json(request): Json<ImportConfirmRequest>,
 ) -> Result<Response, ImportApiError> {
     let (request_id, context) = require_import_write(&state, &headers).await?;
+    require_manual_batch_endpoint(&state, &context, import_id, request_id).await?;
     let result: Result<Response, ImportApiError> = async {
         let raw_key = headers
             .get("idempotency-key")
@@ -1405,7 +1437,7 @@ pub async fn confirm(
             context.workspace_id(),
             context.user_id(),
             import_id,
-            request.conflict_policy,
+            database::imports::ImportConfirmationScope::manual(request.conflict_policy),
             &idempotency_key_hash,
             &request_hash,
         )
@@ -1438,6 +1470,279 @@ pub async fn confirm(
             error,
         )
         .await),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/imports/{import_id}/automatic-confirm",
+    params(
+        ("import_id" = Uuid, Path),
+        ("Idempotency-Key" = String, Header),
+        ("x-csrf-token" = String, Header),
+        ("Origin" = String, Header)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 202, body = ImportConfirmApiResponse),
+        (status = 400, body = ImportErrorBody),
+        (status = 401, body = ImportErrorBody),
+        (status = 403, body = ImportErrorBody),
+        (status = 404, body = ImportErrorBody),
+        (status = 409, body = ImportErrorBody)
+    )
+)]
+pub async fn automatic_confirm(
+    State(state): State<Arc<ImportState>>,
+    Path(import_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ImportApiError> {
+    let (request_id, context) = require_import_write(&state, &headers).await?;
+    if !context.is_collector_account() {
+        return Err(ImportApiError::forbidden(
+            "automatic_account_required",
+            request_id,
+        ));
+    }
+    let result: Result<Response, ImportApiError> = async {
+        let automatic = database::imports::automatic_import_context(
+            &state.auth.pool,
+            context.workspace_id(),
+            import_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        if automatic.fixed_template_code != format!("{}@1", automatic.dataset_type) {
+            return Err(ImportApiError::bad_request(
+                "automatic_template_invalid",
+                request_id,
+            ));
+        }
+        let raw_key = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| (16..=200).contains(&value.len()))
+            .ok_or_else(|| ImportApiError::bad_request("idempotency_key_required", request_id))?;
+        let mut record =
+            load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+        if record.status == ImportBatchStatus::Uploaded {
+            let bytes = state
+                .storage
+                .read(&record.object_key, state.upload_policy.max_bytes)
+                .await
+                .map_err(|_| ImportApiError::internal(request_id))?;
+            let definition = import_dataset_definitions()
+                .into_iter()
+                .find(|definition| definition.dataset_type == automatic.dataset_type)
+                .ok_or_else(|| {
+                    ImportApiError::bad_request("automatic_dataset_invalid", request_id)
+                })?;
+            let fields = definition
+                .fields
+                .iter()
+                .map(|field| ImportMappingField {
+                    source_column: field.code.clone(),
+                    target_field: field.code.clone(),
+                    transform: None,
+                })
+                .collect::<Vec<_>>();
+            let mut inspected = application::imports::inspect_content(
+                import_id,
+                record.status,
+                &record.detected_format,
+                &bytes,
+                ImportInspectRequest {
+                    encoding: Some("utf-8".into()),
+                    delimiter: Some(",".into()),
+                    selected_sheet: None,
+                    header_row: Some(1),
+                },
+                &fields,
+            )
+            .map_err(|error| map_parse_error(error, request_id))?;
+            if !inspected.errors.is_empty() || inspected.total_rows == 0 {
+                return Err(ImportApiError::bad_request(
+                    "automatic_parse_failed",
+                    request_id,
+                ));
+            }
+            let saved = database::imports::save_inspection(
+                &state.auth.pool,
+                InspectionUpdate {
+                    workspace_id: context.workspace_id(),
+                    actor_user_id: context.user_id(),
+                    import_id,
+                    detected_encoding: inspected.encoding.value.as_deref(),
+                    detected_delimiter: inspected.delimiter.value.as_deref(),
+                    selected_sheet: None,
+                    header_row: 1,
+                },
+            )
+            .await
+            .map_err(|error| map_repository_error(error, request_id))?;
+            inspected.status = saved.status;
+            database::imports::save_mapping(
+                &state.auth.pool,
+                context.workspace_id(),
+                context.user_id(),
+                import_id,
+                &automatic.dataset_type,
+                None,
+                &fields,
+            )
+            .await
+            .map_err(|error| map_repository_error(error, request_id))?;
+            let full_parse = application::imports::parse_all_content_with_warnings(
+                &record.detected_format,
+                &bytes,
+                ImportPreviewRequest {
+                    encoding: Some("utf-8".into()),
+                    delimiter: Some(",".into()),
+                    selected_sheet: None,
+                    header_row: Some(1),
+                },
+                &fields,
+                application::imports::DEFAULT_IMPORT_MAX_ROWS,
+            )
+            .map_err(|error| map_parse_error(error, request_id))?;
+            database::imports::save_preview(
+                &state.auth.pool,
+                PreviewSave {
+                    workspace_id: context.workspace_id(),
+                    actor_user_id: context.user_id(),
+                    import_id,
+                    snapshot: PreviewInputSnapshot {
+                        detected_encoding: Some("utf-8"),
+                        detected_delimiter: Some(","),
+                        selected_sheet: None,
+                        header_row: 1,
+                        fields: &fields,
+                    },
+                    rows: &full_parse.rows,
+                    errors: &[],
+                    warnings: &full_parse.warnings,
+                },
+            )
+            .await
+            .map_err(|error| map_repository_error(error, request_id))?;
+            let validation_context = database::imports::load_validation_context(
+                &state.auth.pool,
+                context.workspace_id(),
+                import_id,
+            )
+            .await
+            .map_err(|error| map_repository_error(error, request_id))?;
+            let outcome = application::import_jobs::validate_automatic_staging_rows(
+                &validation_context.dataset_type,
+                &automatic.data_source_code,
+                validation_context.rows.clone(),
+            )
+            .map_err(|_| ImportApiError::bad_request("automatic_validation_failed", request_id))?;
+            let saved = database::imports::save_validation(
+                &state.auth.pool,
+                context.workspace_id(),
+                context.user_id(),
+                import_id,
+                &validation_context,
+                &outcome,
+            )
+            .await
+            .map_err(|error| map_repository_error(error, request_id))?;
+            if saved.blocking_error_count > 0 {
+                return Err(ImportApiError::bad_request(
+                    "automatic_validation_failed",
+                    request_id,
+                ));
+            }
+            record =
+                load_import_object(&state, context.workspace_id(), import_id, request_id).await?;
+        } else if matches!(
+            record.status,
+            ImportBatchStatus::Inspected
+                | ImportBatchStatus::Mapped
+                | ImportBatchStatus::PreviewReady
+        ) {
+            return Err(ImportApiError::bad_request(
+                "automatic_pipeline_untrusted_state",
+                request_id,
+            ));
+        }
+        if !matches!(
+            record.status,
+            ImportBatchStatus::PreviewReady
+                | ImportBatchStatus::Confirmed
+                | ImportBatchStatus::Importing
+                | ImportBatchStatus::Succeeded
+        ) {
+            return Err(ImportApiError::bad_request(
+                "automatic_state_invalid",
+                request_id,
+            ));
+        }
+        let idempotency_key_hash = digest(&[&state.idempotency_pepper, raw_key]);
+        let request_hash = digest(&[
+            &context.workspace_id().to_string(),
+            &import_id.to_string(),
+            "automatic",
+            &automatic.dataset_type,
+            &automatic.collection_date.to_string(),
+            &context.user_id().to_string(),
+        ]);
+        let confirmed = database::imports::confirm_import(
+            &state.auth.pool,
+            context.workspace_id(),
+            context.user_id(),
+            import_id,
+            database::imports::ImportConfirmationScope::automatic(),
+            &idempotency_key_hash,
+            &request_hash,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        database::imports::mark_automatic_queued(
+            &state.auth.pool,
+            context.workspace_id(),
+            import_id,
+        )
+        .await
+        .map_err(|error| map_repository_error(error, request_id))?;
+        Ok((
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::new(
+                ImportConfirmApiResponse {
+                    import_id,
+                    job_id: confirmed.job_id,
+                    status: confirmed.status,
+                    conflict_policy: ImportConflictPolicy::Skip,
+                    replayed: confirmed.replayed,
+                },
+                request_id,
+            )),
+        )
+            .into_response())
+    }
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let _ = database::imports::fail_automatic_import(
+                &state.auth.pool,
+                context.workspace_id(),
+                context.user_id(),
+                import_id,
+                error.code,
+            )
+            .await;
+            Err(audit_import_failure(
+                &state,
+                &context,
+                request_id,
+                import_id,
+                "import.automatic_confirm",
+                error,
+            )
+            .await)
+        }
     }
 }
 
@@ -2147,6 +2452,9 @@ fn map_parse_error(error: ImportParseError, request_id: Uuid) -> ImportApiError 
 fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> ImportApiError {
     match error {
         ImportRepositoryError::NotFound => ImportApiError::not_found(request_id),
+        ImportRepositoryError::InvalidAutomaticMetadata => {
+            ImportApiError::bad_request("automatic_metadata_invalid", request_id)
+        }
         ImportRepositoryError::InvalidTransition => {
             ImportApiError::bad_request("invalid_import_status", request_id)
         }
@@ -2217,6 +2525,74 @@ fn map_repository_error(error: ImportRepositoryError, request_id: Uuid) -> Impor
         }
         _ => ImportApiError::internal(request_id),
     }
+}
+
+fn automatic_metadata(
+    headers: &HeaderMap,
+    request_id: Uuid,
+) -> Result<Option<AutomaticImportMetadata>, ImportApiError> {
+    let mode = headers
+        .get("x-ingestion-mode")
+        .and_then(|value| value.to_str().ok());
+    let automatic = match mode {
+        None | Some("manual") => return Ok(None),
+        Some("automatic") => true,
+        Some(_) => false,
+    };
+    if !automatic {
+        return Err(ImportApiError::bad_request(
+            "automatic_metadata_invalid",
+            request_id,
+        ));
+    }
+    let header = |name: &'static str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| ImportApiError::bad_request("automatic_metadata_required", request_id))
+    };
+    let dataset_type = header("x-dataset-type")?;
+    if !matches!(
+        dataset_type.as_str(),
+        "futures_catalog_v1"
+            | "trading_calendar_v1"
+            | "daily_market_prices_v1"
+            | "seat_positions_v1"
+    ) {
+        return Err(ImportApiError::bad_request(
+            "automatic_dataset_invalid",
+            request_id,
+        ));
+    }
+    let fixed_template_code = header("x-template-version")?;
+    if fixed_template_code != format!("{dataset_type}@1") {
+        return Err(ImportApiError::bad_request(
+            "automatic_template_invalid",
+            request_id,
+        ));
+    }
+    let collection_date = Date::parse(
+        &header("x-collection-date")?,
+        format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|_| ImportApiError::bad_request("automatic_date_invalid", request_id))?;
+    let skipped_source_item_count = headers
+        .get("x-collection-skip-count")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("0")
+        .parse::<i32>()
+        .ok()
+        .filter(|value| (0..=100_000).contains(value))
+        .ok_or_else(|| ImportApiError::bad_request("automatic_metadata_invalid", request_id))?;
+    Ok(Some(AutomaticImportMetadata {
+        dataset_type,
+        data_source_code: header("x-data-source-code")?,
+        collection_date,
+        fixed_template_code,
+        skipped_source_item_count,
+    }))
 }
 
 fn map_event_repository_error(error: ImportRepositoryError, request_id: Uuid) -> ImportApiError {
@@ -2309,6 +2685,38 @@ async fn require_import_write(
         return Err(audit_write_denial(state, &context, request_id, error).await);
     }
     Ok((request_id, context))
+}
+
+async fn require_manual_batch_endpoint(
+    state: &ImportState,
+    context: &auth::AuthContext,
+    import_id: Uuid,
+    request_id: Uuid,
+) -> Result<(), ImportApiError> {
+    if !manual_endpoint_access_allowed(context.is_collector_account(), "manual") {
+        return Err(ImportApiError::forbidden(
+            "manual_account_required",
+            request_id,
+        ));
+    }
+    let mode = database::imports::import_ingestion_mode(
+        &state.auth.pool,
+        context.workspace_id(),
+        import_id,
+    )
+    .await
+    .map_err(|error| map_repository_error(error, request_id))?;
+    if !manual_endpoint_access_allowed(false, &mode) {
+        return Err(ImportApiError::forbidden(
+            "automatic_batch_forbidden",
+            request_id,
+        ));
+    }
+    Ok(())
+}
+
+fn manual_endpoint_access_allowed(is_collector_account: bool, ingestion_mode: &str) -> bool {
+    !is_collector_account && ingestion_mode == "manual"
 }
 
 async fn require_import_rollback_write(
@@ -2465,11 +2873,51 @@ fn digest(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod phase_3d_compensation_contract {
-    use super::{Uuid, map_object_governance_error};
+    use super::{Uuid, manual_endpoint_access_allowed, map_object_governance_error};
     use database::object_governance::ObjectGovernanceError;
     use std::{convert::Infallible, time::Duration};
 
     const SOURCE: &str = include_str!("imports.rs");
+
+    #[test]
+    fn collector_and_manual_endpoint_matrix_is_deny_by_default() {
+        assert!(manual_endpoint_access_allowed(false, "manual"));
+        assert!(!manual_endpoint_access_allowed(true, "manual"));
+        assert!(!manual_endpoint_access_allowed(false, "automatic"));
+        assert!(!manual_endpoint_access_allowed(true, "automatic"));
+        let production = SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source");
+        assert_eq!(
+            production.matches("require_manual_batch_endpoint(").count(),
+            6
+        );
+        assert!(SOURCE.contains("automatic_pipeline_untrusted_state"));
+    }
+
+    #[test]
+    fn ordinary_user_automatic_confirm_rejection_has_no_batch_failure_side_effect() {
+        let handler = SOURCE
+            .split("pub async fn automatic_confirm")
+            .nth(1)
+            .expect("automatic confirm handler")
+            .split("#[utoipa::path(")
+            .next()
+            .expect("automatic confirm handler end");
+        let identity_guard = handler
+            .find("if !context.is_collector_account()")
+            .expect("collector identity guard");
+        let fallible_pipeline = handler
+            .find("let result: Result<Response, ImportApiError>")
+            .expect("fallible automatic pipeline");
+        let failure_transition = handler
+            .find("fail_automatic_import")
+            .expect("authenticated collector failure transition");
+
+        assert!(identity_guard < fallible_pipeline);
+        assert!(fallible_pipeline < failure_transition);
+    }
 
     #[test]
     fn committed_compensation_objects_are_never_physically_deleted() {

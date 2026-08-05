@@ -198,3 +198,129 @@ mod phase_3d_schema_contract {
         assert!(!FAIRNESS_MIGRATION.contains("disable row level security"));
     }
 }
+
+#[cfg(test)]
+mod phase_4a_schema_contract {
+    const MIGRATION: &str =
+        include_str!("../../../migrations/202608020001_phase_4a_collection_schema.sql");
+    const EVALUATOR_FIXES: &str =
+        include_str!("../../../migrations/202608030001_phase_4a_evaluator_fixes.sql");
+    const RLS_BACKFILL: &str =
+        include_str!("../../../migrations/202608030002_phase_4a_rls_backfill.sql");
+
+    #[test]
+    fn all_phase_4a_business_tables_force_workspace_rls() {
+        for table in [
+            "data_sources",
+            "data_source_allowed_domains",
+            "exchanges",
+            "instruments",
+            "contracts",
+            "trading_calendar_versions",
+            "trading_calendar_days",
+            "market_prices",
+            "seat_entities",
+            "seat_positions",
+            "extraction_jobs",
+        ] {
+            assert!(MIGRATION.contains(&format!("alter table {table} enable row level security;")));
+            assert!(MIGRATION.contains(&format!("alter table {table} force row level security;")));
+            assert!(MIGRATION.contains(&format!(
+                "create policy {table}_workspace_isolation on {table}"
+            )));
+        }
+    }
+
+    #[test]
+    fn formal_facts_have_business_keys_and_import_provenance() {
+        for table in ["trading_calendar_days", "market_prices", "seat_positions"] {
+            let section = MIGRATION
+                .split(&format!("create table {table}"))
+                .nth(1)
+                .expect("table")
+                .split("create table")
+                .next()
+                .expect("table end");
+            assert!(section.contains("business_identity unique"));
+            assert!(section.contains("source_import_batch_id"));
+            assert!(section.contains("source_row_number"));
+            assert!(section.contains("source_record_id"));
+        }
+    }
+
+    #[test]
+    fn automatic_metadata_is_fixed_to_four_versioned_datasets() {
+        assert!(MIGRATION.contains("fixed_template_code = dataset_type || '@1'"));
+        for dataset in [
+            "futures_catalog_v1",
+            "trading_calendar_v1",
+            "daily_market_prices_v1",
+            "seat_positions_v1",
+        ] {
+            assert!(MIGRATION.contains(dataset));
+        }
+    }
+
+    #[test]
+    fn evaluator_fixes_version_every_formal_projection_for_atomic_rollback() {
+        for table in [
+            "trading_calendar_versions",
+            "trading_calendar_days",
+            "market_prices",
+            "seat_positions",
+        ] {
+            assert!(
+                EVALUATOR_FIXES
+                    .contains(&format!("alter table {table}\n    add column row_version"))
+            );
+        }
+        for target in [
+            "'exchange'",
+            "'instrument'",
+            "'contract'",
+            "'trading_calendar_version'",
+            "'trading_calendar_day'",
+            "'market_price'",
+            "'seat_entity'",
+            "'seat_position'",
+        ] {
+            assert!(EVALUATOR_FIXES.contains(target));
+        }
+        assert!(EVALUATOR_FIXES.contains("ingestion_mode = 'automatic'"));
+        assert!(EVALUATOR_FIXES.contains("rollback_capability = 'compensation_only'"));
+    }
+
+    #[test]
+    fn source_identity_backfill_is_tenant_scoped_and_preserves_v2_batches() {
+        assert!(
+            RLS_BACKFILL
+                .contains("create or replace function app.enforce_direct_rollback_change_log()")
+        );
+        assert!(RLS_BACKFILL.contains("new.change_log_version = 2"));
+        assert!(RLS_BACKFILL.contains("change_row.target_kind = 'imported_record'"));
+        assert!(RLS_BACKFILL.contains("select id from workspaces order by id"));
+        assert!(RLS_BACKFILL.contains("set_config("));
+        assert!(RLS_BACKFILL.contains("'app.current_workspace_id'"));
+        assert!(RLS_BACKFILL.contains("workspace_id = target_workspace_id"));
+        assert!(RLS_BACKFILL.contains("change_log_version = 1"));
+        assert!(!RLS_BACKFILL.contains("update import_staging_rows"));
+        let lock = RLS_BACKFILL
+            .find("lock table import_batches in access exclusive mode")
+            .expect("exclusive migration lock");
+        let disable = RLS_BACKFILL
+            .find("disable trigger import_batches_enforce_phase_3d_invariants")
+            .expect("maintenance trigger disable");
+        let update = RLS_BACKFILL
+            .find("update import_batches")
+            .expect("legacy batch reclassification");
+        let constraints = RLS_BACKFILL
+            .find("set constraints all immediate")
+            .expect("deferred invariant check");
+        let enable = RLS_BACKFILL
+            .find("enable trigger import_batches_enforce_phase_3d_invariants")
+            .expect("maintenance trigger enable");
+        assert!(lock < disable && disable < update && update < constraints && constraints < enable);
+        assert!(!RLS_BACKFILL.contains("disable row level security"));
+        assert!(!RLS_BACKFILL.contains("bypassrls"));
+    }
+}

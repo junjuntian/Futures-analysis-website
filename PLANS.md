@@ -2,9 +2,9 @@
 
 ## 当前阶段
 
-Phase 3 已全部完成并收口。2026-08-02 总方案重审提案已获用户确认并完成决策与设计文档修订；后续路线固定为 Phase 4 至 Phase 9，Phase 4 尚未开始实现。
+Phase 3 已全部完成并收口。Phase 4A 首轮独立 Evaluator 的十项缺陷已修复；残留 HIGH-03 候选 `e627ab8` 已完成 self-hosted CI、四镜像发布、Deploy 与 VPS E2E，等待独立 Evaluator 单项终验，在此之前不得宣告 PASS。Phase 4B-1 已形成回填驱动，10 日试跑进程已结束但未在本单形成终验交接，连续五年回填未启动；Phase 4B-2 尚未启动。后续路线仍为 Phase 5 至 Phase 9。
 
-状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038`、`DEC-039`、`DEC-040`。
+状态：Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS。Phase 3A 以 `1b089f7` 收口，Phase 3B 以 `150194c` 收口，Phase 3C 实现提交为 `04011ed`、收口提交为 `6e1d46d`。Phase 3D 实现与部署完成后，首轮独立 Evaluator 在 `12716d2` 判定 FAIL（HIGH 2 / MEDIUM 5 / LOW 1）；修复序列为 `bf5baab`、`1b4c06b`、`f13b17d`、`3aa200c`、`5b67393`、`1c32ab4`、`49fc930`、`c87b26f`、`45ee802`，复核提交 `6ff4c2b` 最终 PASS。`main` 普通 merge commit 为 `33aa838c9ef3f39c4e32bb5749982d82d358bf7a`，main CI Run `30703979390` success，标签为 `phase-3-pass-20260801`。总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038` 至 `DEC-040`；Phase 4A 追加 `DEC-041`。Phase 4A 残留 HIGH-03 修复为 `23e679d`，self-hosted 工作流适配为 `4e39c69`、`d4265c4`、`e627ab8`；候选 `e627ab8` 的 CI Run `30969365344`、四镜像 Run `30970280360`、Deploy Run `30971024520` 全部 success，VPS 返回 `PHASE4A_E2E_PASS`。
 
 ## 本阶段任务状态
 
@@ -39,9 +39,10 @@ Phase 3 已全部完成并收口。2026-08-02 总方案重审提案已获用户�
 | Phase 3B：解析、预览与映射 | 已完成、已提交、Evaluator PASS | TXT/CSV/XLS/XLSX 解析、编码/分隔符识别与人工覆盖、Excel 工作表/表头选择、前 50 行预览、字段映射与版本模板、错误展示、OpenAPI multipart schema 契约修复；提交 `150194c`，Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3C：校验与异步确认 | 已完成、已提交、Evaluator PASS | 实现提交 `04011ed`，收口提交 `6e1d46d`；独立 Evaluator `BLOCKER=0`、`HIGH=0` |
 | Phase 3D：回滚与完整流程 | 已完成、Evaluator 复核 PASS | 原子回滚、冲突整体中止、补偿/lineage、对象治理、完整前端和全量自动化已完成；候选 `45ee802` 已部署并通过 VPS 验收，复核 `6ff4c2b` PASS |
-| 标准发布流程 | 已确认并实际运行 | GitHub Actions 发布三镜像至 GHCR，`futures` VPS 已按完整 digest pull、备份、迁移和 E2E；Deploy Run `30689392268` success，运行版本 `45ee8028647a1b8e4b8cda043e8012b4e281d739` |
+| 标准发布流程 | 已确认并实际运行 | `futures-vps` self-hosted Actions 在 2.5 GiB 总峰值护栏内发布四镜像；Deploy Run `30971024520` 按完整 digest 完成备份、迁移和 E2E，运行版本 `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
 | Phase 3 版本收口 | 已完成 | 普通 merge `33aa838`；main CI Run `30703979390` success；标签 `phase-3-pass-20260801`；标签镜像 Run `30704223198` success；未重新部署 VPS |
-| Phase 4：akshare 采集与全历史回填 | 待单独规划与授权 | 五交易所一次覆盖；盘后按需容器；标准化 CSV 调用导入 API；自动批次免确认；行情全量与席位分层历史回填 |
+| Phase 4A：akshare 单日采集链路 | 残留 HIGH-03 发布链完成，待独立 Evaluator 单项终验 | `23e679d` 补齐 exchange→calendar version 回滚依赖；候选 `e627ab8` 已通过 CI、四镜像、Deploy 和包含预检拒绝/零变更的 Phase 4A E2E；不得自行宣告 PASS |
+| Phase 4B：全历史回填 | 4B-1 驱动已提交，10 日试跑进程已结束但尚未终验交接，连续任务未启动；4B-2 未启动 | 提交 `222fd3e`、`9900971`；后续须在 Phase 4A 终验及用户授权后另行处理，不在本次发布链中恢复 |
 | Phase 5–9 路线 | 已确认、未实施 | 依次为多腿套利与图表、成交/持仓/绩效、席位分析、AI、运维加固与完工事项 |
 
 ## Phase 3A 收口核验
@@ -87,23 +88,25 @@ Phase 3 已全部完成并收口。2026-08-02 总方案重审提案已获用户�
 
 ## 本地与云端验证结果
 
-最近验证时间：2026-08-01，Phase 3D 独立 Evaluator 复核与 Phase 3 版本收口。
+最近验证时间：2026-08-05，Phase 4A HIGH-03 终验候选 `e627ab8`。
 
 | 命令 | 结果 | 备注 |
 | --- | --- | --- |
 | `cargo +stable fmt --check` | 通过 | 在 `rust/` 目录执行 |
 | `cargo +stable clippy --workspace --all-targets -- -D warnings` | 通过 | 无 warning |
-| `cargo +stable test --workspace` | 通过 | 119 项测试通过，0 failed |
+| `cargo +stable test --workspace` | 通过 | CI Run `30969365344` success，包含 HIGH-03 PostgreSQL 集成测试 |
 | `pnpm lint` | 通过 | `vue-tsc --noEmit` |
 | `pnpm test` | 通过 | 6 files / 18 tests 通过 |
 | `pnpm build` | 通过 | 1468 modules transformed；仅有既存的大 chunk warning |
-| `git diff --check 6dfea78..45ee802` | 通过 | exit 0 |
+| `ruff check` / `ruff format --check` | 通过 | 固定 Python 容器只读运行，15 files already formatted |
+| `pytest collector/tests -q` | 通过 | 35 passed |
+| `git diff --check` | 通过 | 当前工作区 exit 0 |
 | `docker --version` | 未通过 | 本机未安装 Docker 或未加入 PATH |
-| `docker compose config/build` | 本机未执行；GitHub Actions 通过 | main CI Run `30703979390` 的 Compose config 与 API/Worker/Frontend 三镜像 build job 全部 success |
+| `docker compose config/build` | 本机未执行；GitHub Actions 通过 | CI Run `30969365344` 的 Compose config 与四个非发布构建 job success；Container images Run `30970280360` success |
 
 ## futures VPS 核对结果
 
-最近核对时间：2026-08-01，Phase 3 版本收口只读复核；本次没有重新部署。
+最近核对时间：2026-08-05，Phase 4A Deploy Run `30971024520` 实时部署与 E2E。
 
 | 项目 | 结果 |
 | --- | --- |
@@ -112,14 +115,24 @@ Phase 3 已全部完成并收口。2026-08-02 总方案重审提案已获用户�
 | Docker | Docker 29.1.3 |
 | Docker Compose | Docker Compose 2.40.3 |
 | 当前容器 | PostgreSQL、API、Worker、Frontend、Nginx 均运行；API/PostgreSQL healthy |
-| 当前运行版本 | `45ee8028647a1b8e4b8cda043e8012b4e281d739` |
-| Phase 3D 数据库迁移 | `202607260001`、`202607260002` 已执行 |
-| 数据实态 | `users=31`、`import_batches=127`；按用户裁定留待项目完工时生产库归零重置 |
+| 当前运行版本 | `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` |
+| 数据库迁移 | Phase 3D `202607260001`、`202607260002` 与 Phase 4A `202608020001` 至 `202608030003` 已执行 |
+| 受保护数据实态 | `users=32`、手动 `import_batches=144`；E2E 前后手动批次数与整行指纹不变 |
 | 监听端口 | SSH 22、本项目 HTTP 8088、DNS stub 53、chrony 323 |
-| 根分区 | Phase 3B 最终验收时：25G 总量、约 11G 已用、13G 可用，使用率 45% |
-| 内存 | 约 956MiB；已启用项目 swapfile 2GiB |
+| 根分区 | 当前使用率 19%，可用约 60 GiB；低于 80% 水位 |
+| 内存与 runner | VPS 4 GiB；runner `MemoryMax=2500M`，本轮 `oom=0`、`oom_kill=0` |
 
-部署状态：Phase 3D 候选 `45ee802` 已通过 Deploy Run `30689392268` 按 GHCR digest 部署并验证；本次版本收口只做只读复核，VPS 未重新部署。
+部署状态：Phase 4A HIGH-03 候选 `e627ab8` 已通过 Deploy Run `30971024520` 按四个 GHCR 完整 digest 部署并验证，VPS 返回 `PHASE4A_E2E_PASS` 与 `DEPLOYMENT_PASS`。该事实仅证明 Generator 发布链完成，Phase 4A 最终 PASS 仍由独立 Evaluator 判定。
+
+Phase 4A VPS 与发布证据：
+
+- CI Run `30753685223`、Container images Run `30753724067`、Deploy Run `30754021926` 全部 success。
+- 真实日期 `2026-07-30` 的五交易所目录、日历、行情、席位采集全部成功；DCE 官方请求失败后仅 DCE 激活 `akshare_sina_dce_fallback`，正式行情/席位 `source_id` 指向真实聚合来源，其余四家保持官方来源。
+- `market_prices`、`seat_positions` 均大于 0，业务唯一键重复为 0；同日完整重跑后正式表行数不变。
+- 故障注入使 DCE 行情批次进入 `failed`，SHFE/CZCE/GFEX/CFFEX 四个行情批次仍 `succeeded`，正式行情行数不变。
+- RLS、import batch / imported record / 正式事实表来源链、目录自动建档与稳定用户/手动批次保护均 PASS。
+- host cron 已安装工作日 17:30、21:30 两次调度并使用 `flock`；collector cgroup 实测峰值 `130641920` bytes，小于 `512m` 限制。
+- 临时 GHCR 认证清理 PASS；collector 凭据文件权限/只读挂载检查通过，日志秘密模式扫描无命中；Phase 3C/3D 生产 E2E 未重跑，避免新增手动测试批次。
 
 Phase 3A VPS 证据：
 
@@ -193,21 +206,22 @@ Phase 3C 实施边界：
 
 - 本地 Git 仓库是唯一源码源头，所有变更先提交再推送 GitHub 私有仓库。
 - Codex Cloud / GitHub Actions 承担云端编译测试；GitHub Actions 构建并发布
-  `linux/amd64` API、Worker、前端镜像到 GHCR。
-- `futures` VPS 禁止直接修改源码，不再承担常规 Rust 或前端编译，只执行数据库
-  备份、`docker pull`、数据库迁移、真实 RLS/持久化和最终 E2E 验收。
+  `linux/amd64` API、Worker、前端、Collector 镜像到 GHCR。
+- `futures` VPS 禁止直接修改源码或手工编译；其 4 GiB 资源允许仓库级 self-hosted
+  runner 在 2.5 GiB 总峰值护栏内执行 CI 与镜像构建，部署仍只执行备份、
+  `docker pull`、数据库迁移、真实 RLS/持久化和最终 E2E 验收。
 - 部署只能引用 SHA 标签或完整 digest，不能只使用 `latest`。
 - 生产部署前必须备份数据库；失败时按发布记录中的上一稳定镜像 digest 回滚。
 - 生产密钥不得进入 Git、镜像层、构建日志、构建参数或普通环境变量文件。
 - GitHub Actions / Codex Cloud 通过不能替代 `futures` VPS 验收。
-- GHCR digest 部署已经实际运行：候选 `45ee8028647a1b8e4b8cda043e8012b4e281d739` 的 Container images Run `30689138347` 发布三镜像，Deploy Run `30689392268` 按完整 digest 完成备份、迁移、切换与 VPS E2E；当前 VPS 仍运行该版本。本次 Phase 3 收口只发布标签镜像，没有重新部署。
+- GHCR digest 部署已经实际运行：Phase 4A HIGH-03 候选 `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb` 的 Container images Run `30970280360` 发布 API、Worker、Frontend、Collector 四镜像，Deploy Run `30971024520` 按完整 digest 完成备份、迁移、切换与 VPS E2E；当前 VPS 运行该版本。
 
 ## 收口后待办与下一步
 
-- MEDIUM-05：VPS 现存 127 个历史测试批次继续如实登记，按用户裁定在项目完工时执行生产库归零重置；未经单独运维授权不得提前清理。
+- MEDIUM-05：原 127 个历史测试批次未清理；Phase 4A 部署前实际手动批次为 144，全部继续如实登记并受指纹保护。按用户裁定在项目完工时执行生产库归零重置；未经单独运维授权不得提前清理。
 - TLS：生产 HTTPS 入口与 `AUTH_COOKIE_SECURE=true` 验证按用户裁定延后到项目完工时处理。
 - 备份：备份自动化与 master-key 离线副本纳入 Phase 9 完工事项。
-- 下一步：为 Phase 4“akshare 采集与全历史回填”建立 Planner 契约，实施仍需用户单独授权。
+- 下一步：由全新的独立 Evaluator 对 Phase 4A 残留 HIGH-03 做单项终验；在其结论前不得宣告 Phase 4A PASS、合并 main、打标签或启动 Phase 4B-2。Phase 4B-1 连续回填未启动，本次不恢复。
 
 ## 变更规则
 

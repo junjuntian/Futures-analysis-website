@@ -15,14 +15,16 @@
   独立源码源头。
 - GitHub 私有仓库：受控远端、协作与发布触发入口。只接收本地 Git 推送，不保存
   生产数据库、对象文件或秘密。
-- GitHub Actions：权威 CI 和容器发布环境。使用 GitHub-hosted Ubuntu runner
-  执行 Rust/pnpm 门禁、Compose/Dockerfile 检查，构建 `linux/amd64` API、Worker、
-  前端镜像并发布到 GHCR。
+- GitHub Actions：权威 CI 和容器发布环境。仓库级 self-hosted runner（标签
+  `futures-vps`）执行 Rust/pnpm/Python 门禁、Compose/Dockerfile 检查，构建
+  `linux/amd64` API、Worker、前端、Collector 镜像并发布到 GHCR；Cargo、Node、
+  PostgreSQL 测试服务与 BuildKit 均设置资源护栏，总编译峰值不超过 2.5 GiB。
 - Codex Cloud：辅助编译、测试、静态分析和独立审查环境。其结果必须回到本地 Git
   核验；除非通过已批准的 GitHub Actions 发布流程，不得作为生产镜像的旁路来源。
-- `futures` VPS：生产候选的最终验收环境。只拉取已发布镜像、备份和迁移真实
-  PostgreSQL、验证 RLS/文件持久化、启动服务并执行最终 E2E；禁止直接修改源码，
-  不再承担常规 Rust 或前端编译。
+- `futures` VPS：4 GiB 生产候选验收环境，并承载上述仓库级 self-hosted runner。
+  Actions 可在资源护栏内执行 CI 与镜像构建；部署路径只拉取已发布镜像、备份和
+  迁移真实 PostgreSQL、验证 RLS/文件持久化并执行最终 E2E。禁止直接修改源码，
+  禁止绕过 Actions 手工编译或构建生产镜像。
 
 GitHub Actions 只使用自动提供的 `GITHUB_TOKEN` 向 GHCR 发布镜像，权限限定为
 `contents: read` 和 `packages: write`。缓存仅包含 Cargo/pnpm/BuildKit 构建依赖，
@@ -33,7 +35,7 @@ GitHub Actions 只使用自动提供的 `GITHUB_TOKEN` 向 GHCR 发布镜像，�
 ```text
 本地开发与验证
 → 推送 GitHub 私有仓库
-→ Codex Cloud / GitHub Actions 编译测试
+→ GitHub Actions（`futures-vps` self-hosted runner）编译测试
 → GitHub Actions 构建 linux/amd64 镜像
 → GitHub Actions 推送 GHCR
 → futures VPS 备份数据库、docker pull、数据库迁移和 E2E 验收

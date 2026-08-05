@@ -955,10 +955,83 @@ const GENERIC_DATASET_FIELDS: &[DatasetFieldRule] = &[
     },
 ];
 
+macro_rules! dataset_fields {
+    ($($code:literal => $label:literal),+ $(,)?) => {
+        &[$(DatasetFieldRule {
+            code: $code,
+            label: $label,
+            transforms: &["trim", "empty_to_null"],
+        }),+]
+    };
+}
+
+const CATALOG_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
+    "exchange_code" => "交易所代码",
+    "exchange_name" => "交易所名称",
+    "timezone" => "时区",
+    "instrument_code" => "品种代码",
+    "instrument_name" => "品种名称",
+    "currency_code" => "币种",
+    "contract_multiplier" => "合约乘数",
+    "price_tick" => "最小变动价位",
+    "contract_code" => "合约代码",
+    "delivery_month" => "交割月份",
+    "listed_at" => "上市日",
+    "expires_at" => "到期日",
+    "source_record_ref" => "来源定位"
+};
+
+const CALENDAR_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
+    "exchange_code" => "交易所代码",
+    "calendar_version" => "日历版本",
+    "effective_from" => "生效日期",
+    "trade_date" => "交易日",
+    "is_trading_day" => "是否交易日",
+    "day_session_json" => "日盘时段",
+    "night_session_json" => "夜盘时段",
+    "source_record_ref" => "来源定位"
+};
+
+const MARKET_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
+    "exchange_code" => "交易所代码",
+    "contract_code" => "合约代码",
+    "trade_date" => "交易日",
+    "session_type" => "时段类型",
+    "observed_at" => "观测时间",
+    "granularity" => "粒度",
+    "close_price" => "收盘价",
+    "settlement_price" => "结算价",
+    "currency_code" => "币种",
+    "calendar_version" => "日历版本",
+    "revision_no" => "修订号",
+    "source_record_ref" => "来源定位"
+};
+
+const SEAT_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
+    "exchange_code" => "交易所代码",
+    "contract_code" => "合约代码",
+    "trade_date" => "交易日",
+    "seat_name" => "席位名称",
+    "rank_type" => "排名类型",
+    "rank" => "名次",
+    "volume" => "成交量",
+    "long_position" => "持买量",
+    "short_position" => "持卖量",
+    "source_record_ref" => "来源定位"
+};
+
 pub fn import_dataset_definitions() -> Vec<ImportDatasetDefinition> {
-    vec![ImportDatasetDefinition {
-        dataset_type: "generic".to_string(),
-        fields: GENERIC_DATASET_FIELDS
+    [
+        ("generic", GENERIC_DATASET_FIELDS),
+        ("futures_catalog_v1", CATALOG_DATASET_FIELDS),
+        ("trading_calendar_v1", CALENDAR_DATASET_FIELDS),
+        ("daily_market_prices_v1", MARKET_DATASET_FIELDS),
+        ("seat_positions_v1", SEAT_DATASET_FIELDS),
+    ]
+    .into_iter()
+    .map(|(dataset_type, fields)| ImportDatasetDefinition {
+        dataset_type: dataset_type.to_string(),
+        fields: fields
             .iter()
             .map(|field| ImportDatasetFieldDefinition {
                 code: field.code.to_string(),
@@ -970,7 +1043,8 @@ pub fn import_dataset_definitions() -> Vec<ImportDatasetDefinition> {
                     .collect(),
             })
             .collect(),
-    }]
+    })
+    .collect()
 }
 
 pub fn validate_mapping_fields(
@@ -979,6 +1053,10 @@ pub fn validate_mapping_fields(
 ) -> Result<(), ImportMappingDefinitionError> {
     let dataset_fields = match dataset_type {
         "generic" => GENERIC_DATASET_FIELDS,
+        "futures_catalog_v1" => CATALOG_DATASET_FIELDS,
+        "trading_calendar_v1" => CALENDAR_DATASET_FIELDS,
+        "daily_market_prices_v1" => MARKET_DATASET_FIELDS,
+        "seat_positions_v1" => SEAT_DATASET_FIELDS,
         _ => return Err(ImportMappingDefinitionError::UnknownDatasetType),
     };
 

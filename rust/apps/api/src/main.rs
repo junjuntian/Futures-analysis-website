@@ -43,6 +43,7 @@ use uuid::Uuid;
         imports::preview,
         imports::validate,
         imports::confirm,
+        imports::automatic_confirm,
         imports::rollback_check,
         imports::rollback_conflicts,
         imports::rollback,
@@ -190,6 +191,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pool = database::connect(&config.database_url).await?;
+    if std::env::args().any(|arg| arg == "--provision-collector-account") {
+        auth::provision_collector_account(&pool, &auth_config).await?;
+        return Ok(());
+    }
     let upload_policy = application::imports::UploadPolicy::from_env()
         .map_err(|_| anyhow::anyhow!("invalid IMPORT_MAX_BYTES"))?;
     let storage_root =
@@ -302,6 +307,10 @@ fn router(state: Arc<AuthState>, import_state: Arc<imports::ImportState>) -> Rou
         .route(
             "/api/v1/imports/{import_id}/confirm",
             post(imports::confirm),
+        )
+        .route(
+            "/api/v1/imports/{import_id}/automatic-confirm",
+            post(imports::automatic_confirm),
         )
         .route(
             "/api/v1/imports/{import_id}/rollback-check",
@@ -620,5 +629,24 @@ mod tests {
         assert!(validate_sse_revalidate_seconds(60).is_ok());
         assert!(validate_sse_revalidate_seconds(0).is_err());
         assert!(validate_sse_revalidate_seconds(61).is_err());
+    }
+
+    #[test]
+    fn openapi_exposes_automatic_confirm_as_a_secured_write() {
+        let document = serde_json::to_value(ApiDoc::openapi()).expect("serialize OpenAPI");
+        let operation = &document["paths"]["/api/v1/imports/{import_id}/automatic-confirm"]["post"];
+        assert_eq!(
+            operation["security"][0]["session_cookie"],
+            serde_json::json!([])
+        );
+        let parameters = operation["parameters"].as_array().expect("parameters");
+        for header in ["Idempotency-Key", "x-csrf-token", "Origin"] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == header)
+            );
+        }
+        assert!(operation["responses"]["202"].is_object());
     }
 }

@@ -3,7 +3,7 @@ ARG GIT_SHA=local
 WORKDIR /app
 COPY rust ./rust
 WORKDIR /app/rust
-RUN GIT_SHA="${GIT_SHA}" cargo build --release -p api
+RUN GIT_SHA="${GIT_SHA}" cargo build --release --jobs 2 -p api
 
 FROM debian:13.2-slim
 ARG GIT_SHA=local

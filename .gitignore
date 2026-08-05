@@ -17,6 +17,12 @@ target/
 rust/target/
 **/*.rs.bk
 
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
 # Node
 node_modules/
 frontend/node_modules/

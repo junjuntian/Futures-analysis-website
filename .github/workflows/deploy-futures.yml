@@ -7,6 +7,10 @@ on:
         description: Exact 40-character Git SHA already validated by CI and GHCR
         required: true
         type: string
+      acceptance_sha:
+        description: Exact harness SHA; may differ only in the deploy workflow and Phase 4A E2E
+        required: true
+        type: string
       api_digest:
         description: Immutable API sha256 digest
         required: true
@@ -19,6 +23,19 @@ on:
         description: Immutable Frontend sha256 digest
         required: true
         type: string
+      collector_digest:
+        description: Immutable Collector sha256 digest
+        required: true
+        type: string
+      collection_date:
+        description: Recent completed trading date for Phase 4A acceptance (YYYY-MM-DD)
+        required: true
+        type: string
+      provision_collector:
+        description: Explicitly run the one-time collector credential/account management flow
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -31,7 +48,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy and accept production candidate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, futures-vps]
     timeout-minutes: 180
     environment: production
     env:
@@ -54,25 +71,47 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${{ inputs.git_sha }}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${{ inputs.acceptance_sha }}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${{ inputs.api_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.worker_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.frontend_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.collector_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.collection_date }}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
           [[ "${FUTURES_SSH_PORT}" =~ ^[0-9]{1,5}$ ]]
           [[ "${FUTURES_SSH_HOST}" =~ ^[A-Za-z0-9._:-]+$ ]]
           [[ "${FUTURES_SSH_USER}" =~ ^[A-Za-z0-9._-]+$ ]]
 
-      - name: Checkout exact candidate
+      - name: Checkout exact acceptance harness
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.git_sha }}
+          ref: ${{ inputs.acceptance_sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify checked out candidate
+      - name: Verify runtime and acceptance revisions
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${{ inputs.git_sha }}"
+          runtime_sha='${{ inputs.git_sha }}'
+          acceptance_sha='${{ inputs.acceptance_sha }}'
+          test "$acceptance_sha" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$acceptance_sha"
+          git cat-file -e "${runtime_sha}^{commit}"
+          git merge-base --is-ancestor "$runtime_sha" "$acceptance_sha"
+          if test "$runtime_sha" != "$acceptance_sha"; then
+            mapfile -t changed_files < <(git diff --name-only "$runtime_sha" "$acceptance_sha")
+            test "${#changed_files[@]}" -gt 0
+            for changed_file in "${changed_files[@]}"; do
+              case "$changed_file" in
+                .github/workflows/deploy-futures.yml|rust/tests/phase_4a_e2e.sh|rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql) ;;
+                *)
+                  echo "acceptance-only revision changes forbidden file: $changed_file" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            printf '%s\n' "${changed_files[@]}" | grep -Fx 'rust/tests/phase_4a_e2e.sh' >/dev/null
+          fi
 
       - name: Install strict SSH identity
         shell: bash
@@ -95,24 +134,28 @@ jobs:
           umask 077
           install -d -m 700 \
             "${RELEASE_BUNDLE}/deploy/nginx" \
+            "${RELEASE_BUNDLE}/deploy/collector" \
             "${RELEASE_BUNDLE}/migrations" \
-            "${RELEASE_BUNDLE}/e2e/fixtures"
+            "${RELEASE_BUNDLE}/e2e"
           install -m 600 docker-compose.yml "${RELEASE_BUNDLE}/docker-compose.yml"
           install -m 600 docker-compose.production.yml "${RELEASE_BUNDLE}/docker-compose.production.yml"
           install -m 600 deploy/nginx/nginx.conf "${RELEASE_BUNDLE}/deploy/nginx/nginx.conf"
+          install -m 700 deploy/collector/run-collector.sh \
+            "${RELEASE_BUNDLE}/deploy/collector/run-collector.sh"
+          install -m 600 deploy/collector/futures-collector.cron \
+            "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
+          install -m 600 deploy/collector/futures-collector.logrotate \
+            "${RELEASE_BUNDLE}/deploy/collector/futures-collector.logrotate"
           install -m 600 \
             rust/migrations/202607260001_phase_3d_rollback_and_object_governance.sql \
             rust/migrations/202607260002_phase_3d_worker_fairness.sql \
+            rust/migrations/202608020001_phase_4a_collection_schema.sql \
+            rust/migrations/202608020002_dce_fallback_source.sql \
+            rust/migrations/202608030001_phase_4a_evaluator_fixes.sql \
+            rust/migrations/202608030002_phase_4a_rls_backfill.sql \
+            rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql \
             "${RELEASE_BUNDLE}/migrations/"
-          install -m 700 rust/tests/phase_3c_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_3c_e2e.sh"
-          git cat-file -e "${GITHUB_SHA}^{commit}"
-          git show "${GITHUB_SHA}:rust/tests/phase_3d_e2e.sh" \
-            >"${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
-          chmod 700 "${RELEASE_BUNDLE}/e2e/phase_3d_e2e.sh"
-          install -m 600 rust/tests/phase_3d_schema_invariants.sql \
-            "${RELEASE_BUNDLE}/e2e/phase_3d_schema_invariants.sql"
-          install -m 600 rust/tests/fixtures/phase3d_sample.xls \
-            "${RELEASE_BUNDLE}/e2e/fixtures/phase3d_sample.xls"
+          install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
 
           cat >"${RELEASE_BUNDLE}/deploy-futures-remote.sh" <<'REMOTE_SCRIPT'
           #!/usr/bin/env bash
@@ -123,9 +166,13 @@ jobs:
           API_DIGEST=$2
           WORKER_DIGEST=$3
           FRONTEND_DIGEST=$4
-          GHCR_USER=$5
-          RUN_URL=$6
-          RELEASE_DIR=$7
+          COLLECTOR_DIGEST=$5
+          GHCR_USER=$6
+          RUN_URL=$7
+          RELEASE_DIR=$8
+          COLLECTION_DATE=$9
+          PROVISION_COLLECTOR=${10}
+          ACCEPTANCE_SHA=${11}
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
@@ -134,9 +181,11 @@ jobs:
           API_IMAGE=ghcr.io/junjuntian/futures-analysis-website-api
           WORKER_IMAGE=ghcr.io/junjuntian/futures-analysis-website-worker
           FRONTEND_IMAGE=ghcr.io/junjuntian/futures-analysis-website-frontend
+          COLLECTOR_IMAGE=ghcr.io/junjuntian/futures-analysis-website-collector
           API_REF="${API_IMAGE}@${API_DIGEST}"
           WORKER_REF="${WORKER_IMAGE}@${WORKER_DIGEST}"
           FRONTEND_REF="${FRONTEND_IMAGE}@${FRONTEND_DIGEST}"
+          COLLECTOR_REF="${COLLECTOR_IMAGE}@${COLLECTOR_DIGEST}"
           export IMAGE_TAG="sha-${SOURCE_SHA}"
           SUCCESS=0
           SWITCH_STARTED=0
@@ -145,9 +194,13 @@ jobs:
           BACKUP_PATH=
           PREVIOUS_STABLE=
           PREVIOUS_RUNTIME=
+          EVIDENCE_DIR=
 
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST"; do
+          [[ "$ACCEPTANCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          [[ "$PROVISION_COLLECTOR" = true || "$PROVISION_COLLECTOR" = false ]]
+          for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
           [[ "$GHCR_USER" =~ ^[A-Za-z0-9-]+$ ]]
@@ -312,10 +365,22 @@ jobs:
             return "$rollback_status"
           }
 
+          emit_phase4a_failure_diagnostics() {
+            local log
+            test -n "$EVIDENCE_DIR" || return 0
+            for log in "$EVIDENCE_DIR"/phase4a-work/*.log; do
+              test -f "$log" || continue
+              grep -Eh \
+                '^(INFO|WARNING|ERROR) (collector_start_failed|exchange_failed|dataset_collected|dataset_failed|dataset_submit_failed|fallback_activated|fallback_failed|batch_failed|batch_succeeded) ' \
+                "$log" || true
+            done
+          }
+
           on_exit() {
             local status=$?
             trap - EXIT
             if test "$status" -ne 0 && test "$SWITCH_STARTED" -eq 1; then
+              emit_phase4a_failure_diagnostics
               rollback_deployment || status=1
             fi
             cleanup_registry
@@ -338,6 +403,10 @@ jobs:
           pull_exact "$API_IMAGE" "$API_DIGEST"
           pull_exact "$WORKER_IMAGE" "$WORKER_DIGEST"
           pull_exact "$FRONTEND_IMAGE" "$FRONTEND_DIGEST"
+          pull_exact "$COLLECTOR_IMAGE" "$COLLECTOR_DIGEST"
+          for ref in "$API_REF" "$WORKER_REF" "$FRONTEND_REF" "$COLLECTOR_REF"; do
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ref")" = "$SOURCE_SHA"
+          done
 
           PREVIOUS_RUNTIME="$STATE_ROOT/previous-runtime-${SOURCE_SHA}-${GITHUB_RUN_ID:-manual}.env"
           {
@@ -359,6 +428,9 @@ jobs:
             for ref in "$previous_api_ref" "$previous_worker_ref" "$previous_frontend_ref"; do
               docker image inspect "$ref" >/dev/null
             done
+            if test -n "${previous_collector_ref:-}"; then
+              docker image inspect "$previous_collector_ref" >/dev/null
+            fi
           fi
           cleanup_registry
 
@@ -372,6 +444,8 @@ jobs:
               image: ${WORKER_REF}
               environment:
                 APP_ENV: acceptance
+            collector:
+              image: ${COLLECTOR_REF}
             frontend:
               image: ${FRONTEND_REF}
           EOF
@@ -416,6 +490,24 @@ jobs:
             test "$(stat -c %a "/etc/futures-platform/secrets/$required")" = 400
           done
 
+          COLLECTOR_CREDENTIAL_FILE=/etc/futures-platform/secrets/collector-credentials
+          if test "$PROVISION_COLLECTOR" = true && test ! -s "$COLLECTOR_CREDENTIAL_FILE"; then
+            public_origin=$("${COMPOSE[@]}" config --format json |
+              jq -r '.services.api.environment.PUBLIC_ORIGIN')
+            [[ "$public_origin" =~ ^https?://[A-Za-z0-9._:-]+$ ]]
+            collector_password=$(openssl rand -base64 48 | tr -d '\n' | tr '+/' '-_')
+            credential_tmp=$(mktemp /etc/futures-platform/secrets/.collector.XXXXXX)
+            printf '{"base_url":"http://api:8080","origin":"%s","username":"collector-service","password":"%s"}' \
+              "$public_origin" "$collector_password" >"$credential_tmp"
+            chown root:root "$credential_tmp"
+            chmod 400 "$credential_tmp"
+            mv "$credential_tmp" "$COLLECTOR_CREDENTIAL_FILE"
+            unset collector_password
+          fi
+          test -s "$COLLECTOR_CREDENTIAL_FILE"
+          test "$(stat -c %U:%G "$COLLECTOR_CREDENTIAL_FILE")" = root:root
+          test "$(stat -c %a "$COLLECTOR_CREDENTIAL_FILE")" = 400
+
           timestamp=$(date -u +%Y%m%dT%H%M%SZ)
           BACKUP_PATH="$BACKUP_ROOT/database-before-${SOURCE_SHA}-${timestamp}.dump"
           backup_tmp="${BACKUP_PATH}.tmp"
@@ -450,6 +542,15 @@ jobs:
                 item.nspname, item.relname);
             end loop;
             for item in
+              select n.nspname, c.relname
+                from pg_class c join pg_namespace n on n.oid=c.relnamespace
+               where n.nspname in ('public','app')
+                 and c.relkind = 'S'
+            loop
+              execute format('alter sequence %I.%I owner to futures_migrator',
+                item.nspname, item.relname);
+            end loop;
+            for item in
               select n.nspname, p.proname,
                      pg_get_function_identity_arguments(p.oid) args,
                      p.prokind
@@ -469,7 +570,12 @@ jobs:
 
           for migration in \
             202607260001_phase_3d_rollback_and_object_governance.sql \
-            202607260002_phase_3d_worker_fairness.sql
+            202607260002_phase_3d_worker_fairness.sql \
+            202608020001_phase_4a_collection_schema.sql \
+            202608020002_dce_fallback_source.sql \
+            202608030001_phase_4a_evaluator_fixes.sql \
+            202608030002_phase_4a_rls_backfill.sql \
+            202608030003_phase_4a_projection_rollback_delete_grants.sql
           do
             version=${migration%%_*}
             applied=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
@@ -483,15 +589,30 @@ jobs:
           done
           test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
             psql -X -U futures_app -d futures_platform -Atq \
-            -c "select count(*) from schema_versions where version in ('202607260001','202607260002')")" = 2
+            -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001','202608020002','202608030001','202608030002','202608030003')")" = 7
+
+          if test "$PROVISION_COLLECTOR" = true; then
+            "${COMPOSE[@]}" run --rm --no-deps api \
+              /app/api --provision-collector-account >/dev/null
+          fi
 
           "${COMPOSE[@]}" up -d --no-build --remove-orphans
           timeout 240 bash -c "until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null; do sleep 3; done"
           VERSION_JSON=$(mktemp)
-          curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON"
-          jq -e --arg sha "$SOURCE_SHA" '.data.git_sha == $sha and .data.git_sha != "local"' \
-            "$VERSION_JSON" >/dev/null
+          VERSION_VERIFIED=0
+          for version_attempt in {1..20}; do
+            if curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON" &&
+               jq -e --arg sha "$SOURCE_SHA" \
+                 '.data.git_sha == $sha and .data.git_sha != "local"' \
+                 "$VERSION_JSON" >/dev/null; then
+              VERSION_VERIFIED=1
+              break
+            fi
+            sleep 3
+          done
           rm -f "$VERSION_JSON"
+          test "$VERSION_VERIFIED" -eq 1
+          echo "DEPLOY_STAGE version_verified"
 
           for spec in "api:$API_REF" "worker:$WORKER_REF" "frontend:$FRONTEND_REF"; do
             service=${spec%%:*}
@@ -501,51 +622,28 @@ jobs:
             test -n "$cid"
             test "$(docker inspect --format '{{.Image}}' "$cid")" = "$expected"
           done
+          docker image inspect "$COLLECTOR_REF" >/dev/null
+          echo "DEPLOY_STAGE runtime_images_verified"
+
+          install -m 700 "$RELEASE_DIR/deploy/collector/run-collector.sh" \
+            /usr/local/sbin/run-futures-collector
+          install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.cron" \
+            /etc/cron.d/futures-collector
+          install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
+            /etc/logrotate.d/futures-collector
+          echo "DEPLOY_STAGE collector_schedule_installed"
 
           EVIDENCE_DIR="$EVIDENCE_ROOT/${SOURCE_SHA}-${timestamp}"
           install -d -m 700 "$EVIDENCE_DIR"
-          COMPOSE_TEXT="${COMPOSE[*]}"
           set -o pipefail
-          PHASE3C_ROOT="$LEGACY_ROOT" \
-          PHASE3C_BASE_URL=http://127.0.0.1:8088 \
-          PHASE3C_ORIGIN=http://localhost:8088 \
-          PHASE3C_COMPOSE="$COMPOSE_TEXT" \
-          PHASE3C_DB_USER=futures_app \
-          PHASE3C_WORK_DIR="$EVIDENCE_DIR/phase3c-work" \
-            bash "$RELEASE_DIR/e2e/phase_3c_e2e.sh" |
-            tee "$EVIDENCE_DIR/phase3c-stdout.txt"
+          echo "DEPLOY_STAGE phase4a_e2e_started"
+          PHASE4A_RELEASE_DIR="$RELEASE_DIR" \
+          PHASE4A_COLLECTION_DATE="$COLLECTION_DATE" \
+          PHASE4A_EVIDENCE_DIR="$EVIDENCE_DIR/phase4a-work" \
+            bash "$RELEASE_DIR/e2e/phase_4a_e2e.sh" |
+            tee "$EVIDENCE_DIR/phase4a-stdout.txt"
           test "${PIPESTATUS[0]}" -eq 0
-          grep -qx PHASE3C_E2E_PASS "$EVIDENCE_DIR/phase3c-stdout.txt"
-          {
-            echo PHASE3C_E2E_PASS
-            echo "source_sha=$SOURCE_SHA"
-            echo "script_sha256=$(sha256sum "$RELEASE_DIR/e2e/phase_3c_e2e.sh" | awk '{print $1}')"
-            echo "stdout_sha256=$(sha256sum "$EVIDENCE_DIR/phase3c-stdout.txt" | awk '{print $1}')"
-            echo "result_env_sha256=$(sha256sum "$EVIDENCE_DIR/phase3c-work/result.env" | awk '{print $1}')"
-            echo "completed_at_epoch=$(date +%s)"
-          } >"$EVIDENCE_DIR/phase3c-attestation.txt"
-
-          PHASE3D_ROOT="$LEGACY_ROOT" \
-          PHASE3D_BASE_URL=http://127.0.0.1:8088 \
-          PHASE3D_ORIGIN=http://localhost:8088 \
-          PHASE3D_COMPOSE="$COMPOSE_TEXT" \
-          PHASE3D_DB_ADMIN_USER=futures_app \
-          PHASE3D_SOURCE_SHA="$SOURCE_SHA" \
-          PHASE3D_API_IMAGE="$API_IMAGE" \
-          PHASE3D_API_DIGEST="$API_DIGEST" \
-          PHASE3D_WORKER_IMAGE="$WORKER_IMAGE" \
-          PHASE3D_WORKER_DIGEST="$WORKER_DIGEST" \
-          PHASE3D_FRONTEND_IMAGE="$FRONTEND_IMAGE" \
-          PHASE3D_FRONTEND_DIGEST="$FRONTEND_DIGEST" \
-          PHASE3D_ALLOW_SERVICE_RESTART=1 \
-          PHASE3D_PHASE3C_ATTESTATION="$EVIDENCE_DIR/phase3c-attestation.txt" \
-          PHASE3D_PHASE3C_STDOUT="$EVIDENCE_DIR/phase3c-stdout.txt" \
-          PHASE3D_PHASE3C_RESULT_ENV="$EVIDENCE_DIR/phase3c-work/result.env" \
-          PHASE3D_EVIDENCE_DIR="$EVIDENCE_DIR/phase3d-work" \
-            bash "$RELEASE_DIR/e2e/phase_3d_e2e.sh" |
-            tee "$EVIDENCE_DIR/phase3d-stdout.txt"
-          test "${PIPESTATUS[0]}" -eq 0
-          grep -qx PHASE3D_E2E_PASS "$EVIDENCE_DIR/phase3d-stdout.txt"
+          grep -qx PHASE4A_E2E_PASS "$EVIDENCE_DIR/phase4a-stdout.txt"
 
           "${COMPOSE[@]}" logs --no-color --since 4h >"$EVIDENCE_DIR/service-logs.txt"
           if grep -Eiq \
@@ -579,6 +677,7 @@ jobs:
             printf 'previous_api_ref=%q\n' "$API_REF"
             printf 'previous_worker_ref=%q\n' "$WORKER_REF"
             printf 'previous_frontend_ref=%q\n' "$FRONTEND_REF"
+            printf 'previous_collector_ref=%q\n' "$COLLECTOR_REF"
             printf 'previous_release_dir=%q\n' "$RELEASE_DIR"
             printf 'previous_backup_path=%q\n' "$BACKUP_PATH"
             printf 'previous_deployed_at=%q\n' "$DEPLOYED_AT"
@@ -590,17 +689,23 @@ jobs:
             echo "status=PASS"
             echo "run_url=$RUN_URL"
             echo "git_sha=$SOURCE_SHA"
+            echo "acceptance_sha=$ACCEPTANCE_SHA"
             echo "deployed_at=$DEPLOYED_AT"
             echo "backup_path=$BACKUP_PATH"
             echo "backup_sha256=$BACKUP_SHA256"
             echo "api_ref=$API_REF"
             echo "worker_ref=$WORKER_REF"
             echo "frontend_ref=$FRONTEND_REF"
-            echo "migrations=202607260001,202607260002"
-            echo "phase3c_e2e=PASS"
-            echo "phase3d_e2e=PASS"
+            echo "collector_ref=$COLLECTOR_REF"
+            echo "migrations=202607260001,202607260002,202608020001,202608020002,202608030001,202608030002,202608030003"
+            echo "phase3c_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
+            echo "phase3d_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
+            echo "phase4a_e2e=PASS"
+            echo "collection_date=$COLLECTION_DATE"
             echo "version_git_sha=$SOURCE_SHA"
             echo "runtime_digest_match=PASS"
+            echo "collector_image_verified=PASS"
+            echo "collector_management_flow=$PROVISION_COLLECTOR"
             echo "registry_auth_cleanup=PASS"
             echo "service_log_secret_scan=PASS"
             echo "evidence_dir=$EVIDENCE_DIR"
@@ -659,11 +764,14 @@ jobs:
             -o IdentitiesOnly=yes
             -o StrictHostKeyChecking=yes
             -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=6
+            -o TCPKeepAlive=yes
           )
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
@@ -711,6 +819,7 @@ jobs:
           {
             echo '### futures production deployment'
             echo
+            echo "- acceptance_sha=${{ inputs.acceptance_sha }}"
             sed 's/^/- /' "${RUNNER_TEMP}/deployment-report.txt"
           } >>"${GITHUB_STEP_SUMMARY}"
 

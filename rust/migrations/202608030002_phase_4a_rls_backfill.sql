@@ -1,0 +1,105 @@
+begin;
+
+-- Change-log v2 includes both the imported-record row and every formal
+-- projection row. Completeness is therefore measured by imported-record
+-- changes, while v1 retains the original all-row count contract.
+create or replace function app.enforce_direct_rollback_change_log()
+returns trigger
+language plpgsql
+as $$
+declare
+    change_count bigint;
+begin
+    if new.rollback_capability <> 'direct' then
+        return null;
+    end if;
+    if new.change_log_version = 2 then
+        select count(*)
+          into change_count
+          from import_row_changes change_row
+         where change_row.workspace_id = new.workspace_id
+           and change_row.import_batch_id = new.id
+           and change_row.target_kind = 'imported_record';
+    else
+        select count(*)
+          into change_count
+          from import_row_changes change_row
+         where change_row.workspace_id = new.workspace_id
+           and change_row.import_batch_id = new.id;
+    end if;
+    if change_count <> (new.imported_count::bigint + new.overwritten_count::bigint) then
+        raise exception 'direct rollback requires a complete change log'
+            using errcode = '23514';
+    end if;
+    return null;
+end;
+$$;
+
+-- The Phase 4A tables FORCE RLS.  The preceding migration intentionally runs
+-- as the non-bypass migrator role, so data repairs must establish each tenant
+-- context before touching workspace-scoped rows.
+--
+-- Legacy automatic v1 batches were incorrectly marked direct even though
+-- their formal projections were not logged.  Reclassification is a one-time
+-- schema repair that the normal post-commit immutability trigger must reject.
+-- Hold an exclusive table lock while that one trigger is disabled so no
+-- concurrent business write can observe the maintenance window.
+lock table import_batches in access exclusive mode;
+alter table import_batches
+    disable trigger import_batches_enforce_phase_3d_invariants;
+
+do $$
+declare
+    target_workspace_id uuid;
+begin
+    for target_workspace_id in
+        select id from workspaces order by id
+    loop
+        perform set_config(
+            'app.current_workspace_id',
+            target_workspace_id::text,
+            true
+        );
+
+        update data_sources
+           set priority = 50,
+               updated_at = now()
+         where workspace_id = target_workspace_id
+           and code = 'akshare_sina_dce_fallback'
+           and priority <> 50;
+
+        update imported_records record
+           set business_key = upper(source.code) || '|' || record.business_key,
+               updated_at = now()
+          from import_batches batch
+          join data_sources source
+            on source.workspace_id = batch.workspace_id
+           and source.id = batch.data_source_id
+         where record.workspace_id = target_workspace_id
+           and batch.workspace_id = target_workspace_id
+           and record.source_import_batch_id = batch.id
+           and batch.ingestion_mode = 'automatic'
+           and record.business_key not like upper(source.code) || '|%';
+
+        -- Only legacy v1 automatic batches lack formal-projection change rows.
+        -- Preserve v2 batches created by the repaired Worker.
+        update import_batches
+           set rollback_capability = 'compensation_only',
+               change_log_version = null
+         where workspace_id = target_workspace_id
+           and ingestion_mode = 'automatic'
+           and rollback_capability = 'direct'
+           and change_log_version = 1;
+    end loop;
+end $$;
+
+set constraints all immediate;
+
+alter table import_batches
+    enable trigger import_batches_enforce_phase_3d_invariants;
+
+insert into schema_versions (version, description)
+values ('202608030002', 'Phase 4A RLS-aware source identity backfill')
+on conflict (version) do nothing;
+
+commit;
