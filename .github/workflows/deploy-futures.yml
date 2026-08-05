@@ -154,8 +154,10 @@ jobs:
             rust/migrations/202608030001_phase_4a_evaluator_fixes.sql \
             rust/migrations/202608030002_phase_4a_rls_backfill.sql \
             rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql \
+            rust/migrations/202608050001_phase_5a_spread_provider.sql \
             "${RELEASE_BUNDLE}/migrations/"
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
+          install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
 
           cat >"${RELEASE_BUNDLE}/deploy-futures-remote.sh" <<'REMOTE_SCRIPT'
           #!/usr/bin/env bash
@@ -575,7 +577,8 @@ jobs:
             202608020002_dce_fallback_source.sql \
             202608030001_phase_4a_evaluator_fixes.sql \
             202608030002_phase_4a_rls_backfill.sql \
-            202608030003_phase_4a_projection_rollback_delete_grants.sql
+            202608030003_phase_4a_projection_rollback_delete_grants.sql \
+            202608050001_phase_5a_spread_provider.sql
           do
             version=${migration%%_*}
             applied=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
@@ -589,7 +592,7 @@ jobs:
           done
           test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
             psql -X -U futures_app -d futures_platform -Atq \
-            -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001','202608020002','202608030001','202608030002','202608030003')")" = 7
+            -c "select count(*) from schema_versions where version in ('202607260001','202607260002','202608020001','202608020002','202608030001','202608030002','202608030003','202608050001')")" = 8
 
           if test "$PROVISION_COLLECTOR" = true; then
             "${COMPOSE[@]}" run --rm --no-deps api \
@@ -645,6 +648,14 @@ jobs:
           test "${PIPESTATUS[0]}" -eq 0
           grep -qx PHASE4A_E2E_PASS "$EVIDENCE_DIR/phase4a-stdout.txt"
 
+          echo "DEPLOY_STAGE phase5a_e2e_started"
+          PHASE5A_RELEASE_DIR="$RELEASE_DIR" \
+          PHASE5A_EVIDENCE_DIR="$EVIDENCE_DIR/phase5a-work" \
+            bash "$RELEASE_DIR/e2e/phase_5a_e2e.sh" |
+            tee "$EVIDENCE_DIR/phase5a-stdout.txt"
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -qx PHASE5A_E2E_PASS "$EVIDENCE_DIR/phase5a-stdout.txt"
+
           "${COMPOSE[@]}" logs --no-color --since 4h >"$EVIDENCE_DIR/service-logs.txt"
           if grep -Eiq \
             'gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|authorization:[[:space:]]*bearer|BEGIN (OPENSSH|RSA|EC|DSA) PRIVATE KEY' \
@@ -697,10 +708,11 @@ jobs:
             echo "worker_ref=$WORKER_REF"
             echo "frontend_ref=$FRONTEND_REF"
             echo "collector_ref=$COLLECTOR_REF"
-            echo "migrations=202607260001,202607260002,202608020001,202608020002,202608030001,202608030002,202608030003"
+            echo "migrations=202607260001,202607260002,202608020001,202608020002,202608030001,202608030002,202608030003,202608050001"
             echo "phase3c_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
             echo "phase3d_e2e=NOT_RERUN_PRESERVE_LEGACY_PRODUCTION_DATA"
             echo "phase4a_e2e=PASS"
+            echo "phase5a_e2e=PASS"
             echo "collection_date=$COLLECTION_DATE"
             echo "version_git_sha=$SOURCE_SHA"
             echo "runtime_digest_match=PASS"
