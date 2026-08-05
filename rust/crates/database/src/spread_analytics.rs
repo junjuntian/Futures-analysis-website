@@ -11,6 +11,7 @@ use time::{Date, Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const SANHE_PROVIDER: &str = "sanhe";
+const PROVIDER_REQUEST_INTERVAL_MS: i64 = 2_000;
 
 #[derive(Debug, Clone)]
 pub struct CachedProviderPayload {
@@ -240,7 +241,7 @@ pub async fn reserve_request_slot(pool: &PgPool) -> Result<StdDuration, sqlx::Er
     let suppressed: Option<OffsetDateTime> = row.get("suppressed_until");
     let mut not_before = now;
     if let Some(last) = last {
-        not_before = not_before.max(last + Duration::milliseconds(1_500));
+        not_before = not_before.max(last + Duration::milliseconds(PROVIDER_REQUEST_INTERVAL_MS));
     }
     if let Some(suppressed) = suppressed {
         not_before = not_before.max(suppressed);
@@ -920,7 +921,7 @@ mod tests {
         );
         let separation = first.abs_diff(second);
         assert!(
-            separation >= StdDuration::from_millis(1_490),
+            separation >= StdDuration::from_millis(1_500),
             "reserved provider starts were separated by only {separation:?}"
         );
 
