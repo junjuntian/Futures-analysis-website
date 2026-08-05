@@ -76,7 +76,10 @@ jobs:
             --memory-swap 768m \
             --env PIP_DISABLE_PIP_VERSION_CHECK=1 \
             --env PIP_NO_CACHE_DIR=1 \
+            --env PIP_ROOT_USER_ACTION=ignore \
             --env PYTHONDONTWRITEBYTECODE=1 \
+            --env RUFF_CACHE_DIR=/tmp/ruff-cache \
+            --tmpfs /tmp:rw,noexec,nosuid,size=128m \
             --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
             --workdir /workspace \
             python:3.13.11-slim-bookworm \
