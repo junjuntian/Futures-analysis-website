@@ -686,3 +686,21 @@ self-hosted CI 的无认证 PostgreSQL 全地址端口发布而不能最终 PASS
 **Phase 4A 最终状态：PASS。** BLOCKER/HIGH/MEDIUM/LOW 均为 0；首轮十项和终验
 新增 MEDIUM-05 已全部关闭。仍不合并 main、不打标签；Phase 4B 在同一 phase 分支
 继续，Phase 4 整体完成后一次合并 main。
+
+## 阶段性收口轻量复确认（2026-08-05）
+
+本节按用户授权仅复确认 MEDIUM-05 和 Phase 4B-1 回填驱动，不重开已经关闭的 Phase
+4A 全量审查，也不修改业务代码、部署或回填数据。
+
+| 复确认项 | 结论 | 独立证据 |
+| --- | --- | --- |
+| MEDIUM-05：self-hosted CI PostgreSQL 暴露 | **CLOSED** | `8018f32` 的唯一文件差异把 service 映射精确改为 `127.0.0.1:5432:5432`，删除 `POSTGRES_HOST_AUTH_METHOD: trust`，改用一次性测试密码并同步 `DATABASE_URL`。GitHub Actions Run `30977655724` 的 `headSha` 精确为 `8018f32`、结论为 `success`；validate 中 PostgreSQL 初始化、Rust/前端/Python 门禁和 `PostgreSQL rollback dependency integration test` 均 success，四个非发布镜像构建亦 success。此前 service 存活期 VPS `ss` 证据只监听 `127.0.0.1:5432`，没有 `0.0.0.0:5432` 或 `[::]:5432`。该一次性测试值不属于生产秘密，也未进入生产部署。 |
+| Phase 4B-1 回填驱动：`222fd3e` / `9900971` | **ACCEPTED（无新 HIGH）** | `222fd3e` 引入的宿主驱动具有独立 driver `flock`、与每日 collector 共用的 `flock`、日期参数校验、受控交易日历/工作日回退、已完成日期幂等跳过、每天最多 80 日、每日期至少 60 秒、16:30–22:30 保护窗、磁盘 80% 停止、每来源连续失败 5 日暂停、30 分钟单源超时、失败清单和原子水位文件；只调用稳定 release 的 collector，不构建镜像或直接写库。`9900971` 仅把 Compose 渲染后的 512 MiB 数值兼容为字符串比较，没有放宽限额。当前谱系继续由 `8ce831a` 精确锁定已验收运行候选 `e627ab8`；`bash -n` 通过。VPS 只读实态显示驱动仍运行，已进入保护窗等待，水位 `2026-07-11`、累计 24 日、磁盘 20%；失败按清单隔离，没有绕过护栏或打断每日采集。 |
+
+对抗性快审未发现可导致未授权数据库写入、重复并发回填、绕过运行候选、突破资源/时间
+护栏或重新暴露 PostgreSQL 的新路径。DCE 的既有单源超时属于已设计的失败隔离与重试
+队列事实，不构成新的 HIGH 缺陷。
+
+**轻量复确认结论：PASS。** 新增 BLOCKER/HIGH/MEDIUM/LOW 均为 0；Phase 4A 可按
+用户本单授权做阶段性 main 收口和 `phase-4a-pass-20260805` 标签。Phase 4B-1 继续
+自治运行，Phase 4B-2 仍待另单；本结论不授权重新部署 VPS。
