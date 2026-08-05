@@ -432,7 +432,7 @@ case "$previous_release_dir" in
   /opt/futures-platform-releases/*) ;;
   *) echo "BACKFILL_FAIL unsafe_release_dir" >&2; exit 1 ;;
 esac
-test "$previous_git_sha" = "82cec44184ffb6ae4bf700afd0210193a081ad0a" || {
+test "$previous_git_sha" = "e627ab8c3b797cc77f872a9c02439c1dfca0d4eb" || {
   echo "BACKFILL_FAIL unexpected_runtime_candidate" >&2; exit 1;
 }
 export IMAGE_TAG="sha-${previous_git_sha}"
