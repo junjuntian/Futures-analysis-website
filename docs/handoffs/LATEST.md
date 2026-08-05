@@ -1,26 +1,19 @@
 # 最新交接状态
 
-- 最新完整交接文档：`docs/handoffs/HANDOFF_20260805_1440.md`；本文件追加记录其后的
-  Phase 4A 阶段性收口事实。
-- Phase 4A：首轮 FAIL（H5/M4/L1）十项、HIGH-03 终验残留及新增 MEDIUM-05 均已
-  关闭；轻量复确认提交 `814a09a` 对 MEDIUM-05 和回填驱动快审未发现新 HIGH，最终
-  状态为 **PASS**。
-- Git 收口：phase 分支以普通 merge commit
-  `1884583035798436173c71af5d1225048dcf8633` 合入 `main`，未使用 squash/rebase；
-  合并无冲突，三个 workflow 与 phase 版本一致。
-- main CI：Run `30990641425` success；validate 及 API/Worker/Frontend/Collector
-  五个 job 全部成功。标签 `phase-4a-pass-20260805` 精确指向 merge commit
-  `1884583`，未创建 `v*` 标签。
-- VPS：本单未部署，继续运行 `e627ab8`。最终核验发现旧 `nohup` 回填进程在保护窗
-  等待期无 `driver_finished` 事件退出；内核无 OOM，runner `oom_kill=0`，水位和失败
-  清单未回退。2026-08-05 17:17:32 CST 已用相同区间、80 日上限、60 秒限速及全部
-  既有护栏恢复为独立 `futures-backfill-phase4b1.service`；恢复后 service active、
-  `driver_running=yes` 并继续保护窗等待。当前水位 `2026-07-11`、累计处理 24 日、
-  失败对 6、根分区 25%。
-- Phase 4B-2 仍待另单。Phase 5 已获准从收口后的 `main` 新建独立分支并行开发，
-  不得干扰 Phase 4B-1。
-- 下一步：Phase 5 Planner 可从 `main` 建分支开始；4B-1 继续自治，后续只读检查先看
-  `--status`、失败清单与磁盘水位。
+- 最新完整交接：`docs/handoffs/HANDOFF_20260806_0158.md`。
+- Phase 5A 发布链尚未完成。运行候选 `6e65728`、验收脚本提交 `5d30e44`；CI Run
+  `31019205792`、`31029671239` 与镜像 Run `31020852354` 均 success，四个不可变镜像
+  digest 已记录在完整交接中。
+- 第一次 Deploy Run `31022410133` 在 5A 授权夹具处失败并自动回滚；夹具已修复。
+  第二次 Run `31031247994` 在 Phase 4A 期间按用户要求取消。取消后远端进程仍存活，
+  已终止并按切换前备份完成数据库与镜像回滚。
+- 2026-08-06 01:58 CST 实测生产已恢复 `e627ab8`，ready 正常，5A 迁移计数为 0，
+  deploy/Phase 4A/Phase 5A 远端进程均不存在，临时 GHCR 认证目录为 0。
+- 回填仍保持暂停：service inactive，水位 `2026-07-11`、累计处理 24 日、失败对 6、
+  `driver_running=no`；本轮未恢复或重启回填。
+- 尚无 `PHASE5A_E2E_PASS`、真实三禾查询证据或自由价差页截图；不得宣称 5A 发布 PASS。
+- 下一次在允许时间窗先只读复核，再复用已发布镜像重跑 Deploy。发布完成后才可开启
+  全新会话的独立 Evaluator；本会话未创建 `PHASE_05A_EVALUATION.md`。
+- 仍禁止合并 main、打标签、启动 5B、恢复回填、清理既有数据或输出秘密。
 
-接管者必须完整阅读最新交接与 Phase 4A 评审，不盲目信任摘要；不得输出秘密、重复
-启动回填、绕过护栏、重新部署、清理数据或未经另单启动 Phase 4B-2。
+接管者必须完整阅读最新交接与 Phase 5 契约，以 VPS、Git 和 Actions 实证为准。
