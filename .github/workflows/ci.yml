@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, futures-vps]
     timeout-minutes: 30
     services:
       postgres:
@@ -26,8 +26,13 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --memory 384m
+          --memory-swap 384m
     env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
       DATABASE_URL: postgres://postgres@localhost:5432/postgres
+      NODE_OPTIONS: --max-old-space-size=768
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -116,10 +121,11 @@ jobs:
 
   dockerfiles:
     name: Build ${{ matrix.image }} image
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, futures-vps]
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - image: api
@@ -136,6 +142,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        with:
+          driver-opts: |
+            memory=2g
+            memory-swap=2g
 
       - name: Build image without publishing
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
