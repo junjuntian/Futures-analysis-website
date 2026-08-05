@@ -67,6 +67,13 @@ jobs:
           imports::tests::postgres_exchange_calendar_dependency_blocks_precheck
           -- --ignored --exact
 
+      - name: PostgreSQL Phase 5A provider integration test
+        working-directory: rust
+        run: >-
+          cargo test -p database
+          spread_analytics::tests::postgres_phase_5a_migration_cache_and_throttle_contract
+          -- --ignored --exact
+
       - name: Collector lint and tests
         shell: bash
         run: |
