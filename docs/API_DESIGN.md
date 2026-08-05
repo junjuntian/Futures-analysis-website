@@ -149,10 +149,24 @@
 | `GET` | `/api/v1/spreads/{spread_id}/series` | 按公式版本查询序列 |
 | `GET` | `/api/v1/spreads/{spread_id}/statistics` | 查询统计与样本口径 |
 | `GET` | `/api/v1/spreads/{spread_id}/seasonality` | 查询季节性 |
+| `GET` | `/api/v1/spread-analytics/providers/sanhe/varieties` | 查询当日缓存的三禾品种清单 |
+| `GET` | `/api/v1/spread-analytics/providers/sanhe/varieties/{variety}/months` | 查询当日缓存的品种月份 |
+| `POST` | `/api/v1/spread-analytics/free-spread/query` | 查询三禾序列并返回散户窗口裁剪后的连续/季节/月度 DTO |
+| `GET/POST` | `/api/v1/spread-analytics/favorites` | 查询或新建当前 Workspace 自由价差收藏 |
+| `DELETE` | `/api/v1/spread-analytics/favorites/{favorite_id}` | 删除当前 Workspace 收藏 |
+| `GET` | `/api/v1/spread-monitor` | 查询自有行情套利监控行 |
+| `GET` | `/api/v1/spreads/{spread_id}/analytics` | 查询自有行情统计卡、主图和叠年线 |
 
-序列响应必须包含 `formula_version_id`、`price_basis`、`calendar_version_id`、`sample_count`、`data_cutoff_at` 和来源摘要。
+序列响应必须包含 `formula_version_id`（provider 临时查询可空）、`provider`、
+`source_code`、`source_display_name`、`fetched_at`、`price_basis`、
+`calendar_version_id`、`window_rule_version`、`algorithm_version`、`sample_count`、
+`excluded_count`、`data_cutoff_at` 和来源摘要。三禾合法空数据使用 HTTP 200 和显式
+`quality.status=empty`；上游错误使用稳定平台错误，不透传上游正文。
 
-允许的 `price_basis` 至少包含 `close`、`settlement`、`trade`。行情图默认 `close`；日终持仓、未实现盈亏和权益默认 `settlement`；已实现盈亏固定使用 `trade`。
+允许的 `price_basis` 至少包含 `close`、`settlement`、`trade`、
+`upstream_spread`。行情图默认 `close`；日终持仓、未实现盈亏和权益默认
+`settlement`；已实现盈亏固定使用 `trade`。`upstream_spread` 只用于上游仅提供计算后
+差值且无原始腿价格的 provider，不得伪装为 `close`。
 
 ### 5.3 成交与持仓
 
@@ -187,7 +201,10 @@
 | `POST` | `/api/v1/ai/providers/{provider_id}/test` | 管理员测试提供商 |
 | `GET` | `/api/v1/ai/usage` | 查询用量和费用 |
 
-MVP 不接受任意外部 URL。API 只接受当前 Workspace 下已配置的 `data_source_id` 和 akshare 连接器操作；服务端验证连接器与五交易所域名白名单。东方财富等二手数据源不进入第一批。
+MVP 不接受任意外部 URL。Phase 4 API 只接受当前 Workspace 下已配置的
+`data_source_id` 和 akshare 连接器操作；服务端验证连接器与五交易所域名白名单，
+东方财富等二手数据源不进入第一批。`DEC-042` 只允许 Phase 5 Rust 适配器内部构造
+三禾三个固定只读 POST 路径，客户端仍不能提交任意 URL 或上游路径。
 
 `extraction-jobs` 仅作为采集任务元数据接口。自动采集产出的标准化 CSV 使用固定映射模板调用导入 API，preview/confirm 环节对自动批次不适用；解析或校验失败时批次为 `failed` 且正式表零写入，质量警告仅记录、不拦截。手动文件导入继续使用第 4 节既有 preview/confirm 接口。
 

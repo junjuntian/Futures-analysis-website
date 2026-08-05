@@ -88,6 +88,19 @@
 | `spread_observations` | `id`, `workspace_id`, `spread_id`, `formula_version_id`, `trade_date`, `session_type`, `price_basis`, `spread_value`, `quality_status`, `calculation_batch_id` | BIGINT identity；`spread_value` 使用 `numeric(20,8)` |
 | `spread_observation_legs` | `id`, `workspace_id`, `observation_id`, `leg_no`, `market_price_id`, `price`, `coefficient` | BIGINT identity；支持下钻到原始腿价格 |
 | `spread_statistics` | `id`, `workspace_id`, `spread_id`, `formula_version_id`, `price_basis`, `metric_code`, `window_json`, `value`, `sample_count`, `algorithm_version` | BIGINT identity；参数、价格口径和样本数必填 |
+| `spread_provider_cache` | `id`, `provider_code`, `endpoint_code`, `parameter_hash`, `parameters_json`, `business_date`, `fetched_at`, `http_status`, `business_code`, `payload_json`, `result_kind`, `payload_hash` | 系统级；provider/endpoint/参数/业务日期唯一；只保存成功或合法空结果 |
+| `spread_provider_throttles` | `provider_code`, `last_requested_at`, `suppressed_until`, `updated_at` | 系统级；跨 API 实例锁定，保证三禾实际请求间隔至少 1.5 秒 |
+| `retail_trade_window_rule_versions` | `id`, `workspace_id`, `version`, `algorithm_version`, `status`, `effective_from`, `effective_to` | UUIDv7；版本不可变；系统默认可映射到每个 Workspace |
+| `retail_trade_window_rules` | `id`, `workspace_id`, `rule_version_id`, `exchange_code`, `instrument_code`, `rule_json`, `priority` | 品种精确规则优先于交易所默认；RLS |
+| `spread_provider_series` | `id`, `workspace_id`, `provider_code`, `source_id`, `query_json`, `fetched_at`, `data_cutoff_at`, `payload_hash`, `window_algorithm_version` | UUIDv7；保存 provider 查询/计算批次与来源摘要；RLS |
+| `spread_provider_observations` | `id`, `workspace_id`, `series_id`, `trade_date`, `spread_value`, `from_code`, `to_code`, `segment_id`, `retained`, `exclusion_reason` | BIGINT identity；三禾无原始腿价格，不伪造 market_price 引用；RLS |
+| `spread_window_segments` | `id`, `workspace_id`, `series_id`, `segment_no`, `from_code`, `to_code`, `candidate_start`, `window_start`, `window_end`, `rule_version_id`, `point_count` | 段界、日历/规则版本和点数可追溯；RLS |
+| `spread_favorites` | `id`, `workspace_id`, `name`, `provider_code`, `leg1_json`, `leg2_json`, `created_by`, `created_at` | 规范化两腿参数在 Workspace 内唯一；RLS 与审计 |
+
+`spread_provider_cache` 和 `spread_provider_throttles` 不包含用户或 Workspace 私有数据，
+属于系统级 provider 基础设施；其余新增表属于 Workspace 业务数据。三禾观测只保存上游
+差值、实际合约代码和来源摘要；只有 `self_hosted` 结果可通过既有
+`spread_observation_legs` 下钻到原始 `market_prices`。
 
 ## 8. 成交与持仓域
 

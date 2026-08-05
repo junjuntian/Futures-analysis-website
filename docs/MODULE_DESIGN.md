@@ -11,7 +11,7 @@
 | 文件对象 | `storage` | 对象元数据与存储端口 | `audit` |
 | 导入 | `import` | 文件识别、映射、预览、校验、提交、回滚 | `catalog`、`storage`、`jobs`、`audit` |
 | 行情 | `market_data` | 标准化价格、来源和修订 | `catalog`、`import` |
-| 套利 | `spread` | 多腿定义、公式版本、价差与统计 | `catalog`、`market_data`、`jobs` |
+| 套利 | `spread` | 多腿定义、公式版本、可插拔序列、散户窗口、价差与统计 | `catalog`、`market_data`、`jobs` |
 | 交易复盘 | `portfolio` | 成交、交易组、持仓、权益和绩效 | `catalog`、`import` |
 | 席位 | `seat_analysis` | 席位标准化、分类版本、汇总 | `catalog`、`import` |
 | 图表 | `chart` | 图表模板、查询配置和前端导出安全约束 | `spread`、`portfolio`、`seat_analysis` |
@@ -27,6 +27,8 @@
 - MVP 的 Workspace 是个人边界，不暴露邀请、共享或切换成员 API。
 - `import` 是数据进入业务模块的统一批量入口，不在解析器中直接调用业务表 SQL。
 - `market_data` 不依赖 `spread`；价差是行情的消费者。
+- `spread` 只通过 `SpreadSeriesProvider` 获取规范化序列；`sanhe` 与 `self_hosted`
+  适配器不得把各自字段泄漏到领域用例。三禾只读边界遵循 `DEC-042`。
 - `portfolio` 与 `spread` 可共享 `catalog`，但不得互相引用内部实体。
 - `chart` 只消费查询模型和图表数据 DTO，不修改来源数据。
 - `ai` 只依赖应用查询端口，不依赖仓储实现。
@@ -69,6 +71,7 @@
 | `JobQueue` | `enqueue`、`claim`、`heartbeat`、`complete`、`fail`，任务载荷绑定 `workspace_id` |
 | `ImportParser` | `inspect`、`preview`、`stream_rows` |
 | `DataConnector` | `schedule_collect`、`normalize_csv`、`submit_import` |
+| `SpreadSeriesProvider` | `list_varieties`、`list_contract_months`、`load_series`；返回真实来源和取数元数据 |
 | `AiProvider` | `capabilities`、`chat`、`stream` |
 | `Clock` | `now` |
 | `SecretCipher` | `encrypt_with_dek`、`decrypt_for_workspace`、`rewrap_dek`、`kek_version` |

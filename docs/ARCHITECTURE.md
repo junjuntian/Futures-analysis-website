@@ -9,6 +9,7 @@
 - 业务数据归属于个人 Workspace；所有业务查询、写入、任务、文件对象和 AI 工具必须携带服务端解析的 `workspace_id`。
 - 文件通过 `ObjectStorage` 端口访问；第一版实现本地存储适配器。
 - 自动采集由独立 Python akshare 容器执行，按需拉起、跑完退出；容器输出标准化 CSV 后只通过导入 API 入库。
+- Phase 5 自由价差由 Rust API 内的 `SpreadSeriesProvider` 读取；首发 `sanhe` 适配器仅代理 `DEC-042` 的三个三禾只读 POST 端点，自有 `self_hosted` 实现读取本库行情。
 - PNG/SVG 由 ECharts 前端直接导出，不建设服务端图表渲染辅助进程。
 - AI 通过应用层只读工具访问业务能力，不直接访问数据库。
 
@@ -31,6 +32,7 @@ flowchart TB
     SCH["盘后调度"] --> COL["akshare Collector（Python，按需）"]
     COL -->|公开接口与公开文件| EX["五家交易所"]
     COL -->|标准化 CSV + 导入 API| API
+    API -->|服务端只读代理、限频与缓存| SANHE["三禾自由价差 API"]
     API --> AIG["AI Gateway"]
     AIG --> LLM["外部模型提供商"]
     FS --> LOCAL["本地文件适配器"]
@@ -99,6 +101,11 @@ sequenceDiagram
 - 夜盘记录为独立 `session_type`，并归入交易所日历定义的下一交易日。
 - 行情图默认 `price_basis=close`；日终持仓、未实现盈亏和权益默认 `price_basis=settlement`。
 - MVP 不生成连续合约；外部连续合约通过来源与换月规则元数据进入。
+- Phase 5A 的三禾序列没有原始腿价格，必须如实使用 `price_basis=upstream_spread`；
+  按实际合约代码和本库交割月执行版本化散户可交易窗口裁剪后，再在服务端重算季节图
+  与月度矩阵。详细边界见 `docs/phases/PHASE_05_SPREAD_ANALYTICS.md`。
+- `SpreadSeriesProvider` 隔离 `sanhe` 与 `self_hosted`；UI 和响应始终披露真实 provider、
+  source、取数时间、样本范围和算法版本。
 
 ### 4.3 akshare 自动采集
 
