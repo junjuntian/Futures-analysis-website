@@ -6,8 +6,9 @@
 - VPS 上不得手工编辑业务源码。
 - GitHub Actions / Codex Cloud 负责无生产数据的编译、测试和辅助审查；权威生产
   镜像由 GitHub Actions 构建并发布到 GHCR。
-- `futures` VPS 不再进行常规 Rust 或前端编译，只负责数据库备份、镜像拉取、
-  迁移、真实 PostgreSQL/RLS/文件持久化和最终 E2E 验收。
+- `futures` VPS 的 4 GiB 资源承载仓库级 self-hosted runner；CI 与镜像构建只可
+  由受控 Actions 工作流在 2.5 GiB 总峰值护栏内执行。部署步骤不得手工运行
+  Cargo、pnpm 或 Docker 源码构建，仍只拉取已发布镜像并执行备份、迁移和 E2E。
 - 部署目录建议：`/opt/futures-platform`。
 - 秘密目录建议：`/etc/futures-platform/secrets`。
 - 数据目录建议：`/var/lib/futures-platform`。
@@ -70,7 +71,8 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
 4. 在任何生产迁移或容器切换前备份数据库，记录备份路径、校验值和恢复点；
    同时记录当前稳定的四个镜像 digest。
 5. 执行 Compose config，确认没有 `build:`、`latest`、明文秘密或意外端口。
-6. 执行 `docker pull`，不得在 VPS 运行 Cargo、pnpm 或 Docker 源码构建。
+6. 执行 `docker pull`；部署作业和人工操作不得在 VPS 运行 Cargo、pnpm 或 Docker
+   源码构建。只有仓库 Actions 的 CI/container-images job 可按本节资源护栏构建。
 7. 按迁移顺序使用受控迁移身份执行数据库迁移，并核验 `schema_versions`；
    应用运行时身份不得获得迁移所有者权限。
 8. 使用已拉取镜像启动服务，核验 `/api/v1/version`、健康检查和镜像 digest。
@@ -131,14 +133,40 @@ futures VPS 主密钥文件：
 - 部署前基线为 144 个手动批次、25 个自动批次、32 个用户；手动批次未删除或篡改。Phase 3C/3D 生产 E2E 未重跑，避免制造新的手动测试批次。
 - 临时 GHCR 登录配置清理通过；collector 日志的密码、Cookie、CSRF、Authorization 与凭据路径模式扫描无命中。
 
-## Deploy self-hosted runner 资源限额（2026-08-04）
+## Self-hosted runner 资源限额（2026-08-05）
 
-- 仓库级 runner 仅承接 `deploy-futures`，标签为 `futures-vps`；CI 与
-  container-images 继续由 GitHub-hosted runner 编译，不把编译负载转移到 1 GB VPS。
+- VPS 已由用户升配至 4 GiB；仓库级 runner 标签为 `futures-vps`，承接 CI、
+  container-images 与 deploy-futures。禁止在 Actions 外直接编译业务源码。
 - systemd unit 为
   `actions.runner.junjuntian-Futures-analysis-website.futures-vps.service`，资源 drop-in
   为同名 `.service.d/limits.conf`。
-- 因 256 MiB 限额在既有部署验收中触顶并发生 cgroup 限流，已将
-  `MemoryMax` 调整为 384 MiB。执行 `systemctl daemon-reload` 并在 runner 空闲时
-  重启服务后，实态为 `active/running`，`MemoryMax=402653184` bytes。
-- 本次仅调整 runner 服务资源上限，没有触发部署、迁移、E2E 或生产数据修改。
+- runner `MemoryMax=2500M`（实态 `2621440000` bytes）；Cargo 使用 2 jobs 且关闭
+  incremental，Node heap 限 768 MiB，CI PostgreSQL 限 384 MiB；BuildKit 单 job
+  串行运行，memory/memory-swap 均限 2 GiB。runner 已加入 Docker 组；该组等价于
+  root 权限边界，变更经用户明确授权，不得扩散至其他账号。
+- 候选 `e627ab8` 的完整 CI 期间 runner cgroup 达到上限但 `oom=0`、`oom_kill=0`；
+  生产五容器与 PostgreSQL 同期保持健康。构建峰值必须继续保持不超过 2.5 GiB。
+
+## Phase 4A HIGH-03 终验候选部署实证（2026-08-05）
+
+- 业务修复：`23e679db3b7fa3a384e764235e6ea3066d18766f`；发布候选：
+  `e627ab8c3b797cc77f872a9c02439c1dfca0d4eb`。
+- CI Run `30969365344` success；Container images Run `30970280360` success；
+  Deploy Run `30971024520` success。
+- 运行镜像：
+  - API：`sha256:cb9145eca282dc72d0e916723e12ead471d4376aee85852a93a5ed8ece85f3de`
+  - Worker：`sha256:597fe69d47b442ae2569d24ddb013a9e9ebf7a8b69de3e802b41032a3f5cb0af`
+  - Frontend：`sha256:54c3c0e7f33eddb42356fd13cbf64772939b699ec1c40645d99930642ee90f36`
+  - Collector：`sha256:e07b34a05316b620d9ddf68db57b054e9227665951bf51ad33245f55c1891e60`
+- 最新 release 证据目录为
+  `/var/lib/futures-platform/deployment-evidence/e627ab8c3b797cc77f872a9c02439c1dfca0d4eb-20260805T030140Z`；
+  `/api/v1/version` 返回同一 Git SHA。
+- Phase 4A E2E 覆盖授权矩阵、目录受控 upsert、全部正式投影回滚、HIGH-03 的
+  exchange 被 calendar version 引用时预检拒绝与零变更、DCE 来源恢复和同日重放
+  幂等，最终输出 `PHASE4A_E2E_PASS`。Collector 峰值 `179359744` bytes，低于
+  512 MiB 限额。
+- 部署后只读快照：手动批次 144、用户 32、`market_prices=9020`、
+  `seat_positions=186083`，两类业务唯一键重复组均为 0；bootstrap token absent，
+  collector 凭据仍为 `root:root`/`0400`。本节不记录任何秘密内容。
+- 本次完成 Generator 发布链，不构成独立 Evaluator 的 Phase 4A PASS；不得据此合并
+  main、打标签或启动 Phase 4B-2。
