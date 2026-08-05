@@ -20,6 +20,9 @@ COOKIE_NAME=${PHASE5A_COOKIE_NAME:-futures_session}
 SESSION_ONE=
 SESSION_TWO=
 FAVORITE_ID=
+TEMP_USER_ID=
+TEMP_WORKSPACE_ID=
+TEMP_MEMBERSHIP_ID=
 
 case "$RELEASE_DIR" in
   /opt/futures-platform-releases/*) ;;
@@ -77,6 +80,14 @@ cleanup() {
     psql_value -c "delete from sessions where id in ('$SESSION_ONE','$SESSION_TWO')" \
       >/dev/null 2>&1
   fi
+  if [[ "$TEMP_USER_ID" =~ ^[0-9a-f-]{36}$ ]] &&
+     [[ "$TEMP_WORKSPACE_ID" =~ ^[0-9a-f-]{36}$ ]] &&
+     [[ "$TEMP_MEMBERSHIP_ID" =~ ^[0-9a-f-]{36}$ ]]; then
+    psql_value -c "delete from user_roles where user_id='$TEMP_USER_ID';
+      delete from workspace_memberships where id='$TEMP_MEMBERSHIP_ID';
+      delete from workspaces where id='$TEMP_WORKSPACE_ID';
+      delete from users where id='$TEMP_USER_ID'" >/dev/null 2>&1
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -117,6 +128,23 @@ mapfile -t workspace_rows < <(psql_value -c \
     order by (select count(*) from contracts c where c.workspace_id=w.id) desc,
              w.created_at, w.id
     limit 2")
+if test "${#workspace_rows[@]}" -eq 1; then
+  TEMP_USER_ID=$(new_uuid)
+  TEMP_WORKSPACE_ID=$(new_uuid)
+  TEMP_MEMBERSHIP_ID=$(new_uuid)
+  temp_username="phase5a-e2e-$TEMP_USER_ID"
+  psql_value -c "insert into users
+      (id,username,username_normalized,password_hash,password_params_version)
+    values
+      ('$TEMP_USER_ID','$temp_username','$temp_username','phase5a-e2e-no-login',1);
+    insert into workspaces (id,name,owner_user_id)
+    values ('$TEMP_WORKSPACE_ID','Phase 5A VPS E2E','$TEMP_USER_ID');
+    insert into workspace_memberships (id,workspace_id,user_id,role)
+    values ('$TEMP_MEMBERSHIP_ID','$TEMP_WORKSPACE_ID','$TEMP_USER_ID','owner');
+    insert into user_roles (user_id,role_name)
+    values ('$TEMP_USER_ID','analyst')" >/dev/null
+  workspace_rows+=("$TEMP_WORKSPACE_ID|$TEMP_USER_ID")
+fi
 test "${#workspace_rows[@]}" -eq 2
 IFS='|' read -r WORKSPACE_ONE USER_ONE <<<"${workspace_rows[0]}"
 IFS='|' read -r WORKSPACE_TWO USER_TWO <<<"${workspace_rows[1]}"

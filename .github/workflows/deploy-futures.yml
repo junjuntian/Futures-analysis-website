@@ -103,14 +103,15 @@ jobs:
             test "${#changed_files[@]}" -gt 0
             for changed_file in "${changed_files[@]}"; do
               case "$changed_file" in
-                .github/workflows/deploy-futures.yml|rust/tests/phase_4a_e2e.sh|rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql) ;;
+                .github/workflows/deploy-futures.yml|rust/tests/phase_4a_e2e.sh|rust/tests/phase_5a_e2e.sh|rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql) ;;
                 *)
                   echo "acceptance-only revision changes forbidden file: $changed_file" >&2
                   exit 1
                   ;;
               esac
             done
-            printf '%s\n' "${changed_files[@]}" | grep -Fx 'rust/tests/phase_4a_e2e.sh' >/dev/null
+            printf '%s\n' "${changed_files[@]}" |
+              grep -Ex 'rust/tests/phase_(4a|5a)_e2e\.sh' >/dev/null
           fi
 
       - name: Install strict SSH identity
