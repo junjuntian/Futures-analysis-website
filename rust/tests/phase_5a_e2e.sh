@@ -169,10 +169,18 @@ unset token_one_hash token_two_hash csrf_one_hash csrf_two_hash
 
 assert_status "$(curl -sS -o "$EVIDENCE_DIR/unauthorized.json" -w '%{http_code}' \
   "$BASE/api/v1/spread-analytics/favorites")" 401 "unauthorized favorites"
+AUTH_PROBE_BODY='{"provider":"sanhe","leg1":{"variety":"probe-a","symbol":"PA","month":"01"},"leg2":{"variety":"probe-b","symbol":"PB","month":"02"}}'
+assert_status "$(curl -sS -o "$EVIDENCE_DIR/query-unauthenticated.json" -w '%{http_code}' -X POST \
+  -H "Origin: $ORIGIN" -H 'Content-Type: application/json' \
+  --data "$AUTH_PROBE_BODY" \
+  "$BASE/api/v1/spread-analytics/free-spread/query")" 401 "query unauthenticated"
+jq -e '.data.code == "auth_required"' "$EVIDENCE_DIR/query-unauthenticated.json" >/dev/null
 assert_status "$(curl -sS -o "$EVIDENCE_DIR/csrf.json" -w '%{http_code}' -X POST \
   -H "Cookie: $COOKIE_NAME=$TOKEN_ONE" -H "Origin: $ORIGIN" \
-  -H 'Content-Type: application/json' --data '{}' \
+  -H 'Content-Type: application/json' --data "$AUTH_PROBE_BODY" \
   "$BASE/api/v1/spread-analytics/free-spread/query")" 403 "query csrf"
+jq -e '.data.code == "csrf_required"' "$EVIDENCE_DIR/csrf.json" >/dev/null
+unset AUTH_PROBE_BODY
 
 echo "PHASE5A_E2E_STAGE live_provider"
 varieties_json="$EVIDENCE_DIR/varieties.json"
