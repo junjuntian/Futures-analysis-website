@@ -315,6 +315,11 @@ seasonal_series { axis, years }
 monthly_matrix { years, months, up_ratios }
 ```
 
+写接口沿用既有导入链的检查顺序：Axum 先完成路径、查询串和 JSON 请求体提取；进入
+handler 后依次校验 session 认证、Origin、CSRF、权限。因此结构合法的匿名请求优先返回
+401，结构合法且 session 有效但缺少/错误 CSRF 的请求返回 403；结构不合法的 JSON 可在
+安全检查前由 extractor 返回 400/422，不能用作认证或 CSRF 顺序断言。
+
 合法空结果使用 HTTP 200，三块数据为空且 `quality.status=empty`；provider 错误使用
 第 3.4 节稳定 envelope。来源、取数时间、数据截止时间、规则/算法/日历版本不得省略。
 
