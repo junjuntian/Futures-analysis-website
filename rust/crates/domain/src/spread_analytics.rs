@@ -403,13 +403,27 @@ pub fn calculate_windowed_analytics(
 }
 
 fn validate_points(points: &[RawSpreadPoint]) -> Result<(), WindowError> {
-    let mut previous = None;
+    // Dates must increase strictly WITHIN a contract-pair segment.  Across a
+    // segment boundary the upstream legitimately repeats the roll date: on the
+    // day the pair rolls (e.g. jm1909&jm2001 -> jm2009&jm2101) it returns one
+    // point for the old pair and one for the new pair with the same trade
+    // date, so the whole-series strictness check rejected real data.
+    let mut previous: Option<Date> = None;
+    let mut current_pair: Option<(String, String)> = None;
     for point in points {
-        if previous.is_some_and(|date| point.trade_date <= date) {
-            return Err(WindowError::DatesNotStrictlyIncreasing);
-        }
         if point.from_code.trim().is_empty() || point.to_code.trim().is_empty() {
             return Err(WindowError::BlankContractCode);
+        }
+        let pair = (
+            point.from_code.to_ascii_uppercase(),
+            point.to_code.to_ascii_uppercase(),
+        );
+        if current_pair.as_ref() != Some(&pair) {
+            current_pair = Some(pair);
+            previous = None;
+        }
+        if previous.is_some_and(|date| point.trade_date <= date) {
+            return Err(WindowError::DatesNotStrictlyIncreasing);
         }
         previous = Some(point.trade_date);
     }
@@ -753,6 +767,47 @@ mod tests {
             calculate_windowed_analytics(&points, &HashMap::new(), None),
             Err(WindowError::DatesNotStrictlyIncreasing)
         ));
+    }
+
+    #[test]
+    fn accepts_repeated_roll_date_across_segment_boundary() {
+        // Upstream returns the roll date twice: once for the outgoing pair and
+        // once for the incoming pair (observed live on jm 09-01, e.g.
+        // 2019-09-17).  That must not be rejected as out-of-order data, and the
+        // outgoing pair's point past its retail deadline is excluded by the
+        // window rule rather than by validation.
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "JM1909".into(),
+            contract("JM1909", 2019, 9, date!(2019 - 08 - 30)),
+        );
+        contracts.insert(
+            "JM2001".into(),
+            contract("JM2001", 2020, 1, date!(2019 - 12 - 31)),
+        );
+        contracts.insert(
+            "JM2009".into(),
+            contract("JM2009", 2020, 9, date!(2020 - 08 - 31)),
+        );
+        contracts.insert(
+            "JM2101".into(),
+            contract("JM2101", 2021, 1, date!(2020 - 12 - 31)),
+        );
+        let points = vec![
+            point(date!(2019 - 08 - 29), -50.0, "jm1909", "jm2001"),
+            point(date!(2019 - 09 - 17), -53.0, "jm1909", "jm2001"),
+            point(date!(2019 - 09 - 17), -40.0, "jm2009", "jm2101"),
+            point(date!(2019 - 09 - 18), -41.0, "jm2009", "jm2101"),
+        ];
+        let result =
+            calculate_windowed_analytics(&points, &contracts, Some(date!(2019 - 09 - 18))).unwrap();
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(
+            result.observations[1].exclusion_reason,
+            Some(ExclusionReason::OutsideRetailWindow)
+        );
+        assert!(result.observations[2].retained);
+        assert!(result.observations[3].retained);
     }
 
     #[test]
