@@ -213,9 +213,145 @@ run_collector_with_peak() {
   return "$status"
 }
 
+# Deployment-acceptance exception only: DEC-041/HIGH-04 still requires the
+# collector to fail and quarantine an incomplete DCE fallback dataset.  A
+# partial Sina response may warn instead of blocking an unrelated release, but
+# the production collector/import policy remains unchanged and writes no
+# incomplete dataset to the projections.
+declare -A DCE_INCOMPLETE_DATASETS=()
+DCE_COMPLETENESS_WARNING_COUNT=0
+
+accept_dce_completeness_only_failure() {
+  local log=$1 run_label=$2 exchange dataset summary
+  local missing_contracts skipped_items expected_items
+  local -a dce_failed_datasets=() fallback_activated_datasets=()
+  local -a incomplete_datasets=()
+
+  for exchange in SHFE CZCE GFEX CFFEX; do
+    if grep -Eq "^ERROR (exchange_failed|dataset_failed|dataset_submit_failed|batch_failed) exchange=$exchange([[:space:]]|$)" "$log"; then
+      echo "PHASE4A_E2E_FAIL non_dce_failure run=$run_label exchange=$exchange" >&2
+      return 1
+    fi
+    for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
+      if ! grep -Eq "^INFO batch_succeeded exchange=$exchange dataset=$dataset([[:space:]]|$)" "$log"; then
+        echo "PHASE4A_E2E_FAIL non_dce_success_missing run=$run_label exchange=$exchange dataset=$dataset" >&2
+        return 1
+      fi
+    done
+  done
+
+  if grep -Eq '^ERROR (exchange_failed|dataset_submit_failed) exchange=DCE([[:space:]]|$)' "$log"; then
+    echo "PHASE4A_E2E_FAIL dce_non_completeness_failure run=$run_label" >&2
+    return 1
+  fi
+  if grep -E '^ERROR fallback_failed exchange=DCE ' "$log" |
+    grep -Evq ' error=DatasetCompletenessError$'; then
+    echo "PHASE4A_E2E_FAIL dce_fallback_unexpected_error run=$run_label" >&2
+    return 1
+  fi
+
+  mapfile -t dce_failed_datasets < <(
+    sed -nE 's/^ERROR dataset_failed exchange=DCE dataset=([^ ]+) error=[^ ]+$/\1/p' "$log" |
+      sort -u
+  )
+  mapfile -t fallback_activated_datasets < <(
+    sed -nE 's/^WARNING fallback_activated exchange=DCE dataset=([^ ]+) source=akshare_sina_dce_fallback$/\1/p' "$log" |
+      sort -u
+  )
+  mapfile -t incomplete_datasets < <(
+    sed -nE 's/^ERROR fallback_failed exchange=DCE dataset=([^ ]+) error=DatasetCompletenessError$/\1/p' "$log" |
+      sort -u
+  )
+  test "${#incomplete_datasets[@]}" -gt 0 || {
+    echo "PHASE4A_E2E_FAIL collector_failed_without_dce_completeness run=$run_label" >&2
+    return 1
+  }
+
+  for dataset in "${dce_failed_datasets[@]}"; do
+    if ! printf '%s\n' "${fallback_activated_datasets[@]}" | grep -Fxq "$dataset"; then
+      echo "PHASE4A_E2E_FAIL dce_fallback_not_activated run=$run_label dataset=$dataset" >&2
+      return 1
+    fi
+  done
+  for dataset in "${fallback_activated_datasets[@]}"; do
+    if grep -Eq "^INFO batch_succeeded exchange=DCE dataset=$dataset source=akshare_sina_dce_fallback([[:space:]]|$)" "$log"; then
+      continue
+    fi
+    if ! printf '%s\n' "${incomplete_datasets[@]}" | grep -Fxq "$dataset"; then
+      echo "PHASE4A_E2E_FAIL dce_fallback_terminal_result_missing run=$run_label dataset=$dataset" >&2
+      return 1
+    fi
+  done
+
+  for dataset in "${incomplete_datasets[@]}"; do
+    if ! grep -Eq "^ERROR batch_failed exchange=DCE dataset=$dataset source=akshare_sina_dce_fallback reason=automatic_validation_failed$" "$log"; then
+      echo "PHASE4A_E2E_FAIL dce_incomplete_batch_not_isolated run=$run_label dataset=$dataset" >&2
+      return 1
+    fi
+    summary=$(awk -v target="$dataset" '
+      function reset_attempt(    contract) {
+        for (contract in missing) delete missing[contract]
+        skipped = ""
+        expected = ""
+      }
+      $0 == "WARNING fallback_activated exchange=DCE dataset=" target " source=akshare_sina_dce_fallback" {
+        active = 1
+        reset_attempt()
+        next
+      }
+      active && $0 ~ ("^WARNING dataset_retry exchange=DCE dataset=" target " source=akshare_sina_dce_fallback ") {
+        reset_attempt()
+        next
+      }
+      active && $0 ~ /^WARNING dce_fallback_(market|seat)_contract_skipped contract=/ {
+        for (field = 1; field <= NF; field++) {
+          if ($field ~ /^contract=/) {
+            split($field, pair, "=")
+            missing[pair[2]] = 1
+          }
+        }
+        next
+      }
+      active && $0 ~ /^ERROR dce_fallback_dataset_incomplete / {
+        for (field = 1; field <= NF; field++) {
+          if ($field ~ /^skipped_count=/) {
+            split($field, pair, "=")
+            skipped = pair[2]
+          } else if ($field ~ /^expected_(contracts|requests)=/) {
+            split($field, pair, "=")
+            expected = pair[2]
+          }
+        }
+        next
+      }
+      active && $0 == "ERROR fallback_failed exchange=DCE dataset=" target " error=DatasetCompletenessError" {
+        count = 0
+        for (contract in missing) count++
+        print count "|" skipped "|" expected
+        exit
+      }
+    ' "$log")
+    IFS='|' read -r missing_contracts skipped_items expected_items <<<"$summary"
+    if ! [[ "$missing_contracts" =~ ^[1-9][0-9]*$ ]] ||
+      ! [[ "$skipped_items" =~ ^[1-9][0-9]*$ ]] ||
+      ! [[ "$expected_items" =~ ^[1-9][0-9]*$ ]] ||
+      test "$skipped_items" -ge "$expected_items"; then
+      echo "PHASE4A_E2E_FAIL dce_fallback_empty_or_unstructured run=$run_label dataset=$dataset" >&2
+      return 1
+    fi
+    DCE_INCOMPLETE_DATASETS["$dataset"]=1
+    DCE_COMPLETENESS_WARNING_COUNT=$((DCE_COMPLETENESS_WARNING_COUNT + 1))
+    echo "PHASE4A_E2E_WARNING dce_fallback_incomplete run=$run_label dataset=$dataset source=akshare_sina_dce_fallback missing_contracts=$missing_contracts missing_source_items=$skipped_items expected_source_items=$expected_items admission=non_blocking"
+  done
+}
+
 echo "PHASE4A_E2E_STAGE first_run_started"
 first_run_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-run_collector_with_peak "$EVIDENCE_DIR/first-run.log"
+first_run_status=0
+run_collector_with_peak "$EVIDENCE_DIR/first-run.log" || first_run_status=$?
+if test "$first_run_status" -ne 0; then
+  accept_dce_completeness_only_failure "$EVIDENCE_DIR/first-run.log" first
+fi
 echo "PHASE4A_E2E_STAGE first_run_completed"
 
 workspace_id=$(psql_value -c \
@@ -245,18 +381,29 @@ for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 sea
   actual_official_sources=$(psql_value -c \
     "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_cffex_official','akshare_czce_official','akshare_gfex_official','akshare_shfe_official')")
   test "$actual_official_sources" = "$expected_official_sources"
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")" = 1
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started'")" = 5
+  dce_source_count=$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")
+  all_source_count=$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started'")
+  if test -n "${DCE_INCOMPLETE_DATASETS[$dataset]+set}"; then
+    test "$dce_source_count" = 0
+    test "$all_source_count" = 4
+    test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_sina_dce_fallback' and job.dataset_type='$dataset' and job.status='failed' and job.skipped_source_item_count>0 and job.started_at>=timestamptz '$first_run_started'")" -ge 1
+  else
+    test "$dce_source_count" = 1
+    test "$all_source_count" = 5
+  fi
 done
 
 test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='akshare_sina_dce_fallback' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='akshare_v1'")" = 1
 for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")" = 1
+  expected_dce_source_count=1
+  test -n "${DCE_INCOMPLETE_DATASETS[$dataset]+set}" && expected_dce_source_count=0
+  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")" = "$expected_dce_source_count"
 done
 dce_market_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='daily_market_prices_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback') order by batch.created_at desc limit 1")
 dce_seat_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='seat_positions_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback') order by batch.created_at desc limit 1")
 case "$dce_market_source:$dce_seat_source" in
   akshare_dce_official:akshare_dce_official|akshare_sina_dce_fallback:akshare_sina_dce_fallback) ;;
+  :|:akshare_dce_official|:akshare_sina_dce_fallback|akshare_dce_official:|akshare_sina_dce_fallback:) ;;
   *) echo "PHASE4A_E2E_FAIL inconsistent_dce_source" >&2; exit 1 ;;
 esac
 
@@ -272,14 +419,22 @@ test "$market_before" -gt 0
 test "$seats_before" -gt 0
 test "$(psql_value -c "select count(*) from exchanges where workspace_id='$workspace_id'")" -ge 5
 test "$(psql_value -c "select count(*) from contracts where workspace_id='$workspace_id'")" -gt 0
-test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id join contracts contract on contract.workspace_id=price.workspace_id and contract.id=price.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_market_source'")" -gt 0
-test "$(psql_value -c "select count(*) from seat_positions position join data_sources source on source.workspace_id=position.workspace_id and source.id=position.source_id join contracts contract on contract.workspace_id=position.workspace_id and contract.id=position.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where position.workspace_id='$workspace_id' and position.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_seat_source'")" -gt 0
+if test -n "$dce_market_source"; then
+  test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id join contracts contract on contract.workspace_id=price.workspace_id and contract.id=price.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_market_source'")" -gt 0
+fi
+if test -n "$dce_seat_source"; then
+  test "$(psql_value -c "select count(*) from seat_positions position join data_sources source on source.workspace_id=position.workspace_id and source.id=position.source_id join contracts contract on contract.workspace_id=position.workspace_id and contract.id=position.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where position.workspace_id='$workspace_id' and position.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_seat_source'")" -gt 0
+fi
 
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,contract_id,trade_date,session_type,granularity,revision_no,count(*) from market_prices where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade_date,contract_id,seat_id,rank_type,rank,count(*) from seat_positions where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 
 echo "PHASE4A_E2E_STAGE replay_run_started"
-run_collector_with_peak "$EVIDENCE_DIR/replay-run.log"
+replay_run_status=0
+run_collector_with_peak "$EVIDENCE_DIR/replay-run.log" || replay_run_status=$?
+if test "$replay_run_status" -ne 0; then
+  accept_dce_completeness_only_failure "$EVIDENCE_DIR/replay-run.log" replay
+fi
 echo "PHASE4A_E2E_STAGE replay_run_completed"
 market_after=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
@@ -686,7 +841,13 @@ fi
   echo "rls=PASS"
   echo "provenance=PASS"
   echo "dce_source_provenance=PASS"
-  echo "exact_source_sets=PASS"
+  if test "$DCE_COMPLETENESS_WARNING_COUNT" -gt 0; then
+    echo "exact_source_sets=PASS_WITH_DCE_COMPLETENESS_WARNING"
+    echo "dce_completeness_warnings=$DCE_COMPLETENESS_WARNING_COUNT"
+  else
+    echo "exact_source_sets=PASS"
+    echo "dce_completeness_warnings=0"
+  fi
   echo "identity_mode_matrix=PASS"
   echo "automatic_fixed_pipeline=PASS"
   echo "projection_rollback=PASS"
