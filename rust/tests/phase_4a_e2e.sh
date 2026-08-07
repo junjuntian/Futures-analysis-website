@@ -458,7 +458,7 @@ if run_collector_with_peak "$EVIDENCE_DIR/fault-run.log" \
 fi
 test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_dce_official' and job.dataset_type='daily_market_prices_v1' and job.status='failed' and job.started_at >= timestamptz '$fault_started'")" -ge 1
 test "$(psql_value -c "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and job.dataset_type='daily_market_prices_v1' and job.status='succeeded' and job.started_at >= timestamptz '$fault_started'")" = "$expected_official_sources"
-test "$(psql_value -c "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")" = "$market_before"
+test "$(psql_value -c "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")" = "$market_after"
 
 echo "PHASE4A_E2E_STAGE authorization_matrix_started"
 RUN_MARK=$(new_uuid)
