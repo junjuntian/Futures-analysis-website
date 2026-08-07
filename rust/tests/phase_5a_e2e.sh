@@ -196,6 +196,18 @@ jq -e '
   (.data.items | length >= 2)
 ' "$varieties_json" >/dev/null
 
+# A cache hit must be a pure read: no upstream/throttle activity, and the API must
+# replay the persisted payload plus source metadata byte-for-byte.
+varieties_cache_count_before=$(psql_value -c "select count(*) from spread_provider_cache")
+varieties_throttle_before=$(psql_value -c \
+  "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")
+assert_status "$(api_get "$TOKEN_ONE" \
+  '/api/v1/spread-analytics/providers/sanhe/varieties' "$EVIDENCE_DIR/varieties-hit.json")" 200 "varieties cache hit"
+test "$(psql_value -c "select count(*) from spread_provider_cache")" = "$varieties_cache_count_before"
+test "$(psql_value -c \
+  "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")" = "$varieties_throttle_before"
+diff -u <(jq -S '.data' "$varieties_json") <(jq -S '.data' "$EVIDENCE_DIR/varieties-hit.json")
+
 VARIETY_A=$(jq -r '.data.items[0].name' "$varieties_json")
 VARIETY_B=$(jq -r '.data.items[1].name' "$varieties_json")
 test "$VARIETY_A" != "$VARIETY_B"
@@ -234,6 +246,8 @@ throttle_hit_after=$(psql_value -c \
 test "$cache_count_after" = "$cache_count_before"
 test "$cache_fetched_after" = "$cache_fetched_before"
 test "$throttle_hit_after" = "$throttle_hit_before"
+diff -u <(jq -S '.data' "$EVIDENCE_DIR/months-a.json") \
+  <(jq -S '.data' "$EVIDENCE_DIR/months-a-hit.json")
 
 JM_NAME=$(jq -r '.data.items[] | select((.symbol|ascii_upcase)=="JM") | .name' \
   "$varieties_json" | head -n1)
@@ -269,6 +283,18 @@ jq -e '
 series_id=$(jq -r '.data.series_id' "$query_json")
 test "$(psql_value -c "select count(*) from spread_provider_series where id='$series_id' and workspace_id='$WORKSPACE_ONE' and price_basis='upstream_spread'")" = 1
 test "$(psql_value -c "select count(*) from spread_provider_observations where series_id='$series_id' and workspace_id='$WORKSPACE_ONE'")" = "$(jq -r '.data.quality.input_point_count' "$query_json")"
+
+query_cache_count_before=$(psql_value -c "select count(*) from spread_provider_cache")
+query_throttle_before=$(psql_value -c \
+  "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")
+query_hit_json="$EVIDENCE_DIR/jm-09-01-hit.json"
+assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
+  '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_hit_json")" 200 "jm 09-01 cache hit"
+test "$(psql_value -c "select count(*) from spread_provider_cache")" = "$query_cache_count_before"
+test "$(psql_value -c \
+  "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")" = "$query_throttle_before"
+diff -u <(jq -S '.data | del(.series_id)' "$query_json") \
+  <(jq -S '.data | del(.series_id)' "$query_hit_json")
 echo "PHASE5A_E2E_STAGE live_provider_passed"
 
 echo "PHASE5A_E2E_STAGE favorites_and_rls"

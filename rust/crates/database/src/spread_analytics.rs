@@ -162,7 +162,10 @@ pub async fn get_cache_in_transaction(
     }))
 }
 
-pub async fn store_cache(pool: &PgPool, cache: &NewProviderCache<'_>) -> Result<(), sqlx::Error> {
+pub async fn store_cache(
+    pool: &PgPool,
+    cache: &NewProviderCache<'_>,
+) -> Result<CachedProviderPayload, sqlx::Error> {
     sqlx::query(
         "insert into spread_provider_cache
             (id, provider_code, endpoint_code, parameter_hash, parameters_json,
@@ -187,7 +190,17 @@ pub async fn store_cache(pool: &PgPool, cache: &NewProviderCache<'_>) -> Result<
     .execute(pool)
     .await?;
     clear_failure(pool, cache.endpoint, cache.parameter_hash).await?;
-    Ok(())
+    // PostgreSQL canonicalizes timestamptz precision, and an immutable same-day row may
+    // already have won the conflict. Always return the persisted row so the cache-fill
+    // response and every later cache hit expose exactly the same payload and metadata.
+    get_cache(
+        pool,
+        cache.endpoint,
+        cache.parameter_hash,
+        cache.business_date,
+    )
+    .await?
+    .ok_or(sqlx::Error::RowNotFound)
 }
 
 pub async fn active_failure(
@@ -869,13 +882,15 @@ mod tests {
         sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
 
         let business_date = Date::from_calendar_date(2026, time::Month::August, 5).unwrap();
-        let fetched_at = OffsetDateTime::now_utc();
+        let fetched_at = OffsetDateTime::now_utc()
+            .replace_nanosecond(123_456_789)
+            .unwrap();
         let parameters = json!({});
         let payload = json!({"code": 0, "data": []});
         let parameter_hash = "0".repeat(64);
         let payload_hash = "1".repeat(64);
 
-        store_cache(
+        let canonical = store_cache(
             &pool,
             &NewProviderCache {
                 endpoint: ProviderEndpoint::AllVarieties,
@@ -903,6 +918,35 @@ mod tests {
         .expect("legal empty result is persisted");
         assert_eq!(cached.result_kind, "empty");
         assert_eq!(cached.payload, payload);
+        assert_ne!(canonical.fetched_at, fetched_at);
+        assert_eq!(canonical.fetched_at, cached.fetched_at);
+        assert_eq!(canonical.payload, cached.payload);
+        assert_eq!(canonical.payload_hash, cached.payload_hash);
+
+        let conflicting_payload = json!({"code": 0, "data": ["must-not-replace-cache"]});
+        let conflicting_fetched_at = fetched_at + Duration::seconds(30);
+        let conflicting_payload_hash = "2".repeat(64);
+        let conflict_result = store_cache(
+            &pool,
+            &NewProviderCache {
+                endpoint: ProviderEndpoint::AllVarieties,
+                parameter_hash: &parameter_hash,
+                parameters: &parameters,
+                business_date,
+                fetched_at: conflicting_fetched_at,
+                http_status: 200,
+                business_code: 0,
+                payload: &conflicting_payload,
+                result_kind: "ok",
+                payload_hash: &conflicting_payload_hash,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict_result.fetched_at, cached.fetched_at);
+        assert_eq!(conflict_result.payload, cached.payload);
+        assert_eq!(conflict_result.result_kind, cached.result_kind);
+        assert_eq!(conflict_result.payload_hash, cached.payload_hash);
 
         let first_pool = pool.clone();
         let second_pool = pool.clone();

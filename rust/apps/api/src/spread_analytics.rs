@@ -664,7 +664,7 @@ async fn load_varieties(
             );
         }
     };
-    store_fetch(
+    let cache = store_fetch(
         state,
         endpoint,
         &parameter_hash,
@@ -681,11 +681,13 @@ async fn load_varieties(
         .commit()
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let (data, result_kind) = SanheSpreadSeriesProvider::parse_varieties(&cache.payload)
+        .map_err(|error| provider_error(error, request_id))?;
     Ok(CachedFetch {
-        data: fetched.data,
-        fetched_at: fetched.fetched_at,
-        result_kind: fetched.result_kind,
-        payload_hash: sha256_json(&fetched.raw_payload),
+        data,
+        fetched_at: cache.fetched_at,
+        result_kind,
+        payload_hash: cache.payload_hash,
     })
 }
 
@@ -783,7 +785,7 @@ async fn load_months(
             );
         }
     };
-    store_fetch(
+    let cache = store_fetch(
         state,
         endpoint,
         &parameter_hash,
@@ -800,11 +802,14 @@ async fn load_months(
         .commit()
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let (data, result_kind) =
+        SanheSpreadSeriesProvider::parse_contract_months(variety, &cache.payload)
+            .map_err(|error| provider_error(error, request_id))?;
     Ok(CachedFetch {
-        data: fetched.data,
-        fetched_at: fetched.fetched_at,
-        result_kind: fetched.result_kind,
-        payload_hash: sha256_json(&fetched.raw_payload),
+        data,
+        fetched_at: cache.fetched_at,
+        result_kind,
+        payload_hash: cache.payload_hash,
     })
 }
 
@@ -878,7 +883,7 @@ async fn load_series(
             );
         }
     };
-    store_fetch(
+    let cache = store_fetch(
         state,
         endpoint,
         &parameter_hash,
@@ -895,11 +900,13 @@ async fn load_series(
         .commit()
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let (data, result_kind) = SanheSpreadSeriesProvider::parse_series(&cache.payload)
+        .map_err(|error| provider_error(error, request_id))?;
     Ok(CachedFetch {
-        data: fetched.data,
-        fetched_at: fetched.fetched_at,
-        result_kind: fetched.result_kind,
-        payload_hash: sha256_json(&fetched.raw_payload),
+        data,
+        fetched_at: cache.fetched_at,
+        result_kind,
+        payload_hash: cache.payload_hash,
     })
 }
 
@@ -977,7 +984,7 @@ async fn store_fetch(
     business_code: i64,
     result_kind: ProviderResultKind,
     request_id: Uuid,
-) -> Result<(), SpreadApiError> {
+) -> Result<database::spread_analytics::CachedProviderPayload, SpreadApiError> {
     let payload_hash = sha256_json(payload);
     database::spread_analytics::store_cache(
         &state.auth.pool,
