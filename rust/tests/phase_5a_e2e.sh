@@ -270,20 +270,33 @@ test "$throttle_hit_after" = "$throttle_hit_before"
 diff -u <(jq -S '.data' "$EVIDENCE_DIR/months-a.json") \
   <(jq -S '.data' "$EVIDENCE_DIR/months-a-hit.json")
 
-JM_NAME=$(jq -r '.data.items[] | select((.symbol|ascii_upcase)=="JM") | .name' \
+# Use the provider-analysis control pair that is documented and live-probed with
+# code=0.  Same-variety JM 09-01 can legally return code=2/no data, so it cannot
+# serve as the success-path fixture for cache and window assertions.
+FG_NAME=$(jq -r '.data.items[] | select((.symbol|ascii_upcase)=="FG") | .name' \
   "$varieties_json" | head -n1)
-test -n "$JM_NAME"
-JM_SYMBOL=$(jq -r --arg name "$JM_NAME" '.data.items[] | select(.name==$name) | .symbol' \
+SA_NAME=$(jq -r '.data.items[] | select((.symbol|ascii_upcase)=="SA") | .name' \
   "$varieties_json" | head -n1)
-JM_PATH="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$JM_NAME")/months"
-assert_status "$(api_get "$TOKEN_ONE" "$JM_PATH" "$EVIDENCE_DIR/jm-months.json")" 200 "jm months"
-jq -e '.data.months | index("09") and index("01")' "$EVIDENCE_DIR/jm-months.json" >/dev/null
+test -n "$FG_NAME"
+test -n "$SA_NAME"
+FG_SYMBOL=$(jq -r --arg name "$FG_NAME" '.data.items[] | select(.name==$name) | .symbol' \
+  "$varieties_json" | head -n1)
+SA_SYMBOL=$(jq -r --arg name "$SA_NAME" '.data.items[] | select(.name==$name) | .symbol' \
+  "$varieties_json" | head -n1)
+FG_PATH="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$FG_NAME")/months"
+SA_PATH="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$SA_NAME")/months"
+assert_status "$(api_get "$TOKEN_ONE" "$FG_PATH" "$EVIDENCE_DIR/fg-months.json")" 200 "fg months"
+assert_status "$(api_get "$TOKEN_ONE" "$SA_PATH" "$EVIDENCE_DIR/sa-months.json")" 200 "sa months"
+jq -e '.data.months | index("01")' "$EVIDENCE_DIR/fg-months.json" >/dev/null
+jq -e '.data.months | index("01")' "$EVIDENCE_DIR/sa-months.json" >/dev/null
 
-query_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" '
-  {provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:"09"},leg2:{variety:$variety,symbol:$symbol,month:"01"}}')
-query_json="$EVIDENCE_DIR/jm-09-01.json"
+query_body=$(jq -cn \
+  --arg variety1 "$FG_NAME" --arg symbol1 "$FG_SYMBOL" \
+  --arg variety2 "$SA_NAME" --arg symbol2 "$SA_SYMBOL" '
+  {provider:"sanhe",leg1:{variety:$variety1,symbol:$symbol1,month:"01"},leg2:{variety:$variety2,symbol:$symbol2,month:"01"}}')
+query_json="$EVIDENCE_DIR/fg-01-sa-01.json"
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
-  '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_json")" 200 "jm 09-01"
+  '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_json")" 200 "fg 01-sa 01"
 jq -e '
   .data.source.provider == "sanhe" and
   .data.source.source_code == "sanhe_spread_readonly" and
@@ -308,9 +321,9 @@ test "$(psql_value -c "select count(*) from spread_provider_observations where s
 query_cache_count_before=$(psql_value -c "select count(*) from spread_provider_cache")
 query_throttle_before=$(psql_value -c \
   "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")
-query_hit_json="$EVIDENCE_DIR/jm-09-01-hit.json"
+query_hit_json="$EVIDENCE_DIR/fg-01-sa-01-hit.json"
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
-  '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_hit_json")" 200 "jm 09-01 cache hit"
+  '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_hit_json")" 200 "fg 01-sa 01 cache hit"
 test "$(psql_value -c "select count(*) from spread_provider_cache")" = "$query_cache_count_before"
 test "$(psql_value -c \
   "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")" = "$query_throttle_before"
