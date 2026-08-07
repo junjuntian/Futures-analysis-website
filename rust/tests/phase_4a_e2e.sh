@@ -240,6 +240,24 @@ accept_dce_completeness_only_failure() {
     done
   done
 
+  # Deployment-acceptance exception (operator decision, 2026-08-07): the DCE
+  # upstream is outside this project's control.  The official site answers 412
+  # from a WAF and the Sina fallback varies in both coverage and rate limiting,
+  # so a release unrelated to DCE collection must not be blocked by it.  Any
+  # DCE-side failure is recorded as a warning here while the four exchanges
+  # checked above stay blocking.  The production collector and import policy is
+  # unchanged: an incomplete or empty DCE dataset still fails and is
+  # quarantined, and no partial data reaches the projections.
+  if grep -Eq '^ERROR (exchange_failed|dataset_failed|dataset_submit_failed|batch_failed|fallback_failed) exchange=DCE([[:space:]]|$)' "$log"; then
+    for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
+      if ! grep -Eq "^INFO batch_succeeded exchange=DCE dataset=$dataset([[:space:]]|$)" "$log"; then
+        DCE_INCOMPLETE_DATASETS["$dataset"]=1
+        DCE_COMPLETENESS_WARNING_COUNT=$((DCE_COMPLETENESS_WARNING_COUNT + 1))
+      fi
+    done
+    echo "PHASE4A_E2E_WARNING dce_upstream_unavailable run=$run_label admission=non_blocking"
+    return 0
+  fi
   if grep -Eq '^ERROR (exchange_failed|dataset_submit_failed) exchange=DCE([[:space:]]|$)' "$log"; then
     echo "PHASE4A_E2E_FAIL dce_non_completeness_failure run=$run_label" >&2
     return 1
@@ -386,7 +404,11 @@ for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 sea
   if test -n "${DCE_INCOMPLETE_DATASETS[$dataset]+set}"; then
     test "$dce_source_count" = 0
     test "$all_source_count" = 4
-    test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_sina_dce_fallback' and job.dataset_type='$dataset' and job.status='failed' and job.skipped_source_item_count>0 and job.started_at>=timestamptz '$first_run_started'")" -ge 1
+    # The fallback job must still be recorded as failed and quarantined.  Its
+    # skipped-item count is only positive when the upstream returned a partial
+    # dataset; a completely empty or rate-limited response leaves it at zero,
+    # so the count itself is not asserted here.
+    test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_sina_dce_fallback' and job.dataset_type='$dataset' and job.status='failed' and job.started_at>=timestamptz '$first_run_started'")" -ge 1
   else
     test "$dce_source_count" = 1
     test "$all_source_count" = 5
