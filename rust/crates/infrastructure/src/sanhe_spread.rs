@@ -285,8 +285,15 @@ impl SanheSpreadSeriesProvider {
                 to_code,
             });
         }
+        // Dates must increase strictly within one contract-pair run.  On a
+        // roll date the upstream legitimately repeats the trade date across
+        // the boundary (one point for the outgoing pair, one for the incoming
+        // pair — observed live on jm 09-01), so only same-pair neighbours are
+        // held to strict ordering, mirroring the domain window validation.
         for pair in points.windows(2) {
-            if pair[1].trade_date <= pair[0].trade_date {
+            let same_pair = pair[1].from_code.eq_ignore_ascii_case(&pair[0].from_code)
+                && pair[1].to_code.eq_ignore_ascii_case(&pair[0].to_code);
+            if same_pair && pair[1].trade_date <= pair[0].trade_date {
                 return Err(contract_changed());
             }
         }
@@ -527,6 +534,41 @@ mod tests {
         assert_eq!(series.points.len(), 2);
         assert_eq!(series.points[0].trade_date, date!(2025 - 01 - 02));
         assert_eq!(series.points[1].value, Decimal::new(45, 1));
+    }
+
+    #[test]
+    fn accepts_repeated_roll_date_across_pair_boundary() {
+        let (series, kind) = SanheSpreadSeriesProvider::parse_series(&json!({
+            "code": 0,
+            "data": {
+                "dates": ["2019-09-16", "2019-09-17", "2019-09-17", "2019-09-18"],
+                "spreads": [
+                    {"value": -50, "from_code": "jm1909", "to_code": "jm2001"},
+                    {"value": -53, "from_code": "jm1909", "to_code": "jm2001"},
+                    {"value": -40, "from_code": "jm2009", "to_code": "jm2101"},
+                    {"value": -41, "from_code": "jm2009", "to_code": "jm2101"}
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(kind, ProviderResultKind::Ok);
+        assert_eq!(series.points.len(), 4);
+    }
+
+    #[test]
+    fn rejects_repeated_date_within_one_pair() {
+        let error = SanheSpreadSeriesProvider::parse_series(&json!({
+            "code": 0,
+            "data": {
+                "dates": ["2025-01-02", "2025-01-02"],
+                "spreads": [
+                    {"value": 1, "from_code": "fg2505", "to_code": "sa2505"},
+                    {"value": 2, "from_code": "fg2505", "to_code": "sa2505"}
+                ]
+            }
+        }))
+        .unwrap_err();
+        assert_eq!(error.kind, SpreadProviderErrorKind::ContractChanged);
     }
 
     #[test]
