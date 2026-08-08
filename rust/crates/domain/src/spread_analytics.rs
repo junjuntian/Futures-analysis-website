@@ -232,6 +232,30 @@ pub fn calculate_windowed_analytics(
         return Ok(empty_analytics());
     }
 
+    // The stored catalog only holds contracts the collector has actually seen,
+    // so historical legs (e.g. jm1309 from 2013) are absent and every point
+    // that references them would be dropped, leaving only the most recent
+    // contract cycle. Chinese exchange codes encode the delivery month
+    // (letters + YYMM), so derive a window for any leg missing from the
+    // catalog. Catalog rows always take precedence; the derived deadline is
+    // the last weekday before the delivery month, which only ever lands on
+    // holidays that carry no price points, so window contents are unchanged.
+    let contracts = {
+        let mut resolved = contracts.clone();
+        for point in points {
+            for code in [&point.from_code, &point.to_code] {
+                let key = code.to_ascii_uppercase();
+                if let std::collections::hash_map::Entry::Vacant(entry) = resolved.entry(key)
+                    && let Some(info) = derive_contract_window(entry.key())
+                {
+                    entry.insert(info);
+                }
+            }
+        }
+        resolved
+    };
+    let contracts = &contracts;
+
     let mut observations = Vec::with_capacity(points.len());
     let mut continuous_points = Vec::new();
     let mut segment_boundaries = Vec::new();
@@ -400,6 +424,59 @@ pub fn calculate_windowed_analytics(
         current_value,
         quality,
     })
+}
+
+/// Derive a contract window from an exchange code of the form `<letters><YYMM>`
+/// (e.g. `JM1309` -> delivery 2013-09). Returns `None` when the code does not
+/// match that shape, letting the caller exclude the point instead of guessing.
+/// The exchange is unknown from the code alone, so the calendar version is nil
+/// and the deadline is the last weekday of the month before delivery.
+fn derive_contract_window(code: &str) -> Option<ContractWindowInfo> {
+    let digits_start = code.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = code.split_at(digits_start);
+    if letters.is_empty() || digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year = 2000 + digits[0..2].parse::<i32>().ok()?;
+    let month = digits[2..4].parse::<u8>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let retail_deadline = last_weekday_before_delivery(year, month)?;
+    Some(ContractWindowInfo {
+        code: code.to_string(),
+        instrument_code: letters.to_string(),
+        exchange_code: String::new(),
+        delivery_year: year,
+        delivery_month: month,
+        retail_deadline,
+        calendar_version_id: Uuid::nil(),
+    })
+}
+
+/// Last non-weekend day of the month before the delivery month. Divergence from
+/// the true exchange calendar only occurs on holidays, which carry no price
+/// points, so retail-window trimming is unaffected.
+fn last_weekday_before_delivery(delivery_year: i32, delivery_month: u8) -> Option<Date> {
+    let (year, month) = if delivery_month == 1 {
+        (delivery_year - 1, 12u8)
+    } else {
+        (delivery_year, delivery_month - 1)
+    };
+    let month = Month::try_from(month).ok()?;
+    let first = Date::from_calendar_date(year, month, 1).ok()?;
+    let mut day = first
+        .checked_add(time::Duration::days(31))?
+        .replace_day(1)
+        .ok()?
+        .checked_sub(time::Duration::days(1))?;
+    while matches!(
+        day.weekday(),
+        time::Weekday::Saturday | time::Weekday::Sunday
+    ) {
+        day = day.checked_sub(time::Duration::days(1))?;
+    }
+    Some(day)
 }
 
 fn validate_points(points: &[RawSpreadPoint]) -> Result<(), WindowError> {
@@ -698,9 +775,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_contract_metadata_is_excluded_instead_of_guessed() {
+    fn unparseable_contract_code_is_excluded_instead_of_guessed() {
+        // A code that cannot be parsed into <letters><YYMM> has no derivable
+        // delivery month, so the point is excluded rather than guessed.
         let result = calculate_windowed_analytics(
-            &[point(date!(2025 - 01 - 02), 10.0, "A2505", "B2505")],
+            &[point(date!(2025 - 01 - 02), 10.0, "MYSTERY", "OTHER")],
             &HashMap::new(),
             None,
         )
@@ -767,6 +846,60 @@ mod tests {
             calculate_windowed_analytics(&points, &HashMap::new(), None),
             Err(WindowError::DatesNotStrictlyIncreasing)
         ));
+    }
+
+    #[test]
+    fn derives_window_for_historical_leg_absent_from_catalog() {
+        // No catalog rows at all: historical jm codes must still resolve via
+        // code derivation so the full multi-year history is retained rather
+        // than dropped as missing metadata.
+        let points = vec![
+            point(date!(2013 - 03 - 22), -53.0, "jm1309", "jm1401"),
+            point(date!(2013 - 03 - 25), -47.0, "jm1309", "jm1401"),
+        ];
+        let result =
+            calculate_windowed_analytics(&points, &HashMap::new(), Some(date!(2013 - 03 - 25)))
+                .unwrap();
+        assert_eq!(result.quality.missing_contract_point_count, 0);
+        assert_eq!(result.continuous_points.len(), 2);
+        assert_eq!(result.segments[0].window_year, Some(2013));
+    }
+
+    #[test]
+    fn derive_contract_window_parses_code_shapes() {
+        let jm = derive_contract_window("JM1309").unwrap();
+        assert_eq!(jm.instrument_code, "JM");
+        assert_eq!((jm.delivery_year, jm.delivery_month), (2013, 9));
+        assert_eq!(jm.retail_deadline, date!(2013 - 08 - 30));
+        let jan = derive_contract_window("A2701").unwrap();
+        assert_eq!((jan.delivery_year, jan.delivery_month), (2027, 1));
+        assert_eq!(jan.retail_deadline, date!(2026 - 12 - 31));
+        assert!(derive_contract_window("JM13").is_none());
+        assert!(derive_contract_window("1309").is_none());
+        assert!(derive_contract_window("JM1399").is_none());
+    }
+
+    #[test]
+    fn catalog_row_takes_precedence_over_derivation() {
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "JM2509".into(),
+            contract("JM2509", 2025, 9, date!(2025 - 08 - 15)),
+        );
+        contracts.insert(
+            "JM2601".into(),
+            contract("JM2601", 2026, 1, date!(2025 - 12 - 31)),
+        );
+        let points = vec![
+            point(date!(2025 - 08 - 14), 1.0, "jm2509", "jm2601"),
+            point(date!(2025 - 08 - 15), 2.0, "jm2509", "jm2601"),
+            point(date!(2025 - 08 - 18), 3.0, "jm2509", "jm2601"),
+        ];
+        let result =
+            calculate_windowed_analytics(&points, &contracts, Some(date!(2025 - 08 - 18))).unwrap();
+        // Catalog deadline 2025-08-15 (not the derived 2025-08-29) governs.
+        assert_eq!(result.segments[0].window_end, Some(date!(2025 - 08 - 15)));
+        assert_eq!(result.quality.retained_point_count, 2);
     }
 
     #[test]
