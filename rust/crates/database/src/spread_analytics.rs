@@ -474,9 +474,22 @@ pub async fn resolve_contract_windows(
     for row in rows {
         let deadline: Option<Date> = row.get("retail_deadline");
         let calendar_version_id: Option<Uuid> = row.get("calendar_version_id");
-        let (Some(retail_deadline), Some(calendar_version_id)) = (deadline, calendar_version_id)
-        else {
-            continue;
+        // The stored calendar only covers days the collector has actually
+        // seen, so most deadline months have no calendar rows yet.  Fall back
+        // to the last non-weekend day of the month before delivery: any
+        // divergence from the exchange calendar lands on holidays that carry
+        // no price points anyway, so the window maths are unaffected.  The nil
+        // calendar version marks the approximation.
+        let (retail_deadline, calendar_version_id) = match (deadline, calendar_version_id) {
+            (Some(deadline), Some(calendar_version_id)) => (deadline, calendar_version_id),
+            _ => {
+                let delivery_year: i32 = row.get("delivery_year");
+                let delivery_month: i32 = row.get("delivery_month");
+                let Some(fallback) = fallback_retail_deadline(delivery_year, delivery_month) else {
+                    continue;
+                };
+                (fallback, Uuid::nil())
+            }
         };
         let code: String = row.get("code");
         resolved.insert(
@@ -493,6 +506,59 @@ pub async fn resolve_contract_windows(
         );
     }
     Ok(resolved)
+}
+
+fn fallback_retail_deadline(delivery_year: i32, delivery_month: i32) -> Option<Date> {
+    let (year, month) = if delivery_month == 1 {
+        (delivery_year - 1, 12u8)
+    } else {
+        (delivery_year, u8::try_from(delivery_month - 1).ok()?)
+    };
+    let first_of_month =
+        Date::from_calendar_date(year, time::Month::try_from(month).ok()?, 1).ok()?;
+    let mut day = first_of_month
+        .replace_day(1)
+        .ok()?
+        .checked_add(Duration::days(31))?
+        .replace_day(1)
+        .ok()?
+        .checked_sub(Duration::days(1))?;
+    if day.month() as u8 != month {
+        day = day.replace_day(1).ok()?.checked_sub(Duration::days(1))?;
+    }
+    while matches!(
+        day.weekday(),
+        time::Weekday::Saturday | time::Weekday::Sunday
+    ) {
+        day = day.checked_sub(Duration::days(1))?;
+    }
+    Some(day)
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::fallback_retail_deadline;
+    use time::macros::date;
+
+    #[test]
+    fn falls_back_to_last_weekday_of_prior_month() {
+        assert_eq!(
+            fallback_retail_deadline(2026, 9),
+            Some(date!(2026 - 08 - 31))
+        );
+        assert_eq!(
+            fallback_retail_deadline(2027, 1),
+            Some(date!(2026 - 12 - 31))
+        );
+        assert_eq!(
+            fallback_retail_deadline(2026, 6),
+            Some(date!(2026 - 05 - 29))
+        );
+        assert_eq!(
+            fallback_retail_deadline(2026, 12),
+            Some(date!(2026 - 11 - 30))
+        );
+    }
 }
 
 pub async fn save_series(
