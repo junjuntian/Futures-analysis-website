@@ -161,7 +161,21 @@ jobs:
             rust/migrations/202608030002_phase_4a_rls_backfill.sql \
             rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql \
             rust/migrations/202608050001_phase_5a_spread_provider.sql \
+            rust/migrations/202608090001_phase_5a_leg_order_mismatch.sql \
             "${RELEASE_BUNDLE}/migrations/"
+          # The list above is explicit so a release always ships a reviewed set
+          # of migrations. That makes it easy to add a migration and forget the
+          # list, shipping code whose schema never arrives -- which is how a
+          # leg-order deploy reached production and answered 500 on every
+          # query. Fail here instead of at runtime.
+          missing_migrations=$(comm -23 \
+            <(find rust/migrations -name '*.sql' -printf '%f\n' | sort) \
+            <(find "${RELEASE_BUNDLE}/migrations" -name '*.sql' -printf '%f\n' | sort))
+          if test -n "$missing_migrations"; then
+            echo "DEPLOY_FAIL migrations_not_bundled" >&2
+            printf '%s\n' "$missing_migrations" >&2
+            exit 1
+          fi
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
           install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
 
