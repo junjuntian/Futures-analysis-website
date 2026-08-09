@@ -319,8 +319,22 @@ diff -u <(jq -S '.data | del(.series_id)' "$query_json") \
 echo "PHASE5A_E2E_STAGE live_provider_passed"
 
 echo "PHASE5A_E2E_STAGE favorites_and_rls"
-favorite_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" '
-  {name:"Phase 5A VPS E2E",provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:"09"},leg2:{variety:$variety,symbol:$symbol,month:"01"}}')
+# Favorite uniqueness covers the leg pair only, not the name, so a probe using
+# jm 09-01 collides with the operator's own favorite for the combination they
+# are most likely to save. Pick two months outside the common spreads, and
+# clear only rows this test created (matched by its own name) so a run
+# interrupted before cleanup cannot block the next one.
+FAVORITE_MONTH_ONE=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][0] // "09"' \
+  "$EVIDENCE_DIR/jm-months.json")
+FAVORITE_MONTH_TWO=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][1] // "01"' \
+  "$EVIDENCE_DIR/jm-months.json")
+test -n "$FAVORITE_MONTH_ONE"
+test -n "$FAVORITE_MONTH_TWO"
+test "$FAVORITE_MONTH_ONE" != "$FAVORITE_MONTH_TWO"
+psql_value -c "delete from spread_favorites where workspace_id='$WORKSPACE_ONE' and name='Phase 5A VPS E2E'" >/dev/null
+favorite_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" \
+  --arg month1 "$FAVORITE_MONTH_ONE" --arg month2 "$FAVORITE_MONTH_TWO" '
+  {name:"Phase 5A VPS E2E",provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:$month1},leg2:{variety:$variety,symbol:$symbol,month:$month2}}')
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
   '/api/v1/spread-analytics/favorites' "$favorite_body" "$EVIDENCE_DIR/favorite-create.json")" 201 "favorite create"
 FAVORITE_ID=$(jq -r '.data.id' "$EVIDENCE_DIR/favorite-create.json")
