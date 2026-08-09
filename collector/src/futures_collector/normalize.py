@@ -46,6 +46,8 @@ MARKET_FIELDS = [
     "low_price",
     "close_price",
     "settlement_price",
+    "volume",
+    "turnover",
     "currency_code",
     "calendar_version",
     "revision_no",
@@ -176,6 +178,13 @@ def normalize_market(
                 "low_price": low,
                 "close_price": close,
                 "settlement_price": settlement,
+                # Carried so the price multiplier can be checked against the
+                # exchange's own arithmetic: turnover / (volume x settlement)
+                # is the multiplier, and a mismatch means a contract spec
+                # changed or the wrong multiplier is on file. That check caught
+                # eggs being off by a factor of two.
+                "volume": _decimal(_pick(raw, "volume", "成交量")),
+                "turnover": _decimal(_pick(raw, "turnover", "成交额")),
                 "currency_code": "CNY",
                 "calendar_version": version,
                 "revision_no": "1",
