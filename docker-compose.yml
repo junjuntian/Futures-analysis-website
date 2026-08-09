@@ -94,8 +94,13 @@ services:
       COLLECTOR_CREDENTIALS_FILE: /run/secrets/collector-credentials
       COLLECTOR_TEMP_ROOT: /work
       TMPDIR: /work
+      FUTURES_DCE_HISTORY_DIR: /srv/dce-history
     volumes:
       - ${COLLECTOR_CREDENTIALS_FILE:-/etc/futures-platform/secrets/collector-credentials}:/run/secrets/collector-credentials:ro
+      # The exchange's own annual history files (DEC-044). Read-only, and only
+      # read when --dce-history is passed: normal daily collection never opens
+      # this directory.
+      - ${DCE_HISTORY_DIR:-/opt/futures-platform/dce-history}:/srv/dce-history:ro
     networks:
       - edge
     mem_limit: 512m

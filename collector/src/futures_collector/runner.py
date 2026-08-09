@@ -14,6 +14,8 @@ from futures_collector.normalize import (
 )
 from futures_collector.sources import (
     DCE_FALLBACK_SOURCE,
+    DCE_HISTORY_SOURCE,
+    DCE_HISTORY_SOURCE_CODE,
     EASTMONEY_SEATS_SOURCE_CODE,
     SOURCES,
     AkshareAdapter,
@@ -48,6 +50,8 @@ class CollectionRunner:
         # None means "every variety". An empty set would mean "none at all",
         # which is never what a caller wants and would submit empty batches.
         self._varieties: frozenset[str] | None = None
+        # Read DCE from the exchange's own annual files instead of the network.
+        self._history = False
 
     def run(
         self,
@@ -56,11 +60,15 @@ class CollectionRunner:
         datasets: list[str],
         injected_failure_exchange: str | None = None,
         varieties: frozenset[str] | None = None,
+        history: bool = False,
     ) -> int:
         self._varieties = varieties
+        self._history = history
         failures = 0
         for code in exchanges:
-            source = SOURCES[code]
+            # History mode replaces DCE outright: for those years no live
+            # endpoint answers, so there is nothing to fall back from.
+            source = DCE_HISTORY_SOURCE if (self._history and code == "DCE") else SOURCES[code]
             try:
                 if code == injected_failure_exchange:
                     raise ConnectionError("injected source isolation failure")
@@ -247,6 +255,31 @@ class CollectionRunner:
             # catalog, so it must never stand in for anything but seats.
             raise ValueError("the Eastmoney source only serves the seats dataset")
         varieties = self._varieties
+        if source.source_code == DCE_HISTORY_SOURCE_CODE:
+            # The annual files carry the prices and the contracts that traded,
+            # and nothing else. Seats for those years live in the exchange's
+            # daily ranking archives, which are a separate download.
+            if dataset == "seats":
+                raise ValueError("the DCE history source carries no seat rankings")
+            frame = self.adapter.dce_history_frame(collection_date, varieties)
+            if dataset == "catalog":
+                # The annual file is one row per contract per trading day, so a
+                # catalog built from it whole would repeat every contract once
+                # per day of the year. The catalog for a date is the distinct
+                # contracts the exchange listed that day.
+                day = frame[frame["交易日期"].astype(str) == collection_date.strftime("%Y%m%d")]
+                day = day.drop_duplicates(subset=["合约"])
+                return self._narrow(normalize_catalog(source, collection_date, day))
+            if dataset == "market":
+                return self._narrow(
+                    normalize_market(source, collection_date, frame, observed_at)
+                )
+            if dataset == "calendar":
+                # Proven the same way as for every other source: the exchange
+                # published rows for this date, so it was a trading day.
+                normalize_market(source, collection_date, frame, observed_at)
+                return normalize_calendar(source, collection_date)
+            raise ValueError("unsupported dataset")
         if dataset == "catalog":
             frame = (
                 self.adapter.fallback_catalog(source, collection_date, varieties)

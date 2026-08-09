@@ -31,6 +31,15 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     value.add_argument(
+        "--dce-history",
+        action="store_true",
+        help=(
+            "Read DCE from the exchange's annual history files in "
+            "$FUTURES_DCE_HISTORY_DIR instead of the network, for the years no "
+            "live endpoint serves. The files are downloaded once by hand."
+        ),
+    )
+    value.add_argument(
         "--inject-failure-exchange",
         choices=[*SOURCES],
         help="Acceptance-only source-isolation fault; records failure without network access",
@@ -78,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                 datasets,
                 injected_failure_exchange=args.inject_failure_exchange,
                 varieties=varieties,
+                history=args.dce_history,
             )
     except Exception as error:
         logging.getLogger("futures_collector").error(

@@ -11,6 +11,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -167,6 +168,41 @@ VARIETY_EXCHANGES = {
 # delisted contract returns nothing and costs one request per contract per date.
 DCE_DETAIL_RECENCY_DAYS = 45
 
+# The exchange's own annual history files, which its site offers for every year
+# back to 2006 and which carry the settlement price the aggregators do not. They
+# are the authoritative record for the years no live endpoint will serve: DCE's
+# API has answered 412 to every client since 2026-08-02, Sina keeps delisted
+# contracts only back to about 2018-09, and Eastmoney keeps none at all.
+#
+# The files are not fetched here. The site's WAF refuses scripted clients and
+# writing code to defeat that is out of the question, so they are downloaded
+# once through a browser by the operator and read from disk. That is sound for
+# this data in a way it would not be for daily collection: history does not
+# change, so a one-time capture stays correct forever.
+DCE_HISTORY_SOURCE_CODE = "dce_official_history"
+DCE_HISTORY_DIR_ENV = "FUTURES_DCE_HISTORY_DIR"
+# Columns as the exchange names them, mapped to what the normalizer already
+# reads. Renaming here keeps the normalizer free of a per-source special case.
+DCE_HISTORY_COLUMNS = {
+    "合约名称": "合约",
+    "交易日期": "交易日期",
+    "收盘价": "今收盘",
+    "结算价": "今结算",
+    "商品名称": "品种名称",
+}
+
+DCE_HISTORY_SOURCE = ExchangeSource(
+    "DCE",
+    DCE_HISTORY_SOURCE_CODE,
+    "大连商品交易所",
+    # No domains: this source never opens a socket.
+    frozenset(),
+    "",
+    "",
+    "",
+    False,
+)
+
 EASTMONEY_SEATS_SOURCE_CODE = "eastmoney_seats_fallback"
 EASTMONEY_SEATS_DOMAINS = frozenset({"datacenter-web.eastmoney.com"})
 EASTMONEY_SEATS_ENDPOINT = "https://datacenter-web.eastmoney.com/api/data/v1/get"
@@ -235,6 +271,9 @@ class AkshareAdapter:
         # ordinary answer for a derived candidate that was never listed.
         self._sina_history_cache: dict[str, pd.DataFrame | None] = {}
         self._sina_next_request_at = 0.0
+        # One year of one variety per entry, parsed once and shared by the
+        # catalog and market datasets across every date in that year.
+        self._dce_history_cache: dict[tuple[str, int], pd.DataFrame] = {}
 
     def catalog(self, source: ExchangeSource, collection_date: date) -> Any:
         function = getattr(akshare, source.catalog_function)
@@ -487,6 +526,39 @@ class AkshareAdapter:
                 "seats", len(contracts) * len(kinds), len(contracts) * len(kinds)
             )
         return tables
+
+    def dce_history_frame(
+        self, collection_date: date, varieties: frozenset[str] | None
+    ) -> pd.DataFrame:
+        """Rows for one date, read from the exchange's annual files on disk."""
+        directory = os.environ.get(DCE_HISTORY_DIR_ENV)
+        if not directory:
+            raise ValueError(f"{DCE_HISTORY_DIR_ENV} is not set")
+        root = Path(directory)
+        wanted = sorted(varieties) if varieties is not None else None
+        if not wanted:
+            # Without a selection there is no way to know which files to open;
+            # the directory holds one per variety and year.
+            raise ValueError("the DCE history source requires a variety selection")
+        frames: list[pd.DataFrame] = []
+        missing: list[str] = []
+        for symbol in wanted:
+            key = (symbol.upper(), collection_date.year)
+            frame = self._dce_history_cache.get(key)
+            if frame is None:
+                path = root / f"{symbol.lower()}_{collection_date.year}.xlsx"
+                if not path.is_file():
+                    missing.append(path.name)
+                    continue
+                frame = pd.read_excel(path, dtype=str)
+                frame = frame.rename(columns=DCE_HISTORY_COLUMNS)
+                self._dce_history_cache[key] = frame
+            frames.append(frame)
+        if not frames:
+            raise ValueError(
+                f"no DCE history file for {collection_date.isoformat()}: missing {missing}"
+            )
+        return pd.concat(frames, ignore_index=True)
 
     def _pace_sina(self) -> None:
         """Hold the floor between Sina requests.

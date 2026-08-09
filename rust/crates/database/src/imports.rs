@@ -563,6 +563,22 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             priority: 100,
             allowed_domains: &["www.gfex.com.cn"],
         }),
+        "dce_official_history" => Some(AutomaticSourceDefinition {
+            name: "大连商品交易所（官方历史文件）",
+            source_type: "exchange_public",
+            // Recorded for provenance only: this source reads files from disk
+            // and never resolves a host. The empty allowlist below is what
+            // actually governs it.
+            base_domain: "www.dce.com.cn",
+            authorization_status: "whitelisted",
+            connector_code: "dce_history_files_v1",
+            // Above the Sina fallback and level with the live official source:
+            // these are the exchange's own published files, and for the years
+            // they cover no live endpoint answers at all.
+            priority: 100,
+            // No host is ever contacted, so nothing is allowed.
+            allowed_domains: &[],
+        }),
         "eastmoney_seats_fallback" => Some(AutomaticSourceDefinition {
             name: "东方财富（席位聚合）",
             source_type: "aggregator_public",
@@ -3922,6 +3938,21 @@ mod tests {
         assert_eq!(eastmoney.connector_code, "eastmoney_seats_v1");
         assert!(eastmoney.priority < fallback.priority);
         assert_eq!(eastmoney.allowed_domains, ["datacenter-web.eastmoney.com"]);
+
+        // The exchange's own history files: an exchange source that reads from
+        // disk, so it must be admitted without granting it any host.
+        let history = automatic_source("dce_official_history").unwrap();
+        assert_eq!(history.source_type, "exchange_public");
+        assert_eq!(history.authorization_status, "whitelisted");
+        assert_eq!(history.connector_code, "dce_history_files_v1");
+        assert!(
+            history.allowed_domains.is_empty(),
+            "a source that reads files must not be granted an outbound host"
+        );
+        let history_migration =
+            include_str!("../../../migrations/202608100001_dce_official_history_source.sql");
+        assert!(history_migration.contains("'dce_history_files_v1'"));
+        assert!(history_migration.contains("values ('202608100001'"));
 
         let eastmoney_migration =
             include_str!("../../../migrations/202608090002_eastmoney_seats_source.sql");
