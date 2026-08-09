@@ -17,6 +17,18 @@ esac
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
 
+# docker-compose.production.yml declares every image as
+# `...:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}`. Compose
+# interpolates each file before merging them, so that `:?` aborts the whole
+# command even though docker-compose.release.yml immediately overrides all four
+# images with pinned digests. The deploy job exports IMAGE_TAG and never
+# noticed; cron does not, so every scheduled collection died at interpolation
+# with no data written and nothing but a one-line error in the log. The value is
+# inert here — the digests win — but it has to be set, so derive it from the
+# release the state file points at.
+test -n "${previous_git_sha:-}"
+export IMAGE_TAG="sha-${previous_git_sha}"
+
 COMPOSE=(
   docker compose
   -f "$previous_release_dir/docker-compose.yml"
