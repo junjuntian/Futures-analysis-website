@@ -984,7 +984,16 @@ where
     let stored =
         database::spread_analytics::get_latest_cache(&state.auth.pool, endpoint, parameter_hash)
             .await
-            .map_err(|_| SpreadApiError::Internal(request_id))?;
+            .map_err(|error| {
+                warn!(
+                    request_id = %request_id,
+                    endpoint = endpoint.code(),
+                    parameter_hash,
+                    %error,
+                    "could not read a stored payload to serve after the provider refused"
+                );
+                SpreadApiError::Internal(request_id)
+            })?;
     let Some(stored) = stored else {
         return Err(recorded);
     };
@@ -1068,7 +1077,20 @@ async fn store_fetch(
         },
     )
     .await
-    .map_err(|_| SpreadApiError::Internal(request_id))
+    .map_err(|error| {
+        // A 500 whose cause is discarded cannot be diagnosed from production.
+        // That is not hypothetical: an acceptance run failed here and the only
+        // evidence left was the words "internal error".
+        warn!(
+            request_id = %request_id,
+            provider = SANHE_PROVIDER_CODE,
+            endpoint = endpoint.code(),
+            parameter_hash,
+            %error,
+            "could not store the provider payload"
+        );
+        SpreadApiError::Internal(request_id)
+    })
 }
 
 fn response_from_analytics(

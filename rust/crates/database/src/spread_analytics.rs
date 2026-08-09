@@ -199,7 +199,18 @@ pub async fn store_cache(
     .execute(pool)
     .await?;
     clear_failure(pool, cache.endpoint, cache.parameter_hash).await?;
-    prune_cache(pool, cache.endpoint, cache.parameter_hash).await?;
+    // Trimming old business dates is housekeeping. It must never be able to
+    // fail the request that triggered it: the payload is already stored and
+    // the caller wants it, so a pruning problem is a reason to keep an extra
+    // copy, not a reason to answer 500.
+    if let Err(error) = prune_cache(pool, cache.endpoint, cache.parameter_hash).await {
+        tracing::warn!(
+            provider = SANHE_PROVIDER,
+            endpoint = cache.endpoint.code(),
+            %error,
+            "could not trim the provider cache; leaving the older copies in place"
+        );
+    }
     // PostgreSQL canonicalizes timestamptz precision, and an immutable same-day row may
     // already have won the conflict. Always return the persisted row so the cache-fill
     // response and every later cache hit expose exactly the same payload and metadata.

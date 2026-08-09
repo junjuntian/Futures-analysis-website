@@ -26,8 +26,10 @@ alter table instruments
 -- turnover / (volume x settlement) computed from published daily files, which
 -- agrees to four decimal places on every product where both are available.
 --
--- Matched on the instrument code within whichever workspace holds it, so a
--- fresh database that has not yet collected a catalog simply updates nothing.
+-- Matched on the instrument code in whatever workspace holds it. instruments
+-- carries FORCE row level security, but the migration role has BYPASSRLS, so
+-- the policy does not filter this statement. The assertion below is what makes
+-- that a fact rather than an assumption.
 update instruments set price_multiplier = spec.multiplier
   from (values
     ('JM', 60::numeric),   -- 60 吨/手, 元/吨,      0.5 元 -> 30 元/手
@@ -40,6 +42,25 @@ update instruments set price_multiplier = spec.multiplier
     ('AG', 15::numeric)    -- 15 千克/手, 元/千克,  1 元   -> 15 元/手
   ) as spec(code, multiplier)
  where upper(instruments.code) = spec.code;
+
+-- Prove the seed landed. A migration that silently updates nothing is worse
+-- than one that fails, because the damage only appears much later as profit
+-- computed against a null.
+do $$
+declare
+    seeded integer;
+    present integer;
+begin
+    select count(*) into present from instruments
+     where upper(code) in ('JM','JD','LH','FG','SA','AP','AU','AG');
+    select count(*) into seeded from instruments
+     where upper(code) in ('JM','JD','LH','FG','SA','AP','AU','AG')
+       and price_multiplier is not null;
+    if seeded <> present then
+        raise exception
+            'price multiplier seed reached % of % collected instruments', seeded, present;
+    end if;
+end $$;
 
 insert into schema_versions (version, description)
 values ('202608100003', 'Instrument price multiplier distinct from contract size')
