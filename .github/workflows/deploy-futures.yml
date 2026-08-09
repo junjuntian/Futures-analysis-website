@@ -36,6 +36,11 @@ on:
         required: true
         default: false
         type: boolean
+      run_live_collection:
+        description: Run the full 3-pass live 5-exchange Phase 4A collection gate. Set false for deploys that do not touch collector/Phase 4A code to skip ~1h of unrelated live collection.
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -176,6 +181,7 @@ jobs:
           COLLECTION_DATE=$9
           PROVISION_COLLECTOR=${10}
           ACCEPTANCE_SHA=${11}
+          RUN_LIVE_COLLECTION=${12}
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
@@ -203,6 +209,7 @@ jobs:
           [[ "$ACCEPTANCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
           [[ "$PROVISION_COLLECTOR" = true || "$PROVISION_COLLECTOR" = false ]]
+          [[ "$RUN_LIVE_COLLECTION" = true || "$RUN_LIVE_COLLECTION" = false ]]
           for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
@@ -643,6 +650,7 @@ jobs:
           echo "DEPLOY_STAGE phase4a_e2e_started"
           PHASE4A_RELEASE_DIR="$RELEASE_DIR" \
           PHASE4A_COLLECTION_DATE="$COLLECTION_DATE" \
+          PHASE4A_RUN_LIVE_COLLECTION="$RUN_LIVE_COLLECTION" \
           PHASE4A_EVIDENCE_DIR="$EVIDENCE_DIR/phase4a-work" \
             bash "$RELEASE_DIR/e2e/phase_4a_e2e.sh" |
             tee "$EVIDENCE_DIR/phase4a-stdout.txt"
@@ -702,6 +710,7 @@ jobs:
             echo "run_url=$RUN_URL"
             echo "git_sha=$SOURCE_SHA"
             echo "acceptance_sha=$ACCEPTANCE_SHA"
+            echo "run_live_collection=$RUN_LIVE_COLLECTION"
             echo "deployed_at=$DEPLOYED_AT"
             echo "backup_path=$BACKUP_PATH"
             echo "backup_sha256=$BACKUP_SHA256"
@@ -784,7 +793,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}' '${{ inputs.run_live_collection }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
