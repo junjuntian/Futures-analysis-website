@@ -62,6 +62,12 @@ const subtitle = computed(() => result.value?.continuous_series.current_value ==
   : `仅统计散户可交易窗口 · 当前 ${formatNumber(result.value.continuous_series.current_value)}`)
 const continuousOption = computed(() => result.value ? continuousChartOption(result.value) : {})
 const seasonalOption = computed(() => result.value ? seasonalChartOption(result.value) : {})
+// 取数时间 is when we called the upstream, which says nothing about how fresh
+// the upstream itself is, nor about where the retail window cuts the series
+// off. Both were being read as "the data is stale", so surface them.
+const lastPoint = computed(() => result.value?.continuous_series.points.at(-1))
+const activeWindowEnd = computed(() => result.value?.segments
+  .find((segment) => segment.segment_no === lastPoint.value?.segment_no)?.window_end ?? null)
 const seasonalRange = computed(() => {
   const axis = result.value?.seasonal_series.axis ?? []
   if (!axis.length) return '—'
@@ -300,6 +306,7 @@ onMounted(async () => {
             <strong>{{ subtitle }}</strong>
             <span>数据来源：{{ result.source.source_display_name }}</span>
             <span>取数时间：{{ dateTime(result.source.fetched_at) }}</span>
+            <span>上游数据止于：{{ result.source.data_cutoff_at ?? '—' }}</span>
           </div>
         </div>
         <div v-if="result.continuous_series.points.length" class="chart-wrap">
@@ -312,6 +319,7 @@ onMounted(async () => {
         <el-empty v-else description="该组合在散户可交易窗口内暂无数据" />
         <div class="chart-footnote">
           保留 {{ result.quality.retained_point_count }} 点，剔除 {{ result.quality.excluded_point_count }} 点 ·
+          末点 {{ lastPoint?.trade_date ?? '—' }} · 本段可交易窗口截止 {{ activeWindowEnd ?? '—' }} ·
           窗口算法 {{ result.algorithm_versions.window }} · 规则 {{ result.algorithm_versions.rule }}
         </div>
         <el-collapse v-if="result.continuous_series.points.length" class="data-view">
