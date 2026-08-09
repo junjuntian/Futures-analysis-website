@@ -8,7 +8,7 @@ import socket
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -111,6 +111,18 @@ DCE_FALLBACK_SOURCE = ExchangeSource(
 # a seats-only source: `RPT_FUTU_DAILYPOSITION` carries no settlement price, so
 # it can never stand in for market data (the same reason Sina, not Eastmoney,
 # was chosen as the DCE market fallback).
+# DCE lists twelve consecutive delivery months, so the tradable set for a
+# variety on any given day is the delivery months from the current one through
+# twelve ahead. Deriving that from the date is the only way to know what was
+# listed on a historical day: the Sina instrument and realtime endpoints take no
+# date and answer for today, which is why backfilling an old date used to hunt
+# for contracts that did not exist yet and come back with nothing.
+DCE_FORWARD_DELIVERY_MONTHS = 12
+# Contract parameters come from a live-contracts endpoint, so it is only asked
+# about contracts whose history reaches roughly the present. Asking it about a
+# delisted contract returns nothing and costs one request per contract per date.
+DCE_DETAIL_RECENCY_DAYS = 45
+
 EASTMONEY_SEATS_SOURCE_CODE = "eastmoney_seats_fallback"
 EASTMONEY_SEATS_DOMAINS = frozenset({"datacenter-web.eastmoney.com"})
 EASTMONEY_SEATS_ENDPOINT = "https://datacenter-web.eastmoney.com/api/data/v1/get"
@@ -173,6 +185,11 @@ class AkshareAdapter:
         self._dce_catalog_cache: dict[date, pd.DataFrame] = {}
         self._dce_market_cache: dict[date, pd.DataFrame] = {}
         self._eastmoney_seat_cache: dict[date, list[dict[str, Any]]] = {}
+        # Sina's whole history per contract, fetched once and shared by the
+        # catalog and market datasets so a contract never crosses the network
+        # twice. A None value records "Sina does not know this contract", the
+        # ordinary answer for a derived candidate that was never listed.
+        self._sina_history_cache: dict[str, pd.DataFrame | None] = {}
 
     def catalog(self, source: ExchangeSource, collection_date: date) -> Any:
         function = getattr(akshare, source.catalog_function)
@@ -301,9 +318,11 @@ class AkshareAdapter:
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
             for contract in contracts:
                 try:
-                    frame = akshare.futures_zh_daily_sina(symbol=contract)
-                    if frame is None or frame.empty or "date" not in frame.columns:
-                        raise ValueError("Sina market response is invalid")
+                    # Shared with the catalog build, so a contract's history
+                    # crosses the network once per run rather than twice.
+                    frame = self._sina_contract_history(contract)
+                    if frame is None:
+                        raise ValueError("Sina has no history for this contract")
                     dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
                     if dates.isna().all():
                         raise ValueError("Sina market dates are invalid")
@@ -423,6 +442,95 @@ class AkshareAdapter:
             )
         return tables
 
+    def _sina_contract_history(self, contract: str) -> pd.DataFrame | None:
+        """Sina's whole history for one contract, or None if it has none.
+
+        Sina keeps delisted contracts for a few years and answers with an empty
+        table for anything older, or never listed. That empty answer surfaces as
+        a ValueError from the akshare wrapper, so it has to be told apart from a
+        transport failure: an unknown contract is an ordinary outcome for a
+        derived candidate, while a transport failure must still count as a skip.
+        """
+        if contract in self._sina_history_cache:
+            return self._sina_history_cache[contract]
+        try:
+            frame = akshare.futures_zh_daily_sina(symbol=contract)
+        except OutboundPolicyError:
+            raise
+        except requests.RequestException:
+            # Sina never answered. That is a transport failure, not evidence
+            # about whether the contract exists, so it must keep propagating
+            # and be counted as a skip rather than silently shrinking a catalog.
+            raise
+        except Exception as error:
+            # Sina answered with something the wrapper cannot read as this
+            # contract's history, which it does in at least two different
+            # shapes: ValueError for a delisted contract older than Sina keeps,
+            # IndexError for one not listed yet. Neither says the contract
+            # traded, so the candidate is dropped -- logged with its type so an
+            # upstream format change shows up as every candidate failing rather
+            # than as a quietly empty day.
+            LOG.info(
+                "sina_contract_history_unusable contract=%s error=%s",
+                contract,
+                type(error).__name__,
+            )
+            self._sina_history_cache[contract] = None
+            return None
+        if frame is None or frame.empty or "date" not in frame.columns:
+            self._sina_history_cache[contract] = None
+            return None
+        self._sina_history_cache[contract] = frame
+        return frame
+
+    def _derived_dce_catalog(
+        self, collection_date: date, varieties: frozenset[str]
+    ) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        unusable = 0
+        detail_floor = collection_date - timedelta(days=DCE_DETAIL_RECENCY_DAYS)
+        candidates = _derive_dce_contracts(collection_date, varieties)
+        with official_requests_only(DCE_FALLBACK_SOURCE.domains):
+            for contract in candidates:
+                history = self._sina_contract_history(contract)
+                if history is None:
+                    # Never listed, or older than Sina keeps. Not an error: the
+                    # candidate set is derived, so it is expected to overshoot.
+                    unusable += 1
+                    continue
+                detail: dict[str, str] = {}
+                last_seen = pd.to_datetime(history["date"], errors="coerce").dt.date.max()
+                if pd.notna(last_seen) and last_seen >= detail_floor:
+                    try:
+                        detail = _detail_map(akshare.futures_contract_detail(symbol=contract))
+                    except OutboundPolicyError:
+                        raise
+                    except Exception:
+                        LOG.info("dce_contract_detail_absent contract=%s", contract)
+                rows.append(
+                    {
+                        "品种名称": _contract_instrument(contract),
+                        "合约": contract,
+                        "交易单位": _numeric_value(detail.get("交易单位", "")),
+                        "最小变动价位": _numeric_value(detail.get("最小变动价位", "")),
+                        "开始交易日": detail.get("上市日期", detail.get("上市日", "")),
+                        "最后交易日": detail.get("最后交易日", ""),
+                    }
+                )
+        if not rows:
+            # Every candidate came back unreadable. A genuinely empty day is
+            # possible in principle, but far less likely than Sina refusing the
+            # whole run: it answers a rate limit with an HTML page and HTTP 456,
+            # which is a perfectly successful transaction as far as the client
+            # is concerned and reaches the parser as an ordinary parse error.
+            # Say both readings out loud rather than reporting the day as empty.
+            raise ValueError(
+                f"no usable DCE contract history for {collection_date.isoformat()}: "
+                f"all {unusable} derived candidates were unreadable, which usually "
+                "means the upstream refused the run rather than that nothing traded"
+            )
+        return pd.DataFrame(rows)
+
     def _dce_catalog(
         self, collection_date: date, varieties: frozenset[str] | None = None
     ) -> pd.DataFrame:
@@ -430,6 +538,13 @@ class AkshareAdapter:
         cached = self._dce_catalog_cache.get(cache_key)
         if cached is not None:
             return cached
+        if varieties is not None:
+            # Deriving needs to know which varieties to enumerate. With no
+            # selection there is nothing to derive from, so the live listing is
+            # still used: correct for today, and the only option available.
+            frame = self._derived_dce_catalog(collection_date, varieties)
+            self._dce_catalog_cache[cache_key] = frame
+            return frame
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
@@ -503,6 +618,23 @@ def _detail_map(frame: pd.DataFrame) -> dict[str, str]:
 def _numeric_value(value: str) -> str:
     match = re.search(r"[-+]?\d+(?:\.\d+)?", value.replace(",", ""))
     return match.group(0) if match else ""
+
+
+def _derive_dce_contracts(collection_date: date, varieties: frozenset[str]) -> list[str]:
+    """Contract codes plausibly listed on a date, nearest delivery first.
+
+    The set deliberately overshoots: a candidate that was never listed simply
+    has no history at Sina and is dropped. Overshooting costs one lookup;
+    undershooting would silently omit a contract that really did trade.
+    """
+    codes: list[str] = []
+    for symbol in sorted(varieties):
+        for offset in range(DCE_FORWARD_DELIVERY_MONTHS + 1):
+            month_index = collection_date.month - 1 + offset
+            year = collection_date.year + month_index // 12
+            month = month_index % 12 + 1
+            codes.append(f"{symbol}{year % 100:02d}{month:02d}")
+    return codes
 
 
 def _contract_instrument(contract: str) -> str:
