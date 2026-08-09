@@ -344,6 +344,10 @@ class AkshareAdapter:
                         "client": "WEB",
                     },
                     headers={"Referer": "https://data.eastmoney.com/"},
+                    # The outbound guard supplies a default, but relying on it
+                    # means a future call made outside that guard would hang
+                    # forever with nothing to say so.
+                    timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 payload = response.json()

@@ -4,6 +4,7 @@
 - **接手前必读 `1111` 第 0 节「部署铁律」**（四条，每条都是踩出来的），再看第 2 节分支拓扑，再补 2130 第 5 节的第五条。
 - 生产运行 **`f7374e4`**（2026-08-09 部署成功，见 2130 第 10 节）。`retained_points` 2069→2071 是日历修复的直接量化证据。**其后仍有未部署提交**（workflow 打包修复等），需再跑一轮镜像构建+部署；含 Rust/采集器改动的批次**四个镜像都要重编，不是 15 分钟路径**。
 - **两个当天查出的生产故障已修并已部署**（`IMAGE_TAG` 修复的真实效果待周一 cron 验证）：①定时采集自安装以来一次都没成功过（`run-collector.sh` 缺 `export IMAGE_TAG`，compose 逐文件插值时 `:?` 先炸），导致行情与交易日历停在 2026-08-05、08-04 整天为空；②交易日历只采半个月时，散户截止日被算成「已采到的最后一天」，把自由价差图的最后两天误剔。两者串联，详见 2130 第 2 节。
+- **部署铁律第 0 条（新增，2026-08-10，最常被忽略）：构建镜像之前先看 `gh run list --workflow=ci.yml --limit 1`，红的不准往下走。** `ci.yml` 在每次 push 自动跑，含本地 `cargo test` 会跳过的 PostgreSQL 集成测试与 ruff/前端闸门。**2026-08-09 它连续红了 8 次以上没人看**，本地只跑 `cargo test`（跳过 `#[ignore]`）当作通过，结果一路构建镜像、部署、失败。而且 lint 步骤靠后，它一红，后面的前端 lint/测试/构建/compose 校验**全部被跳过**。
 - 部署铁律：①`run_live_collection` 与采集无关时传 `false`（本批相关，见 2130 第 6 节）；②传了还要 `grep -c PHASE4A_RUN_LIVE_COLLECTION rust/tests/phase_4a_e2e.sh` 确认 ≥1，否则开关空转白跑一小时；③镜像必须本链新构建；④验收 Origin 与 `PUBLIC_ORIGIN` 一致（workflow 已自动传，勿删）；⑤**镜像构建完成后、部署跑完前不要再往 `deploy/phase-5a-candidate` 推任何提交（含文档）**，否则 `acceptance_sha` 与 ref tip 对不上，第一道护栏就拒。
 - **数据获取有两条独立链路，谈「采集渠道」时必须说清是哪一条**（详见 2130 第 3.0 节）：
   - **链路 A 采集器**（Phase 4A，cron 定时，落事实表）：五家交易所官方 akshare 接口；DCE 官方全线 412，实际走新浪 fallback（`DEC-041`）；**东方财富已按 `DEC-043` 接入为席位专用兜底源**（`datacenter-web.eastmoney.com` 报表 `RPT_FUTU_DAILYPOSITION`，不经 akshare，排在全部官方源之后，五家通用，不承担行情与目录，INE 排除）。`1111` 里记的 `qhhqzl.eastmoney.com/...` 地址是错的。

@@ -13,7 +13,10 @@ from futures_collector.sources import (
     AkshareAdapter,
 )
 
-COLUMNS = ["商品名称", "合约名称", "交易日期", "开盘价", "最高价", "最低价", "收盘价", "前结算价", "结算价"]
+COLUMNS = [
+    "商品名称", "合约名称", "交易日期",
+    "开盘价", "最高价", "最低价", "收盘价", "前结算价", "结算价",
+]
 
 
 def annual_file(path, rows):
