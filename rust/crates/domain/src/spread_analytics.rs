@@ -306,9 +306,19 @@ pub fn calculate_windowed_analytics(
             _ => (None, None, Vec::new()),
         };
 
-        let window_start = (from.is_some() && to.is_some()).then_some(candidate_start);
+        let candidate_window_start = (from.is_some() && to.is_some()).then_some(candidate_start);
         let empty_window =
-            matches!((window_start, window_end), (Some(start), Some(end)) if start > end);
+            matches!((candidate_window_start, window_end), (Some(start), Some(end)) if start > end);
+        // An empty window has no orderable start/end pair: the first data point
+        // already sits past the retail deadline (common for historical segments
+        // whose leg was listed late). Report both bounds as absent rather than
+        // an inverted range, which also satisfies the stored
+        // `window_end >= window_start` invariant.
+        let (window_start, window_end) = if empty_window {
+            (None, None)
+        } else {
+            (candidate_window_start, window_end)
+        };
         let mut retained_count = 0u32;
         let mut excluded_count = 0u32;
         let mut first_retained_date = None;
