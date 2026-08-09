@@ -460,12 +460,11 @@ jobs:
               image: ${FRONTEND_REF}
           EOF
           chmod 600 "$RELEASE_DIR/docker-compose.release.yml"
-          # Carry the host's public origin into the release compose. It is
-          # deployment-specific (the VPS is reached by IP, not localhost) and
-          # lives in the legacy .env alongside the other operational settings;
-          # without this every deploy reverted to the localhost default and
-          # browser logins failed the Origin check with "request is not
-          # allowed".
+          # Carry the deployed public origin into the release compose. The
+          # value is host-specific (this VPS is reached by IP, not localhost)
+          # and lives in the legacy .env next to the other operational
+          # settings. Without this, every deploy fell back to the localhost
+          # default and browser logins were rejected by the Origin check.
           if legacy_origin=$(grep -m1 '^PUBLIC_ORIGIN=' "$LEGACY_ROOT/.env" 2>/dev/null); then
             legacy_origin=${legacy_origin#PUBLIC_ORIGIN=}
             legacy_origin=${legacy_origin%\"}
