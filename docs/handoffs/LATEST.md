@@ -1,19 +1,12 @@
 # 最新交接状态
 
-- 最新完整交接：`docs/handoffs/HANDOFF_20260806_0158.md`。
-- Phase 5A 发布链尚未完成。运行候选 `6e65728`、验收脚本提交 `5d30e44`；CI Run
-  `31019205792`、`31029671239` 与镜像 Run `31020852354` 均 success，四个不可变镜像
-  digest 已记录在完整交接中。
-- 第一次 Deploy Run `31022410133` 在 5A 授权夹具处失败并自动回滚；夹具已修复。
-  第二次 Run `31031247994` 在 Phase 4A 期间按用户要求取消。取消后远端进程仍存活，
-  已终止并按切换前备份完成数据库与镜像回滚。
-- 2026-08-06 01:58 CST 实测生产已恢复 `e627ab8`，ready 正常，5A 迁移计数为 0，
-  deploy/Phase 4A/Phase 5A 远端进程均不存在，临时 GHCR 认证目录为 0。
-- 回填仍保持暂停：service inactive，水位 `2026-07-11`、累计处理 24 日、失败对 6、
-  `driver_running=no`；本轮未恢复或重启回填。
-- 尚无 `PHASE5A_E2E_PASS`、真实三禾查询证据或自由价差页截图；不得宣称 5A 发布 PASS。
-- 下一次在允许时间窗先只读复核，再复用已发布镜像重跑 Deploy。发布完成后才可开启
-  全新会话的独立 Evaluator；本会话未创建 `PHASE_05A_EVALUATION.md`。
-- 仍禁止合并 main、打标签、启动 5B、恢复回填、清理既有数据或输出秘密。
+- 最新完整交接：`docs/handoffs/HANDOFF_20260809_1111.md`（务必先读其第 2、6 节：分支拓扑与部署参数）。
+- Phase 5A 自由价差页已上生产可用，但当前生产 `e2f5c11` 仅含近一年历史；含完整 13 年历史 + 三处根因修复 + 发布流程提速的新候选就绪，正在部署。
+- 分支：代码源头 `phase/05-spread-analytics`（HEAD `49f3dcd`）；部署候选 `deploy/phase-5a-candidate`（HEAD `decdef0`）。两支只差两个白名单 e2e 脚本，部署"仅白名单差异"门会过。`ci.yml` 不在白名单，只放 phase/05，两支必须一致。
+- 三处根因（全在 phase/05）：provider 层 + domain 层日期严格递增误杀换月交界重复日期（改段内严格）；窗口引擎历史合约查不到致图只剩一年（`derive_contract_window` 从合约代码自解析交割月，jm 09-01 保留点 130→2989）。Rust 171 测试绿。
+- 发布提速四条（运营者确定）：cargo-chef 依赖分层（`a001762`，版本 pin 0.1.77）+ 删 CI 冗余镜像构建 + deploy 加 `run_live_collection` 开关（默认 true；false 时 4A 只做只读轻量回归、跳过三次真采省~1h）；快通道由该开关覆盖不另建。采集无关部署 ~2h→~15-20min。**均为静态验证，首次部署验证；工装改动在部署前门，失败不影响生产。**
+- 生产：`PUBLIC_ORIGIN` 已改为 IP（IP 访问登录所需）；临时登录用 collector 服务账号（凭据待轮换）；回填暂停（运营者指令，标记文件在 VPS）；DCE 走新浪 fallback（东财席位接口待 DEC-041 修订纳入）。
+- 下一步：本次部署完成 → Phase 5A 独立 Evaluator（全新会话，重点见交接第 7 节）→ 4B-2 → Phase 6 前确认 OPEN-PORT-002。
+- Phase 5 尚未合 main（main 停在 `phase-4a-pass-20260805`），待 5A Evaluator PASS 后合。
 
-接管者必须完整阅读最新交接与 Phase 5 契约，以 VPS、Git 和 Actions 实证为准。
+接手须以 Git、Actions、VPS 实态复核，不盲信摘要；不得输出密钥、恢复回填、清理数据或未经授权合 main/打标签。
