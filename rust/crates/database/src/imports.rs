@@ -3967,6 +3967,30 @@ mod tests {
             !deployment.contains("migrations=202607260001,202607260002"),
             "the evidence line must derive the version list, not hardcode it"
         );
+        // Every operator script the repository owns must be both bundled and
+        // installed. run-backfill.sh was bundled by nobody and installed by
+        // hand once, so repository changes to it silently never reached the
+        // box: production ran an August 5 snapshot while the reviewed copy
+        // moved on. Assert both halves for each script.
+        for (source, destination) in [
+            (
+                "deploy/collector/run-collector.sh",
+                "/usr/local/sbin/run-futures-collector",
+            ),
+            (
+                "deploy/collector/run-backfill.sh",
+                "/usr/local/sbin/run-futures-backfill",
+            ),
+        ] {
+            assert!(
+                deployment.contains(&format!("install -m 700 {source} \\")),
+                "{source} is never copied into the release bundle"
+            );
+            assert!(
+                deployment.contains(destination),
+                "{source} is bundled but never installed as {destination}"
+            );
+        }
         assert_eq!(deployment.matches("ServerAliveInterval=30").count(), 1);
         assert_eq!(deployment.matches("ServerAliveCountMax=6").count(), 1);
         assert!(deployment.contains("for version_attempt in {1..20}"));

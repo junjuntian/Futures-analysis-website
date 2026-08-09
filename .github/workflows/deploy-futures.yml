@@ -148,6 +148,8 @@ jobs:
           install -m 600 deploy/nginx/nginx.conf "${RELEASE_BUNDLE}/deploy/nginx/nginx.conf"
           install -m 700 deploy/collector/run-collector.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-collector.sh"
+          install -m 700 deploy/collector/run-backfill.sh \
+            "${RELEASE_BUNDLE}/deploy/collector/run-backfill.sh"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
@@ -688,6 +690,12 @@ jobs:
 
           install -m 700 "$RELEASE_DIR/deploy/collector/run-collector.sh" \
             /usr/local/sbin/run-futures-collector
+          # The backfill driver was installed by hand once and never shipped by
+          # a release, so every repository change to it silently stopped at the
+          # bundle. It is installed here for the same reason the collector
+          # wrapper is: the box must run the reviewed copy, not a snapshot.
+          install -m 700 "$RELEASE_DIR/deploy/collector/run-backfill.sh" \
+            /usr/local/sbin/run-futures-backfill
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.cron" \
             /etc/cron.d/futures-collector
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
