@@ -7,3 +7,12 @@
     notifempty
     create 0600 root root
 }
+/var/log/futures-spread-warm.log {
+    weekly
+    rotate 8
+    size 10M
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}

@@ -1,6 +1,7 @@
 mod auth;
 mod imports;
 mod spread_analytics;
+mod spread_warm;
 
 use application::{HealthStatus, VersionInfo};
 use auth::{AuthConfig, AuthState, LoginLimiter};
@@ -252,6 +253,15 @@ async fn main() -> anyhow::Result<()> {
         auth: state.clone(),
         provider: Arc::new(infrastructure::sanhe_spread::SanheSpreadSeriesProvider::new()),
     });
+    if std::env::args().any(|arg| arg == "--warm-spread-cache") {
+        let summary = spread_warm::warm_spread_cache(spread_state).await?;
+        // A run that could not refresh anything it tried is a failed run: the
+        // exit code is what a scheduler sees.
+        if summary.attempted > 0 && summary.succeeded == 0 {
+            anyhow::bail!("every warm attempt failed");
+        }
+        return Ok(());
+    }
 
     let app = router(state, import_state, spread_state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;

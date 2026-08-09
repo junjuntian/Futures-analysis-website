@@ -1157,6 +1157,34 @@ fn source_metadata(fetched_at: OffsetDateTime, data_cutoff_at: Option<Date>) -> 
     }
 }
 
+/// Thin seams for the warming job, so it drives the same cache, throttle and
+/// failure-recording path a real request does instead of a parallel one.
+pub async fn warm_contract_months(
+    state: &SpreadAnalyticsState,
+    variety: &str,
+    request_id: Uuid,
+) -> Result<Vec<String>, SpreadApiError> {
+    Ok(load_months(state, variety, request_id).await?.data.months)
+}
+
+pub fn warm_parameter_hash(request: &FreeSpreadQueryRequest) -> String {
+    sha256_json(&canonical_query(request))
+}
+
+/// Fetch and store one combination's series, discarding the payload.
+///
+/// The point is the write into the provider cache, which is what a refused
+/// request later falls back on. Nothing derived is computed: the page rebuilds
+/// all of that from the cached payload when someone actually looks.
+pub async fn warm_one_combination(
+    state: &SpreadAnalyticsState,
+    request: &FreeSpreadQueryRequest,
+    request_id: Uuid,
+) -> Result<(), SpreadApiError> {
+    load_series(state, request, request_id).await?;
+    Ok(())
+}
+
 fn canonical_query(request: &FreeSpreadQueryRequest) -> Value {
     json!({
         "variety1": request.leg1.variety.trim(),

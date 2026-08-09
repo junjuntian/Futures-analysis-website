@@ -3981,6 +3981,10 @@ mod tests {
                 "deploy/collector/run-backfill.sh",
                 "/usr/local/sbin/run-futures-backfill",
             ),
+            (
+                "deploy/collector/run-spread-warm.sh",
+                "/usr/local/sbin/run-futures-spread-warm",
+            ),
         ] {
             assert!(
                 deployment.contains(&format!("install -m 700 {source} \\")),

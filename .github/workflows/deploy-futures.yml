@@ -150,6 +150,8 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/run-collector.sh"
           install -m 700 deploy/collector/run-backfill.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-backfill.sh"
+          install -m 700 deploy/collector/run-spread-warm.sh \
+            "${RELEASE_BUNDLE}/deploy/collector/run-spread-warm.sh"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
@@ -696,6 +698,8 @@ jobs:
           # wrapper is: the box must run the reviewed copy, not a snapshot.
           install -m 700 "$RELEASE_DIR/deploy/collector/run-backfill.sh" \
             /usr/local/sbin/run-futures-backfill
+          install -m 700 "$RELEASE_DIR/deploy/collector/run-spread-warm.sh" \
+            /usr/local/sbin/run-futures-spread-warm
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.cron" \
             /etc/cron.d/futures-collector
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \

@@ -1,3 +1,7 @@
 CRON_TZ=Asia/Shanghai
 30 17 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
 30 21 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
+# Spread warming runs after the evening collection, when the upstream has
+# settled and nobody is on the page. Weekdays only: a weekend series is
+# identical to Friday's, so refreshing it would spend requests on nothing.
+0 23 * * 1-5 root /usr/local/sbin/run-futures-spread-warm >>/var/log/futures-spread-warm.log 2>&1
