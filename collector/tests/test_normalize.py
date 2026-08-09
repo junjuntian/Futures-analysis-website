@@ -93,3 +93,23 @@ def test_seat_row_is_split_into_three_rank_types() -> None:
     assert rows[0]["volume"] == "10"
     assert rows[1]["long_position"] == "20"
     assert rows[2]["short_position"] == "30"
+
+
+def test_contract_parameters_survive_their_units() -> None:
+    # CZCE writes these with the unit attached. A plain Decimal parse rejects
+    # the whole field, which is why apple, glass and soda ash reached
+    # production with no contract multiplier at all — and a position's profit
+    # cannot be computed without one.
+    from futures_collector.normalize import _decimal
+
+    assert _decimal("10吨/手") == "10"
+    assert _decimal("20吨/手") == "20"
+    assert _decimal("1.00元/吨") == "1.00"
+    assert _decimal("1,000吨/手") == "1000"
+    # Plain values keep working.
+    assert _decimal("60") == "60"
+    assert _decimal("0.5") == "0.5"
+    # A value with no leading number is still refused rather than guessed at.
+    assert _decimal("吨/手") == ""
+    assert _decimal("") == ""
+    assert _decimal("不适用") == ""

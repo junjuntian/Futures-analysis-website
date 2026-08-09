@@ -41,6 +41,9 @@ MARKET_FIELDS = [
     "session_type",
     "observed_at",
     "granularity",
+    "open_price",
+    "high_price",
+    "low_price",
     "close_price",
     "settlement_price",
     "currency_code",
@@ -148,10 +151,18 @@ def normalize_market(
         if not contract or trade_date != collection_date.isoformat():
             continue
         contract = contract.upper().replace(" ", "")
-        close = _decimal(_pick(raw, "close", "今收盘"))
-        settlement = _decimal(_pick(raw, "settle", "今结算"))
+        close = _decimal(_pick(raw, "close", "今收盘", "收盘价"))
+        settlement = _decimal(_pick(raw, "settle", "今结算", "结算价"))
         if not close and not settlement:
             continue
+        # A contract that did not trade is written with zeros in all four range
+        # fields by the exchange's own files. That says nothing traded, not
+        # that it traded at zero, so the range is recorded as absent.
+        opening = _decimal(_pick(raw, "open", "今开盘", "开盘价"))
+        high = _decimal(_pick(raw, "high", "最高", "最高价"))
+        low = _decimal(_pick(raw, "low", "最低", "最低价"))
+        if _all_zero(opening, high, low):
+            opening = high = low = ""
         rows.append(
             {
                 "exchange_code": source.code,
@@ -160,6 +171,9 @@ def normalize_market(
                 "session_type": "daily",
                 "observed_at": observed_at_text,
                 "granularity": "1d",
+                "open_price": opening,
+                "high_price": high,
+                "low_price": low,
                 "close_price": close,
                 "settlement_price": settlement,
                 "currency_code": "CNY",
@@ -306,12 +320,40 @@ def _decimal(value: str) -> str:
     if not value:
         return ""
     try:
-        number = Decimal(value.replace(",", ""))
-    except InvalidOperation:
+        number = Decimal(_leading_number(value))
+    except (InvalidOperation, ValueError):
         return ""
     if not number.is_finite():
         return ""
     return format(number, "f")
+
+
+def _all_zero(*values: str) -> bool:
+    if not any(values):
+        return False
+    try:
+        return all(Decimal(value) == 0 for value in values if value)
+    except InvalidOperation:
+        return False
+
+
+def _leading_number(value: str) -> str:
+    """The number at the front of a value, dropping any unit that follows.
+
+    CZCE writes contract parameters with their units attached — `10吨/手`,
+    `1.00元/吨` — so a plain Decimal parse rejects the whole field and the
+    multiplier lands empty. Without it a position's profit cannot be computed
+    at all, which is why this is worth reading rather than discarding.
+
+    Only a leading number is accepted. A value that starts with anything else
+    is still rejected, so this widens what parses without inventing a number
+    out of prose.
+    """
+    text = value.replace(",", "").strip()
+    match = re.match(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        raise ValueError("value does not start with a number")
+    return match.group(0)
 
 
 def _integer(value: str, *, allow_zero: bool = False) -> str:
