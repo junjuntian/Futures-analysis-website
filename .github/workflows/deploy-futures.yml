@@ -667,6 +667,7 @@ jobs:
           PHASE4A_RELEASE_DIR="$RELEASE_DIR" \
           PHASE4A_COLLECTION_DATE="$COLLECTION_DATE" \
           PHASE4A_RUN_LIVE_COLLECTION="$RUN_LIVE_COLLECTION" \
+          PHASE4A_ORIGIN="${PUBLIC_ORIGIN:-http://localhost:8088}" \
           PHASE4A_EVIDENCE_DIR="$EVIDENCE_DIR/phase4a-work" \
             bash "$RELEASE_DIR/e2e/phase_4a_e2e.sh" |
             tee "$EVIDENCE_DIR/phase4a-stdout.txt"
@@ -675,6 +676,7 @@ jobs:
 
           echo "DEPLOY_STAGE phase5a_e2e_started"
           PHASE5A_RELEASE_DIR="$RELEASE_DIR" \
+          PHASE5A_ORIGIN="${PUBLIC_ORIGIN:-http://localhost:8088}" \
           PHASE5A_EVIDENCE_DIR="$EVIDENCE_DIR/phase5a-work" \
             bash "$RELEASE_DIR/e2e/phase_5a_e2e.sh" |
             tee "$EVIDENCE_DIR/phase5a-stdout.txt"
