@@ -1,12 +1,11 @@
 # 最新交接状态
 
-- 最新完整交接：`docs/handoffs/HANDOFF_20260809_1111.md`（务必先读其第 2、6 节：分支拓扑与部署参数）。
-- Phase 5A 自由价差页已上生产可用，但当前生产 `e2f5c11` 仅含近一年历史；含完整 13 年历史 + 三处根因修复 + 发布流程提速的新候选就绪，正在部署。
-- 分支：代码源头 `phase/05-spread-analytics`（HEAD `49f3dcd`）；部署候选 `deploy/phase-5a-candidate`（HEAD `decdef0`）。两支只差两个白名单 e2e 脚本，部署"仅白名单差异"门会过。`ci.yml` 不在白名单，只放 phase/05，两支必须一致。
-- 三处根因（全在 phase/05）：provider 层 + domain 层日期严格递增误杀换月交界重复日期（改段内严格）；窗口引擎历史合约查不到致图只剩一年（`derive_contract_window` 从合约代码自解析交割月，jm 09-01 保留点 130→2989）。Rust 171 测试绿。
-- 发布提速四条（运营者确定）：cargo-chef 依赖分层（`a001762`，版本 pin 0.1.77）+ 删 CI 冗余镜像构建 + deploy 加 `run_live_collection` 开关（默认 true；false 时 4A 只做只读轻量回归、跳过三次真采省~1h）；快通道由该开关覆盖不另建。采集无关部署 ~2h→~15-20min。**均为静态验证，首次部署验证；工装改动在部署前门，失败不影响生产。**
-- 生产：`PUBLIC_ORIGIN` 已改为 IP（IP 访问登录所需）；临时登录用 collector 服务账号（凭据待轮换）；回填暂停（运营者指令，标记文件在 VPS）；DCE 走新浪 fallback（东财席位接口待 DEC-041 修订纳入）。
-- 下一步：本次部署完成 → Phase 5A 独立 Evaluator（全新会话，重点见交接第 7 节）→ 4B-2 → Phase 6 前确认 OPEN-PORT-002。
-- Phase 5 尚未合 main（main 停在 `phase-4a-pass-20260805`），待 5A Evaluator PASS 后合。
+- 最新完整交接：`docs/handoffs/HANDOFF_20260809_1111.md`。**接手前必读其第 0 节「部署铁律」**（四条，每条都是踩出来的），再看第 2 节分支拓扑。
+- 生产运行 `babb15d`：Phase 5A 自由价差页含完整 13 年历史、腿序规则修正、时间滑块、数据视图、季节叠年图连续化。最后一轮部署已切换成功但验收被主动取消（未按提速路径跑，误入 1 小时真采），**需补一次干净的部署验收**。
+- 分支：`phase/05-spread-analytics` 与 `deploy/phase-5a-candidate` 已合一（同一提交），e2e 脚本全部并入主线。这是为避免两份脚本互相覆盖——提速短路代码就是这样丢失的。
+- 部署四条铁律：①`run_live_collection` 与采集无关时传 `false`；②**传了还要 `grep -c PHASE4A_RUN_LIVE_COLLECTION rust/tests/phase_4a_e2e.sh` 确认 ≥1**，否则开关空转白跑一小时；③镜像必须本链新构建；④验收 Origin 与 `PUBLIC_ORIGIN` 一致（workflow 已自动传，勿删）。正常耗时 ≈15 分钟，超 20 分钟未见验收标记即应检查第②条。
+- 业务口径要点：三禾序列会混入反向组合（查 09-01 时混进 `jm2609-jm2601`，那属于 01-09）。规则=前腿必须先到期，不满足整段排除。实测 jm 09-01 保留点 2987→2069，段边界 33→16，每段起于晚上市腿的上市日。
+- 待办：补部署验收 → Phase 5A 独立 Evaluator（全新会话）→ 4B-2 → Phase 6 前确认 OPEN-PORT-002。前端三项只经 CI 验证，未经人工肉眼验收。
+- Phase 5 尚未合 main（main 停在 `phase-4a-pass-20260805`），待 Evaluator PASS 后合。
 
 接手须以 Git、Actions、VPS 实态复核，不盲信摘要；不得输出密钥、恢复回填、清理数据或未经授权合 main/打标签。
