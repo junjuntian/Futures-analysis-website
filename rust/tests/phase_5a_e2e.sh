@@ -215,6 +215,8 @@ PATH_A="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$VARIETY
 PATH_B="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$VARIETY_B")/months"
 throttle_before=$(psql_value -c \
   "select coalesce(floor(extract(epoch from last_requested_at)*1000)::bigint,0) from spread_provider_throttles where provider_code='sanhe'")
+months_cache_before=$(psql_value -c \
+  "select count(*) from spread_provider_cache where endpoint_code='variety_contracts' and business_date=(now() at time zone 'Asia/Shanghai')::date")
 (
   status=$(api_get "$TOKEN_ONE" "$PATH_A" "$EVIDENCE_DIR/months-a.json")
   assert_status "$status" 200 "months a"
@@ -230,7 +232,21 @@ wait "$pid_b"
 throttle_after=$(psql_value -c \
   "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")
 throttle_delta_ms=$((throttle_after - throttle_before))
-test "$throttle_delta_ms" -ge 4000
+months_cache_after=$(psql_value -c \
+  "select count(*) from spread_provider_cache where endpoint_code='variety_contracts' and business_date=(now() at time zone 'Asia/Shanghai')::date")
+# Spacing is only observable when both probes actually reached upstream. A
+# same-day redeploy finds these two varieties already cached, so no request is
+# issued and the throttle clock does not move; that is the cache working, not a
+# regression. Assert spacing only for the requests that did go out.
+upstream_requests=$((months_cache_after - months_cache_before))
+if test "$upstream_requests" -ge 2; then
+  test "$throttle_delta_ms" -ge 4000
+elif test "$upstream_requests" -eq 1; then
+  test "$throttle_delta_ms" -ge 2000
+else
+  test "$throttle_delta_ms" -eq 0
+fi
+echo "PHASE5A_THROTTLE upstream_requests=$upstream_requests delta_ms=$throttle_delta_ms"
 jq -e '.data.result_kind == "ok" and (.data.months | type == "array")' \
   "$EVIDENCE_DIR/months-a.json" "$EVIDENCE_DIR/months-b.json" >/dev/null
 
