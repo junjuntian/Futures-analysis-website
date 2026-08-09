@@ -93,7 +93,12 @@ cleanup() {
 trap cleanup EXIT
 
 echo "PHASE5A_E2E_STAGE preconditions"
-test "$(psql_value -c "select count(*) from schema_versions where version='202608050001'")" = 1
+# Every Phase 5A migration must be applied, not just the first one: a later
+# migration that never shipped leaves the code writing values the old CHECK
+# constraints reject, which surfaces as a 500 well after this point.
+test "$(psql_value -c "select count(*) from schema_versions where version in ('202608050001','202608090001')")" = 2
+test "$(psql_value -c "select count(*) from pg_constraint where conname='spread_provider_observations_exclusion_allowed' and pg_get_constraintdef(oid) like '%leg_order_mismatch%'")" = 1
+test "$(psql_value -c "select count(*) from pg_constraint where conname='spread_window_segments_boundary_reason' and pg_get_constraintdef(oid) like '%leg_order_mismatch%'")" = 1
 test "$(psql_value -c "select count(*) from pg_class where relname in ('spread_provider_cache','spread_provider_throttles','spread_provider_failures','retail_trade_window_rule_versions','retail_trade_window_rules','spread_provider_series','spread_provider_observations','spread_window_segments','spread_favorites') and relkind='r'")" = 9
 test "$(psql_value -c "select count(*) from pg_class where relname in ('spread_provider_series','spread_provider_observations','spread_window_segments','spread_favorites') and relrowsecurity and relforcerowsecurity")" = 4
 test "$(psql_value -c "select count(*) from pg_policies where tablename in ('spread_provider_series','spread_provider_observations','spread_window_segments','spread_favorites')")" = 4

@@ -164,12 +164,15 @@ jobs:
             rust/migrations/202608090001_phase_5a_leg_order_mismatch.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
-          # of migrations. That makes it easy to add a migration and forget the
-          # list, shipping code whose schema never arrives -- which is how a
-          # leg-order deploy reached production and answered 500 on every
-          # query. Fail here instead of at runtime.
+          # of migrations, and it deliberately omits the pre-Phase-3D baseline
+          # that production applied long ago. The hazard is adding a migration
+          # and forgetting the list: the code ships while its schema never
+          # arrives, which is how a leg-order deploy reached production and
+          # answered 500 on every query. Everything at or after the oldest
+          # bundled migration must therefore be present.
+          oldest_bundled=$(find "${RELEASE_BUNDLE}/migrations" -name '*.sql' -printf '%f\n' | sort | head -n1)
           missing_migrations=$(comm -23 \
-            <(find rust/migrations -name '*.sql' -printf '%f\n' | sort) \
+            <(find rust/migrations -name '*.sql' -printf '%f\n' | sort | awk -v floor="$oldest_bundled" '$0 >= floor') \
             <(find "${RELEASE_BUNDLE}/migrations" -name '*.sql' -printf '%f\n' | sort))
           if test -n "$missing_migrations"; then
             echo "DEPLOY_FAIL migrations_not_bundled" >&2
