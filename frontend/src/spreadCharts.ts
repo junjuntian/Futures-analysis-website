@@ -37,7 +37,23 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
   }
   return {
     animation: false,
-    grid: { left: 54, right: 58, top: 28, bottom: 48 },
+    grid: { left: 54, right: 58, top: 28, bottom: 82 },
+    dataZoom: [
+      { type: 'inside', filterMode: 'none' },
+      {
+        type: 'slider',
+        height: 26,
+        bottom: 30,
+        borderColor: '#e2e1dd',
+        fillerColor: 'rgba(120,150,200,0.12)',
+        handleStyle: { color: '#b9b8b4' },
+        dataBackground: {
+          lineStyle: { color: '#c9c8c4' },
+          areaStyle: { color: '#eeeeec' }
+        },
+        labelFormatter: (value: number) => points[Math.round(value)]?.trade_date ?? ''
+      }
+    ],
     tooltip: {
       trigger: 'axis',
       formatter: (params: unknown) => {
@@ -137,12 +153,22 @@ export function buildSignedLineSegments(
 
 export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOption {
   const currentYear = data.seasonal_series.current_year
+  // The axis spans every calendar day of the window, so days no year traded
+  // (weekends, holidays, dates outside every year's tradable window) leave
+  // holes that break each line into fragments. Keep only the slots at least
+  // one year traded and connect the remainder, which yields one continuous
+  // curve per year over just the tradable days.
+  const keptSlots = data.seasonal_series.axis
+    .map((_, index) => index)
+    .filter((index) => data.seasonal_series.years.some((year) => year.values[index] !== null
+      && year.values[index] !== undefined))
+  const axis = keptSlots.map((index) => data.seasonal_series.axis[index])
   const series: SeriesOption[] = data.seasonal_series.years.map((year) => ({
     name: String(year.year),
     type: 'line',
     showSymbol: false,
-    connectNulls: false,
-    data: year.values,
+    connectNulls: true,
+    data: keptSlots.map((index) => year.values[index] ?? null),
     lineStyle: {
       color: year.year === currentYear ? '#df572d' : '#cacac8',
       width: year.year === currentYear ? 3.5 : 1.5
@@ -171,7 +197,7 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
     xAxis: {
       type: 'category',
       boundaryGap: false,
-      data: data.seasonal_series.axis.map((value) => value.replace('-', '/')),
+      data: axis.map((value) => value.replace('-', '/')),
       axisLabel: { color: GREY, hideOverlap: true },
       axisLine: { lineStyle: { color: '#d8d8d5' } },
       axisTick: { show: false }

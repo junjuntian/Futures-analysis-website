@@ -244,6 +244,26 @@ function dateTime(value?: string | null) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
 }
 
+function downloadCsv() {
+  const current = result.value
+  if (!current) return
+  const rows = current.continuous_series.points.map((point) => [
+    point.trade_date,
+    point.value,
+    point.from_code.toUpperCase(),
+    point.to_code.toUpperCase(),
+    point.segment_no
+  ].join(','))
+  // Prefixed with a BOM so Excel opens the UTF-8 header without mojibake.
+  const csv = `﻿交易日,价差,第一腿,第二腿,段\n${rows.join('\n')}\n`
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `自由价差-${subtitle.value.replace(/[^\w一-龥-]+/g, '_')}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 onMounted(async () => {
   loadingVarieties.value = true
   errorMessage.value = ''
@@ -344,6 +364,28 @@ onMounted(async () => {
           保留 {{ result.quality.retained_point_count }} 点，剔除 {{ result.quality.excluded_point_count }} 点 ·
           窗口算法 {{ result.algorithm_versions.window }} · 规则 {{ result.algorithm_versions.rule }}
         </div>
+        <el-collapse v-if="result.continuous_series.points.length" class="data-view">
+          <el-collapse-item name="data-view">
+            <template #title>
+              <span class="data-view-title">数据视图（{{ result.continuous_series.points.length }} 个可交易日）</span>
+            </template>
+            <div class="data-view-actions">
+              <el-button size="small" :icon="Download" @click="downloadCsv">导出 CSV</el-button>
+            </div>
+            <el-table :data="result.continuous_series.points" height="320" size="small" stripe>
+              <el-table-column prop="trade_date" label="交易日" width="130" />
+              <el-table-column label="价差" width="120" align="right">
+                <template #default="{ row }">{{ row.value }}</template>
+              </el-table-column>
+              <el-table-column label="合约对" min-width="180">
+                <template #default="{ row }">
+                  {{ row.from_code.toUpperCase() }} − {{ row.to_code.toUpperCase() }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="segment_no" label="段" width="80" align="right" />
+            </el-table>
+          </el-collapse-item>
+        </el-collapse>
       </section>
 
       <section class="spread-card analytics-card">
@@ -472,5 +514,19 @@ onMounted(async () => {
   .section-heading { flex-direction: column; }
   .heading-meta { align-items: flex-start; white-space: normal; }
   .source-footer { flex-direction: column; }
+}
+
+.data-view {
+  margin-top: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.data-view-title {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+}
+.data-view-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 </style>

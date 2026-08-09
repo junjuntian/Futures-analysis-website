@@ -63,6 +63,7 @@ pub enum ExclusionReason {
     ContractMetadataMissing,
     OutsideRetailWindow,
     EmptyRetailWindow,
+    LegOrderMismatch,
 }
 
 impl ExclusionReason {
@@ -71,6 +72,7 @@ impl ExclusionReason {
             Self::ContractMetadataMissing => "contract_metadata_missing",
             Self::OutsideRetailWindow => "outside_retail_window",
             Self::EmptyRetailWindow => "empty_retail_window",
+            Self::LegOrderMismatch => "leg_order_mismatch",
         }
     }
 }
@@ -284,6 +286,19 @@ pub fn calculate_windowed_analytics(
         let candidate_start = segment_points[0].trade_date;
         let candidate_end = segment_points[segment_points.len() - 1].trade_date;
 
+        // A leg pair only belongs to the requested spread when the first leg
+        // expires before the second, matching how the combination is named
+        // (09-01 means the September leg first, then the following January).
+        // The upstream series splices in same-year pairs such as
+        // jm2609-jm2601 near the January expiry; those are the reverse
+        // combination (01-09) and must not be mixed into this one.
+        let leg_order_mismatch = match (from, to) {
+            (Some(from), Some(to)) => {
+                (to.delivery_year, to.delivery_month) <= (from.delivery_year, from.delivery_month)
+            }
+            _ => false,
+        };
+
         let (window_year, window_end, calendars) = match (from, to) {
             (Some(from), Some(to)) => {
                 let from_delivery = (from.delivery_year, from.delivery_month);
@@ -314,7 +329,7 @@ pub fn calculate_windowed_analytics(
         // whose leg was listed late). Report both bounds as absent rather than
         // an inverted range, which also satisfies the stored
         // `window_end >= window_start` invariant.
-        let (window_start, window_end) = if empty_window {
+        let (window_start, window_end) = if empty_window || leg_order_mismatch {
             (None, None)
         } else {
             (candidate_window_start, window_end)
@@ -326,6 +341,8 @@ pub fn calculate_windowed_analytics(
         for (offset, point) in segment_points.iter().enumerate() {
             let reason = if from.is_none() || to.is_none() {
                 Some(ExclusionReason::ContractMetadataMissing)
+            } else if leg_order_mismatch {
+                Some(ExclusionReason::LegOrderMismatch)
             } else if empty_window {
                 Some(ExclusionReason::EmptyRetailWindow)
             } else if window_end.is_some_and(|end| point.trade_date > end) {
@@ -394,6 +411,8 @@ pub fn calculate_windowed_analytics(
             excluded_point_count: excluded_count,
             boundary_reason: if from.is_none() || to.is_none() {
                 "contract_metadata_missing".to_string()
+            } else if leg_order_mismatch {
+                "leg_order_mismatch".to_string()
             } else if empty_window {
                 "empty_retail_window".to_string()
             } else {
@@ -983,15 +1002,56 @@ mod tests {
                 contract(code, 2025, month, date!(2025 - 04 - 30)),
             );
         }
+        // Every pair here keeps the first leg expiring before the second, so
+        // all three segments stay inside the requested combination.
         let points = vec![
             point(date!(2025 - 01 - 02), 1.0, "A2505", "B2509"),
-            point(date!(2025 - 01 - 03), 2.0, "A2509", "B2509"),
-            point(date!(2025 - 01 - 06), 3.0, "A2509", "B2512"),
+            point(date!(2025 - 01 - 03), 2.0, "A2509", "B2512"),
+            point(date!(2025 - 01 - 06), 3.0, "A2505", "B2512"),
         ];
         let result = calculate_windowed_analytics(&points, &contracts, None).unwrap();
         assert_eq!(result.segments.len(), 3);
         assert_eq!(result.segment_boundaries.len(), 3);
         assert_eq!(result.continuous_points[2].segment_no, 3);
+    }
+
+    #[test]
+    fn reverse_leg_order_segments_are_excluded() {
+        // The upstream splices the reverse combination near expiry: a 09-01
+        // query receives jm2609-jm2601 stretches where January expires first.
+        // Those belong to 01-09 and must not enter this series.
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "JM2609".into(),
+            contract("JM2609", 2026, 9, date!(2026 - 08 - 31)),
+        );
+        contracts.insert(
+            "JM2601".into(),
+            contract("JM2601", 2026, 1, date!(2025 - 12 - 31)),
+        );
+        contracts.insert(
+            "JM2701".into(),
+            contract("JM2701", 2027, 1, date!(2026 - 12 - 31)),
+        );
+        let points = vec![
+            point(date!(2025 - 09 - 15), 10.0, "jm2609", "jm2601"),
+            point(date!(2025 - 09 - 16), 11.0, "jm2609", "jm2601"),
+            point(date!(2026 - 01 - 19), 20.0, "jm2609", "jm2701"),
+            point(date!(2026 - 01 - 20), 21.0, "jm2609", "jm2701"),
+        ];
+        let result =
+            calculate_windowed_analytics(&points, &contracts, Some(date!(2026 - 01 - 20))).unwrap();
+        assert_eq!(result.quality.retained_point_count, 2);
+        assert_eq!(
+            result.observations[0].exclusion_reason,
+            Some(ExclusionReason::LegOrderMismatch)
+        );
+        assert!(result.observations[2].retained);
+        // The retained stretch starts on the later leg's first tradable day.
+        assert_eq!(
+            result.continuous_points[0].trade_date,
+            date!(2026 - 01 - 19)
+        );
     }
 
     #[test]
