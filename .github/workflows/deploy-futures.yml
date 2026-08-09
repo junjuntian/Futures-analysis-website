@@ -460,6 +460,23 @@ jobs:
               image: ${FRONTEND_REF}
           EOF
           chmod 600 "$RELEASE_DIR/docker-compose.release.yml"
+          # Carry the host's public origin into the release compose. It is
+          # deployment-specific (the VPS is reached by IP, not localhost) and
+          # lives in the legacy .env alongside the other operational settings;
+          # without this every deploy reverted to the localhost default and
+          # browser logins failed the Origin check with "request is not
+          # allowed".
+          if legacy_origin=$(grep -m1 '^PUBLIC_ORIGIN=' "$LEGACY_ROOT/.env" 2>/dev/null); then
+            legacy_origin=${legacy_origin#PUBLIC_ORIGIN=}
+            legacy_origin=${legacy_origin%\"}
+            legacy_origin=${legacy_origin#\"}
+            if [[ "$legacy_origin" =~ ^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?$ ]]; then
+              export PUBLIC_ORIGIN="$legacy_origin"
+            else
+              echo "DEPLOY_FAIL invalid_public_origin" >&2
+              exit 1
+            fi
+          fi
           COMPOSE=(
             docker compose
             -f "$RELEASE_DIR/docker-compose.yml"
@@ -711,6 +728,7 @@ jobs:
             echo "git_sha=$SOURCE_SHA"
             echo "acceptance_sha=$ACCEPTANCE_SHA"
             echo "run_live_collection=$RUN_LIVE_COLLECTION"
+            echo "public_origin=${PUBLIC_ORIGIN:-default}"
             echo "deployed_at=$DEPLOYED_AT"
             echo "backup_path=$BACKUP_PATH"
             echo "backup_sha256=$BACKUP_SHA256"
