@@ -179,6 +179,20 @@ jobs:
             printf '%s\n' "$missing_migrations" >&2
             exit 1
           fi
+          # A migration records its own version in schema_versions; the runner
+          # skips files whose version is already present. One that forgets the
+          # insert reruns on every deploy and never registers, so acceptance
+          # sees the schema as missing while the file looks applied.
+          for migration_file in "${RELEASE_BUNDLE}"/migrations/*.sql; do
+            migration_version=$(basename "$migration_file")
+            migration_version=${migration_version%%_*}
+            if ! grep -q "insert into schema_versions" "$migration_file" ||
+               ! grep -q "'${migration_version}'" "$migration_file"; then
+              echo "DEPLOY_FAIL migration_missing_version_record" >&2
+              echo "$(basename "$migration_file")" >&2
+              exit 1
+            fi
+          done
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
           install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
 
