@@ -168,6 +168,24 @@ echo "PHASE4A_E2E_BASELINE manual_batches=$legacy_batches_before automatic_batch
 test "$legacy_batches_before" -ge 127
 echo "PHASE4A_E2E_STAGE baseline_counts_passed"
 
+# Deploys that do not touch collection or Phase 4A run a light regression
+# instead of three live 5-exchange collector passes, which otherwise spend
+# about an hour on the DCE 412 fallback and timeout path unrelated to the
+# change under test. The full gate still runs by default; the deploy workflow
+# sets PHASE4A_RUN_LIVE_COLLECTION=false when the candidate is unrelated.
+if [[ "${PHASE4A_RUN_LIVE_COLLECTION:-true}" != "true" ]]; then
+  echo "PHASE4A_E2E_STAGE live_collection_skipped reason=deploy_unrelated_to_collection"
+  test "$(psql_value -c "select count(*) from market_prices")" -gt 0
+  test "$(psql_value -c "select count(*) from seat_positions")" -gt 0
+  test "$(psql_value -c "select count(*) from contracts")" -gt 0
+  test "$(psql_value -c "select md5(coalesce(string_agg(to_jsonb(batch)::text, '|' order by id), '')) from import_batches batch where ingestion_mode='manual'")" = "$legacy_batches_fingerprint_before"
+  test "$(psql_value -c "select count(*) from import_batches where ingestion_mode='automatic'")" = "$automatic_batches_before"
+  test "$(psql_value -c "select count(*) from users")" = "$users_before"
+  echo "PHASE4A_E2E_LIGHT_REGRESSION_PASS market_prices=$(psql_value -c "select count(*) from market_prices") seat_positions=$(psql_value -c "select count(*) from seat_positions")"
+  echo "PHASE4A_E2E_PASS"
+  exit 0
+fi
+
 run_collector_with_peak() {
   local output=$1
   shift
