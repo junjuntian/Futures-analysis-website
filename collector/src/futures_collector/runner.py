@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 
 from futures_collector.api import PlatformClient, safe_error_code
 from futures_collector.normalize import (
+    filter_rows_by_variety,
     normalize_calendar,
     normalize_catalog,
     normalize_market,
@@ -24,6 +25,15 @@ from futures_collector.sources import (
 LOG = logging.getLogger("futures_collector")
 
 
+class EmptyAfterVarietyFilter(Exception):
+    """Raised when a response held nothing for the requested varieties.
+
+    This is an ordinary outcome when an exchange lists none of them, so the
+    runner records it and moves on instead of counting it as a failure or
+    firing the fallback chain at a source that answered perfectly well.
+    """
+
+
 class CollectionRunner:
     def __init__(
         self,
@@ -35,6 +45,9 @@ class CollectionRunner:
         self.adapter = adapter
         self.platform = platform
         self.retry_delay_seconds = retry_delay_seconds
+        # None means "every variety". An empty set would mean "none at all",
+        # which is never what a caller wants and would submit empty batches.
+        self._varieties: frozenset[str] | None = None
 
     def run(
         self,
@@ -42,7 +55,9 @@ class CollectionRunner:
         exchanges: list[str],
         datasets: list[str],
         injected_failure_exchange: str | None = None,
+        varieties: frozenset[str] | None = None,
     ) -> int:
+        self._varieties = varieties
         failures = 0
         for code in exchanges:
             source = SOURCES[code]
@@ -80,6 +95,13 @@ class CollectionRunner:
                     observed_at,
                     fallback=False,
                 )
+            except EmptyAfterVarietyFilter:
+                LOG.info(
+                    "dataset_skipped_no_requested_variety exchange=%s dataset=%s",
+                    source.code,
+                    dataset_type,
+                )
+                continue
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",
@@ -224,37 +246,49 @@ class CollectionRunner:
             # Eastmoney's report carries no settlement price and no contract
             # catalog, so it must never stand in for anything but seats.
             raise ValueError("the Eastmoney source only serves the seats dataset")
+        varieties = self._varieties
         if dataset == "catalog":
             frame = (
-                self.adapter.fallback_catalog(source, collection_date)
+                self.adapter.fallback_catalog(source, collection_date, varieties)
                 if fallback
                 else self.adapter.catalog(source, collection_date)
             )
-            return normalize_catalog(source, collection_date, frame)
+            return self._narrow(normalize_catalog(source, collection_date, frame))
         if dataset == "market":
             frame = (
-                self.adapter.fallback_market(source, collection_date)
+                self.adapter.fallback_market(source, collection_date, varieties)
                 if fallback
                 else self.adapter.market(source, collection_date)
             )
-            return normalize_market(source, collection_date, frame, observed_at)
+            return self._narrow(normalize_market(source, collection_date, frame, observed_at))
         if dataset == "calendar":
             frame = (
-                self.adapter.fallback_market(source, collection_date)
+                self.adapter.fallback_market(source, collection_date, varieties)
                 if fallback
                 else self.adapter.market(source, collection_date)
             )
+            # The calendar is proven by the exchange answering for the date at
+            # all, so it is normalized from the unnarrowed response and never
+            # filtered: a trading day belongs to every variety.
             normalize_market(source, collection_date, frame, observed_at)
             return normalize_calendar(source, collection_date)
         if dataset == "seats":
             if source.source_code == EASTMONEY_SEATS_SOURCE_CODE:
-                tables = self.adapter.eastmoney_seats(source, collection_date)
+                tables = self.adapter.eastmoney_seats(source, collection_date, varieties)
             elif fallback:
-                tables = self.adapter.fallback_seats(source, collection_date)
+                tables = self.adapter.fallback_seats(source, collection_date, varieties)
             else:
                 tables = self.adapter.seats(source, collection_date)
-            return normalize_seats(source, collection_date, tables)
+            return self._narrow(normalize_seats(source, collection_date, tables))
         raise ValueError("unsupported dataset")
+
+    def _narrow(self, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        narrowed = filter_rows_by_variety(rows, self._varieties)
+        if not narrowed:
+            # An exchange that carries none of the requested varieties is not a
+            # failure, but an empty batch would look like one downstream.
+            raise EmptyAfterVarietyFilter("no rows left after the variety filter")
+        return narrowed
 
 
 def _fallback_chain(source: ExchangeSource, dataset: str) -> list[tuple[ExchangeSource, bool]]:

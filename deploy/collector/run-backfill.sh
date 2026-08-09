@@ -31,7 +31,11 @@ RUN_LIMIT=0
 SLEEP_SECONDS=60
 CONTINUOUS=0
 
-EXCHANGES=(DCE SHFE CZCE GFEX CFFEX)
+# The eight varieties under backfill live on three exchanges only; GFEX and
+# CFFEX list none of them, so calling those two would spend requests on data
+# nobody asked for. Override with FUTURES_BACKFILL_EXCHANGES / _VARIETIES.
+EXCHANGES=(${FUTURES_BACKFILL_EXCHANGES:-DCE SHFE CZCE})
+VARIETIES=${FUTURES_BACKFILL_VARIETIES:-AP,JD,JM,FG,SA,AU,AG,LH}
 declare -A FAILURE_STREAK=()
 declare -A SOURCE_PAUSED=()
 
@@ -286,7 +290,7 @@ run_exchange() {
     flock -w 900 9 || exit 75
     timeout --foreground "$SOURCE_TIMEOUT_SECONDS" \
       "${COMPOSE[@]}" run --rm --no-deps collector \
-      --date "$target_date" --exchange "$exchange"
+      --date "$target_date" --exchange "$exchange" --variety "$VARIETIES"
   ) 9>"$COLLECTOR_LOCK" 2>&1 | tee -a "$source_log" "$LOG_FILE"
   status=${PIPESTATUS[0]}
   set -e

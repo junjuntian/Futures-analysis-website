@@ -24,7 +24,7 @@ class FakeAdapter:
             ]
         )
 
-    def fallback_catalog(self, source, collection_date):
+    def fallback_catalog(self, source, collection_date, varieties=None):
         raise AssertionError("fallback must not run for a successful official source")
 
 
@@ -71,7 +71,7 @@ class DceFallbackAdapter(FakeAdapter):
     def catalog(self, source, collection_date):
         raise ValueError("official response was not JSON")
 
-    def fallback_catalog(self, source, collection_date):
+    def fallback_catalog(self, source, collection_date, varieties=None):
         return pd.DataFrame(
             [
                 {
@@ -121,7 +121,7 @@ class IncompleteDceAdapter(FakeAdapter):
     def market(self, source, collection_date):
         raise ConnectionError("official unavailable")
 
-    def fallback_market(self, source, collection_date):
+    def fallback_market(self, source, collection_date, varieties=None):
         raise DatasetCompletenessError("market", 2, 10)
 
 

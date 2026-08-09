@@ -23,11 +23,33 @@ def parser() -> argparse.ArgumentParser:
         choices=["all", "catalog", "calendar", "market", "seats"],
     )
     value.add_argument(
+        "--variety",
+        default="all",
+        help=(
+            "Comma-separated variety symbols to collect, e.g. JM,JD,LH. "
+            "Default 'all' collects every variety the exchange publishes."
+        ),
+    )
+    value.add_argument(
         "--inject-failure-exchange",
         choices=[*SOURCES],
         help="Acceptance-only source-isolation fault; records failure without network access",
     )
     return value
+
+
+def parse_varieties(value: str) -> frozenset[str] | None:
+    """`all` means no narrowing; anything else is a set of variety symbols.
+
+    An explicitly empty selection is rejected rather than silently collecting
+    nothing, which would submit empty batches and read as a source failure.
+    """
+    if value.strip().lower() == "all":
+        return None
+    symbols = frozenset(part.strip().upper() for part in value.split(",") if part.strip())
+    if not symbols:
+        raise ValueError("--variety selected no symbols")
+    return symbols
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     exchanges = list(SOURCES) if args.exchange == "all" else [args.exchange]
+    varieties = parse_varieties(args.variety)
     datasets = (
         ["catalog", "calendar", "market", "seats"] if args.dataset == "all" else [args.dataset]
     )
@@ -54,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
                 exchanges,
                 datasets,
                 injected_failure_exchange=args.inject_failure_exchange,
+                varieties=varieties,
             )
     except Exception as error:
         logging.getLogger("futures_collector").error(

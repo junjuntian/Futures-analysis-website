@@ -192,7 +192,10 @@ class AkshareAdapter:
             return function(date=collection_date.strftime("%Y%m%d"))
 
     def eastmoney_seats(
-        self, source: ExchangeSource, collection_date: date
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        varieties: frozenset[str] | None = None,
     ) -> dict[str, pd.DataFrame]:
         if source.source_code != EASTMONEY_SEATS_SOURCE_CODE:
             raise ValueError("eastmoney_seats requires the Eastmoney seat source")
@@ -203,6 +206,12 @@ class AkshareAdapter:
             if EASTMONEY_TRADE_MARKET_CODES.get(str(row.get("TRADE_MARKET_CODE") or ""))
             == source.code
         ]
+        if varieties is not None:
+            selected = [
+                row
+                for row in selected
+                if _contract_instrument(str(row.get("SECURITY_CODE") or "")) in varieties
+            ]
         if not selected:
             raise ValueError("Eastmoney seat response has no rows for this exchange")
         return _pivot_eastmoney_seats(selected)
@@ -262,16 +271,30 @@ class AkshareAdapter:
         self._eastmoney_seat_cache[collection_date] = rows
         return rows
 
-    def fallback_catalog(self, source: ExchangeSource, collection_date: date) -> pd.DataFrame:
+    def fallback_catalog(
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        varieties: frozenset[str] | None = None,
+    ) -> pd.DataFrame:
         self._require_dce(source)
-        return self._dce_catalog(collection_date).copy()
+        return self._dce_catalog(collection_date, varieties).copy()
 
-    def fallback_market(self, source: ExchangeSource, collection_date: date) -> pd.DataFrame:
+    def fallback_market(
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        varieties: frozenset[str] | None = None,
+    ) -> pd.DataFrame:
         self._require_dce(source)
-        cached = self._dce_market_cache.get(collection_date)
+        cache_key = (collection_date, varieties)
+        cached = self._dce_market_cache.get(cache_key)
         if cached is not None:
             return cached.copy()
-        catalog = self._dce_catalog(collection_date)
+        # Narrowing here rather than after the crawl is the whole point: this
+        # loop issues one request per contract, and it is what makes a DCE
+        # backfill date take half an hour.
+        catalog = self._dce_catalog(collection_date, varieties)
         contracts = catalog["合约"].drop_duplicates().tolist()
         frames: list[pd.DataFrame] = []
         skipped_count = 0
@@ -315,14 +338,17 @@ class AkshareAdapter:
         if not frames:
             raise DatasetCompletenessError("market", len(contracts), len(contracts))
         result = pd.concat(frames, ignore_index=True)
-        self._dce_market_cache[collection_date] = result
+        self._dce_market_cache[cache_key] = result
         return result.copy()
 
     def fallback_seats(
-        self, source: ExchangeSource, collection_date: date
+        self,
+        source: ExchangeSource,
+        collection_date: date,
+        varieties: frozenset[str] | None = None,
     ) -> dict[str, pd.DataFrame]:
         self._require_dce(source)
-        catalog = self._dce_catalog(collection_date)
+        catalog = self._dce_catalog(collection_date, varieties)
         contracts = catalog["合约"].drop_duplicates().tolist()
         tables: dict[str, pd.DataFrame] = {}
         skipped_count = 0
@@ -397,8 +423,11 @@ class AkshareAdapter:
             )
         return tables
 
-    def _dce_catalog(self, collection_date: date) -> pd.DataFrame:
-        cached = self._dce_catalog_cache.get(collection_date)
+    def _dce_catalog(
+        self, collection_date: date, varieties: frozenset[str] | None = None
+    ) -> pd.DataFrame:
+        cache_key = (collection_date, varieties)
+        cached = self._dce_catalog_cache.get(cache_key)
         if cached is not None:
             return cached
         rows: list[dict[str, Any]] = []
@@ -425,6 +454,11 @@ class AkshareAdapter:
                     contract = str(raw_contract).strip().upper()
                     if not re.fullmatch(r"[A-Z]+\d{3,4}", contract) or contract in seen:
                         continue
+                    if varieties is not None and _contract_instrument(contract) not in varieties:
+                        # Skipped before the detail request, not after: that
+                        # request is issued once per contract and is half of
+                        # what makes building this catalog slow.
+                        continue
                     seen.add(contract)
                     detail: dict[str, str] = {}
                     try:
@@ -447,7 +481,7 @@ class AkshareAdapter:
         if not rows:
             raise ValueError("DCE fallback catalog response is empty")
         frame = pd.DataFrame(rows)
-        self._dce_catalog_cache[collection_date] = frame
+        self._dce_catalog_cache[cache_key] = frame
         return frame
 
     @staticmethod
@@ -469,6 +503,11 @@ def _detail_map(frame: pd.DataFrame) -> dict[str, str]:
 def _numeric_value(value: str) -> str:
     match = re.search(r"[-+]?\d+(?:\.\d+)?", value.replace(",", ""))
     return match.group(0) if match else ""
+
+
+def _contract_instrument(contract: str) -> str:
+    match = re.match(r"([A-Za-z]+)", contract.strip())
+    return match.group(1).upper() if match else ""
 
 
 def _pivot_eastmoney_seats(rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:

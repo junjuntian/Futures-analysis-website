@@ -88,7 +88,7 @@ def test_dce_market_rejects_partial_contract_set_after_collecting_skip_count(
 ) -> None:
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame(
         [{"合约": "A2609"}, {"合约": "M2609"}]
     )
 
@@ -110,7 +110,7 @@ def test_dce_market_excludes_contracts_without_an_observation_for_the_target_dat
     caplog.set_level(logging.INFO)
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame(
         [{"合约": "A2609"}, {"合约": "M2609"}]
     )
 
@@ -129,7 +129,7 @@ def test_dce_market_rejects_malformed_history_instead_of_treating_it_as_no_obser
 ) -> None:
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame([{"合约": "A2609"}])
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame([{"合约": "A2609"}])
     monkeypatch.setattr(
         "futures_collector.sources.akshare.futures_zh_daily_sina",
         lambda symbol: pd.DataFrame([{"date": "not-a-date", "close": 4000}]),
@@ -142,7 +142,7 @@ def test_dce_market_rejects_malformed_history_instead_of_treating_it_as_no_obser
 def test_dce_seats_require_every_contract_and_rank_type(monkeypatch, caplog) -> None:
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame(
         [{"合约": "A2609"}, {"合约": "M2609"}]
     )
 
@@ -169,7 +169,7 @@ def test_dce_seats_exclude_contracts_with_no_published_rankings(monkeypatch, cap
     caplog.set_level(logging.INFO)
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame(
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame(
         [{"合约": "A2609"}, {"合约": "M2609"}]
     )
 
@@ -194,7 +194,7 @@ def test_dce_seats_exclude_contracts_with_no_published_rankings(monkeypatch, cap
 def test_dce_seats_reject_partially_published_rank_types(monkeypatch) -> None:
     collection_date = date(2026, 7, 31)
     adapter = AkshareAdapter()
-    adapter._dce_catalog_cache[collection_date] = pd.DataFrame([{"合约": "A2609"}])
+    adapter._dce_catalog_cache[(collection_date, None)] = pd.DataFrame([{"合约": "A2609"}])
 
     def seats(symbol, contract, date):
         del contract, date

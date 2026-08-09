@@ -232,6 +232,43 @@ def _pick(row: pd.Series, *names: str) -> str:
     return ""
 
 
+def row_instrument(row: dict[str, str]) -> str | None:
+    """The variety a normalized row belongs to, or None if it belongs to none.
+
+    Catalog rows carry the instrument outright; market and seat rows only carry
+    a contract code, whose letter prefix is the variety. Calendar rows describe
+    a trading day rather than an instrument and so belong to every variety.
+    """
+    instrument = (row.get("instrument_code") or "").strip().upper()
+    if instrument:
+        return instrument
+    contract = (row.get("contract_code") or "").strip().upper()
+    if not contract:
+        return None
+    try:
+        return _instrument(contract)
+    except ValueError:
+        return None
+
+
+def filter_rows_by_variety(
+    rows: list[dict[str, str]], varieties: frozenset[str] | None
+) -> list[dict[str, str]]:
+    """Keep only the rows belonging to the requested varieties.
+
+    `None` means no narrowing at all, which is not the same as an empty set:
+    an empty set would silently discard everything.
+    """
+    if varieties is None:
+        return rows
+    kept = []
+    for row in rows:
+        instrument = row_instrument(row)
+        if instrument is None or instrument in varieties:
+            kept.append(row)
+    return kept
+
+
 def _instrument(contract: str) -> str:
     match = re.match(r"([A-Z]+)", contract.upper())
     if not match:
