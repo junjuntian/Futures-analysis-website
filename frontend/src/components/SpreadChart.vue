@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
 import { LineChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from 'echarts/components'
+import {
+  DataZoomComponent,
+  GridComponent,
+  LegendComponent,
+  MarkLineComponent,
+  TooltipComponent
+} from 'echarts/components'
 import { init, use, type EChartsType } from 'echarts/core'
 import { CanvasRenderer, SVGRenderer } from 'echarts/renderers'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -17,7 +23,19 @@ const props = withDefaults(defineProps<{
 })
 
 const root = ref<HTMLDivElement>()
-use([LineChart, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent, CanvasRenderer, SVGRenderer])
+// Components must be registered explicitly in the tree-shaken build: an option
+// for an unregistered component is silently ignored, which is why the trend
+// chart rendered without its zoom slider.
+use([
+  LineChart,
+  DataZoomComponent,
+  GridComponent,
+  LegendComponent,
+  MarkLineComponent,
+  TooltipComponent,
+  CanvasRenderer,
+  SVGRenderer
+])
 
 let chart: EChartsType | undefined
 let resizeObserver: ResizeObserver | undefined

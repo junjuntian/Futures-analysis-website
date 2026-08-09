@@ -5,6 +5,16 @@ const RED = '#e64b4b'
 const GREEN = '#4f8f22'
 const ORANGE = '#d97706'
 const GREY = '#8d8c87'
+const CURRENT_YEAR_COLOR = '#df572d'
+// Distinct hues for the historical years of the seasonal chart. Painting them
+// all grey made the years indistinguishable, which defeats the comparison the
+// chart exists for. The current year keeps CURRENT_YEAR_COLOR and is excluded
+// from this palette so it always stands out.
+const SEASONAL_PALETTE = [
+  '#2f6fa8', '#4f8f22', '#9a4fb5', '#c79a1e', '#1f9a91',
+  '#b8437b', '#5c6ac4', '#7d8b2c', '#a2563a', '#3a8fd4',
+  '#8a5cd6', '#2d9a5b'
+]
 
 export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOption {
   const points = data.continuous_series.points
@@ -163,26 +173,29 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
     .filter((index) => data.seasonal_series.years.some((year) => year.values[index] !== null
       && year.values[index] !== undefined))
   const axis = keptSlots.map((index) => data.seasonal_series.axis[index])
-  const series: SeriesOption[] = data.seasonal_series.years.map((year) => ({
-    name: String(year.year),
-    type: 'line',
-    showSymbol: false,
-    connectNulls: true,
-    data: keptSlots.map((index) => year.values[index] ?? null),
-    lineStyle: {
-      color: year.year === currentYear ? '#df572d' : '#cacac8',
-      width: year.year === currentYear ? 3.5 : 1.5
-    },
-    itemStyle: { color: year.year === currentYear ? '#df572d' : '#8d8c87' },
-    emphasis: { lineStyle: { width: 3 } },
-    endLabel: year.year === currentYear
-      ? { show: true, formatter: String(year.year), color: '#b44020', fontSize: 15 }
-      : { show: false }
-  }))
+  let paletteCursor = 0
+  const series: SeriesOption[] = data.seasonal_series.years.map((year) => {
+    const isCurrent = year.year === currentYear
+    const color = isCurrent
+      ? CURRENT_YEAR_COLOR
+      : SEASONAL_PALETTE[paletteCursor++ % SEASONAL_PALETTE.length]
+    return {
+      name: String(year.year),
+      type: 'line',
+      showSymbol: false,
+      connectNulls: true,
+      data: keptSlots.map((index) => year.values[index] ?? null),
+      lineStyle: { color, width: isCurrent ? 3.5 : 1.6, opacity: isCurrent ? 1 : 0.85 },
+      itemStyle: { color },
+      emphasis: { focus: 'series', lineStyle: { width: 3.2, opacity: 1 } },
+      endLabel: isCurrent
+        ? { show: true, formatter: String(year.year), color: '#b44020', fontSize: 15 }
+        : { show: false }
+    } as SeriesOption
+  })
   return {
     animation: false,
-    color: ['#df572d', '#666560', '#8d8c87', '#aaa9a5'],
-    grid: { left: 54, right: 76, top: 74, bottom: 40 },
+    grid: { left: 54, right: 76, top: 74, bottom: 44 },
     legend: {
       top: 8,
       left: 0,

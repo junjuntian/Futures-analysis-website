@@ -23,26 +23,6 @@ import { useAuthStore } from '../stores/auth'
 type LegKey = 'leg1' | 'leg2'
 type ExportableChart = { download: (type: 'png' | 'svg') => void }
 
-interface Preset {
-  name: string
-  leg1: { symbol: string; month: string }
-  leg2: { symbol: string; month: string }
-  disabledReason?: string
-}
-
-const presets: Preset[] = [
-  { name: '卷螺差', leg1: { symbol: 'HC', month: '10' }, leg2: { symbol: 'RB', month: '10' } },
-  { name: '豆棕差', leg1: { symbol: 'Y', month: '01' }, leg2: { symbol: 'P', month: '01' } },
-  {
-    name: '油粕比',
-    leg1: { symbol: 'Y', month: '01' },
-    leg2: { symbol: 'M', month: '01' },
-    disabledReason: '上游口径待确认：三禾首期缺少两腿原价，暂不计算比值'
-  },
-  { name: '玻璃-纯碱', leg1: { symbol: 'FG', month: '01' }, leg2: { symbol: 'SA', month: '01' } },
-  { name: '焦煤 9-1', leg1: { symbol: 'JM', month: '09' }, leg2: { symbol: 'JM', month: '01' } }
-]
-
 const auth = useAuthStore()
 const varieties = ref<SpreadVariety[]>([])
 const months = reactive<Record<LegKey, string[]>>({ leg1: [], leg2: [] })
@@ -88,6 +68,12 @@ const seasonalRange = computed(() => {
   return `${axis[0].replace('-', '/')}–${axis.at(-1)?.replace('-', '/')}`
 })
 
+// e.g. 焦煤jm09 — the variety name alone is ambiguous once two legs share it,
+// and the bare code alone (jm09) does not say which variety it is.
+function legLabel(key: LegKey) {
+  return `${legs[key].variety}${legs[key].symbol.toLowerCase()}${legs[key].month}`
+}
+
 function varietyByName(name: string) {
   return varieties.value.find((item) => item.name === name)
 }
@@ -121,25 +107,6 @@ async function changeVariety(key: LegKey, requestedMonth?: string) {
   } finally {
     loadingMonths[key] = false
   }
-}
-
-async function applyPreset(preset: Preset) {
-  if (preset.disabledReason) {
-    ElMessage.info(preset.disabledReason)
-    return
-  }
-  const first = varietyBySymbol(preset.leg1.symbol)
-  const second = varietyBySymbol(preset.leg2.symbol)
-  if (!first || !second) {
-    ElMessage.warning('当前品种清单不包含此常用组合')
-    return
-  }
-  legs.leg1.variety = first.name
-  legs.leg2.variety = second.name
-  await Promise.all([
-    changeVariety('leg1', preset.leg1.month),
-    changeVariety('leg2', preset.leg2.month)
-  ])
 }
 
 async function applyFavorite(favorite: SpreadFavorite) {
@@ -186,7 +153,7 @@ function openFavoriteDialog() {
     ElMessage.warning('请先选好两腿组合')
     return
   }
-  favoriteName.value = `${legs.leg1.symbol}${legs.leg1.month}-${legs.leg2.symbol}${legs.leg2.month}`
+  favoriteName.value = `${legLabel('leg1')}-${legLabel('leg2')}`
   favoriteDialog.value = true
 }
 
@@ -271,14 +238,15 @@ onMounted(async () => {
     const [varietyEnvelope] = await Promise.all([getSpreadVarieties(), loadFavorites()])
     varieties.value = varietyEnvelope.data.items
     source.value = varietyEnvelope.data.source
-    const defaultPreset = presets.find((preset) => preset.name === '焦煤 9-1')!
     if (varieties.value.length) {
-      if (varietyBySymbol('JM')) await applyPreset(defaultPreset)
-      else {
-        legs.leg1.variety = varieties.value[0].name
-        legs.leg2.variety = varieties.value[0].name
-        await Promise.all([changeVariety('leg1'), changeVariety('leg2')])
-      }
+      const coking = varietyBySymbol('JM')
+      const initial = coking ?? varieties.value[0]
+      legs.leg1.variety = initial.name
+      legs.leg2.variety = initial.name
+      await Promise.all([
+        changeVariety('leg1', coking ? '09' : undefined),
+        changeVariety('leg2', coking ? '01' : undefined)
+      ])
     }
   } catch (error) {
     errorMessage.value = describeError(error)
@@ -317,11 +285,7 @@ onMounted(async () => {
       </div>
 
       <div class="preset-row">
-        <span class="preset-label">常用</span>
-        <el-tooltip v-for="preset in presets" :key="preset.name" :disabled="!preset.disabledReason"
-          :content="preset.disabledReason" placement="top">
-          <el-button round :disabled="Boolean(preset.disabledReason)" @click="applyPreset(preset)">{{ preset.name }}</el-button>
-        </el-tooltip>
+        <span v-if="favorites.length" class="preset-label">收藏</span>
         <el-tag v-for="favorite in favorites" :key="favorite.id" closable round class="favorite-pill"
           @click="applyFavorite(favorite)" @close.stop="removeFavorite(favorite)">
           {{ favorite.name }}
@@ -487,8 +451,10 @@ onMounted(async () => {
 .section-heading.compact { margin-bottom: 2px; }
 .heading-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; color: #8d8c87; font-size: 13px; white-space: nowrap; }
 .heading-meta strong { color: #8d8c87; font-size: 16px; font-weight: 500; }
-.chart-wrap { position: relative; margin-top: 10px; }
-.export-actions { position: absolute; right: 2px; bottom: 3px; display: flex; gap: 4px; }
+.chart-wrap { margin-top: 10px; }
+/* Kept in flow below the chart: floating them over the bottom-right corner
+   covered the last date labels and the zoom slider. */
+.export-actions { display: flex; justify-content: flex-end; gap: 4px; margin-top: 6px; }
 .chart-footnote { margin-top: 12px; color: #8d8c87; font-size: 13px; }
 .matrix-heading { align-items: center; }
 .matrix-legend { color: #8d8c87; white-space: nowrap; }
