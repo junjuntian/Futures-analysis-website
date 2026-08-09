@@ -13,10 +13,12 @@ from futures_collector.normalize import (
 )
 from futures_collector.sources import (
     DCE_FALLBACK_SOURCE,
+    EASTMONEY_SEATS_SOURCE_CODE,
     SOURCES,
     AkshareAdapter,
     DatasetCompletenessError,
     ExchangeSource,
+    eastmoney_seats_source,
 )
 
 LOG = logging.getLogger("futures_collector")
@@ -92,48 +94,55 @@ class CollectionRunner:
                     dataset_type,
                     reason,
                 )
-                if source.code != "DCE":
+                rows = None
+                for candidate, candidate_is_fallback in _fallback_chain(source, dataset):
+                    LOG.warning(
+                        "fallback_activated exchange=%s dataset=%s source=%s",
+                        source.code,
+                        dataset_type,
+                        candidate.source_code,
+                    )
+                    try:
+                        rows = self._collect_with_retries(
+                            candidate,
+                            collection_date,
+                            dataset,
+                            observed_at,
+                            fallback=candidate_is_fallback,
+                        )
+                    except Exception as fallback_error:
+                        LOG.error(
+                            "fallback_failed exchange=%s dataset=%s source=%s error=%s",
+                            source.code,
+                            dataset_type,
+                            candidate.source_code,
+                            safe_error_code(fallback_error),
+                        )
+                        skipped_count = (
+                            fallback_error.skipped_count
+                            if isinstance(fallback_error, DatasetCompletenessError)
+                            else 0
+                        )
+                        fallback_reason = self.platform.record_failure(
+                            candidate,
+                            dataset_type,
+                            collection_date,
+                            skipped_source_item_count=skipped_count,
+                        )
+                        LOG.error(
+                            "batch_failed exchange=%s dataset=%s source=%s reason=%s",
+                            source.code,
+                            dataset_type,
+                            candidate.source_code,
+                            fallback_reason,
+                        )
+                        rows = None
+                        continue
+                    effective_source = candidate
+                    break
+                if rows is None:
                     failures += 1
                     continue
-                LOG.warning(
-                    "fallback_activated exchange=DCE dataset=%s source=%s",
-                    dataset_type,
-                    DCE_FALLBACK_SOURCE.source_code,
-                )
-                try:
-                    rows = self._collect_with_retries(
-                        DCE_FALLBACK_SOURCE,
-                        collection_date,
-                        dataset,
-                        observed_at,
-                        fallback=True,
-                    )
-                except Exception as fallback_error:
-                    LOG.error(
-                        "fallback_failed exchange=DCE dataset=%s error=%s",
-                        dataset_type,
-                        safe_error_code(fallback_error),
-                    )
-                    skipped_count = (
-                        fallback_error.skipped_count
-                        if isinstance(fallback_error, DatasetCompletenessError)
-                        else 0
-                    )
-                    fallback_reason = self.platform.record_failure(
-                        DCE_FALLBACK_SOURCE,
-                        dataset_type,
-                        collection_date,
-                        skipped_source_item_count=skipped_count,
-                    )
-                    LOG.error(
-                        "batch_failed exchange=DCE dataset=%s source=%s reason=%s",
-                        dataset_type,
-                        DCE_FALLBACK_SOURCE.source_code,
-                        fallback_reason,
-                    )
-                    failures += 1
-                    continue
-                effective_source = DCE_FALLBACK_SOURCE
             LOG.info(
                 "dataset_collected exchange=%s dataset=%s source=%s rows=%d",
                 effective_source.code,
@@ -211,6 +220,10 @@ class CollectionRunner:
         *,
         fallback: bool,
     ) -> list[dict[str, str]]:
+        if source.source_code == EASTMONEY_SEATS_SOURCE_CODE and dataset != "seats":
+            # Eastmoney's report carries no settlement price and no contract
+            # catalog, so it must never stand in for anything but seats.
+            raise ValueError("the Eastmoney source only serves the seats dataset")
         if dataset == "catalog":
             frame = (
                 self.adapter.fallback_catalog(source, collection_date)
@@ -234,13 +247,31 @@ class CollectionRunner:
             normalize_market(source, collection_date, frame, observed_at)
             return normalize_calendar(source, collection_date)
         if dataset == "seats":
-            tables = (
-                self.adapter.fallback_seats(source, collection_date)
-                if fallback
-                else self.adapter.seats(source, collection_date)
-            )
+            if source.source_code == EASTMONEY_SEATS_SOURCE_CODE:
+                tables = self.adapter.eastmoney_seats(source, collection_date)
+            elif fallback:
+                tables = self.adapter.fallback_seats(source, collection_date)
+            else:
+                tables = self.adapter.seats(source, collection_date)
             return normalize_seats(source, collection_date, tables)
         raise ValueError("unsupported dataset")
+
+
+def _fallback_chain(source: ExchangeSource, dataset: str) -> list[tuple[ExchangeSource, bool]]:
+    """Sources to try, in order, once the official one has failed.
+
+    Official first is the standing rule, so nothing here ever pre-empts an
+    exchange that is answering. DCE keeps its existing Sina fallback for every
+    dataset. Eastmoney is appended for seats only, and only last: it is the one
+    source that covers all five exchanges, so it turns a hard seat failure into
+    an attempt where previously there was none.
+    """
+    chain: list[tuple[ExchangeSource, bool]] = []
+    if source.code == "DCE":
+        chain.append((DCE_FALLBACK_SOURCE, True))
+    if dataset == "seats":
+        chain.append((eastmoney_seats_source(source.code), False))
+    return chain
 
 
 def _dataset_type(dataset: str) -> str:

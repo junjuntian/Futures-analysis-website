@@ -64,14 +64,42 @@ VPS host cron
 | CFFEX | `futures_contract_info_cffex(date)` | `get_cffex_daily(date)` | `get_cffex_rank_table(date)` | `www.cffex.com.cn` |
 
 - 不调用聚合入口 `get_futures_daily` 或 `get_rank_sum`，以便单交易所失败可独立归因和隔离。
-- `DEC-041` 只为 DCE 增加官方失败后的新浪 fallback；SHFE、CZCE、GFEX、CFFEX 仍不得调用新浪、东方财富、生意社等二手源。
+- `DEC-041` 只为 DCE 增加官方失败后的新浪 fallback；SHFE、CZCE、GFEX、CFFEX 不得调用新浪、生意社等二手源。**东方财富按 `DEC-043` 例外**：仅席位数据集、仅在全部官方兜底之后、五家交易所通用，见下方专条。
 - DCE fallback 函数固定为：`futures_symbol_mark()` 取得 DCE 品种目录，`futures_zh_realtime(symbol)` 取得当前活跃合约，`futures_contract_detail(contract)` 取得合约参数，`futures_zh_daily_sina(contract)` 取得含收盘价与结算价的历史日行情，`futures_hold_pos_sina(kind, contract, date)` 分别取得成交量、持买和持卖排名。允许域名固定为 `vip.stock.finance.sina.com.cn`、`finance.sina.com.cn`、`stock2.finance.sina.com.cn`；重定向仍须落在该集合。
-- 选择新浪而非东方财富的依据：锁定版 AKShare 的 `futures_zh_daily_sina` 返回 `close` 与 `settle`，且 `futures_hold_pos_sina` 覆盖 DEC-039 要求的三类逐合约席位排名；东方财富 `futures_hist_em` 不返回结算价，数据完整性不足。
+- 选择新浪而非东方财富承担 **DCE 行情** 的依据：锁定版 AKShare 的 `futures_zh_daily_sina` 返回 `close` 与 `settle`，且 `futures_hold_pos_sina` 覆盖 DEC-039 要求的三类逐合约席位排名；东方财富 `futures_hist_em` 不返回结算价，数据完整性不足。**该理由只对行情成立**——`DEC-043` 据此把东方财富限定为席位专用源。
 - 每个 DCE 数据集都必须先尝试上表官方函数。仅在官方请求或解析失败时 fallback；不能以空结果静默切换，非交易日仍按原规则失败隔离。官方失败尝试必须生成 `failed` 审计批次，fallback 另建 `succeeded` 批次。
 - DCE fallback 完整性以 catalog 合约集为候选闭合基准。行情函数成功返回历史表但目标交易日无记录，表示该合约当日没有必要行情观测，必须登记 `not_observed` 而非伪造事实或记作请求失败；函数请求、响应解析或目标日行解析异常经重试后仍失败，则整个 DCE 行情数据集 `failed`。
 - DCE 席位以“目标日是否实际发布排名”判定必要合约：同一合约成交量、持买、持卖三类均为空时登记 `not_published`；任一类已发布后三类即构成必要闭合，缺少任一类或任一请求/解析异常经重试后仍失败，整个 DCE 席位数据集 `failed`。`not_observed`/`not_published` 不进入正式表，失败 skip 数继续写结构化日志与审计。
 - akshare 自带交易日判断只用于拒绝明显非交易日参数；正式 `trading_calendar_days` 的 4A 记录由该交易所目录/行情官方响应共同证明，不能仅凭 akshare 本地静态日历入库。
 - 官方来源代码固定为 `akshare_dce_official`、`akshare_shfe_official`、`akshare_czce_official`、`akshare_gfex_official`、`akshare_cffex_official`；`source_type=exchange_public`、`authorization_status=whitelisted`、`connector_code=akshare_v1`。DCE fallback 来源代码固定为 `akshare_sina_dce_fallback`，`source_type=aggregator_public`、`authorization_status=whitelisted_exception`、`connector_code=akshare_v1`；其批次和正式事实表的 `source_id` 不得指向 `akshare_dce_official`。
+
+### 3.x 东方财富席位兜底源（`DEC-043`）
+
+| 项 | 取值 |
+| --- | --- |
+| 来源代码 | `eastmoney_seats_fallback` |
+| 类型 / 授权 / 连接器 | `aggregator_public` / `whitelisted_exception` / `eastmoney_seats_v1` |
+| 优先级 | 40（官方 100 > 新浪 50 > 东财 40） |
+| 允许域名 | `datacenter-web.eastmoney.com` |
+| 接口 | `GET /api/data/v1/get`，`reportName=RPT_FUTU_DAILYPOSITION`，`columns=ALL`，`filter=(TRADE_DATE='YYYY-MM-DD')(TYPE="0")`，`pageSize` 服务端硬性截到 500 |
+| 覆盖数据集 | 仅 `seat_positions_v1` |
+
+- **不经 AKShare**：锁定版 AKShare 1.18.81 没有任何东方财富期货席位函数（只有
+  `futures_hist_em`、`futures_inventory_em`、`futures_contract_detail_em` 等）。该源由采集器
+  自有 HTTP 客户端直连，但仍在 `official_requests_only` 的域名白名单与 DNS 围栏内，
+  与 AKShare 路径受同一套出站约束。`connector_code` 独立为 `eastmoney_seats_v1`，
+  不复用 `akshare_v1`，以免谎报取数方式。
+- **只服务席位**：该报表不含结算价、不含合约目录，采集器对 `catalog` / `market` /
+  `calendar` 三个数据集显式拒绝使用该源。
+- **顺序**：官方 → （仅 DCE）新浪 → 东方财富。官方在应答时永不被抢先。
+- **行列换形**：东方财富一行 = 一个（合约, 会员），同时带该会员在成交量、持买、持卖
+  三项各自的名次；交易所与本平台的 `seat_positions_v1` 是一行 = 一个名次、三列各指
+  向不同会员。采集器把前者还原成后者，因此规范化层无需特例。名次列中的 `9999` 表示
+  “该会员此项未上榜”，不得当作名次 9999。
+- **市场映射**：`069001005`→SHFE、`069001007`→DCE、`069001008`→CZCE、`069001009`→CFFEX、
+  `069001021`→GFEX。`069001016`（INE，上期能源）**必须排除**——它不属于本平台编目的五家
+  交易所，收进来会凭空造出任何目录数据集都未声明过的合约。
+- **完整性**：分页若超出页预算，整日判 `failed`，不得提交被截断的席位表。
 
 ## 4. 标准化 CSV 契约
 

@@ -106,6 +106,56 @@ DCE_FALLBACK_SOURCE = ExchangeSource(
 )
 
 
+# Eastmoney publishes the same member-level 龙虎榜 the exchanges do, but as one
+# report covering every market, refreshed earlier than the exchange files. It is
+# a seats-only source: `RPT_FUTU_DAILYPOSITION` carries no settlement price, so
+# it can never stand in for market data (the same reason Sina, not Eastmoney,
+# was chosen as the DCE market fallback).
+EASTMONEY_SEATS_SOURCE_CODE = "eastmoney_seats_fallback"
+EASTMONEY_SEATS_DOMAINS = frozenset({"datacenter-web.eastmoney.com"})
+EASTMONEY_SEATS_ENDPOINT = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+EASTMONEY_SEATS_REPORT = "RPT_FUTU_DAILYPOSITION"
+# The report serves six markets. INE is deliberately absent: it is not one of
+# the five exchanges this platform catalogues, and admitting its contracts would
+# invent instruments no catalog dataset ever declared.
+EASTMONEY_TRADE_MARKET_CODES = {
+    "069001005": "SHFE",
+    "069001007": "DCE",
+    "069001008": "CZCE",
+    "069001009": "CFFEX",
+    "069001021": "GFEX",
+}
+# The endpoint silently caps pageSize at 500 however much is asked for, and a
+# full trading day is roughly 10k rows, so the page budget is the real guard
+# against an unbounded crawl.
+EASTMONEY_PAGE_SIZE = 500
+EASTMONEY_MAX_PAGES = 80
+# The report uses 9999 in a rank column to mean "this member is not ranked for
+# that measure", not "rank 9999".
+EASTMONEY_UNRANKED = 9999
+EASTMONEY_RANK_KINDS = (
+    ("VOLUME_RANK", "VOLUME", "vol_party_name", "vol"),
+    ("LP_RANK", "LONG_POSITION", "long_party_name", "long_open_interest"),
+    ("SP_RANK", "SHORT_POSITION", "short_party_name", "short_open_interest"),
+)
+
+
+def eastmoney_seats_source(exchange_code: str) -> ExchangeSource:
+    official = SOURCES[exchange_code]
+    # The akshare function names are empty on purpose: nothing about this source
+    # goes through akshare, which has no Eastmoney futures seat function at all.
+    return ExchangeSource(
+        exchange_code,
+        EASTMONEY_SEATS_SOURCE_CODE,
+        official.name,
+        EASTMONEY_SEATS_DOMAINS,
+        "",
+        "",
+        "",
+        False,
+    )
+
+
 class OutboundPolicyError(ValueError):
     pass
 
@@ -122,6 +172,7 @@ class AkshareAdapter:
     def __init__(self) -> None:
         self._dce_catalog_cache: dict[date, pd.DataFrame] = {}
         self._dce_market_cache: dict[date, pd.DataFrame] = {}
+        self._eastmoney_seat_cache: dict[date, list[dict[str, Any]]] = {}
 
     def catalog(self, source: ExchangeSource, collection_date: date) -> Any:
         function = getattr(akshare, source.catalog_function)
@@ -139,6 +190,77 @@ class AkshareAdapter:
         function = getattr(akshare, source.seats_function)
         with official_requests_only(source.domains):
             return function(date=collection_date.strftime("%Y%m%d"))
+
+    def eastmoney_seats(
+        self, source: ExchangeSource, collection_date: date
+    ) -> dict[str, pd.DataFrame]:
+        if source.source_code != EASTMONEY_SEATS_SOURCE_CODE:
+            raise ValueError("eastmoney_seats requires the Eastmoney seat source")
+        rows = self._eastmoney_daily_position(collection_date)
+        selected = [
+            row
+            for row in rows
+            if EASTMONEY_TRADE_MARKET_CODES.get(str(row.get("TRADE_MARKET_CODE") or ""))
+            == source.code
+        ]
+        if not selected:
+            raise ValueError("Eastmoney seat response has no rows for this exchange")
+        return _pivot_eastmoney_seats(selected)
+
+    def _eastmoney_daily_position(self, collection_date: date) -> list[dict[str, Any]]:
+        cached = self._eastmoney_seat_cache.get(collection_date)
+        if cached is not None:
+            return cached
+        rows: list[dict[str, Any]] = []
+        with official_requests_only(EASTMONEY_SEATS_DOMAINS):
+            page = 1
+            while page <= EASTMONEY_MAX_PAGES:
+                response = requests.get(
+                    EASTMONEY_SEATS_ENDPOINT,
+                    params={
+                        "reportName": EASTMONEY_SEATS_REPORT,
+                        "columns": "ALL",
+                        # TYPE 0 is the 成交持仓龙虎榜 the exchanges publish; the
+                        # report multiplexes nine other tables onto the same
+                        # report name.
+                        "filter": (
+                            f"(TRADE_DATE='{collection_date.isoformat()}')(TYPE=\"0\")"
+                        ),
+                        "sortTypes": 1,
+                        "sortColumns": "SECURITY_CODE",
+                        "pageNumber": page,
+                        "pageSize": EASTMONEY_PAGE_SIZE,
+                        "source": "WEB",
+                        "client": "WEB",
+                    },
+                    headers={"Referer": "https://data.eastmoney.com/"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Eastmoney seat response is not an object")
+                # 9201 is the report's own "no rows" code and arrives with
+                # success=false, so it has to be told apart from a real failure.
+                if payload.get("code") == 9201:
+                    break
+                result = payload.get("result")
+                if not payload.get("success") or not isinstance(result, dict):
+                    raise ValueError("Eastmoney seat response was not successful")
+                page_rows = result.get("data")
+                if not isinstance(page_rows, list):
+                    raise ValueError("Eastmoney seat response has no data array")
+                rows.extend(row for row in page_rows if isinstance(row, dict))
+                total_pages = result.get("pages")
+                if not isinstance(total_pages, int) or page >= total_pages:
+                    break
+                page += 1
+            else:
+                # Falling out of the loop means the report claims more pages
+                # than the budget allows. Refuse rather than submit a silently
+                # truncated day.
+                raise ValueError("Eastmoney seat response exceeded the page budget")
+        self._eastmoney_seat_cache[collection_date] = rows
+        return rows
 
     def fallback_catalog(self, source: ExchangeSource, collection_date: date) -> pd.DataFrame:
         self._require_dce(source)
@@ -347,6 +469,44 @@ def _detail_map(frame: pd.DataFrame) -> dict[str, str]:
 def _numeric_value(value: str) -> str:
     match = re.search(r"[-+]?\d+(?:\.\d+)?", value.replace(",", ""))
     return match.group(0) if match else ""
+
+
+def _pivot_eastmoney_seats(rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
+    """Turn Eastmoney's member-centric rows back into the exchange's rank table.
+
+    Eastmoney emits one row per (contract, member) carrying that member's rank
+    in all three measures at once. The exchanges — and therefore this
+    platform's `seat_positions_v1` shape — publish one row per rank, whose
+    volume, long and short columns each name a different member. Rebuild that
+    layout so the existing normalizer needs no special case, and so a member
+    unranked in one measure (9999) simply leaves that column empty rather than
+    inventing a rank.
+    """
+    by_contract: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        contract = str(row.get("SECURITY_CODE") or "").upper().replace(" ", "")
+        if contract:
+            by_contract.setdefault(contract, []).append(row)
+    tables: dict[str, pd.DataFrame] = {}
+    for contract, members in by_contract.items():
+        ranked: dict[int, dict[str, Any]] = {}
+        for rank_field, value_field, name_column, value_column in EASTMONEY_RANK_KINDS:
+            for member in members:
+                rank = member.get(rank_field)
+                value = member.get(value_field)
+                seat_name = member.get("MEMBER_NAME_ABBR")
+                if not isinstance(rank, int) or rank == EASTMONEY_UNRANKED:
+                    continue
+                if value is None or not seat_name:
+                    continue
+                slot = ranked.setdefault(rank, {"rank": rank, "symbol": contract})
+                slot[name_column] = seat_name
+                slot[value_column] = value
+        if ranked:
+            tables[contract] = pd.DataFrame([ranked[rank] for rank in sorted(ranked)])
+    if not tables:
+        raise ValueError("Eastmoney seat response has no ranked contracts")
+    return tables
 
 
 def _normalize_sina_seat_table(

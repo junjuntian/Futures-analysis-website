@@ -127,7 +127,7 @@
 
 ## 11. akshare 自动采集
 
-- API 不接受任意 URL；akshare 采集容器只允许访问 DCE、SHFE、CZCE、GFEX、CFFEX 的交易所域名白名单，东方财富等二手数据源不进入第一批。
+- API 不接受任意 URL；采集容器只允许访问 DCE、SHFE、CZCE、GFEX、CFFEX 的交易所域名白名单，外加 `DEC-041` 的新浪域名与 `DEC-043` 的 `datacenter-web.eastmoney.com`。东方财富仅按 `DEC-043` 作为席位专用兜底源接入（排在全部官方源之后，不承担行情与目录），其余二手数据源不进入第一批。
 - 非 http/https、localhost、私网、链路本地、云元数据和 DNS Rebinding 目标被拒绝；每次重定向重新校验。
 - 采集容器无法访问宿主机文件、数据库、对象存储、Docker socket 和管理端口，标准化 CSV 只通过导入 API 提交。
 - 白名单结构化自动采集批次使用固定映射模板版本，免人工确认、免提取预览；手动文件导入的既有 preview/confirm 流程不变。

@@ -342,13 +342,13 @@ pub async fn register_upload(
             "insert into data_sources
                     (id, workspace_id, code, name, source_type, base_domain,
                      authorization_status, connector_code, priority)
-                 values ($1, $2, $3, $4, $5, $6, $7, 'akshare_v1', $8)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  on conflict (workspace_id, code) do update
                     set name = excluded.name, base_domain = excluded.base_domain,
                         priority = excluded.priority, updated_at = now()
                   where data_sources.source_type = excluded.source_type
                     and data_sources.authorization_status = excluded.authorization_status
-                    and data_sources.connector_code = 'akshare_v1'
+                    and data_sources.connector_code = excluded.connector_code
                  returning id",
         )
         .bind(Uuid::now_v7())
@@ -358,6 +358,7 @@ pub async fn register_upload(
         .bind(definition.source_type)
         .bind(definition.base_domain)
         .bind(definition.authorization_status)
+        .bind(definition.connector_code)
         .bind(definition.priority)
         .fetch_one(&mut *tx)
         .await?;
@@ -502,6 +503,11 @@ struct AutomaticSourceDefinition {
     source_type: &'static str,
     base_domain: &'static str,
     authorization_status: &'static str,
+    /// How the collector actually reaches this source. Everything akshare
+    /// fetches shares `akshare_v1`; Eastmoney has no akshare futures seat
+    /// function and is fetched by the collector's own client, so recording it
+    /// as akshare would misstate the provenance.
+    connector_code: &'static str,
     priority: i32,
     allowed_domains: &'static [&'static str],
 }
@@ -513,6 +519,7 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "exchange_public",
             base_domain: "www.dce.com.cn",
             authorization_status: "whitelisted",
+            connector_code: "akshare_v1",
             priority: 100,
             allowed_domains: &["www.dce.com.cn", "portal.dce.com.cn"],
         }),
@@ -521,6 +528,7 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "aggregator_public",
             base_domain: "vip.stock.finance.sina.com.cn",
             authorization_status: "whitelisted_exception",
+            connector_code: "akshare_v1",
             priority: 50,
             allowed_domains: &[
                 "vip.stock.finance.sina.com.cn",
@@ -533,6 +541,7 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "exchange_public",
             base_domain: "www.shfe.com.cn",
             authorization_status: "whitelisted",
+            connector_code: "akshare_v1",
             priority: 100,
             allowed_domains: &["www.shfe.com.cn", "tsite.shfe.com.cn"],
         }),
@@ -541,6 +550,7 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "exchange_public",
             base_domain: "www.czce.com.cn",
             authorization_status: "whitelisted",
+            connector_code: "akshare_v1",
             priority: 100,
             allowed_domains: &["www.czce.com.cn"],
         }),
@@ -549,14 +559,27 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             source_type: "exchange_public",
             base_domain: "www.gfex.com.cn",
             authorization_status: "whitelisted",
+            connector_code: "akshare_v1",
             priority: 100,
             allowed_domains: &["www.gfex.com.cn"],
+        }),
+        "eastmoney_seats_fallback" => Some(AutomaticSourceDefinition {
+            name: "东方财富（席位聚合）",
+            source_type: "aggregator_public",
+            base_domain: "datacenter-web.eastmoney.com",
+            authorization_status: "whitelisted_exception",
+            connector_code: "eastmoney_seats_v1",
+            // Below the Sina DCE fallback, which is itself below every
+            // exchange: Eastmoney is the last thing tried, and only for seats.
+            priority: 40,
+            allowed_domains: &["datacenter-web.eastmoney.com"],
         }),
         "akshare_cffex_official" => Some(AutomaticSourceDefinition {
             name: "中国金融期货交易所",
             source_type: "exchange_public",
             base_domain: "www.cffex.com.cn",
             authorization_status: "whitelisted",
+            connector_code: "akshare_v1",
             priority: 100,
             allowed_domains: &["www.cffex.com.cn"],
         }),
@@ -3887,6 +3910,27 @@ mod tests {
             ]
         );
         assert!(automatic_source("akshare_sina_shfe_fallback").is_none());
+        assert_eq!(fallback.connector_code, "akshare_v1");
+
+        // Eastmoney is the only source that does not travel through akshare,
+        // and the only aggregator admitted for all five exchanges. It must sit
+        // below the Sina fallback so it is never reached while a nearer source
+        // is answering.
+        let eastmoney = automatic_source("eastmoney_seats_fallback").unwrap();
+        assert_eq!(eastmoney.source_type, "aggregator_public");
+        assert_eq!(eastmoney.authorization_status, "whitelisted_exception");
+        assert_eq!(eastmoney.connector_code, "eastmoney_seats_v1");
+        assert!(eastmoney.priority < fallback.priority);
+        assert_eq!(eastmoney.allowed_domains, ["datacenter-web.eastmoney.com"]);
+
+        let eastmoney_migration =
+            include_str!("../../../migrations/202608090002_eastmoney_seats_source.sql");
+        assert!(eastmoney_migration.contains("'eastmoney_seats_v1'"));
+        assert!(eastmoney_migration.contains("values ('202608090002'"));
+        // A seats-only aggregator must never be admitted as an exchange source.
+        assert!(!eastmoney_migration.contains(
+            "and authorization_status = 'whitelisted'\n            and connector_code in"
+        ));
 
         let migration = include_str!("../../../migrations/202608020002_dce_fallback_source.sql");
         assert!(migration.contains("source_type = 'aggregator_public'"));

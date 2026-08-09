@@ -161,7 +161,7 @@
 
 - MVP 不开放任意 URL 访问。
 - 只允许域名白名单和已经实现的数据源连接器。
-- Phase 4 采集范围由 `DEC-031` 和 `DEC-039` 约束；第一批仅包含五家交易所公开数据，东方财富等二手数据源不进入第一批。
+- Phase 4 采集范围由 `DEC-031` 和 `DEC-039` 约束；第一批仅包含五家交易所公开数据。二手数据源原则上不进入第一批，现有例外只有两条且都写在决策里：`DEC-041` 的新浪（仅 DCE，官方失败后兜底）与 `DEC-043` 的东方财富（仅席位，全部官方兜底之后）。
 - 原三禾登录连接器及其登录基础设施已由 `DEC-031` 替代并移除；`DEC-042` 仅为 Phase 5 自由价差有限恢复三个无需登录的只读 POST 端点，不恢复登录能力。
 - 重定向、子资源、XHR、WebSocket 和下载仍受相同白名单与出口策略约束。
 
@@ -257,7 +257,7 @@ PaddleOCR 容器不建。以下为原决策内容，仅为变更审计保留，�
 - 实现方式改为 akshare 采集器：独立 Python 容器，按需运行；每交易日盘后由调度拉起，跑完退出，不常驻。
 - 采集器经 akshare 拉取交易所公开数据，产出标准化 CSV 后调用平台导入 API 入库，保留来源、批次、回滚全套机制。
 - 原 Phase A/B 分批约束取消，akshare 一次覆盖五家。
-- 东方财富等二手数据源不进入第一批。
+- 东方财富仅按 `DEC-043` 作为席位专用兜底源接入（排在全部官方源之后，不承担行情与目录），其余二手数据源不进入第一批。
 - 隔离 Chromium、Playwright、noVNC、信封加密浏览器会话整套移除。登录类数据源如未来需要，另行立项；`DEC-042` 的三禾自由价差特例无需登录且不恢复上述基础设施。
 
 以下为修订前决策内容，仅为变更审计保留，不再生效：
@@ -380,6 +380,39 @@ PaddleOCR 容器不建。以下为原决策内容，仅为变更审计保留，�
 - Phase 4A 经审核的 fallback 固定为新浪期货接口：其 AKShare `futures_zh_daily_sina` 同时提供指定合约的历史收盘价与结算价，`futures_hold_pos_sina` 提供指定日期、逐合约的成交量、持买和持卖排名；东方财富 `futures_hist_em` 缺少结算价，因此不选用。
 - fallback 数据必须如实使用独立 `data_sources` 记录和域名白名单；批次、`market_prices.source_id`、`seat_positions.source_id` 必须指向新浪聚合源，不得标注为 DCE 官方。官方失败尝试与 fallback 成功批次均须可审计、可追溯。
 - 该例外仅限 DCE；SHFE、CZCE、GFEX、CFFEX 继续只允许官方直连，不得引入聚合源。
+
+### `DEC-043` 东方财富席位聚合源接入
+
+状态：已确认（2026-08-09，运营者授权）。
+
+- 背景与实证：`DEC-041` 当初选新浪不选东方财富，理由是东方财富 `futures_hist_em`
+  缺少结算价，无法承担行情数据。该理由**只对行情成立，对席位不成立**。2026-08-09
+  实证东方财富数据中心报表 `RPT_FUTU_DAILYPOSITION` 同时覆盖 SHFE、DCE、CZCE、CFFEX、
+  GFEX、INE 六个市场的成员级成交持仓龙虎榜，单日约 9939 行（`TYPE="0"`），且当日即可
+  取到当期交易日数据。
+- **接口更正**：早期交接文档记录的
+  `qhhqzl.eastmoney.com/marketFutuWeb/dragonAndTigerInfo/getLongAndShortPosition`
+  是错的，该地址对任何参数组合都返回 `code:40000`。实际在用的是
+  `datacenter-web.eastmoney.com/api/data/v1/get`，报表名 `RPT_FUTU_DAILYPOSITION`，
+  过滤条件 `(TRADE_DATE='YYYY-MM-DD')(TYPE="0")`，`SECURITY_CODE` 大写，`pageSize`
+  被服务端硬性截到 500。
+- 定位：**只服务席位（`seat_positions_v1`），永远排在官方源之后**。它不提供结算价，
+  也不提供合约目录，因此不得承担 `daily_market_prices_v1`、`futures_catalog_v1`、
+  `trading_calendar_v1` 任何一项——采集器对此有显式拒绝。
+- 顺序：官方 → （仅 DCE）新浪 → 东方财富。官方在应答时永远不会被抢先，`DEC-041`
+  的“官方优先”不受削弱；本决策只是把原先“官方失败即整块席位失败”的情形，变成还有
+  一次尝试。适用于全部五家交易所，这是它相对新浪例外的唯一扩大之处。
+- 连接方式：AKShare 1.18.81 **没有**任何东方财富期货席位函数，因此该源不经 AKShare，
+  由采集器自有 HTTP 客户端直连，并受与 AKShare 路径完全相同的域名白名单与 DNS 围栏
+  约束（`official_requests_only`）。为不谎报取数方式，其 `connector_code` 独立为
+  `eastmoney_seats_v1`，不复用 `akshare_v1`；迁移 `202608090002` 放行该值。
+- 如实标源：`data_sources.code = eastmoney_seats_fallback`，类型 `aggregator_public`，
+  授权状态 `whitelisted_exception`，域名白名单仅 `datacenter-web.eastmoney.com`，
+  优先级 40（低于新浪 50，低于官方 100）。落库批次与 `seat_positions.source_id`
+  必须指向该源，不得标注为交易所官方。
+- INE（上期能源，`069001016`）在该报表中存在，但**不属于本平台编目的五家交易所**，
+  一律排除；否则会凭空造出任何目录数据集都未声明过的合约。
+- 完整性：报表分页若超出页预算，整日判为失败而不是提交被截断的席位表。
 
 ### `DEC-042` 三禾只读 API 接入
 

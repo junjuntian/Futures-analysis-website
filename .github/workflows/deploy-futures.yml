@@ -162,6 +162,7 @@ jobs:
             rust/migrations/202608030003_phase_4a_projection_rollback_delete_grants.sql \
             rust/migrations/202608050001_phase_5a_spread_provider.sql \
             rust/migrations/202608090001_phase_5a_leg_order_mismatch.sql \
+            rust/migrations/202608090002_eastmoney_seats_source.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline
