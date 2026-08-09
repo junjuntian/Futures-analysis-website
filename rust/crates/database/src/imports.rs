@@ -3894,27 +3894,35 @@ mod tests {
         assert!(migration.contains("values ('202608020002'"));
 
         let deployment = include_str!("../../../../.github/workflows/deploy-futures.yml");
-        assert_eq!(
-            deployment
-                .matches("202608020002_dce_fallback_source.sql")
-                .count(),
-            2
+        // Every migration must be named in the bundle list, which is the one
+        // place a release declares its reviewed schema set.
+        for migration in [
+            "202608020002_dce_fallback_source.sql",
+            "202608030001_phase_4a_evaluator_fixes.sql",
+            "202608030002_phase_4a_rls_backfill.sql",
+        ] {
+            assert!(
+                deployment.contains(migration),
+                "{migration} is missing from the release bundle list"
+            );
+        }
+        // Everything downstream of the bundle must be derived from it rather
+        // than repeated. Four hand-maintained copies of this list (bundle,
+        // runner, verification, evidence) used to drift, and a migration that
+        // shipped in the bundle but was missing from the runner copy reached
+        // production unapplied. Assert the shape that made that impossible:
+        // the runner iterates the bundled directory, and verification and
+        // evidence read the same derived set.
+        assert!(
+            deployment.contains("for migration_path in \"$RELEASE_DIR\"/migrations/*.sql"),
+            "the runner must iterate the bundled migrations, not a second list"
         );
-        assert_eq!(
-            deployment
-                .matches("202608030001_phase_4a_evaluator_fixes.sql")
-                .count(),
-            2
+        assert!(deployment.contains("bundled_versions=$(find \"$RELEASE_DIR/migrations\""));
+        assert!(deployment.contains("migrations=$(printf '%s' \"$bundled_versions\""));
+        assert!(
+            !deployment.contains("migrations=202607260001,202607260002"),
+            "the evidence line must derive the version list, not hardcode it"
         );
-        assert_eq!(
-            deployment
-                .matches("202608030002_phase_4a_rls_backfill.sql")
-                .count(),
-            2
-        );
-        assert!(deployment.contains(
-            "migrations=202607260001,202607260002,202608020001,202608020002,202608030001,202608030002"
-        ));
         assert_eq!(deployment.matches("ServerAliveInterval=30").count(), 1);
         assert_eq!(deployment.matches("ServerAliveCountMax=6").count(), 1);
         assert!(deployment.contains("for version_attempt in {1..20}"));

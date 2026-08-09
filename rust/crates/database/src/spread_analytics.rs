@@ -411,6 +411,20 @@ pub async fn resolve_contract_windows(
                  order by (rule.instrument_code is not null) desc, rule.priority asc
                  limit 1
            ) selected_rule on true
+           cross join lateral (
+                select date_trunc(
+                           'month',
+                           delivery.delivery_date::timestamp
+                           + make_interval(months => coalesce(
+                               (selected_rule.rule_json ->> 'month_offset')::integer,
+                               -1
+                           ))
+                       )::date as month_start
+           ) deadline_month
+           cross join lateral (
+                select (deadline_month.month_start
+                        + interval '1 month - 1 day')::date as month_end
+           ) deadline_month_end
            left join lateral (
                 select day.trade_date, calendar.id as calendar_version_id
                   from trading_calendar_days day
@@ -424,29 +438,28 @@ pub async fn resolve_contract_windows(
                          from trading_calendar_versions selected_calendar
                         where selected_calendar.workspace_id = contract.workspace_id
                           and selected_calendar.exchange_id = exchange.id
-                          and selected_calendar.effective_from <= (
-                              date_trunc(
-                                  'month',
-                                  delivery.delivery_date::timestamp
-                                  + make_interval(months => coalesce(
-                                      (selected_rule.rule_json ->> 'month_offset')::integer,
-                                      -1
-                                  ))
-                              ) + interval '1 month - 1 day'
-                          )::date
+                          and selected_calendar.effective_from <= deadline_month_end.month_end
                         order by selected_calendar.effective_from desc,
                                  selected_calendar.created_at desc,
                                  selected_calendar.id desc
                         limit 1
                    )
                    and day.is_trading_day
-                   and date_trunc('month', day.trade_date::timestamp) = date_trunc(
-                       'month',
-                       delivery.delivery_date::timestamp
-                       + make_interval(months => coalesce(
-                           (selected_rule.rule_json ->> 'month_offset')::integer,
-                           -1
-                       ))
+                   and date_trunc('month', day.trade_date::timestamp)
+                       = deadline_month.month_start
+                   -- The calendar only holds days the collector has actually
+                   -- seen, so a month it is still filling looks exactly like a
+                   -- complete one: its newest row silently passes for the last
+                   -- trading day of the month and the retail window closes
+                   -- weeks early. Trust the month only once the calendar has
+                   -- moved past it; otherwise fall back to the last weekday
+                   -- before delivery in Rust.
+                   and exists (
+                       select 1
+                         from trading_calendar_days probe
+                        where probe.workspace_id = day.workspace_id
+                          and probe.calendar_version_id = day.calendar_version_id
+                          and probe.trade_date > deadline_month_end.month_end
                    )
                  order by
                    case when coalesce((selected_rule.rule_json ->> 'trading_day_ordinal')::integer, -1) > 0
@@ -475,11 +488,14 @@ pub async fn resolve_contract_windows(
         let deadline: Option<Date> = row.get("retail_deadline");
         let calendar_version_id: Option<Uuid> = row.get("calendar_version_id");
         // The stored calendar only covers days the collector has actually
-        // seen, so most deadline months have no calendar rows yet.  Fall back
-        // to the last non-weekend day of the month before delivery: any
-        // divergence from the exchange calendar lands on holidays that carry
-        // no price points anyway, so the window maths are unaffected.  The nil
-        // calendar version marks the approximation.
+        // seen, so most deadline months have no calendar rows yet -- and a
+        // month the collector is still filling is deliberately rejected by the
+        // query above, because its newest row would masquerade as the month's
+        // last trading day.  Fall back to the last non-weekend day of the
+        // month before delivery: any divergence from the exchange calendar
+        // lands on holidays that carry no price points anyway, so the window
+        // maths are unaffected.  The nil calendar version marks the
+        // approximation.
         let (retail_deadline, calendar_version_id) = match (deadline, calendar_version_id) {
             (Some(deadline), Some(calendar_version_id)) => (deadline, calendar_version_id),
             _ => {
