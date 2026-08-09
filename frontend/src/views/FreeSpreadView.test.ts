@@ -20,6 +20,19 @@ function response(data: unknown) {
   return { ok: true, status: 200, json: async () => ({ data, meta: { request_id: 'request-1' } }) } as Response
 }
 
+/**
+ * Drives the four Element Plus selects the way a user would. The page no
+ * longer preselects a combination, so a query test has to pick the legs first.
+ */
+async function selectBothLegs(wrapper: ReturnType<typeof mount>) {
+  const selects = wrapper.findAllComponents({ name: 'ElSelect' })
+  for (const index of [0, 2]) {
+    selects[index].vm.$emit('update:modelValue', '焦煤')
+    selects[index].vm.$emit('change', '焦煤')
+    await flushPromises()
+  }
+}
+
 describe('FreeSpreadView', () => {
   beforeEach(() => {
     const pinia = createPinia()
@@ -81,6 +94,7 @@ describe('FreeSpreadView', () => {
       }
     })
     await flushPromises()
+    await selectBothLegs(wrapper)
     const viewButton = wrapper.findAll('button').find((button) => button.text() === '查看')
     expect(viewButton).toBeDefined()
     await viewButton!.trigger('click')
@@ -93,17 +107,38 @@ describe('FreeSpreadView', () => {
     expect(urls.some((url) => url.includes('sanheshuju.com'))).toBe(false)
   })
 
-  it('keeps the unverified oil-meal ratio preset visibly disabled', async () => {
+  it('opens with both legs empty and queries nothing', async () => {
     const pinia = createPinia()
     setActivePinia(pinia)
     const wrapper = mount(FreeSpreadView, {
-      global: {
-        plugins: [pinia, ElementPlus],
-        stubs: { SpreadChart: true }
-      }
+      global: { plugins: [pinia, ElementPlus], stubs: { SpreadChart: true } }
     })
     await flushPromises()
-    const oilMeal = wrapper.findAll('button').find((button) => button.text() === '油粕比')
-    expect(oilMeal?.attributes('disabled')).toBeDefined()
+
+    const selects = wrapper.findAllComponents({ name: 'ElSelect' })
+    expect(selects).toHaveLength(4)
+    expect(selects.every((select) => !select.props('modelValue'))).toBe(true)
+    const viewButton = wrapper.findAll('button').find((button) => button.text() === '查看')
+    expect(viewButton!.attributes('disabled')).toBeDefined()
+    const urls = vi.mocked(fetch).mock.calls.map(([input]) => input.toString())
+    expect(urls.some((url) => url.endsWith('/free-spread/query'))).toBe(false)
+    expect(urls.some((url) => url.endsWith('/months'))).toBe(false)
+  })
+
+  it('ships no built-in preset combinations', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(FreeSpreadView, {
+      global: { plugins: [pinia, ElementPlus], stubs: { SpreadChart: true } }
+    })
+    await flushPromises()
+
+    const labels = wrapper.findAll('button').map((button) => button.text())
+    for (const preset of ['卷螺差', '豆棕差', '油粕比', '玻璃-纯碱', '焦煤 9-1']) {
+      expect(labels).not.toContain(preset)
+    }
+    // The favourite row keeps its heading hidden until something is saved.
+    expect(wrapper.text()).not.toContain('常用')
+    expect(wrapper.text()).not.toContain('收藏组合')
   })
 })

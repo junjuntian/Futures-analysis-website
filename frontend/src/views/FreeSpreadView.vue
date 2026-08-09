@@ -78,10 +78,6 @@ function varietyByName(name: string) {
   return varieties.value.find((item) => item.name === name)
 }
 
-function varietyBySymbol(symbol: string) {
-  return varieties.value.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase())
-}
-
 async function ensureCsrf() {
   if (!auth.csrfToken) await auth.loadCsrf()
   if (!auth.csrfToken) throw new Error('无法取得写入保护令牌')
@@ -238,16 +234,6 @@ onMounted(async () => {
     const [varietyEnvelope] = await Promise.all([getSpreadVarieties(), loadFavorites()])
     varieties.value = varietyEnvelope.data.items
     source.value = varietyEnvelope.data.source
-    if (varieties.value.length) {
-      const coking = varietyBySymbol('JM')
-      const initial = coking ?? varieties.value[0]
-      legs.leg1.variety = initial.name
-      legs.leg2.variety = initial.name
-      await Promise.all([
-        changeVariety('leg1', coking ? '09' : undefined),
-        changeVariety('leg2', coking ? '01' : undefined)
-      ])
-    }
   } catch (error) {
     errorMessage.value = describeError(error)
   } finally {

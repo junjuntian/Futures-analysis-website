@@ -18,7 +18,16 @@ const SEASONAL_PALETTE = [
 
 export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOption {
   const points = data.continuous_series.points
-  const boundaries = data.continuous_series.segment_boundaries.slice(1)
+  // The upstream series alternates the forward and the reverse leg pair day by
+  // day around each January expiry, so one contract roll arrives as a dozen
+  // one-point segments and the server emits a boundary for every one of them.
+  // Drawing them all stacks a dozen dashed lines onto neighbouring trading days
+  // and paints what looks like a solid grey band. Only the boundaries whose leg
+  // pair actually changed are real rolls.
+  const boundaries = data.continuous_series.segment_boundaries
+    .slice(1)
+    .filter((boundary) => boundary.previous_from_code !== boundary.from_code
+      || boundary.previous_to_code !== boundary.to_code)
   const current = data.continuous_series.current_value
   const signedSegments = buildSignedLineSegments(points)
   const boundaryIndexes = new Map(points.map((point, index) => [point.trade_date, index]))
@@ -107,7 +116,8 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
 
 export interface SignedLineSegment {
   sign: 'positive' | 'negative'
-  sourceSegment: number
+  /** `${from_code}-${to_code}` of the leg pair this run belongs to. */
+  sourcePair: string
   points: Array<[number, number]>
 }
 
@@ -115,47 +125,57 @@ export interface SignedLineSegment {
  * Builds a trading-day index axis, breaks every contract roll, and inserts a
  * linearly interpolated zero at each sign crossing. This prevents both a fake
  * roll connection and a red/green gradient approximation around zero.
+ *
+ * A roll is a change of leg pair, not a change of `segment_no`. The server
+ * starts a new segment whenever the upstream run of identical codes ends, and
+ * around each January expiry the upstream alternates the forward and reverse
+ * pair day by day, so the same pair spans several segments. Breaking on
+ * `segment_no` there would chop the curve into single-point fragments even
+ * though no contract changed.
  */
 export function buildSignedLineSegments(
   points: FreeSpreadQueryResponse['continuous_series']['points']
 ): SignedLineSegment[] {
   const output: SignedLineSegment[] = []
   let active: SignedLineSegment | undefined
-  const begin = (sign: SignedLineSegment['sign'], sourceSegment: number, point: [number, number]) => {
-    active = { sign, sourceSegment, points: [point] }
+  const begin = (sign: SignedLineSegment['sign'], sourcePair: string, point: [number, number]) => {
+    active = { sign, sourcePair, points: [point] }
     output.push(active)
   }
+  const pairOf = (point: FreeSpreadQueryResponse['continuous_series']['points'][number]) =>
+    `${point.from_code}-${point.to_code}`
   points.forEach((point, index) => {
     const sign = point.value >= 0 ? 'positive' : 'negative'
     const coordinate: [number, number] = [index, point.value]
     const previous = points[index - 1]
-    if (!previous || previous.segment_no !== point.segment_no) {
-      begin(sign, point.segment_no, coordinate)
+    const pair = pairOf(point)
+    if (!previous || pairOf(previous) !== pair) {
+      begin(sign, pair, coordinate)
       if (point.value === 0) active = undefined
       return
     }
     if (point.value === 0) {
       if (active) active.points.push(coordinate)
-      else begin('positive', point.segment_no, coordinate)
+      else begin('positive', pair, coordinate)
       active = undefined
       return
     }
     if (previous.value === 0) {
-      begin(sign, point.segment_no, [index - 1, 0])
+      begin(sign, pair, [index - 1, 0])
       active?.points.push(coordinate)
       return
     }
     const previousSign = previous.value >= 0 ? 'positive' : 'negative'
     if (previousSign === sign) {
-      if (!active || active.sourceSegment !== point.segment_no || active.sign !== sign) {
-        begin(sign, point.segment_no, [index - 1, previous.value])
+      if (!active || active.sourcePair !== pair || active.sign !== sign) {
+        begin(sign, pair, [index - 1, previous.value])
       }
       active?.points.push(coordinate)
       return
     }
     const zeroIndex = (index - 1) + Math.abs(previous.value) / (Math.abs(previous.value) + Math.abs(point.value))
     active?.points.push([zeroIndex, 0])
-    begin(sign, point.segment_no, [zeroIndex, 0])
+    begin(sign, pair, [zeroIndex, 0])
     active?.points.push(coordinate)
   })
   return output

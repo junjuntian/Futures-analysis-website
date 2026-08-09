@@ -18,12 +18,12 @@ describe('free spread chart contracts', () => {
     expect(segments).toHaveLength(2)
     expect(segments[0]).toEqual({
       sign: 'positive',
-      sourceSegment: 1,
+      sourcePair: 'jm2509-jm2601',
       points: [[0, 6], [0.75, 0]]
     })
     expect(segments[1]).toEqual({
       sign: 'negative',
-      sourceSegment: 1,
+      sourcePair: 'jm2509-jm2601',
       points: [[0.75, 0], [1, -2]]
     })
   })
@@ -33,6 +33,16 @@ describe('free spread chart contracts', () => {
     expect(segments).toHaveLength(2)
     expect(segments[0].points).toEqual([[0, 2]])
     expect(segments[1].points).toEqual([[1, 3]])
+  })
+
+  it('keeps one curve when the server splits a segment without changing the pair', () => {
+    // The upstream alternates the forward and reverse pair day by day around
+    // each January expiry, so the same leg pair arrives as several segments
+    // once the reverse points are excluded. That is not a contract roll.
+    const split = [point(0, 2, 1), { ...point(1, 3, 1), segment_no: 7 }]
+    const segments = buildSignedLineSegments(split)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].points).toEqual([[0, 2], [1, 3]])
   })
 
   it('sanitizes script, event handlers, and external links from SVG export', () => {
