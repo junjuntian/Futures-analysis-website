@@ -12,6 +12,15 @@ use uuid::Uuid;
 
 const SANHE_PROVIDER: &str = "sanhe";
 const PROVIDER_REQUEST_INTERVAL_MS: i64 = 2_000;
+/// Business dates kept per cached parameter set.
+///
+/// The cache is keyed by business date, so a combination queried every day
+/// stores a fresh copy of the whole series every day — around 0.77 MB of
+/// observations each, which for the combinations under watch is several
+/// gigabytes a year of identical history. Two is the smallest number that
+/// still leaves something to fall back on when the upstream is unreachable
+/// while today's copy has not been fetched yet.
+const CACHE_BUSINESS_DATES_KEPT: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CachedProviderPayload {
@@ -190,6 +199,7 @@ pub async fn store_cache(
     .execute(pool)
     .await?;
     clear_failure(pool, cache.endpoint, cache.parameter_hash).await?;
+    prune_cache(pool, cache.endpoint, cache.parameter_hash).await?;
     // PostgreSQL canonicalizes timestamptz precision, and an immutable same-day row may
     // already have won the conflict. Always return the persisted row so the cache-fill
     // response and every later cache hit expose exactly the same payload and metadata.
@@ -201,6 +211,67 @@ pub async fn store_cache(
     )
     .await?
     .ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Drop all but the newest few business dates for one cached parameter set.
+///
+/// Pruning on write rather than on a schedule keeps the bound tied to the thing
+/// that grows it, so a combination that stops being queried simply stops
+/// accumulating instead of needing a sweep to find it.
+pub async fn prune_cache(
+    pool: &PgPool,
+    endpoint: ProviderEndpoint,
+    parameter_hash: &str,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "delete from spread_provider_cache
+          where provider_code = $1 and endpoint_code = $2 and parameter_hash = $3
+            and business_date not in (
+                select business_date
+                  from spread_provider_cache
+                 where provider_code = $1 and endpoint_code = $2 and parameter_hash = $3
+                 order by business_date desc
+                 limit $4
+            )",
+    )
+    .bind(SANHE_PROVIDER)
+    .bind(endpoint.code())
+    .bind(parameter_hash)
+    .bind(CACHE_BUSINESS_DATES_KEPT)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}
+
+/// The newest cached payload for a parameter set, whatever business date it is
+/// from.
+///
+/// Used only when the upstream refuses: serving yesterday's series with its own
+/// fetch time on it beats serving an error page, as long as the age is
+/// disclosed rather than passed off as current.
+pub async fn get_latest_cache(
+    pool: &PgPool,
+    endpoint: ProviderEndpoint,
+    parameter_hash: &str,
+) -> Result<Option<CachedProviderPayload>, sqlx::Error> {
+    let row = sqlx::query(
+        "select payload_json, fetched_at, result_kind, payload_hash
+           from spread_provider_cache
+          where provider_code = $1 and endpoint_code = $2 and parameter_hash = $3
+          order by business_date desc
+          limit 1",
+    )
+    .bind(SANHE_PROVIDER)
+    .bind(endpoint.code())
+    .bind(parameter_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| CachedProviderPayload {
+        payload: row.get("payload_json"),
+        fetched_at: row.get("fetched_at"),
+        result_kind: row.get("result_kind"),
+        payload_hash: row.get("payload_hash"),
+    }))
 }
 
 pub async fn active_failure(
@@ -693,6 +764,26 @@ pub async fn save_series(
         .fetch_one(&mut *tx)
         .await?
     };
+    // The observations are the bulk of this: a single thirteen-year series is
+    // some three thousand rows, and one is stored per business date, so a
+    // combination on the page every day accumulates the same history over and
+    // over. Bound it here, inside the same transaction that grew it.
+    sqlx::query(
+        "delete from spread_provider_series
+          where workspace_id = $1 and provider_code = 'sanhe' and query_hash = $2
+            and business_date not in (
+                select business_date
+                  from spread_provider_series
+                 where workspace_id = $1 and provider_code = 'sanhe' and query_hash = $2
+                 order by business_date desc
+                 limit $3
+            )",
+    )
+    .bind(input.workspace_id)
+    .bind(input.query_hash)
+    .bind(CACHE_BUSINESS_DATES_KEPT)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(series_id)
 }
@@ -1029,6 +1120,64 @@ mod tests {
         assert_eq!(conflict_result.payload, cached.payload);
         assert_eq!(conflict_result.result_kind, cached.result_kind);
         assert_eq!(conflict_result.payload_hash, cached.payload_hash);
+
+        // Retention: the cache is keyed by business date, so a combination
+        // queried daily stores the whole series again every day. Without a
+        // bound that is gigabytes a year of identical history.
+        for offset in 1..=3 {
+            let later = business_date + Duration::days(offset);
+            store_cache(
+                &pool,
+                &NewProviderCache {
+                    endpoint: ProviderEndpoint::AllVarieties,
+                    parameter_hash: &parameter_hash,
+                    parameters: &parameters,
+                    business_date: later,
+                    fetched_at: fetched_at + Duration::days(offset),
+                    http_status: 200,
+                    business_code: 0,
+                    payload: &json!({"code": 0, "data": [offset]}),
+                    result_kind: "ok",
+                    payload_hash: &format!("{offset}").repeat(64),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let kept: Vec<Date> = sqlx::query_scalar(
+            "select business_date from spread_provider_cache
+              where parameter_hash = $1 and endpoint_code = $2
+              order by business_date desc",
+        )
+        .bind(&parameter_hash)
+        .bind(ProviderEndpoint::AllVarieties.code())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            kept,
+            vec![
+                business_date + Duration::days(3),
+                business_date + Duration::days(2)
+            ],
+            "only the newest business dates survive a write"
+        );
+
+        // The stale-serving path reads whatever is newest, whatever date it is
+        // from: it runs when the upstream refuses, so today's row is exactly
+        // what is missing.
+        let latest = get_latest_cache(&pool, ProviderEndpoint::AllVarieties, &parameter_hash)
+            .await
+            .unwrap()
+            .expect("a stored payload survives for the refusal fallback");
+        assert_eq!(latest.payload, json!({"code": 0, "data": [3]}));
+        assert!(
+            get_latest_cache(&pool, ProviderEndpoint::VarietyContracts, &parameter_hash)
+                .await
+                .unwrap()
+                .is_none(),
+            "the fallback must not reach across endpoints"
+        );
 
         let first_pool = pool.clone();
         let second_pool = pool.clone();

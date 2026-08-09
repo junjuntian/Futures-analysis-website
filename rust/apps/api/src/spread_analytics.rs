@@ -659,9 +659,15 @@ async fn load_varieties(
     let fetched = match state.provider.list_varieties().await {
         Ok(fetched) => fetched,
         Err(error) => {
-            return Err(
-                record_provider_error(state, endpoint, &parameter_hash, error, request_id).await,
-            );
+            return serve_stored_after_provider_error(
+                state,
+                endpoint,
+                &parameter_hash,
+                error,
+                request_id,
+                SanheSpreadSeriesProvider::parse_varieties,
+            )
+            .await;
         }
     };
     let cache = store_fetch(
@@ -780,9 +786,15 @@ async fn load_months(
     let fetched = match state.provider.list_contract_months(variety).await {
         Ok(fetched) => fetched,
         Err(error) => {
-            return Err(
-                record_provider_error(state, endpoint, &parameter_hash, error, request_id).await,
-            );
+            return serve_stored_after_provider_error(
+                state,
+                endpoint,
+                &parameter_hash,
+                error,
+                request_id,
+                |payload| SanheSpreadSeriesProvider::parse_contract_months(variety, payload),
+            )
+            .await;
         }
     };
     let cache = store_fetch(
@@ -878,9 +890,15 @@ async fn load_series(
     {
         Ok(fetched) => fetched,
         Err(error) => {
-            return Err(
-                record_provider_error(state, endpoint, &parameter_hash, error, request_id).await,
-            );
+            return serve_stored_after_provider_error(
+                state,
+                endpoint,
+                &parameter_hash,
+                error,
+                request_id,
+                SanheSpreadSeriesProvider::parse_series,
+            )
+            .await;
         }
     };
     let cache = store_fetch(
@@ -938,6 +956,54 @@ async fn guard_and_wait(
 
 fn provider_error(error: SpreadProviderError, request_id: Uuid) -> SpreadApiError {
     SpreadApiError::Provider(error.kind, error.retry_after_seconds, request_id)
+}
+
+/// Serve a previously stored payload when the upstream refuses.
+///
+/// Applied to every sanhe endpoint, not only the series one: the varieties list
+/// is fetched first, so a page that could fall back on a stored series but not
+/// on a stored variety list would still be unusable in exactly the outage the
+/// fallback exists for.
+///
+/// The failure is recorded either way. What is served is whatever was last
+/// stored, carrying its own fetch time, which the page prints — so the answer
+/// may be old but is never presented as current. If nothing was ever stored
+/// there is nothing to serve and the original error stands.
+async fn serve_stored_after_provider_error<T, F>(
+    state: &SpreadAnalyticsState,
+    endpoint: ProviderEndpoint,
+    parameter_hash: &str,
+    error: SpreadProviderError,
+    request_id: Uuid,
+    parse: F,
+) -> Result<CachedFetch<T>, SpreadApiError>
+where
+    F: Fn(&serde_json::Value) -> Result<(T, ProviderResultKind), SpreadProviderError>,
+{
+    let recorded = record_provider_error(state, endpoint, parameter_hash, error, request_id).await;
+    let stored =
+        database::spread_analytics::get_latest_cache(&state.auth.pool, endpoint, parameter_hash)
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let Some(stored) = stored else {
+        return Err(recorded);
+    };
+    let (data, result_kind) =
+        parse(&stored.payload).map_err(|error| provider_error(error, request_id))?;
+    warn!(
+        request_id = %request_id,
+        provider = SANHE_PROVIDER_CODE,
+        endpoint = endpoint.code(),
+        parameter_hash,
+        served_fetched_at = %stored.fetched_at,
+        "serving a stored payload because the provider refused"
+    );
+    Ok(CachedFetch {
+        data,
+        fetched_at: stored.fetched_at,
+        result_kind,
+        payload_hash: stored.payload_hash,
+    })
 }
 
 async fn record_provider_error(
