@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import logging
+import os
 import re
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -118,6 +120,48 @@ DCE_FALLBACK_SOURCE = ExchangeSource(
 # date and answer for today, which is why backfilling an old date used to hunt
 # for contracts that did not exist yet and come back with nothing.
 DCE_FORWARD_DELIVERY_MONTHS = 12
+# Sina answers a rate limit with HTTP 456 and an HTML page. Verifying the
+# derived contract list tripped it after roughly 120 requests issued as fast as
+# the client could manage, so every Sina call is paced. The floor is a guess --
+# the published limit is unknown -- and deliberately tunable, because a backfill
+# date costs on the order of a hundred and fifty of these.
+SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 0.5
+
+
+def sina_min_request_interval_seconds() -> float:
+    """The floor, read at call time.
+
+    Read per call rather than at import so it can be raised on a box that is
+    already being throttled, without rebuilding an image.
+    """
+    raw = os.environ.get("FUTURES_SINA_MIN_INTERVAL_SECONDS")
+    if raw is None:
+        return SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        LOG.warning("sina_interval_override_invalid value=%s", raw)
+        return SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+# Being rate limited looks exactly like every contract being unlisted, because
+# the HTML page reaches the parser as an ordinary parse error. Give up once this
+# many candidates have failed without a single one succeeding, rather than
+# spending the whole list confirming a block.
+SINA_MAX_CONSECUTIVE_UNUSABLE = 8
+# The Sina exception is DCE-only (DEC-041). Enumerating a variety DCE never
+# listed costs one request per delivery month and can only ever come back "not
+# listed", so varieties known to belong elsewhere are not derived. A variety
+# absent from this map is still derived: guessing it away would silently drop a
+# variety nobody classified.
+VARIETY_EXCHANGES = {
+    "JM": "DCE",
+    "JD": "DCE",
+    "LH": "DCE",
+    "AP": "CZCE",
+    "FG": "CZCE",
+    "SA": "CZCE",
+    "AU": "SHFE",
+    "AG": "SHFE",
+}
 # Contract parameters come from a live-contracts endpoint, so it is only asked
 # about contracts whose history reaches roughly the present. Asking it about a
 # delisted contract returns nothing and costs one request per contract per date.
@@ -190,6 +234,7 @@ class AkshareAdapter:
         # twice. A None value records "Sina does not know this contract", the
         # ordinary answer for a derived candidate that was never listed.
         self._sina_history_cache: dict[str, pd.DataFrame | None] = {}
+        self._sina_next_request_at = 0.0
 
     def catalog(self, source: ExchangeSource, collection_date: date) -> Any:
         function = getattr(akshare, source.catalog_function)
@@ -382,6 +427,7 @@ class AkshareAdapter:
                 unpublished_rank_types: list[str] = []
                 contract_failed = False
                 for kind, party_field, value_field in kinds:
+                    self._pace_sina()
                     try:
                         frame = akshare.futures_hold_pos_sina(
                             symbol=kind,
@@ -442,6 +488,17 @@ class AkshareAdapter:
             )
         return tables
 
+    def _pace_sina(self) -> None:
+        """Hold the floor between Sina requests.
+
+        Applied at every Sina call site rather than around the loops, so a new
+        call site cannot quietly skip it.
+        """
+        now = time.monotonic()
+        if now < self._sina_next_request_at:
+            time.sleep(self._sina_next_request_at - now)
+        self._sina_next_request_at = time.monotonic() + sina_min_request_interval_seconds()
+
     def _sina_contract_history(self, contract: str) -> pd.DataFrame | None:
         """Sina's whole history for one contract, or None if it has none.
 
@@ -453,6 +510,7 @@ class AkshareAdapter:
         """
         if contract in self._sina_history_cache:
             return self._sina_history_cache[contract]
+        self._pace_sina()
         try:
             frame = akshare.futures_zh_daily_sina(symbol=contract)
         except OutboundPolicyError:
@@ -497,10 +555,23 @@ class AkshareAdapter:
                     # Never listed, or older than Sina keeps. Not an error: the
                     # candidate set is derived, so it is expected to overshoot.
                     unusable += 1
+                    # Only while nothing has been found yet. Candidates run in
+                    # delivery-month order, so the unlisted ones cluster at the
+                    # tail -- a variety listed only a few months out ends every
+                    # healthy run with a streak of them. A block, by contrast,
+                    # fails from the very first request.
+                    if not rows and unusable >= SINA_MAX_CONSECUTIVE_UNUSABLE:
+                        raise ValueError(
+                            f"the first {unusable} DCE candidates for "
+                            f"{collection_date.isoformat()} were all unreadable; the "
+                            "upstream is refusing the run rather than the contracts "
+                            "being unlisted"
+                        )
                     continue
                 detail: dict[str, str] = {}
                 last_seen = pd.to_datetime(history["date"], errors="coerce").dt.date.max()
                 if pd.notna(last_seen) and last_seen >= detail_floor:
+                    self._pace_sina()
                     try:
                         detail = _detail_map(akshare.futures_contract_detail(symbol=contract))
                     except OutboundPolicyError:
@@ -548,6 +619,7 @@ class AkshareAdapter:
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         with official_requests_only(DCE_FALLBACK_SOURCE.domains):
+            self._pace_sina()
             marks = akshare.futures_symbol_mark()
             if marks is None or marks.empty or not {"exchange", "symbol"}.issubset(marks.columns):
                 raise ValueError("Sina DCE instrument response is invalid")
@@ -556,6 +628,7 @@ class AkshareAdapter:
                 instrument_name = str(instrument["symbol"]).strip()
                 if not instrument_name:
                     continue
+                self._pace_sina()
                 try:
                     contracts = akshare.futures_zh_realtime(symbol=instrument_name)
                 except OutboundPolicyError:
@@ -576,6 +649,7 @@ class AkshareAdapter:
                         continue
                     seen.add(contract)
                     detail: dict[str, str] = {}
+                    self._pace_sina()
                     try:
                         detail_frame = akshare.futures_contract_detail(symbol=contract)
                         detail = _detail_map(detail_frame)
@@ -623,12 +697,19 @@ def _numeric_value(value: str) -> str:
 def _derive_dce_contracts(collection_date: date, varieties: frozenset[str]) -> list[str]:
     """Contract codes plausibly listed on a date, nearest delivery first.
 
-    The set deliberately overshoots: a candidate that was never listed simply
-    has no history at Sina and is dropped. Overshooting costs one lookup;
-    undershooting would silently omit a contract that really did trade.
+    Varieties known to be listed elsewhere are excluded outright: the Sina
+    exception is DCE-only, so enumerating them would spend a request per
+    delivery month to learn what the mapping already says. A variety nobody
+    classified is still enumerated rather than guessed away.
+
+    Within DCE the set deliberately overshoots: a candidate that was never
+    listed simply has no history at Sina and is dropped. Overshooting costs one
+    lookup; undershooting would silently omit a contract that really did trade.
     """
     codes: list[str] = []
     for symbol in sorted(varieties):
+        if VARIETY_EXCHANGES.get(symbol, "DCE") != "DCE":
+            continue
         for offset in range(DCE_FORWARD_DELIVERY_MONTHS + 1):
             month_index = collection_date.month - 1 + offset
             year = collection_date.year + month_index // 12
