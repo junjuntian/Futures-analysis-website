@@ -10,8 +10,19 @@ from futures_collector.sources import AkshareAdapter, _derive_dce_contracts
 def test_candidates_are_the_current_delivery_month_through_twelve_ahead() -> None:
     codes = _derive_dce_contracts(date(2019, 6, 14), frozenset({"JM"}))
     assert codes == [
-        "JM1906", "JM1907", "JM1908", "JM1909", "JM1910", "JM1911", "JM1912",
-        "JM2001", "JM2002", "JM2003", "JM2004", "JM2005", "JM2006",
+        "JM1906",
+        "JM1907",
+        "JM1908",
+        "JM1909",
+        "JM1910",
+        "JM1911",
+        "JM1912",
+        "JM2001",
+        "JM2002",
+        "JM2003",
+        "JM2004",
+        "JM2005",
+        "JM2006",
     ]
 
 
@@ -24,6 +35,7 @@ def test_candidates_roll_the_year_and_cover_every_requested_variety() -> None:
 
 def install_history(monkeypatch, table):
     """`table` maps contract -> frame, or contract -> an exception to raise."""
+
     def fake(symbol):
         outcome = table.get(symbol)
         if outcome is None:
@@ -89,9 +101,7 @@ def test_a_transport_failure_is_never_read_as_not_listed(monkeypatch) -> None:
     # would shrink a catalog without anyone noticing.
     import requests
 
-    install_history(
-        monkeypatch, {"JM1909": requests.ConnectionError("connection reset")}
-    )
+    install_history(monkeypatch, {"JM1909": requests.ConnectionError("connection reset")})
     with pytest.raises(requests.RequestException):
         AkshareAdapter()._dce_catalog(date(2019, 6, 14), frozenset({"JM"}))
 

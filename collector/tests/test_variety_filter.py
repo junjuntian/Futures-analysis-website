@@ -101,9 +101,7 @@ def test_an_exchange_with_none_of_the_requested_varieties_is_a_skip_not_a_failur
     adapter = RecordingAdapter()
     platform = Platform()
     runner = CollectionRunner(adapter, platform, retry_delay_seconds=0)
-    failures = runner.run(
-        date(2026, 8, 7), ["DCE"], ["market"], varieties=frozenset({"CU"})
-    )
+    failures = runner.run(date(2026, 8, 7), ["DCE"], ["market"], varieties=frozenset({"CU"}))
     assert failures == 0
     assert platform.submitted == []
 
@@ -121,9 +119,14 @@ def test_the_eight_requested_varieties_touch_only_three_exchanges() -> None:
     # Documents the scoping decision: GFEX and CFFEX list none of them, so a
     # backfill for this set never needs to call those two at all.
     mapping = {
-        "AP": "CZCE", "FG": "CZCE", "SA": "CZCE",
-        "AU": "SHFE", "AG": "SHFE",
-        "JM": "DCE", "JD": "DCE", "LH": "DCE",
+        "AP": "CZCE",
+        "FG": "CZCE",
+        "SA": "CZCE",
+        "AU": "SHFE",
+        "AG": "SHFE",
+        "JM": "DCE",
+        "JD": "DCE",
+        "LH": "DCE",
     }
     assert set(mapping) == EIGHT
     assert set(mapping.values()) == {"DCE", "CZCE", "SHFE"}

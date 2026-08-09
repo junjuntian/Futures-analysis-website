@@ -54,9 +54,7 @@ def install_pages(monkeypatch, pages):
         return FakeResponse(pages[params["pageNumber"] - 1])
 
     monkeypatch.setattr(sources_module.requests, "get", fake_get)
-    monkeypatch.setattr(
-        sources_module, "official_requests_only", lambda domains: _noop_context()
-    )
+    monkeypatch.setattr(sources_module, "official_requests_only", lambda domains: _noop_context())
     return calls
 
 
@@ -84,10 +82,24 @@ def test_member_rows_are_rebuilt_into_the_exchange_rank_table(monkeypatch) -> No
             envelope(
                 [
                     member("JM2609", DCE, "甲期货", VOLUME_RANK=1, VOLUME=500),
-                    member("JM2609", DCE, "乙期货", VOLUME_RANK=2, VOLUME=300, LP_RANK=1,
-                           LONG_POSITION=120),
-                    member("JM2609", DCE, "丙期货", LP_RANK=2, LONG_POSITION=90, SP_RANK=1,
-                           SHORT_POSITION=80),
+                    member(
+                        "JM2609",
+                        DCE,
+                        "乙期货",
+                        VOLUME_RANK=2,
+                        VOLUME=300,
+                        LP_RANK=1,
+                        LONG_POSITION=120,
+                    ),
+                    member(
+                        "JM2609",
+                        DCE,
+                        "丙期货",
+                        LP_RANK=2,
+                        LONG_POSITION=90,
+                        SP_RANK=1,
+                        SHORT_POSITION=80,
+                    ),
                 ]
             )
         ],

@@ -30,8 +30,14 @@ SPECS = {
     "AG": ("15 千克/手", "元/千克", Decimal("1"), Decimal("15")),
 }
 EXPECTED = {
-    "JM": 60, "JD": 10, "LH": 16, "FG": 20,
-    "SA": 20, "AP": 10, "AU": 1000, "AG": 15,
+    "JM": 60,
+    "JD": 10,
+    "LH": 16,
+    "FG": 20,
+    "SA": 20,
+    "AP": 10,
+    "AU": 1000,
+    "AG": 15,
 }
 
 
@@ -43,8 +49,16 @@ def test_each_multiplier_is_what_the_exchange_states() -> None:
 def test_eggs_are_the_one_variety_where_size_and_multiplier_differ() -> None:
     # The contract is 5 tonnes but the quote is per 500kg, so ten quote units
     # make up one lot. Every other variety quotes per its own trading unit.
-    trading_units = {"JM": 60, "JD": 5, "LH": 16, "FG": 20,
-                     "SA": 20, "AP": 10, "AU": 1000, "AG": 15}
+    trading_units = {
+        "JM": 60,
+        "JD": 5,
+        "LH": 16,
+        "FG": 20,
+        "SA": 20,
+        "AP": 10,
+        "AU": 1000,
+        "AG": 15,
+    }
     differ = [code for code in EXPECTED if trading_units[code] != EXPECTED[code]]
     assert differ == ["JD"]
     assert trading_units["JD"] == 5 and EXPECTED["JD"] == 10
@@ -124,9 +138,7 @@ def test_a_row_without_turnover_simply_carries_nothing() -> None:
     # becoming a zero that makes the check divide into nonsense.
     frame = market_frame(volume=0, turnover=0, settlement=3905)
     frame = frame.drop(columns=["成交额"])
-    rows = normalize_market(
-        DCE_HISTORY_SOURCE, date(2015, 9, 1), frame, datetime.now(UTC)
-    )
+    rows = normalize_market(DCE_HISTORY_SOURCE, date(2015, 9, 1), frame, datetime.now(UTC))
     assert rows[0]["turnover"] == ""
     assert rows[0]["volume"] == "0"
 

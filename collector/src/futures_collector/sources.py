@@ -143,6 +143,8 @@ def sina_min_request_interval_seconds() -> float:
     except ValueError:
         LOG.warning("sina_interval_override_invalid value=%s", raw)
         return SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
+
+
 # Being rate limited looks exactly like every contract being unlisted, because
 # the HTML page reaches the parser as an ordinary parse error. Give up once this
 # many candidates have failed without a single one succeeding, rather than
@@ -333,9 +335,7 @@ class AkshareAdapter:
                         # TYPE 0 is the 成交持仓龙虎榜 the exchanges publish; the
                         # report multiplexes nine other tables onto the same
                         # report name.
-                        "filter": (
-                            f"(TRADE_DATE='{collection_date.isoformat()}')(TYPE=\"0\")"
-                        ),
+                        "filter": (f"(TRADE_DATE='{collection_date.isoformat()}')(TYPE=\"0\")"),
                         "sortTypes": 1,
                         "sortColumns": "SECURITY_CODE",
                         "pageNumber": page,

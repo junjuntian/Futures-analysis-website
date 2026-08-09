@@ -271,9 +271,7 @@ class CollectionRunner:
                 day = day.drop_duplicates(subset=["合约"])
                 return self._narrow(normalize_catalog(source, collection_date, day))
             if dataset == "market":
-                return self._narrow(
-                    normalize_market(source, collection_date, frame, observed_at)
-                )
+                return self._narrow(normalize_market(source, collection_date, frame, observed_at))
             if dataset == "calendar":
                 # Proven the same way as for every other source: the exchange
                 # published rows for this date, so it was a trading day.
