@@ -109,7 +109,8 @@ def test_the_history_source_never_claims_to_carry_seats(tmp_path, monkeypatch):
 
 
 def test_the_source_opens_no_socket() -> None:
-    # It reads files the operator downloaded. An empty allowlist means the
+    # It reads files fetched once through the operator's browser at their
+    # instruction, not by this code. An empty allowlist means the
     # outbound guard would reject any host, so a future edit that tried to fetch
     # from here fails loudly instead of quietly bypassing the exchange's WAF.
     assert DCE_HISTORY_SOURCE.domains == frozenset()
