@@ -7,6 +7,12 @@
 --
 -- 幂等：按业务身份 upsert，重复跑只会刷新同一批行。窗口取最近若干天而不是全量，
 -- 因为交易所会修正近几日的数据，更早的不会再动。
+--
+-- 合约代码不能直接抄 contracts.code：郑商所在那张表里是**三位月份**（AP701），
+-- 而两张历史表用的是四位（AP2701，回填时按上市年份补出来的世纪）。直接抄再拿
+-- 四位正则一过滤，整个郑商所会被静静地丢掉——玻璃、苹果、纯碱从此不再更新，
+-- 而且不报任何错。所以一律由 contracts.delivery_month（'2027-01'）拼出四位年月；
+-- 已核对：大商所、上期所拼出来的与原代码逐条相同，只有郑商所不同，正是那三位的差别。
 
 \set ON_ERROR_STOP on
 \set window_days 10
@@ -18,6 +24,17 @@ begin;
 -- 来源如实记连接器代码（akshare_v1 / eastmoney_dce_quote_v1 …），不冒充回填时
 -- 那几个 *_official：那批是从交易所年度文件解析的，这批是每日接口取的，两者
 -- 出处不同，混成一个名字以后就分不出哪行来自哪里了。
+--
+-- 成交额的量纲和成交量的口径都不是已知的，必须一行一行测出来。2026-08-10 的实测：
+-- 郑商所和上期所经 akshare 给的成交额是**万元**，而 price_history 这一列的定义是元
+-- （回填时那两家的年度文件已经 ×10000）。同一列两种量纲，会让「成交额 ÷（成交量 ×
+-- 结算价）= 点值」这条校验彻底失效——而这条校验正是这张表用来自证的那条。
+-- 大商所当时还没采到，所以这里不写死任何一家的规则。
+--
+-- 做法：算出比值，拿它跟四个候选值比——量纲 1 或 10000，各配单边或双边——
+-- 取相对误差最小且在 5% 以内的那个。四个候选彼此相差 50% 以上，不会认错。
+-- 一个都对不上就说明这三个输入里有问题，那就把成交额和口径一起留空：
+-- 一个不知道单位的金额比没有这个数更糟，它看起来像个能用的数。
 insert into price_history (
     id, workspace_id, exchange, instrument, contract, trade_date,
     open_price, high_price, low_price, close_price, settlement_price, prev_settlement_price,
@@ -28,24 +45,13 @@ select
     m.workspace_id,
     e.code,
     upper(i.code),
-    upper(c.code),
+    upper(i.code) || substr(c.delivery_month, 3, 2) || substr(c.delivery_month, 6, 2),
     m.trade_date,
     m.open_price, m.high_price, m.low_price, m.close_price, m.settlement_price,
     null,  -- market_prices 没有前结算，不编
     m.volume,
-    -- 单边还是双边：用「成交额 ÷（成交量 × 结算价）」比对登记点值实测。
-    -- 比值接近点值是单边，接近点值一半是双边。四个输入缺一个就判不了，
-    -- 判不了就留空——留空的含义是口径未知，不是单边。
-    case
-        when m.turnover is null or m.volume is null or m.volume = 0
-          or m.settlement_price is null or m.settlement_price = 0
-          or i.price_multiplier is null or i.price_multiplier = 0 then null
-        when abs(m.turnover / (m.volume * m.settlement_price) - i.price_multiplier)
-             <= abs(m.turnover / (m.volume * m.settlement_price) - i.price_multiplier / 2)
-            then 'single'
-        else 'double'
-    end,
-    m.turnover,
+    unit.basis,
+    case when unit.scale is null then null else m.turnover * unit.scale end,
     null, null,  -- market_prices 没有持仓量与增减
     ds.connector_code
 from market_prices m
@@ -53,9 +59,25 @@ join contracts c on c.id = m.contract_id and c.workspace_id = m.workspace_id
 join instruments i on i.id = c.instrument_id and i.workspace_id = m.workspace_id
 join exchanges e on e.id = i.exchange_id
 join data_sources ds on ds.id = m.source_id and ds.workspace_id = m.workspace_id
+left join lateral (
+    select x.scale, x.basis
+      from (values
+          (1::numeric,     'single'::text, i.price_multiplier),
+          (1::numeric,     'double'::text, i.price_multiplier / 2),
+          (10000::numeric, 'single'::text, i.price_multiplier / 10000),
+          (10000::numeric, 'double'::text, i.price_multiplier / 20000)
+      ) as x(scale, basis, expected)
+     where m.turnover > 0 and m.volume > 0 and m.settlement_price > 0
+       and i.price_multiplier > 0 and x.expected > 0
+       and abs(m.turnover / (m.volume * m.settlement_price) - x.expected)
+           <= 0.05 * x.expected
+     order by abs(m.turnover / (m.volume * m.settlement_price) - x.expected) / x.expected
+     limit 1
+) as unit on true
 where m.trade_date >= current_date - :window_days
   -- 历史表只收四位月份的合约代码；形状不符的行不是错的，只是不属于这张表。
-  and upper(c.code) ~ '^[A-Z]{1,2}[0-9]{4}$'
+  and upper(i.code) || substr(c.delivery_month, 3, 2) || substr(c.delivery_month, 6, 2)
+      ~ '^[A-Z]{1,2}[0-9]{4}$'
   -- 只投影两个产品覆盖的那八个品种。market_prices 里有五家交易所六十来个品种，
   -- 全量投进来会让套利页的品种下拉冒出一堆只有三天历史的品种——点进去是空图，
   -- 而空图比没有这个选项更糟，它看起来像是数据坏了。
@@ -96,7 +118,7 @@ select
     sp.workspace_id,
     e.code,
     upper(i.code),
-    upper(c.code),
+    upper(i.code) || substr(c.delivery_month, 3, 2) || substr(c.delivery_month, 6, 2),
     false,
     false,
     sp.trade_date,
@@ -113,7 +135,8 @@ join exchanges e on e.id = i.exchange_id
 join seat_entities se on se.id = sp.seat_id and se.workspace_id = sp.workspace_id
 join data_sources ds on ds.id = sp.source_id and ds.workspace_id = sp.workspace_id
 where sp.trade_date >= current_date - :window_days
-  and upper(c.code) ~ '^[A-Z]{1,2}[0-9]{4}$'
+  and upper(i.code) || substr(c.delivery_month, 3, 2) || substr(c.delivery_month, 6, 2)
+      ~ '^[A-Z]{1,2}[0-9]{4}$'
   and exists (
       select 1 from product_instrument_scope s
        where s.workspace_id = sp.workspace_id
