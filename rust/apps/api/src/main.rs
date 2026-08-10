@@ -61,6 +61,8 @@ use uuid::Uuid;
         imports::create_template,
         spread_analytics::list_varieties,
         spread_analytics::list_months,
+        spread_analytics::list_own_varieties,
+        spread_analytics::list_own_months,
         spread_analytics::query_free_spread,
         spread_analytics::query_seat_positions,
         spread_analytics::query_seat_building,
@@ -418,6 +420,14 @@ fn router(
             get(spread_analytics::list_months),
         )
         .route(
+            "/api/v1/spread-analytics/providers/self/varieties",
+            get(spread_analytics::list_own_varieties),
+        )
+        .route(
+            "/api/v1/spread-analytics/providers/self/varieties/{variety}/months",
+            get(spread_analytics::list_own_months),
+        )
+        .route(
             "/api/v1/spread-analytics/free-spread/query",
             post(spread_analytics::query_free_spread),
         )
@@ -747,6 +757,11 @@ mod tests {
             ("/api/v1/spread-analytics/providers/sanhe/varieties", "get"),
             (
                 "/api/v1/spread-analytics/providers/sanhe/varieties/{variety}/months",
+                "get",
+            ),
+            ("/api/v1/spread-analytics/providers/self/varieties", "get"),
+            (
+                "/api/v1/spread-analytics/providers/self/varieties/{variety}/months",
                 "get",
             ),
             ("/api/v1/spread-analytics/free-spread/query", "post"),

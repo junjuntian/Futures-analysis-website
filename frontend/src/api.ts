@@ -327,15 +327,20 @@ export interface ImportLineage {
 
 export type SpreadProviderResultKind = 'ok' | 'empty'
 
+export type SpreadProvider = 'sanhe' | 'self'
+
 export interface SpreadSourceMetadata {
-  provider: 'sanhe'
+  provider: SpreadProvider
   source_code: string
   source_display_name: string
-  source_type: 'aggregator'
+  // 自研那条是 derived：我们自己算的，不是从哪个聚合商取来的。
+  source_type: 'aggregator' | 'derived'
   fetched_at: string
   data_cutoff_at?: string | null
-  price_basis: 'upstream_spread'
-  raw_leg_prices_available: false
+  // 三禾给的是算好的价差；自研是两腿收盘价相减。
+  price_basis: 'upstream_spread' | 'own_close_difference'
+  // 自研这条两条腿的收盘价都在我们自己库里，所以是 true。
+  raw_leg_prices_available: boolean
   provider_algorithm_version: string
 }
 
@@ -367,7 +372,7 @@ export interface FreeSpreadLeg {
 }
 
 export interface FreeSpreadQueryRequest {
-  provider: 'sanhe'
+  provider: SpreadProvider
   leg1: FreeSpreadLeg
   leg2: FreeSpreadLeg
 }
@@ -409,7 +414,7 @@ export interface MonthlyCell {
 }
 
 export interface SpreadAnalysisTrace {
-  provider: 'sanhe'
+  provider: SpreadProvider
   source_code: string
   data_cutoff_at?: string | null
   price_basis: 'upstream_spread'
@@ -481,7 +486,7 @@ export interface FreeSpreadQueryResponse {
 export interface SpreadFavorite {
   id: string
   name: string
-  provider: 'sanhe'
+  provider: SpreadProvider
   leg1: FreeSpreadLeg
   leg2: FreeSpreadLeg
   created_at: string
@@ -612,12 +617,19 @@ export async function getImportLineage(importId: string): Promise<ApiEnvelope<Im
   return getJson(`/api/v1/imports/${encodeURIComponent(importId)}/lineage`)
 }
 
-export function getSpreadVarieties(): Promise<ApiEnvelope<SpreadVarietiesResponse>> {
-  return getJson('/api/v1/spread-analytics/providers/sanhe/varieties')
+export function getSpreadVarieties(
+  provider: SpreadProvider = 'self'
+): Promise<ApiEnvelope<SpreadVarietiesResponse>> {
+  return getJson(`/api/v1/spread-analytics/providers/${provider}/varieties`)
 }
 
-export function getSpreadMonths(variety: string): Promise<ApiEnvelope<SpreadMonthsResponse>> {
-  return getJson(`/api/v1/spread-analytics/providers/sanhe/varieties/${encodeURIComponent(variety)}/months`)
+export function getSpreadMonths(
+  variety: string,
+  provider: SpreadProvider = 'self'
+): Promise<ApiEnvelope<SpreadMonthsResponse>> {
+  return getJson(
+    `/api/v1/spread-analytics/providers/${provider}/varieties/${encodeURIComponent(variety)}/months`
+  )
 }
 
 export function queryFreeSpread(
@@ -632,7 +644,7 @@ export function getSpreadFavorites(): Promise<ApiEnvelope<SpreadFavorite[]>> {
 }
 
 export function createSpreadFavorite(
-  request: { name: string; provider: 'sanhe'; leg1: FreeSpreadLeg; leg2: FreeSpreadLeg },
+  request: { name: string; provider: SpreadProvider; leg1: FreeSpreadLeg; leg2: FreeSpreadLeg },
   csrfToken: string
 ): Promise<ApiEnvelope<SpreadFavorite>> {
   return sendJson('/api/v1/spread-analytics/favorites', request, csrfToken)

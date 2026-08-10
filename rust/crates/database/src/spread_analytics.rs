@@ -63,6 +63,9 @@ pub struct SeriesPersistence<'a> {
     pub payload_hash: &'a str,
     pub derivation_hash: &'a str,
     pub analytics: &'a WindowedSpreadAnalytics,
+    /// 这条序列是我们自己算的还是三禾给的。决定落账时的 provider、口径和
+    /// 有没有外部来源——三者必须一致，库里的约束会兜住写错的情况。
+    pub own_engine: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -659,21 +662,36 @@ mod fallback_tests {
     }
 }
 
+/// 来源与口径成对出现，库里的约束也是成对校验的，所以只在这一处决定。
+fn provider_and_basis(own_engine: bool) -> (&'static str, &'static str) {
+    if own_engine {
+        ("self", "own_close_difference")
+    } else {
+        ("sanhe", "upstream_spread")
+    }
+}
+
 pub async fn save_series(
     pool: &PgPool,
     input: &SeriesPersistence<'_>,
 ) -> Result<Uuid, SpreadRepositoryError> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, input.workspace_id).await?;
-    let source_id = ensure_sanhe_source_in_tx(&mut tx, input.workspace_id).await?;
+    // 自己算的没有外部来源，不去 ensure 三禾那条 data_sources——挂上去就是假账。
+    let source_id = if input.own_engine {
+        None
+    } else {
+        Some(ensure_sanhe_source_in_tx(&mut tx, input.workspace_id).await?)
+    };
+    let (provider_code, price_basis) = provider_and_basis(input.own_engine);
     let new_id = Uuid::now_v7();
     let inserted = sqlx::query_scalar::<_, Uuid>(
         "insert into spread_provider_series
             (id, workspace_id, provider_code, source_id, query_hash, business_date,
              query_json, fetched_at, data_cutoff_at, payload_hash, derivation_hash, price_basis,
              window_algorithm_version, statistics_algorithm_version, rule_version, created_by)
-         values ($1, $2, 'sanhe', $3, $4, $5, $6, $7, $8, $9, $10,
-                 'upstream_spread', $11, $12, $13, $14)
+         values ($1, $2, $15, $3, $4, $5, $6, $7, $8, $9, $10,
+                 $16, $11, $12, $13, $14)
          on conflict (workspace_id, provider_code, query_hash, business_date, derivation_hash)
          do nothing
          returning id",
@@ -692,6 +710,8 @@ pub async fn save_series(
     .bind(STATISTICS_ALGORITHM_VERSION)
     .bind(DEFAULT_RULE_VERSION)
     .bind(input.actor_user_id)
+    .bind(provider_code)
+    .bind(price_basis)
     .fetch_optional(&mut *tx)
     .await?;
     let series_id = if let Some(id) = inserted {
@@ -752,26 +772,28 @@ pub async fn save_series(
             "insert into audit_logs
                 (id, workspace_id, actor_user_id, event_type, outcome, request_id, metadata)
              values ($1, $2, $3, 'spread.provider_series.created', 'success', $4,
-                     jsonb_build_object('series_id', $5::text, 'provider', 'sanhe'))",
+                     jsonb_build_object('series_id', $5::text, 'provider', $6::text))",
         )
         .bind(Uuid::now_v7())
         .bind(input.workspace_id)
         .bind(input.actor_user_id)
         .bind(input.request_id)
         .bind(id)
+        .bind(provider_code)
         .execute(&mut *tx)
         .await?;
         id
     } else {
         sqlx::query_scalar::<_, Uuid>(
             "select id from spread_provider_series
-              where workspace_id = $1 and provider_code = 'sanhe'
+              where workspace_id = $1 and provider_code = $5
                 and query_hash = $2 and business_date = $3 and derivation_hash = $4",
         )
         .bind(input.workspace_id)
         .bind(input.query_hash)
         .bind(input.business_date)
         .bind(input.derivation_hash)
+        .bind(provider_code)
         .fetch_one(&mut *tx)
         .await?
     };
@@ -780,12 +802,14 @@ pub async fn save_series(
     // combination on the page every day accumulates the same history over and
     // over. Bound it here, inside the same transaction that grew it.
     sqlx::query(
+        // 只清自己这一路的：三禾与自研的 query_hash 可能相同（同一组腿），
+        // 不按 provider 分开会把另一路的历史一并删掉。
         "delete from spread_provider_series
-          where workspace_id = $1 and provider_code = 'sanhe' and query_hash = $2
+          where workspace_id = $1 and provider_code = $4 and query_hash = $2
             and business_date not in (
                 select business_date
                   from spread_provider_series
-                 where workspace_id = $1 and provider_code = 'sanhe' and query_hash = $2
+                 where workspace_id = $1 and provider_code = $4 and query_hash = $2
                  order by business_date desc
                  limit $3
             )",
@@ -793,6 +817,7 @@ pub async fn save_series(
     .bind(input.workspace_id)
     .bind(input.query_hash)
     .bind(CACHE_BUSINESS_DATES_KEPT)
+    .bind(provider_code)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -998,6 +1023,49 @@ mod tests {
         include_str!("../../../migrations/202608050001_phase_5a_spread_provider.sql");
     const RETENTION_GRANTS: &str =
         include_str!("../../../migrations/202608100005_spread_retention_delete_grants.sql");
+    const SELF_PROVIDER: &str =
+        include_str!("../../../migrations/202608100009_self_spread_provider.sql");
+
+    #[test]
+    fn self_computed_series_are_not_recorded_as_coming_from_sanhe() {
+        // 来源、口径、外部来源三者必须一起翻。任何一处漏了，落账就在撒谎：
+        // 我们自己用两腿收盘价算的东西，记录上写着是三禾给的。
+        assert_eq!(provider_and_basis(true), ("self", "own_close_difference"));
+        assert_eq!(provider_and_basis(false), ("sanhe", "upstream_spread"));
+
+        // 库里也得挡住写反的情况，光靠这一处函数不够——迁移必须双向绑定。
+        assert!(
+            SELF_PROVIDER.contains("(provider_code = 'self') = (source_id is null)"),
+            "自研序列必须没有外部来源，外部序列必须有，缺一个方向都能写进假账"
+        );
+        assert!(
+            SELF_PROVIDER.contains("provider_code = 'self' and price_basis = 'own_close_difference'")
+                && SELF_PROVIDER
+                    .contains("provider_code = 'sanhe' and price_basis = 'upstream_spread'"),
+            "口径必须跟着来源走，不允许错配"
+        );
+    }
+
+    #[test]
+    fn the_retention_sweep_does_not_reach_across_providers() {
+        // 同一组腿在三禾和自研下 query_hash 相同，清理时不按 provider 分开
+        // 就会把另一路的历史一并删掉——两边对不上账，还查不出是谁删的。
+        let source = include_str!("spread_analytics.rs");
+        let sweep = source
+            .split("delete from spread_provider_series")
+            .nth(1)
+            .expect("留存清理那条语句还在");
+        let statement = &sweep[..sweep.find("\",").unwrap_or(sweep.len())];
+        assert!(
+            !statement.contains("'sanhe'"),
+            "留存清理不能写死 sanhe：{statement}"
+        );
+        assert_eq!(
+            statement.matches("provider_code = $4").count(),
+            2,
+            "外层删除与内层子查询都要按 provider 限定"
+        );
+    }
 
     /// Every table this module deletes from, including the ones reached by
     /// `on delete cascade` from a table it deletes directly. A cascade is still
@@ -1282,6 +1350,14 @@ mod tests {
     }
 }
 
+/// 我们自己有行情的一个品种。字段名与三禾那条的返回对齐，好让前端一个分支都不用加。
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnVariety {
+    pub market: String,
+    pub name: String,
+    pub symbol: String,
+}
+
 /// 自建价差引擎的一个点。价差以文本承载，由调用方解析成精确小数——
 /// 见 `load_own_spread_points` 里那条注释。
 #[derive(Debug, Clone)]
@@ -1297,6 +1373,70 @@ pub struct OwnSpreadPoint {
 /// 用收盘价而不是结算价，是运营者定的口径：价差看的是两个合约的价格关系，收盘价是
 /// 市场公认的那个时点；结算价留给席位成本。
 ///
+/// 我们自己有行情的品种，连同交易所和中文名。
+///
+/// 以 `price_history` 为准而不是 `instruments`：能不能算价差取决于有没有价格，
+/// 品种表里登记过但一根 K 线都没有的，列出来只会让人点了报空。
+pub async fn own_varieties(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<OwnVariety>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select distinct on (p.instrument)
+                p.instrument, p.exchange, coalesce(i.name, p.instrument) as name
+           from price_history p
+           left join instruments i
+             on i.workspace_id = p.workspace_id and upper(i.code) = p.instrument
+          where p.workspace_id = $1
+          order by p.instrument",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| OwnVariety {
+            market: row.get("exchange"),
+            name: row.get("name"),
+            symbol: row.get("instrument"),
+        })
+        .collect())
+}
+
+/// 某品种当前挂牌的合约月份，两位数字。
+///
+/// 只看最近一年：苹果、生猪这类不是月月挂牌的品种，历史上出现过而现在早已不挂的
+/// 月份摆进下拉框，选了也算不出东西。窗口以该品种自己的最后一个交易日为基准而不是
+/// 今天，否则数据一停更下拉框就空了。
+pub async fn own_contract_months(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        "select distinct right(contract, 2) as month
+           from price_history
+          where workspace_id = $1 and instrument = $2
+            and trade_date >= (
+                select max(trade_date) - interval '400 days'
+                  from price_history
+                 where workspace_id = $1 and instrument = $2
+            )
+          order by month",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 /// 腿的年份由月份定：后腿月份大于前腿的，是同一年（01-05）；否则是次年（09-01 的
 /// 01 腿是次年的，否则先到期的就成了 01 腿，那是反向组合）。
 ///

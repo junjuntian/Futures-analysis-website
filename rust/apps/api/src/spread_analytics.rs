@@ -347,6 +347,109 @@ pub async fn list_months(
     .into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/providers/self/varieties",
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = VarietiesResponse),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn list_own_varieties(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let items = database::spread_analytics::own_varieties(&state.auth.pool, context.workspace_id())
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+    // 这条读的是我们自己的库，没有上游可以不可用，所以不存在 502/503。
+    let result_kind = if items.is_empty() {
+        ProviderResultKind::Empty
+    } else {
+        ProviderResultKind::Ok
+    };
+    Ok(Json(ApiResponse::new(
+        VarietiesResponse {
+            source: source_metadata(OffsetDateTime::now_utc(), None, true),
+            items: items
+                .into_iter()
+                .map(|item| ProviderVariety {
+                    market: item.market,
+                    name: item.name,
+                    symbol: item.symbol,
+                })
+                .collect(),
+            result_kind,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/providers/self/varieties/{variety}/months",
+    params(("variety" = String, Path)),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = MonthsResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn list_own_months(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Path(variety): Path<String>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    validate_text(&variety, 1, 40).map_err(|code| SpreadApiError::Validation(code, request_id))?;
+    let wanted = variety.trim();
+    // 路径上给的是中文名，库里按代码存，所以先在自己的品种表里认一遍——
+    // 顺带挡掉不认识的名字，免得把任意字符串当成代码去查。
+    let known = database::spread_analytics::own_varieties(&state.auth.pool, context.workspace_id())
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let matched = known
+        .into_iter()
+        .find(|item| item.name == wanted || item.symbol == wanted.to_ascii_uppercase())
+        .ok_or(SpreadApiError::Validation(
+            "provider_selection_invalid",
+            request_id,
+        ))?;
+    let months = database::spread_analytics::own_contract_months(
+        &state.auth.pool,
+        context.workspace_id(),
+        &matched.symbol,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let result_kind = if months.is_empty() {
+        ProviderResultKind::Empty
+    } else {
+        ProviderResultKind::Ok
+    };
+    Ok(Json(ApiResponse::new(
+        MonthsResponse {
+            source: source_metadata(OffsetDateTime::now_utc(), None, true),
+            variety: matched.name,
+            months,
+            // 基差是三禾自己算的一个数，我们这条没有对应物，不编一个填进去。
+            basis: None,
+            basis_semantics_confirmed: false,
+            result_kind,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
 /// 自建价差引擎的来源标识。与三禾并存而不是取代：切换只是请求里的一个字符串，
 /// 出了问题可以立刻切回去，也便于把两边的数字摆在一起比。
 const SELF_PROVIDER_CODE: &str = "self";
@@ -750,6 +853,7 @@ pub async fn query_free_spread(
             payload_hash: &fetched.payload_hash,
             derivation_hash: &derivation_hash,
             analytics: &analytics,
+            own_engine: use_own_engine,
         },
     )
     .await

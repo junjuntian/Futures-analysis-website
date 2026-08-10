@@ -126,7 +126,7 @@ async function runQuery() {
   errorMessage.value = ''
   try {
     const envelope = await queryFreeSpread({
-      provider: 'sanhe',
+      provider: 'self',
       leg1: { ...legs.leg1 },
       leg2: { ...legs.leg2 }
     }, await ensureCsrf())
@@ -166,7 +166,7 @@ async function saveFavorite() {
   try {
     await createSpreadFavorite({
       name,
-      provider: 'sanhe',
+      provider: 'self',
       leg1: { ...legs.leg1 },
       leg2: { ...legs.leg2 }
     }, await ensureCsrf())
@@ -192,10 +192,13 @@ async function removeFavorite(favorite: SpreadFavorite) {
 function describeError(error: unknown) {
   if (error instanceof ApiError) {
     const known: Record<string, string> = {
-      spread_provider_unavailable: '三禾数据暂时不可用，请稍后再试',
+      spread_provider_unavailable: '行情数据暂时读不到，请稍后再试',
       spread_provider_rate_limited: '数据源正在限频，请稍后再试',
-      spread_provider_forbidden: '三禾只读接口当前拒绝访问',
-      spread_provider_contract_changed: '三禾接口格式发生变化，适配器已停止解析',
+      spread_provider_forbidden: '数据源当前拒绝访问',
+      // 自研引擎下这条的含义变了：不是上游改了格式，而是这两条腿凑不出完整窗口。
+      spread_provider_contract_changed: '这两条腿的历史数据不足以切出完整的年度窗口',
+      provider_selection_invalid: '这个品种我们自己还没有行情数据',
+      invalid_leg_selection: '两条腿必须同品种、且月份不同',
       favorite_exists: '该组合已在收藏中'
     }
     return known[error.code] ?? `请求失败（${error.code}）`
@@ -407,7 +410,7 @@ onMounted(async () => {
     </section>
 
     <footer class="source-footer">
-      <span><el-icon><Star /></el-icon> 数据来源：{{ source?.source_display_name ?? '三禾数据' }}</span>
+      <span><el-icon><Star /></el-icon> 数据来源：{{ source?.source_display_name ?? '自建价差引擎' }}</span>
       <span>服务端代理 · 同参数当日缓存 · 原始统计未直接采用</span>
     </footer>
 
