@@ -1039,7 +1039,8 @@ mod tests {
             "自研序列必须没有外部来源，外部序列必须有，缺一个方向都能写进假账"
         );
         assert!(
-            SELF_PROVIDER.contains("provider_code = 'self' and price_basis = 'own_close_difference'")
+            SELF_PROVIDER
+                .contains("provider_code = 'self' and price_basis = 'own_close_difference'")
                 && SELF_PROVIDER
                     .contains("provider_code = 'sanhe' and price_basis = 'upstream_spread'"),
             "口径必须跟着来源走，不允许错配"
