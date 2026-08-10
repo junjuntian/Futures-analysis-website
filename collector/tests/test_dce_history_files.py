@@ -235,3 +235,42 @@ def test_a_year_is_parsed_once_and_shared_across_dates(tmp_path, monkeypatch):
     adapter.dce_history_frame(date(2015, 9, 1), frozenset({"JM"}))
     adapter.dce_history_frame(date(2015, 9, 2), frozenset({"JM"}))
     assert len(reads) == 1
+
+
+def test_a_range_walks_only_the_dates_the_files_say_traded(tmp_path, monkeypatch):
+    # Deriving weekdays instead would march the importer through fifteen hundred
+    # holidays over twelve years, each recorded as a failed batch for a day on
+    # which nothing happened.
+    root = make_dir(tmp_path, monkeypatch)
+    annual_file(root / "jm_2015.xlsx", jm_rows())
+    adapter = AkshareAdapter()
+    dates = adapter.dce_history_trading_dates(
+        frozenset({"JM"}), date(2015, 1, 1), date(2015, 12, 31)
+    )
+    assert dates == [date(2015, 9, 1), date(2015, 9, 2)]
+
+    # The range is inclusive at both ends and clips to it.
+    assert adapter.dce_history_trading_dates(
+        frozenset({"JM"}), date(2015, 9, 2), date(2015, 9, 2)
+    ) == [date(2015, 9, 2)]
+
+
+def test_a_range_over_a_variety_with_no_file_is_empty_not_an_error(tmp_path, monkeypatch):
+    # 生猪 has no file before its 2021 listing. Asking for 2015 must come back
+    # with nothing rather than claiming the year is broken.
+    root = make_dir(tmp_path, monkeypatch)
+    annual_file(root / "jm_2015.xlsx", jm_rows())
+    adapter = AkshareAdapter()
+    assert (
+        adapter.dce_history_trading_dates(frozenset({"LH"}), date(2015, 1, 1), date(2015, 12, 31))
+        == []
+    )
+
+
+def test_a_range_is_refused_against_a_live_source(tmp_path, monkeypatch):
+    # Walking a date range against an exchange would issue requests with nothing
+    # pacing them between dates. run-backfill.sh is what paces those.
+    from futures_collector.cli import main
+
+    make_dir(tmp_path, monkeypatch)
+    assert main(["--date", "2015-09-01", "--through", "2015-09-02", "--variety", "JM"]) == 1

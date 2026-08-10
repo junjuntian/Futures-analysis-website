@@ -632,38 +632,76 @@ class AkshareAdapter:
         frames: list[pd.DataFrame] = []
         missing: list[str] = []
         for symbol in wanted:
-            key = (symbol.upper(), collection_date.year)
-            frame = self._dce_history_cache.get(key)
+            frame = self._dce_history_year(root, symbol, collection_date.year)
             if frame is None:
-                stem = f"{symbol.lower()}_{collection_date.year}"
-                path = next(
-                    (
-                        root / f"{stem}{suffix}"
-                        for suffix in DCE_HISTORY_SUFFIXES
-                        if (root / f"{stem}{suffix}").is_file()
-                    ),
-                    None,
-                )
-                if path is None:
-                    missing.append(f"{stem}{DCE_HISTORY_SUFFIXES[0]}")
-                    continue
-                frame = pd.read_excel(path, dtype=str)
-                # The exchange's own headers carry stray whitespace in some
-                # years, which would silently defeat the rename below and leave
-                # the file looking like an unknown layout.
-                frame.columns = [str(column).strip() for column in frame.columns]
-                frame = frame.rename(columns=DCE_HISTORY_COLUMNS)
-                if "品种名称" not in frame.columns:
-                    frame["品种名称"] = DCE_HISTORY_VARIETY_NAMES.get(
-                        symbol.upper(), symbol.upper()
-                    )
-                self._dce_history_cache[key] = frame
+                missing.append(f"{symbol.lower()}_{collection_date.year}{DCE_HISTORY_SUFFIXES[0]}")
+                continue
             frames.append(frame)
         if not frames:
             raise ValueError(
                 f"no DCE history file for {collection_date.isoformat()}: missing {missing}"
             )
         return pd.concat(frames, ignore_index=True)
+
+    def dce_history_trading_dates(
+        self, varieties: frozenset[str] | None, start: date, end: date
+    ) -> list[date]:
+        """The dates the files themselves say traded, within the range.
+
+        Read from the files rather than derived from a calendar, because that is
+        the same claim from the same source: the exchange published a row for a
+        date exactly when that date traded. Deriving weekdays instead would
+        march an importer through fifteen hundred holidays, each recorded as a
+        failed batch for a day nothing happened.
+        """
+        directory = os.environ.get(DCE_HISTORY_DIR_ENV)
+        if not directory:
+            raise ValueError(f"{DCE_HISTORY_DIR_ENV} is not set")
+        root = Path(directory)
+        wanted = sorted(varieties) if varieties is not None else []
+        if not wanted:
+            raise ValueError("the DCE history source requires a variety selection")
+        found: set[date] = set()
+        for symbol in wanted:
+            for year in range(start.year, end.year + 1):
+                frame = self._dce_history_year(root, symbol, year)
+                if frame is None or "交易日期" not in frame.columns:
+                    continue
+                for raw in frame["交易日期"].dropna().astype(str):
+                    digits = raw.strip().replace("-", "")[:8]
+                    if len(digits) != 8 or not digits.isdigit():
+                        continue
+                    day = date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+                    if start <= day <= end:
+                        found.add(day)
+        return sorted(found)
+
+    def _dce_history_year(self, root: Path, symbol: str, year: int) -> pd.DataFrame | None:
+        key = (symbol.upper(), year)
+        frame = self._dce_history_cache.get(key)
+        if frame is not None:
+            return frame
+        stem = f"{symbol.lower()}_{year}"
+        path = next(
+            (
+                root / f"{stem}{suffix}"
+                for suffix in DCE_HISTORY_SUFFIXES
+                if (root / f"{stem}{suffix}").is_file()
+            ),
+            None,
+        )
+        if path is None:
+            return None
+        frame = pd.read_excel(path, dtype=str)
+        # The exchange's own headers carry stray whitespace in some years, which
+        # would silently defeat the rename below and leave the file looking like
+        # an unknown layout.
+        frame.columns = [str(column).strip() for column in frame.columns]
+        frame = frame.rename(columns=DCE_HISTORY_COLUMNS)
+        if "品种名称" not in frame.columns:
+            frame["品种名称"] = DCE_HISTORY_VARIETY_NAMES.get(symbol.upper(), symbol.upper())
+        self._dce_history_cache[key] = frame
+        return frame
 
 
 def _eastmoney_query(params: dict[str, Any]) -> str:

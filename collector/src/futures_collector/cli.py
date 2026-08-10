@@ -36,7 +36,19 @@ def parser() -> argparse.ArgumentParser:
         help=(
             "Read DCE from the exchange's annual history files in "
             "$FUTURES_DCE_HISTORY_DIR instead of the network, for the years no "
-            "live endpoint serves. The files are downloaded once by hand."
+            "live endpoint serves. The files are fetched once and read from disk."
+        ),
+    )
+    value.add_argument(
+        "--through",
+        type=date.fromisoformat,
+        metavar="END_DATE",
+        help=(
+            "With --date and --dce-history, import every trading date from "
+            "--date through END_DATE inclusive, in one process. Only the file "
+            "source accepts a range: it reads from disk, so there is no upstream "
+            "to pace, and each annual file is parsed once instead of once per "
+            "date. Live sources stay one date per invocation."
         ),
     )
     value.add_argument(
@@ -78,20 +90,51 @@ def main(argv: list[str] | None = None) -> int:
     datasets = (
         ["catalog", "calendar", "market", "seats"] if args.dataset == "all" else [args.dataset]
     )
+    log = logging.getLogger("futures_collector")
+    if args.through is not None and not args.dce_history:
+        # A range against a live source would hammer an exchange with no pacing
+        # between dates. `run-backfill.sh` is what paces those.
+        log.error("collector_start_failed error=range_requires_dce_history")
+        return 1
+    if args.through is not None and args.through < args.date:
+        log.error("collector_start_failed error=range_ends_before_it_starts")
+        return 1
     try:
-        credentials = load_credentials()
-        with PlatformClient(credentials) as platform:
-            failures = CollectionRunner(AkshareAdapter(), platform).run(
-                args.date,
-                exchanges,
-                datasets,
-                injected_failure_exchange=args.inject_failure_exchange,
-                varieties=varieties,
-                history=args.dce_history,
-            )
-    except Exception as error:
-        logging.getLogger("futures_collector").error(
-            "collector_start_failed error=%s", safe_error_code(error)
+        adapter = AkshareAdapter()
+        dates = (
+            [args.date]
+            if args.through is None
+            else adapter.dce_history_trading_dates(varieties, args.date, args.through)
         )
+        if not dates:
+            log.error("collector_start_failed error=no_trading_dates_in_range")
+            return 1
+        credentials = load_credentials()
+        failures = 0
+        with PlatformClient(credentials) as platform:
+            runner = CollectionRunner(adapter, platform)
+            for index, day in enumerate(dates, start=1):
+                day_failures = runner.run(
+                    day,
+                    exchanges,
+                    datasets,
+                    injected_failure_exchange=args.inject_failure_exchange,
+                    varieties=varieties,
+                    history=args.dce_history,
+                )
+                failures += day_failures
+                if args.through is not None:
+                    # One line per date, because a range runs for a long time and
+                    # a silent process gives no way to tell progress from a hang.
+                    log.info(
+                        "range_date_done date=%s index=%d of=%d failures=%d total_failures=%d",
+                        day.isoformat(),
+                        index,
+                        len(dates),
+                        day_failures,
+                        failures,
+                    )
+    except Exception as error:
+        log.error("collector_start_failed error=%s", safe_error_code(error))
         return 1
     return 0 if failures == 0 else 1
