@@ -15,9 +15,9 @@ use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
 use domain::spread_analytics::{
-    ContinuousPoint, DEFAULT_RULE_VERSION, STATISTICS_ALGORITHM_VERSION, SegmentBoundary,
-    WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment, WindowedSpreadAnalytics,
-    calculate_windowed_analytics,
+    ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
+    SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
+    WindowedSpreadAnalytics, calculate_windowed_analytics,
 };
 use infrastructure::sanhe_spread::SanheSpreadSeriesProvider;
 use rust_decimal::Decimal;
@@ -293,7 +293,7 @@ pub async fn list_varieties(
     let fetched = load_varieties(&state, request_id).await?;
     Ok(Json(ApiResponse::new(
         VarietiesResponse {
-            source: source_metadata(fetched.fetched_at, None),
+            source: source_metadata(fetched.fetched_at, None, false),
             items: fetched.data,
             result_kind: fetched.result_kind,
         },
@@ -334,7 +334,7 @@ pub async fn list_months(
     let fetched = load_months(&state, variety.trim(), request_id).await?;
     Ok(Json(ApiResponse::new(
         MonthsResponse {
-            source: source_metadata(fetched.fetched_at, None),
+            source: source_metadata(fetched.fetched_at, None, false),
             variety: fetched.data.variety,
             months: fetched.data.months,
             basis: fetched.data.basis,
@@ -344,6 +344,31 @@ pub async fn list_months(
         request_id,
     ))
     .into_response())
+}
+
+/// 自建价差引擎的来源标识。与三禾并存而不是取代：切换只是请求里的一个字符串，
+/// 出了问题可以立刻切回去，也便于把两边的数字摆在一起比。
+const SELF_PROVIDER_CODE: &str = "self";
+const SELF_SOURCE_CODE: &str = "own_price_history";
+const SELF_SOURCE_NAME: &str = "自建价差引擎（交易所行情）";
+
+/// 把请求里的两条腿变成品种与前后月。
+///
+/// 前腿是先到期的那条，价差就是它减去后腿——运营者定的口径。组合的命名本身
+/// 已经表达了这个顺序（09-01 是九月腿在前），所以这里按 leg1/leg2 取，
+/// 真正的腿序校验仍由 `calculate_windowed_analytics` 做，不在这里重复一遍。
+fn own_engine_legs(request: &FreeSpreadQueryRequest) -> Option<(String, u8, u8)> {
+    let instrument = request.leg1.symbol.trim().to_ascii_uppercase();
+    if instrument.is_empty() || instrument != request.leg2.symbol.trim().to_ascii_uppercase() {
+        // 两条腿必须同品种：跨品种价差不是这个引擎在算的东西。
+        return None;
+    }
+    let front = request.leg1.month.trim().parse::<u8>().ok()?;
+    let back = request.leg2.month.trim().parse::<u8>().ok()?;
+    if !(1..=12).contains(&front) || !(1..=12).contains(&back) || front == back {
+        return None;
+    }
+    Some((instrument, front, back))
 }
 
 #[utoipa::path(
@@ -372,13 +397,20 @@ pub async fn query_free_spread(
     let request_id = Uuid::now_v7();
     let context = write_context(&state, &headers, Permission::ReadSpreads, request_id).await?;
     validate_query(&request).map_err(|code| SpreadApiError::Validation(code, request_id))?;
-    validate_provider_selection(&state, &request.leg1, &request.leg2, request_id).await?;
-    database::spread_analytics::ensure_sanhe_source(&state.auth.pool, context.workspace_id())
-        .await
-        .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let use_own_engine = request.provider.trim() == SELF_PROVIDER_CODE;
+    if !use_own_engine {
+        validate_provider_selection(&state, &request.leg1, &request.leg2, request_id).await?;
+        database::spread_analytics::ensure_sanhe_source(&state.auth.pool, context.workspace_id())
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+    }
     let query_json = canonical_query(&request);
     let query_hash = sha256_json(&query_json);
-    let fetched = load_series(&state, &request, request_id).await?;
+    let fetched = if use_own_engine {
+        load_own_series(&state, &request, context.workspace_id(), request_id).await?
+    } else {
+        load_series(&state, &request, request_id).await?
+    };
     let mut codes = BTreeSet::new();
     for point in &fetched.data.points {
         codes.insert(point.from_code.to_ascii_uppercase());
@@ -429,10 +461,61 @@ pub async fn query_free_spread(
             fetched.fetched_at,
             data_cutoff_at,
             analytics,
+            use_own_engine,
         ),
         request_id,
     ))
     .into_response())
+}
+
+/// 用我们自己的行情算价差，形状与三禾那条完全一样，好让下游一个字都不用改。
+async fn load_own_series(
+    state: &SpreadAnalyticsState,
+    request: &FreeSpreadQueryRequest,
+    workspace_id: Uuid,
+    request_id: Uuid,
+) -> Result<CachedFetch<ProviderSeries>, SpreadApiError> {
+    let (instrument, front, back) = own_engine_legs(request).ok_or(SpreadApiError::Validation(
+        "invalid_leg_selection",
+        request_id,
+    ))?;
+    let rows = database::spread_analytics::load_own_spread_points(
+        &state.auth.pool,
+        workspace_id,
+        &instrument,
+        front,
+        back,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let points: Vec<_> = rows
+        .into_iter()
+        .filter_map(|row| {
+            // 文本转精确小数；转不动的一行宁可丢掉，也不要把一个近似值
+            // 混进以后要拿来算钱的序列里。
+            row.value.parse().ok().map(|value| RawSpreadPoint {
+                trade_date: row.trade_date,
+                value,
+                from_code: row.front,
+                to_code: row.back,
+            })
+        })
+        .collect();
+    let fetched_at = OffsetDateTime::now_utc();
+    let payload_hash = sha256_json(&json!({
+        "engine": SELF_SOURCE_CODE,
+        "instrument": instrument,
+        "front_month": front,
+        "back_month": back,
+        "point_count": points.len(),
+        "last_trade_date": points.last().map(|point| point.trade_date.to_string()),
+    }));
+    Ok(CachedFetch {
+        data: ProviderSeries { points },
+        fetched_at,
+        payload_hash,
+        result_kind: ProviderResultKind::Ok,
+    })
 }
 
 #[utoipa::path(
@@ -1099,6 +1182,7 @@ fn response_from_analytics(
     fetched_at: OffsetDateTime,
     data_cutoff_at: Option<Date>,
     analytics: WindowedSpreadAnalytics,
+    own_engine: bool,
 ) -> FreeSpreadQueryResponse {
     let WindowedSpreadAnalytics {
         continuous_points,
@@ -1110,11 +1194,17 @@ fn response_from_analytics(
         quality,
         ..
     } = analytics;
+    let (provider_code, source_code, price_basis) = if own_engine {
+        // 自建口径：当天两腿收盘价相减，先到期的减后到期的。
+        (SELF_PROVIDER_CODE, SELF_SOURCE_CODE, "own_close_difference")
+    } else {
+        (SANHE_PROVIDER_CODE, SANHE_SOURCE_CODE, "upstream_spread")
+    };
     let trace = AnalysisTrace {
-        provider: SANHE_PROVIDER_CODE.to_string(),
-        source_code: SANHE_SOURCE_CODE.to_string(),
+        provider: provider_code.to_string(),
+        source_code: source_code.to_string(),
         data_cutoff_at,
-        price_basis: "upstream_spread".to_string(),
+        price_basis: price_basis.to_string(),
         sample_start: continuous_points.first().map(|point| point.trade_date),
         sample_end: continuous_points.last().map(|point| point.trade_date),
         sample_count: u32::try_from(continuous_points.len()).unwrap_or(u32::MAX),
@@ -1131,7 +1221,7 @@ fn response_from_analytics(
     };
     FreeSpreadQueryResponse {
         series_id,
-        source: source_metadata(fetched_at, data_cutoff_at),
+        source: source_metadata(fetched_at, data_cutoff_at, own_engine),
         query: FreeSpreadQueryEcho {
             provider: SANHE_PROVIDER_CODE.to_string(),
             leg1: request.leg1.clone(),
@@ -1165,7 +1255,25 @@ fn response_from_analytics(
     }
 }
 
-fn source_metadata(fetched_at: OffsetDateTime, data_cutoff_at: Option<Date>) -> SourceMetadata {
+fn source_metadata(
+    fetched_at: OffsetDateTime,
+    data_cutoff_at: Option<Date>,
+    own_engine: bool,
+) -> SourceMetadata {
+    if own_engine {
+        return SourceMetadata {
+            provider: SELF_PROVIDER_CODE.to_string(),
+            source_code: SELF_SOURCE_CODE.to_string(),
+            source_display_name: SELF_SOURCE_NAME.to_string(),
+            source_type: "derived".to_string(),
+            fetched_at,
+            data_cutoff_at,
+            price_basis: "own_close_difference".to_string(),
+            // 两条腿的收盘价就在我们自己的表里，与三禾只给算好的价差不同。
+            raw_leg_prices_available: true,
+            provider_algorithm_version: WINDOW_ALGORITHM_VERSION.to_string(),
+        };
+    }
     SourceMetadata {
         provider: SANHE_PROVIDER_CODE.to_string(),
         source_code: SANHE_SOURCE_CODE.to_string(),
@@ -1359,5 +1467,43 @@ mod tests {
         assert_eq!(value.as_object().unwrap().len(), 4);
         assert!(value.get("url").is_none());
         assert!(value.get("headers").is_none());
+    }
+
+    fn own_request(a: (&str, &str), b: (&str, &str)) -> FreeSpreadQueryRequest {
+        FreeSpreadQueryRequest {
+            provider: SELF_PROVIDER_CODE.into(),
+            leg1: leg("焦煤", a.0, a.1),
+            leg2: leg("焦煤", b.0, b.1),
+        }
+    }
+
+    #[test]
+    fn own_engine_reads_the_variety_and_both_months_from_the_request() {
+        let (instrument, front, back) =
+            own_engine_legs(&own_request(("jm", "09"), ("jm", "01"))).expect("09-01 是合法组合");
+        // 前腿是先到期的那条，价差就是它减后腿。
+        assert_eq!((instrument.as_str(), front, back), ("JM", 9, 1));
+    }
+
+    #[test]
+    fn own_engine_refuses_a_cross_variety_pair() {
+        // 跨品种价差不是这个引擎在算的东西；放行只会算出一个没有意义的数。
+        assert!(own_engine_legs(&own_request(("jm", "09"), ("jd", "01"))).is_none());
+    }
+
+    #[test]
+    fn own_engine_refuses_a_month_that_is_not_a_month() {
+        for pair in [("jm", "13"), ("jm", "00"), ("jm", "x")] {
+            assert!(
+                own_engine_legs(&own_request(("jm", "09"), pair)).is_none(),
+                "{pair:?} 不该被当成月份"
+            );
+        }
+    }
+
+    #[test]
+    fn own_engine_refuses_a_pair_of_the_same_month() {
+        // 同月两腿相减恒为零，那不是价差，是把一个错误的选择画成一条直线。
+        assert!(own_engine_legs(&own_request(("jm", "09"), ("jm", "09"))).is_none());
     }
 }

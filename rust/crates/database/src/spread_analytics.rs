@@ -1281,3 +1281,77 @@ mod tests {
         assert!(derivation_column_exists);
     }
 }
+
+/// 自建价差引擎的一个点。价差以文本承载，由调用方解析成精确小数——
+/// 见 `load_own_spread_points` 里那条注释。
+#[derive(Debug, Clone)]
+pub struct OwnSpreadPoint {
+    pub trade_date: Date,
+    pub value: String,
+    pub front: String,
+    pub back: String,
+}
+
+/// 从我们自己的行情算价差：同一交易日，先到期的腿的收盘价减后到期的腿的收盘价。
+///
+/// 用收盘价而不是结算价，是运营者定的口径：价差看的是两个合约的价格关系，收盘价是
+/// 市场公认的那个时点；结算价留给席位成本。
+///
+/// 腿的年份由月份定：后腿月份大于前腿的，是同一年（01-05）；否则是次年（09-01 的
+/// 01 腿是次年的，否则先到期的就成了 01 腿，那是反向组合）。
+///
+/// 这里只产出原始价差点，散户窗口的裁剪、分段、季节与月度全部交给
+/// `calculate_windowed_analytics`——那套逻辑已经有测试，不该有第二份。
+pub async fn load_own_spread_points(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    front_month: u8,
+    back_month: u8,
+) -> Result<Vec<OwnSpreadPoint>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "with years as (
+             select generate_series(
+                 (select min(extract(year from trade_date))::int from price_history
+                   where workspace_id = $1 and instrument = $2),
+                 (select max(extract(year from trade_date))::int + 1 from price_history
+                   where workspace_id = $1 and instrument = $2)
+             ) as y
+         ), legs as (
+             select $2 || lpad((y % 100)::text, 2, '0') || lpad($3::text, 2, '0') as front,
+                    $2 || lpad(((case when $4 > $3 then y else y + 1 end) % 100)::text, 2, '0')
+                       || lpad($4::text, 2, '0') as back
+               from years
+         )
+         select a.trade_date,
+                -- ::text 而非直接取 numeric：sqlx 未开 decimal feature，
+                -- 而 numeric 转文本是无损的，精度不会在这里丢。
+                (a.close_price - b.close_price)::text as value,
+                l.front, l.back
+           from legs l
+           join price_history a
+             on a.workspace_id = $1 and a.contract = l.front and a.close_price is not null
+           join price_history b
+             on b.workspace_id = $1 and b.contract = l.back
+            and b.trade_date = a.trade_date and b.close_price is not null
+          order by a.trade_date",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .bind(i32::from(front_month))
+    .bind(i32::from(back_month))
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| OwnSpreadPoint {
+            trade_date: row.get("trade_date"),
+            value: row.get::<String, _>("value"),
+            front: row.get("front"),
+            back: row.get("back"),
+        })
+        .collect())
+}
