@@ -1,5 +1,6 @@
 pub mod import;
 pub mod object_governance;
+pub mod seat_cost;
 pub mod spread_analytics;
 
 use serde::{Deserialize, Serialize};

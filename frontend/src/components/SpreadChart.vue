@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import { LineChart } from 'echarts/charts'
+import { BarChart, CandlestickChart, LineChart } from 'echarts/charts'
 import {
   DataZoomComponent,
   GridComponent,
@@ -26,7 +26,11 @@ const root = ref<HTMLDivElement>()
 // Components must be registered explicitly in the tree-shaken build: an option
 // for an unregistered component is silently ignored, which is why the trend
 // chart rendered without its zoom slider.
+// tree-shaken 构建里没注册的类型会静默不画——DataZoom 就这么坏过一次，
+// 图上什么都没有而控制台一声不响。建仓过程要 K 线和柱状图。
 use([
+  BarChart,
+  CandlestickChart,
   LineChart,
   DataZoomComponent,
   GridComponent,

@@ -1439,3 +1439,123 @@ pub async fn seat_trade_dates(
     tx.commit().await?;
     Ok(rows)
 }
+
+/// 建仓过程一天的原始素材：K 线、该席位净持仓、当日结算价。
+#[derive(Debug, Clone)]
+pub struct BuildingDay {
+    pub trade_date: Date,
+    pub open_price: Option<String>,
+    pub high_price: Option<String>,
+    pub low_price: Option<String>,
+    pub close_price: Option<String>,
+    pub settlement_price: Option<String>,
+    pub long_position: String,
+    pub short_position: String,
+}
+
+/// 某席位在某合约（或某品种汇总）的逐日持仓与行情。
+///
+/// 行情按合约取；品种汇总没有单一合约的 K 线，所以那一档只出持仓与成本，
+/// K 线留空——把某个合约的 K 线安在品种汇总上，是把两件事画成一件。
+///
+/// 用 full outer 的思路对齐两边：某天有行情没持仓（该席位掉出前 20）要出现，
+/// 某天有持仓没行情（零成交）也要出现。任一边缺失都由界面如实断开，而不是插值。
+pub async fn load_building_days(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    member: &str,
+    contract: Option<&str>,
+) -> Result<Vec<BuildingDay>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "with seats as (
+             select trade_date,
+                    sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+               from seat_history
+              where workspace_id = $1 and instrument = $2 and member = $3
+                and ($4::text is null or contract = $4)
+                -- 选了具体合约就只看逐合约行；没选就是品种汇总，
+                -- 那要把该席位在各合约上的持仓加起来，而不是混进汇总行。
+                and is_variety_total = ($4::text is null)
+              group by trade_date
+         ), prices as (
+             select trade_date, open_price, high_price, low_price, close_price, settlement_price
+               from price_history
+              where workspace_id = $1 and $4::text is not null and contract = $4
+         )
+         select coalesce(s.trade_date, p.trade_date) as trade_date,
+                p.open_price::text, p.high_price::text, p.low_price::text,
+                p.close_price::text, p.settlement_price::text,
+                coalesce(s.long_position, 0)::text as long_position,
+                coalesce(s.short_position, 0)::text as short_position
+           from seats s
+           full outer join prices p on p.trade_date = s.trade_date
+          where coalesce(s.trade_date, p.trade_date) is not null
+          order by 1",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .bind(member)
+    .bind(contract)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| BuildingDay {
+            trade_date: row.get("trade_date"),
+            open_price: row.get("open_price"),
+            high_price: row.get("high_price"),
+            low_price: row.get("low_price"),
+            close_price: row.get("close_price"),
+            settlement_price: row.get("settlement_price"),
+            long_position: row.get("long_position"),
+            short_position: row.get("short_position"),
+        })
+        .collect())
+}
+
+/// 某品种下有过持仓的会员，按最近一次出现的持仓量排序——界面上的会员选择器要靠它。
+pub async fn seat_members(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        "select member from seat_history
+          where workspace_id = $1 and instrument = $2
+          group by member order by max(quantity) desc, member limit 300",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
+/// 该品种的点值。盈亏必须乘它而不是合约单位——八个品种里只有鸡蛋两者不等。
+pub async fn instrument_price_multiplier(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let value = sqlx::query_scalar::<_, Option<String>>(
+        "select price_multiplier::text from instruments
+          where workspace_id = $1 and upper(code) = $2 limit 1",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    tx.commit().await?;
+    Ok(value)
+}

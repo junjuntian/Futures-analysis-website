@@ -14,6 +14,7 @@ use common::ApiResponse;
 use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
+use domain::seat_cost::{DailyPosition, build_cost_series};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -461,6 +462,163 @@ pub async fn query_seat_positions(
         request_id,
     ))
     .into_response())
+}
+
+/// 建仓过程：一个席位在一个合约（或整个品种）上，逐日的持仓、成本与盈亏。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SeatBuildingQuery {
+    pub instrument: String,
+    pub member: String,
+    /// 不给就是品种汇总。运营者要求两个视图都有：单合约会因掉出前 20 而中断，
+    /// 品种汇总几乎不会。
+    pub contract: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BuildingDayItem {
+    pub trade_date: String,
+    pub open_price: Option<String>,
+    pub high_price: Option<String>,
+    pub low_price: Option<String>,
+    pub close_price: Option<String>,
+    pub settlement_price: Option<String>,
+    pub long_position: String,
+    pub short_position: String,
+    pub net_position: String,
+    /// 净持仓成本（推算），不是成交均价——我们看不到成交明细。
+    pub cost: Option<String>,
+    pub daily_pnl: Option<String>,
+    pub open_pnl: Option<String>,
+    pub cost_unknown_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatBuildingResponse {
+    pub instrument: String,
+    pub member: String,
+    pub contract: Option<String>,
+    pub is_variety_total: bool,
+    /// 该品种的点值。鸡蛋是 10 而不是合约单位 5，用错盈亏正好差一倍。
+    pub price_multiplier: Option<String>,
+    /// 该品种有过持仓的会员，供界面选择。
+    pub members: Vec<String>,
+    pub days: Vec<BuildingDayItem>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/building",
+    params(
+        ("instrument" = String, Query),
+        ("member" = String, Query),
+        ("contract" = Option<String>, Query)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SeatBuildingResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn query_seat_building(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<SeatBuildingQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let instrument = query.instrument.trim().to_ascii_uppercase();
+    if instrument.is_empty() || !instrument.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(SpreadApiError::Validation("invalid_instrument", request_id));
+    }
+    let member = query.member.trim().to_string();
+    let contract = query
+        .contract
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+
+    let members = database::spread_analytics::seat_members(
+        &state.auth.pool,
+        context.workspace_id(),
+        &instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let multiplier = database::spread_analytics::instrument_price_multiplier(
+        &state.auth.pool,
+        context.workspace_id(),
+        &instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let mut days = Vec::new();
+    if !member.is_empty() {
+        let raw = database::spread_analytics::load_building_days(
+            &state.auth.pool,
+            context.workspace_id(),
+            &instrument,
+            &member,
+            contract.as_deref(),
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        // 没有点值就不算盈亏：宁可少一条曲线，也不要一条乘错倍数的曲线。
+        let factor: Decimal = multiplier
+            .as_deref()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(Decimal::ZERO);
+        let positions: Vec<_> = raw
+            .iter()
+            .map(|row| DailyPosition {
+                trade_date: row.trade_date,
+                net_position: parse_decimal(&row.long_position)
+                    - parse_decimal(&row.short_position),
+                settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
+            })
+            .collect();
+        let costs = build_cost_series(&positions, factor);
+        days = raw
+            .into_iter()
+            .zip(costs)
+            .map(|(row, cost)| BuildingDayItem {
+                trade_date: row.trade_date.to_string(),
+                open_price: row.open_price,
+                high_price: row.high_price,
+                low_price: row.low_price,
+                close_price: row.close_price,
+                settlement_price: row.settlement_price,
+                long_position: row.long_position,
+                short_position: row.short_position,
+                net_position: cost.net_position.to_string(),
+                cost: cost.cost.map(|value| value.round_dp(4).to_string()),
+                daily_pnl: cost.daily_pnl.map(|value| value.round_dp(2).to_string()),
+                open_pnl: cost.open_pnl.map(|value| value.round_dp(2).to_string()),
+                cost_unknown_reason: cost.cost_unknown_reason.map(str::to_string),
+            })
+            .collect();
+    }
+
+    Ok(Json(ApiResponse::new(
+        SeatBuildingResponse {
+            instrument,
+            member,
+            is_variety_total: contract.is_none(),
+            contract,
+            price_multiplier: multiplier,
+            members,
+            days,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+fn parse_decimal(value: &str) -> Decimal {
+    value.parse().unwrap_or(Decimal::ZERO)
 }
 
 /// 把请求里的两条腿变成品种与前后月。

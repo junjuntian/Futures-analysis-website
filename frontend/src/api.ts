@@ -730,3 +730,40 @@ export function getSeatPositions(
   if (tradeDate) params.set('trade_date', tradeDate)
   return getJson(`/api/v1/spread-analytics/seats/positions?${params.toString()}`)
 }
+
+export interface BuildingDay {
+  trade_date: string
+  open_price: string | null
+  high_price: string | null
+  low_price: string | null
+  close_price: string | null
+  settlement_price: string | null
+  long_position: string
+  short_position: string
+  net_position: string
+  /** 净持仓成本（推算）——由公开持仓变化与结算价推出，不是成交均价。 */
+  cost: string | null
+  daily_pnl: string | null
+  open_pnl: string | null
+  cost_unknown_reason: string | null
+}
+
+export interface SeatBuildingResponse {
+  instrument: string
+  member: string
+  contract: string | null
+  is_variety_total: boolean
+  price_multiplier: string | null
+  members: string[]
+  days: BuildingDay[]
+}
+
+export function getSeatBuilding(
+  instrument: string,
+  member: string,
+  contract?: string
+): Promise<ApiEnvelope<SeatBuildingResponse>> {
+  const params = new URLSearchParams({ instrument, member })
+  if (contract) params.set('contract', contract)
+  return getJson(`/api/v1/spread-analytics/seats/building?${params.toString()}`)
+}

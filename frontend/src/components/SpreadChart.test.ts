@@ -23,7 +23,8 @@ vi.mock('echarts/core', () => ({
   init: vi.fn((_element: HTMLElement, _theme: unknown, options: { renderer: string }) =>
     options.renderer === 'canvas' ? charts.canvas : charts.svg)
 }))
-vi.mock('echarts/charts', () => ({ LineChart: {} }))
+// 三种都要 mock：组件对每一种都调 use()，缺一个就在 setup 里抛。
+vi.mock('echarts/charts', () => ({ BarChart: {}, CandlestickChart: {}, LineChart: {} }))
 vi.mock('echarts/components', () => ({
   DataZoomComponent: {}, GridComponent: {}, LegendComponent: {},
   MarkLineComponent: {}, TooltipComponent: {}
