@@ -37,8 +37,8 @@ const auth = useAuthStore()
             <el-icon><Histogram /></el-icon>
             <span>席位</span>
           </template>
-          <el-menu-item index="/seats/positions">席位持仓</el-menu-item>
-          <el-menu-item index="/seats/building">建仓过程</el-menu-item>
+          <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
+          <el-menu-item index="/seats?tab=building">建仓过程</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/sessions">
           <el-icon><User /></el-icon>

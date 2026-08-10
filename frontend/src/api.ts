@@ -714,7 +714,10 @@ export interface SeatPositionRow {
 }
 
 export interface SeatPositionsResponse {
-  instrument: string
+  member: string | null
+  instrument: string | null
+  /** 有过持仓的会员名录，供顶部选择器使用。 */
+  members: string[]
   trade_date: string | null
   available_dates: string[]
   /** 该品种席位数据的最早一天。各品种起点相差十几年，界面必须说出来。 */
@@ -722,12 +725,15 @@ export interface SeatPositionsResponse {
   rows: SeatPositionRow[]
 }
 
-export function getSeatPositions(
-  instrument: string,
+export function getSeatPositions(options: {
+  member?: string
+  instrument?: string
   tradeDate?: string
-): Promise<ApiEnvelope<SeatPositionsResponse>> {
-  const params = new URLSearchParams({ instrument })
-  if (tradeDate) params.set('trade_date', tradeDate)
+}): Promise<ApiEnvelope<SeatPositionsResponse>> {
+  const params = new URLSearchParams()
+  if (options.member) params.set('member', options.member)
+  if (options.instrument) params.set('instrument', options.instrument)
+  if (options.tradeDate) params.set('trade_date', options.tradeDate)
   return getJson(`/api/v1/spread-analytics/seats/positions?${params.toString()}`)
 }
 

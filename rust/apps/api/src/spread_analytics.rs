@@ -356,9 +356,12 @@ const SELF_SOURCE_NAME: &str = "自建价差引擎（交易所行情）";
 /// 席位每日持仓：选品种、选日期，看当天谁持了多少。
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SeatPositionsQuery {
-    /// 品种代码，例如 JM。
-    pub instrument: String,
-    /// 交易日；不给就用该品种最近一个有数据的交易日。
+    /// 会员简称。这一页以席位为主轴：选一个会员，看它在**全部品种**上的持仓，
+    /// 而不是先选品种——先选品种就得为每个品种各看一遍同一个会员。
+    pub member: Option<String>,
+    /// 只看某个品种，可选。不给就是全部品种。
+    pub instrument: Option<String>,
+    /// 交易日；不给就用最近一个有数据的交易日。
     pub trade_date: Option<String>,
 }
 
@@ -381,7 +384,10 @@ pub struct SeatPositionItem {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SeatPositionsResponse {
-    pub instrument: String,
+    pub member: Option<String>,
+    pub instrument: Option<String>,
+    /// 有过持仓的会员名录，供顶部选择器使用。
+    pub members: Vec<String>,
     #[serde(serialize_with = "domain::spread_analytics::date_serde::option::serialize")]
     #[schema(value_type = Option<String>, format = Date)]
     pub trade_date: Option<Date>,
@@ -419,14 +425,35 @@ pub async fn query_seat_positions(
 ) -> Result<Response, SpreadApiError> {
     let request_id = Uuid::now_v7();
     let context = read_context(&state, &headers, request_id).await?;
-    let instrument = query.instrument.trim().to_ascii_uppercase();
-    if instrument.is_empty() || !instrument.chars().all(|c| c.is_ascii_uppercase()) {
+    let instrument = query
+        .instrument
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+    if instrument
+        .as_deref()
+        .is_some_and(|value| !value.chars().all(|c| c.is_ascii_uppercase()))
+    {
         return Err(SpreadApiError::Validation("invalid_instrument", request_id));
     }
+    let member = query
+        .member
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let members = database::spread_analytics::seat_members(
+        &state.auth.pool,
+        context.workspace_id(),
+        instrument.as_deref(),
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
     let dates = database::spread_analytics::seat_trade_dates(
         &state.auth.pool,
         context.workspace_id(),
-        &instrument,
+        member.as_deref(),
         400,
     )
     .await
@@ -440,20 +467,24 @@ pub async fn query_seat_positions(
         ),
         _ => dates.first().copied(),
     };
-    let rows = match trade_date {
-        Some(day) => database::spread_analytics::load_seat_positions(
+    // 没选会员就不出行：全市场一天上万行，一次全给既慢又没人看得完。
+    let rows = match (trade_date, member.as_deref()) {
+        (Some(day), Some(_)) => database::spread_analytics::load_seat_positions(
             &state.auth.pool,
             context.workspace_id(),
-            &instrument,
+            member.as_deref(),
+            instrument.as_deref(),
             day,
         )
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?,
-        None => Vec::new(),
+        _ => Vec::new(),
     };
     Ok(Json(ApiResponse::new(
         SeatPositionsResponse {
+            member,
             instrument,
+            members,
             trade_date,
             available_dates: dates.iter().map(ToString::to_string).collect(),
             coverage_start: dates.last().copied(),
@@ -543,7 +574,7 @@ pub async fn query_seat_building(
     let members = database::spread_analytics::seat_members(
         &state.auth.pool,
         context.workspace_id(),
-        &instrument,
+        Some(instrument.as_str()),
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;

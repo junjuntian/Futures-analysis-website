@@ -1380,7 +1380,8 @@ pub struct SeatPositionRow {
 pub async fn load_seat_positions(
     pool: &PgPool,
     workspace_id: Uuid,
-    instrument: &str,
+    member: Option<&str>,
+    instrument: Option<&str>,
     trade_date: Date,
 ) -> Result<Vec<SeatPositionRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -1389,12 +1390,16 @@ pub async fn load_seat_positions(
         "select exchange, instrument, contract, is_variety_total, variety_total_is_computed,
                 rank_type, rank, member, quantity::text as quantity, change::text as change, source
            from seat_history
-          where workspace_id = $1 and instrument = $2 and trade_date = $3
-          order by is_variety_total desc, contract nulls first, rank_type, rank nulls last, member",
+          where workspace_id = $1 and trade_date = $2
+            and ($3::text is null or member = $3)
+            and ($4::text is null or instrument = $4)
+          order by instrument, is_variety_total desc, contract nulls first,
+                   rank_type, rank nulls last, member",
     )
     .bind(workspace_id)
-    .bind(instrument)
     .bind(trade_date)
+    .bind(member)
+    .bind(instrument)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1421,18 +1426,18 @@ pub async fn load_seat_positions(
 pub async fn seat_trade_dates(
     pool: &PgPool,
     workspace_id: Uuid,
-    instrument: &str,
+    member: Option<&str>,
     limit: i64,
 ) -> Result<Vec<Date>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
     let rows = sqlx::query_scalar::<_, Date>(
         "select distinct trade_date from seat_history
-          where workspace_id = $1 and instrument = $2
+          where workspace_id = $1 and ($2::text is null or member = $2)
           order by trade_date desc limit $3",
     )
     .bind(workspace_id)
-    .bind(instrument)
+    .bind(member)
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -1522,14 +1527,14 @@ pub async fn load_building_days(
 pub async fn seat_members(
     pool: &PgPool,
     workspace_id: Uuid,
-    instrument: &str,
+    instrument: Option<&str>,
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
     let rows = sqlx::query_scalar::<_, String>(
         "select member from seat_history
-          where workspace_id = $1 and instrument = $2
-          group by member order by max(quantity) desc, member limit 300",
+          where workspace_id = $1 and ($2::text is null or instrument = $2)
+          group by member order by max(quantity) desc, member limit 500",
     )
     .bind(workspace_id)
     .bind(instrument)

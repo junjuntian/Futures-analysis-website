@@ -14,8 +14,7 @@ export const router = createRouter({
     { path: '/auth', component: AuthView },
     { path: '/imports', component: ImportCenterView },
     { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
-    { path: '/seats/positions', component: () => import('./views/SeatPositionsView.vue') },
-    { path: '/seats/building', component: () => import('./views/SeatBuildingView.vue') },
+    { path: '/seats', component: () => import('./views/SeatsView.vue') },
     { path: '/sessions', component: SessionsView },
     { path: '/system', component: SystemView },
     { path: '/:pathMatch(.*)*', component: NotFoundView }
