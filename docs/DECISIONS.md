@@ -539,12 +539,28 @@ settlement，其余静默丢弃。导入全程报成功。
 这直接砍掉两件事——建仓过程的 K 线图就是这个区间，`price_multiplier` 的交叉校验
 （成交额 ÷（成交量 × 结算价））也依赖它。
 
+**这条链路一共断了四处**（第一次修完再验，才发现前面还断着）：
+
+| 环节 | 状态 |
+| --- | --- |
+| 迁移建列（开/高/低） | 做了 |
+| 采集器输出五个字段 | 做了 |
+| **领域层 `MARKET_DATASET_FIELDS` 声明** | **没做——真正的闸门，CSV 送到了在入口被按模板丢弃** |
+| **投影写库** | 没做 |
+| 量/额的列 | 根本没有 |
+
 修复：
+- `rust/crates/domain/src/import.rs` 的 `MARKET_DATASET_FIELDS` 补上
+  开盘价/最高价/最低价/成交量/成交额
 - `202608100007` 给 `market_prices` 加 `volume` / `turnover` 两列（numeric，
   十三年成交额求和会溢出 bigint）
 - 投影的 insert 与 update 两条路径都补上开、高、低、量、额
 - 测试 `the_market_projection_writes_every_value_column_the_table_carries`：
   投影的 insert 必须写、update 必须刷新每一个价格类列，少一个就红
+- 测试 `test_the_collector_and_the_platform_agree_on_every_column`：**跨语言契约**，
+  采集器 `DATASET_FIELDS` 与领域层 `*_DATASET_FIELDS` 必须逐字段双向相等。
+  两边分处两种语言两个 crate，此前没有任何东西把它们连起来，这就是字段被静默
+  丢弃的根本原因
 
 **这是今天第三次同类问题**：改动只做了一半（迁移建了列 / 注释假设了权限 /
 断言读的是被挡住的表），而"部署成功"和"导入成功"都不会告诉你少了什么。

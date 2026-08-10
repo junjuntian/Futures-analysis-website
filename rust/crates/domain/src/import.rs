@@ -999,8 +999,18 @@ const MARKET_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
     "session_type" => "时段类型",
     "observed_at" => "观测时间",
     "granularity" => "粒度",
+    "open_price" => "开盘价",
+    "high_price" => "最高价",
+    "low_price" => "最低价",
     "close_price" => "收盘价",
     "settlement_price" => "结算价",
+    // Lots as the exchange publishes them, and yuan. Carried so the price
+    // multiplier can be checked against the exchange's own arithmetic:
+    // turnover / (volume x settlement) is the multiplier, and a disagreement
+    // means a contract spec changed or the wrong multiplier is on file. That
+    // check is what caught eggs being out by a factor of two.
+    "volume" => "成交量",
+    "turnover" => "成交额",
     "currency_code" => "币种",
     "calendar_version" => "日历版本",
     "revision_no" => "修订号",
