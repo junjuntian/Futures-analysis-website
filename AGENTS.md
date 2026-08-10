@@ -1,5 +1,20 @@
 # 开发规则
 
+## 部署前强制清单（不得跳过）
+
+**每次部署前必须先跑 `ops/preflight-deploy.sh`，全绿再读 `docs/DEPLOY_PREFLIGHT.md`
+的第二节（脚本查不了的那几条）。**两者都过了才允许触发 `deploy-futures.yml`。
+
+脚本会打印出可直接执行的 dispatch 命令，digest 也由它从构建产物里取，不要手抄。
+
+三条最容易漏、且线上不会报错的：
+
+- **建镜像到部署完成之间不推任何提交**（包括只改文档）——推了就得整套镜像重建。
+- **新迁移**要写 `schema_versions`、带 `begin;`、列进 `deploy-futures.yml` 的显式清单。
+- **`deploy/` 下的新文件**要装进发布包，否则线上找不到它且多半不报错。
+
+这份清单是 2026-08-10 连续三次部署失败之后立的，每一条都对应一次真实失败。
+
 - 项目阶段以 `PLANS.md` 为准；只执行当前阶段授权的工作，不提前实现后续业务模块。
 - 产品范围以 `docs/PRODUCT_REQUIREMENTS.md` 为准；未确认事项只记录到 `docs/OPEN_QUESTIONS.md`，不得自行扩展需求。
 - 文档使用中文；代码标识符、API 字段和数据库字段使用英文与 `snake_case`。
@@ -36,5 +51,5 @@
 - 计划与验收：`PLANS.md`、`docs/DEVELOPMENT_PLAN.md`、`docs/phases/PHASE_01_FOUNDATION.md`、`docs/ACCEPTANCE_CRITERIA.md`
 - 审查与交接：`docs/reviews/`、`docs/handoffs/`
 - 环境与 GitHub 接入：`docs/ENVIRONMENT.md`
-- 发布与部署：`docs/RELEASE_PROCESS.md`、`docs/DEPLOYMENT.md`
+- 发布与部署：`docs/DEPLOY_PREFLIGHT.md`（部署前必读）、`docs/RELEASE_PROCESS.md`、`docs/DEPLOYMENT.md`
 - 待确认事项：`docs/OPEN_QUESTIONS.md`
