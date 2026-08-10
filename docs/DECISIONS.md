@@ -476,6 +476,32 @@ PaddleOCR 容器不建。以下为原决策内容，仅为变更审计保留，�
 
 在这条观测完成前，不得按任一假设发版。
 
+#### 部署两次回滚的根因（2026-08-10 查实）
+
+`5bc0e6b` 给价差历史加了保留量限制（删旧数据），**授权没有跟上**。API 实际以
+`futures_runtime` 连库，该角色在这几张表上只有 select/insert（缓存表多一个 update），
+没有 delete：
+
+- 清缓存 → 每次上游取数都记 `permission denied for table spread_provider_cache`
+- 限制已存序列的保留量 → 在**刚写完该序列的同一个事务里**失败，就是
+  `free-spread/query`（焦煤 09-01）那个 500，连续两次部署因它回滚
+
+`spread_provider_observations` 与 `spread_window_segments` 由 `on delete cascade`
+牵连——级联删除同样是对被引用表的删除，同样需要该表的权限，只授权父表会把同一个
+错误往下推一张表。
+
+修复：迁移 `202608100005` 补齐四张表的 delete 授权，并在迁移内断言授权确已生效
+（静默无操作的迁移会原样留下它本该修掉的故障）。
+
+**为什么拖了这么久**：`futures_app` 是超级用户，任何权限检查都通过，所以"没写的授权"
+和"写了的授权"在它身上看起来完全一样。之前我确实猜过 DELETE 权限，但拿它去验，
+于是排除掉了正确答案。证据其实一直在部署失败时抓取的 `failure-service-logs.txt` 里，
+写着 `permission denied`——**我之前没去看那个文件**。
+
+已加静态测试 `every_table_this_module_deletes_from_is_granted_delete_to_the_runtime_role`：
+代码里 `delete from spread_*` 的每一张表，都必须在迁移里对 `futures_runtime` 有 delete
+授权，否则测试失败。
+
 #### 一条被推翻的中间结论（留档）
 
 一度判定「`requests` 把逗号编码成 `%2C` 导致 K 线接口断连」。**该结论错误**：

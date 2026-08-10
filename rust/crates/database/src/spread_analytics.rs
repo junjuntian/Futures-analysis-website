@@ -996,6 +996,62 @@ mod tests {
 
     const MIGRATION: &str =
         include_str!("../../../migrations/202608050001_phase_5a_spread_provider.sql");
+    const RETENTION_GRANTS: &str =
+        include_str!("../../../migrations/202608100005_spread_retention_delete_grants.sql");
+
+    /// Every table this module deletes from, including the ones reached by
+    /// `on delete cascade` from a table it deletes directly. A cascade is still
+    /// a delete on the referencing table and is refused without the privilege.
+    const DELETE_TARGETS: [&str; 6] = [
+        "spread_provider_cache",
+        "spread_provider_failures",
+        "spread_provider_series",
+        "spread_provider_observations",
+        "spread_window_segments",
+        "spread_favorites",
+    ];
+
+    #[test]
+    fn every_table_this_module_deletes_from_is_granted_delete_to_the_runtime_role() {
+        // The API connects as `futures_runtime`. Retention shipped without the
+        // grants and failed inside the transaction that had just written the
+        // series -- a 500 that rolled back two releases. It was invisible in
+        // testing because `futures_app` is a superuser, for which every
+        // privilege check passes whether the grant exists or not.
+        let source = include_str!("spread_analytics.rs");
+        let deleted: Vec<&str> = source
+            .match_indices("delete from ")
+            .map(|(at, marker)| {
+                source[at + marker.len()..]
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default()
+            })
+            .filter(|table| table.starts_with("spread"))
+            .collect();
+        for table in &deleted {
+            assert!(
+                DELETE_TARGETS.contains(table),
+                "{table} is deleted from but is not in DELETE_TARGETS, so nothing \
+                 checks that the runtime role may delete from it"
+            );
+        }
+
+        let grants = format!("{MIGRATION}\n{RETENTION_GRANTS}");
+        for table in DELETE_TARGETS {
+            let granted = grants.lines().any(|line| {
+                let line = line.trim();
+                line.starts_with("grant ")
+                    && line.contains("delete")
+                    && line.contains(table)
+                    && line.contains("futures_runtime")
+            });
+            assert!(
+                granted,
+                "no migration grants delete on {table} to futures_runtime"
+            );
+        }
+    }
 
     #[test]
     fn migration_separates_system_cache_from_workspace_business_tables() {
