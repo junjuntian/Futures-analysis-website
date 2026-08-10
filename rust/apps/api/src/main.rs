@@ -62,6 +62,7 @@ use uuid::Uuid;
         spread_analytics::list_varieties,
         spread_analytics::list_months,
         spread_analytics::query_free_spread,
+        spread_analytics::query_seat_positions,
         spread_analytics::list_favorites,
         spread_analytics::create_favorite,
         spread_analytics::delete_favorite
@@ -192,6 +193,8 @@ use uuid::Uuid;
         ,domain::spread_analytics::MonthlyYearRow
         ,domain::spread_analytics::MonthlyCell
         ,domain::spread_analytics::MonthlyUpRatio
+        ,spread_analytics::SeatPositionsResponse
+        ,spread_analytics::SeatPositionItem
     )),
     modifiers(&SecurityAddon)
 )]
@@ -414,6 +417,10 @@ fn router(
         .route(
             "/api/v1/spread-analytics/free-spread/query",
             post(spread_analytics::query_free_spread),
+        )
+        .route(
+            "/api/v1/spread-analytics/seats/positions",
+            get(spread_analytics::query_seat_positions),
         )
         .route(
             "/api/v1/spread-analytics/favorites",
@@ -736,6 +743,7 @@ mod tests {
                 "get",
             ),
             ("/api/v1/spread-analytics/free-spread/query", "post"),
+            ("/api/v1/spread-analytics/seats/positions", "get"),
             ("/api/v1/spread-analytics/favorites", "get"),
             ("/api/v1/spread-analytics/favorites", "post"),
             ("/api/v1/spread-analytics/favorites/{favorite_id}", "delete"),

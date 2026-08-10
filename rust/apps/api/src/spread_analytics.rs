@@ -6,7 +6,7 @@ use application::spread_analytics::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -351,6 +351,117 @@ pub async fn list_months(
 const SELF_PROVIDER_CODE: &str = "self";
 const SELF_SOURCE_CODE: &str = "own_price_history";
 const SELF_SOURCE_NAME: &str = "自建价差引擎（交易所行情）";
+
+/// 席位每日持仓：选品种、选日期，看当天谁持了多少。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SeatPositionsQuery {
+    /// 品种代码，例如 JM。
+    pub instrument: String,
+    /// 交易日；不给就用该品种最近一个有数据的交易日。
+    pub trade_date: Option<String>,
+}
+
+/// OpenAPI 用的形状，与 `database::spread_analytics::SeatPositionRow` 一一对应。
+/// 数据库结构不直接暴给接口契约，免得改一处存储就动一次对外承诺。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatPositionItem {
+    pub exchange: String,
+    pub instrument: String,
+    pub contract: Option<String>,
+    pub is_variety_total: bool,
+    pub variety_total_is_computed: bool,
+    pub rank_type: String,
+    pub rank: Option<i32>,
+    pub member: String,
+    pub quantity: String,
+    pub change: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatPositionsResponse {
+    pub instrument: String,
+    #[serde(serialize_with = "domain::spread_analytics::date_serde::option::serialize")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub trade_date: Option<Date>,
+    /// 该品种有数据的交易日，最新在前，供界面做日期选择。
+    #[schema(value_type = Vec<String>)]
+    pub available_dates: Vec<String>,
+    /// 这个品种的席位数据最早从哪天起。五个品种有十几年、大商所三个只有三年，
+    /// 不说清楚的话，一张空图看起来像"这个席位没持仓"，而不是"这段没有数据"。
+    #[serde(serialize_with = "domain::spread_analytics::date_serde::option::serialize")]
+    #[schema(value_type = Option<String>, format = Date)]
+    pub coverage_start: Option<Date>,
+    #[schema(value_type = Vec<SeatPositionItem>)]
+    pub rows: Vec<database::spread_analytics::SeatPositionRow>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/positions",
+    params(
+        ("instrument" = String, Query),
+        ("trade_date" = Option<String>, Query)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SeatPositionsResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn query_seat_positions(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<SeatPositionsQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let instrument = query.instrument.trim().to_ascii_uppercase();
+    if instrument.is_empty() || !instrument.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(SpreadApiError::Validation("invalid_instrument", request_id));
+    }
+    let dates = database::spread_analytics::seat_trade_dates(
+        &state.auth.pool,
+        context.workspace_id(),
+        &instrument,
+        400,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    // 明确要哪天就用哪天；没说就用最近有数据的一天，而不是今天——
+    // 今天很可能还没收盘，给一张空表不如给最近一张真表。
+    let trade_date = match query.trade_date.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(
+            Date::parse(raw, &time::format_description::well_known::Iso8601::DATE)
+                .map_err(|_| SpreadApiError::Validation("invalid_trade_date", request_id))?,
+        ),
+        _ => dates.first().copied(),
+    };
+    let rows = match trade_date {
+        Some(day) => database::spread_analytics::load_seat_positions(
+            &state.auth.pool,
+            context.workspace_id(),
+            &instrument,
+            day,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?,
+        None => Vec::new(),
+    };
+    Ok(Json(ApiResponse::new(
+        SeatPositionsResponse {
+            instrument,
+            trade_date,
+            available_dates: dates.iter().map(ToString::to_string).collect(),
+            coverage_start: dates.last().copied(),
+            rows,
+        },
+        request_id,
+    ))
+    .into_response())
+}
 
 /// 把请求里的两条腿变成品种与前后月。
 ///

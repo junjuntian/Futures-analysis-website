@@ -31,6 +31,7 @@ const auth = useAuthStore()
             套利监控 <span class="phase-badge">5B</span>
           </el-menu-item>
           <el-menu-item index="/spread-analytics/free-spread">自由价差</el-menu-item>
+          <el-menu-item index="/seats/positions">席位持仓</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/sessions">
           <el-icon><User /></el-icon>

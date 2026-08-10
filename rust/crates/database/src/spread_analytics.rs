@@ -1355,3 +1355,87 @@ pub async fn load_own_spread_points(
         })
         .collect())
 }
+
+/// 席位每日持仓的一行。字段与 `seat_history` 一一对应，不做加工——
+/// 加工留给读它的人，这里只负责如实取出来。
+#[derive(Debug, Clone, Serialize)]
+pub struct SeatPositionRow {
+    pub exchange: String,
+    pub instrument: String,
+    pub contract: Option<String>,
+    pub is_variety_total: bool,
+    pub variety_total_is_computed: bool,
+    pub rank_type: String,
+    pub rank: Option<i32>,
+    pub member: String,
+    pub quantity: String,
+    pub change: Option<String>,
+    pub source: String,
+}
+
+/// 某品种某交易日的全部席位行。
+///
+/// 数量用文本承载而不是浮点：这些数字后面要拿去算持仓成本，一路保持精确比在
+/// 边界上来回转换安全。
+pub async fn load_seat_positions(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    trade_date: Date,
+) -> Result<Vec<SeatPositionRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select exchange, instrument, contract, is_variety_total, variety_total_is_computed,
+                rank_type, rank, member, quantity::text as quantity, change::text as change, source
+           from seat_history
+          where workspace_id = $1 and instrument = $2 and trade_date = $3
+          order by is_variety_total desc, contract nulls first, rank_type, rank nulls last, member",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .bind(trade_date)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SeatPositionRow {
+            exchange: row.get("exchange"),
+            instrument: row.get("instrument"),
+            contract: row.get("contract"),
+            is_variety_total: row.get("is_variety_total"),
+            variety_total_is_computed: row.get("variety_total_is_computed"),
+            rank_type: row.get("rank_type"),
+            rank: row.get("rank"),
+            member: row.get("member"),
+            quantity: row.get("quantity"),
+            change: row.get("change"),
+            source: row.get("source"),
+        })
+        .collect())
+}
+
+/// 某品种有席位数据的交易日，最新在前。界面的日期选择器要靠它——
+/// 让人去选一个根本没有数据的日子，然后看到一张空表，是最没必要的一种困惑。
+pub async fn seat_trade_dates(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    limit: i64,
+) -> Result<Vec<Date>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, Date>(
+        "select distinct trade_date from seat_history
+          where workspace_id = $1 and instrument = $2
+          order by trade_date desc limit $3",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}

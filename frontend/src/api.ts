@@ -698,3 +698,35 @@ export async function uploadImport(file: File, csrfToken: string): Promise<ApiEn
   if (!response.ok) throw await parseApiError(response, `upload failed: ${response.status}`)
   return response.json() as Promise<ApiEnvelope<ImportSummary>>
 }
+
+export interface SeatPositionRow {
+  exchange: string
+  instrument: string
+  contract: string | null
+  is_variety_total: boolean
+  variety_total_is_computed: boolean
+  rank_type: 'volume' | 'long' | 'short'
+  rank: number | null
+  member: string
+  quantity: string
+  change: string | null
+  source: string
+}
+
+export interface SeatPositionsResponse {
+  instrument: string
+  trade_date: string | null
+  available_dates: string[]
+  /** 该品种席位数据的最早一天。各品种起点相差十几年，界面必须说出来。 */
+  coverage_start: string | null
+  rows: SeatPositionRow[]
+}
+
+export function getSeatPositions(
+  instrument: string,
+  tradeDate?: string
+): Promise<ApiEnvelope<SeatPositionsResponse>> {
+  const params = new URLSearchParams({ instrument })
+  if (tradeDate) params.set('trade_date', tradeDate)
+  return getJson(`/api/v1/spread-analytics/seats/positions?${params.toString()}`)
+}
