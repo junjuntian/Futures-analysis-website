@@ -57,7 +57,11 @@ def post(path, data=None):
 
 def main() -> int:
     start = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date(2023, 8, 10)
-    end = date.fromisoformat(sys.argv[2]) if len(sys.argv) > 2 else datetime.now(UTC).date()  # 三禾窗口以 last_date 为准，下面还会再收一次口
+    end = (
+        date.fromisoformat(sys.argv[2])
+        if len(sys.argv) > 2
+        else datetime.now(UTC).date()
+    )  # 三禾窗口以 last_date 为准，下面还会再收一次口
 
     brokers = json.loads((ROOT / "dce_brokers.json").read_text(encoding="utf-8"))
     window = post("broker_dates.php").get("data") or {}
