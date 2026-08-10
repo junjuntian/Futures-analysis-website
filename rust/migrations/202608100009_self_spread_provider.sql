@@ -9,6 +9,8 @@
 -- 硬造一条只会让那张表说谎。可空 + 「self 必须为空、其余必须非空」的双向约束，
 -- 比造一条假来源诚实。
 
+begin;
+
 alter table spread_provider_series alter column source_id drop not null;
 
 alter table spread_provider_series drop constraint spread_provider_series_provider;
@@ -56,3 +58,5 @@ begin
     end if;
 end
 $$;
+
+commit;

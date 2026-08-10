@@ -152,6 +152,8 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/run-backfill.sh"
           install -m 700 deploy/collector/run-spread-warm.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-spread-warm.sh"
+          install -m 600 deploy/collector/project-history.sql \
+            "${RELEASE_BUNDLE}/deploy/collector/project-history.sql"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
@@ -175,6 +177,9 @@ jobs:
             rust/migrations/202608100006_price_multiplier_seed_under_rls.sql \
             rust/migrations/202608100007_market_prices_volume_turnover.sql \
             rust/migrations/202608100008_price_and_seat_history.sql \
+            rust/migrations/202608100009_self_spread_provider.sql \
+            rust/migrations/202608100010_volume_basis_may_be_unknown.sql \
+            rust/migrations/202608100011_product_instrument_scope.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline

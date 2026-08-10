@@ -7,6 +7,8 @@
 --
 -- 留空的含义是**口径未知**，不是单边。读这列的人必须把 null 当作「别拿这个量去跨所比」。
 
+begin;
+
 alter table price_history alter column volume_basis drop not null;
 
 do $$
@@ -28,3 +30,5 @@ begin
     end if;
 end
 $$;
+
+commit;

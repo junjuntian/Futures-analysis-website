@@ -8,6 +8,8 @@
 -- 存成表而不是写死在 SQL 里：运营者以后要加第九个品种时，改一行数据并补一次回填即可，
 -- 不必改代码再发一次版。
 
+begin;
+
 create table product_instrument_scope (
     workspace_id uuid not null references workspaces(id) on delete restrict,
     exchange text not null,
@@ -65,3 +67,5 @@ begin
     end loop;
 end
 $$;
+
+commit;
