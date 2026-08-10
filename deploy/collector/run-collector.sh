@@ -46,3 +46,16 @@ fi
 [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
 
 "${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE"
+
+# 采到的东西还要投影进两张历史表，套利页和席位页读的是那两张。放在采集之后同一个
+# 脚本里而不是另开一条 cron：顺序是硬要求，投影必须看得到刚落库的那一天，两条独立
+# 的定时任务迟早会在某个慢日子里跑反。
+PROJECTION="$previous_release_dir/deploy/collector/project-history.sql"
+if [ -r "$PROJECTION" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$PROJECTION"
+else
+  # 老版本发布目录里没有这个文件。不当致命错误：采集本身已经成功了，
+  # 报一声让日志里留下痕迹就够了。
+  echo "PROJECTION_SKIPPED missing $PROJECTION" >&2
+fi

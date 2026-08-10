@@ -662,6 +662,20 @@ mod fallback_tests {
     }
 }
 
+/// 序列留存清理。同样提成常量供测试断言——理由见 `OWN_SPREAD_POINTS_SQL`。
+///
+/// 只清自己这一路的：三禾与自研的 query_hash 可能相同（同一组腿），
+/// 不按 provider 分开会把另一路的历史一并删掉。
+const SERIES_RETENTION_SQL: &str = "delete from spread_provider_series
+          where workspace_id = $1 and provider_code = $4 and query_hash = $2
+            and business_date not in (
+                select business_date
+                  from spread_provider_series
+                 where workspace_id = $1 and provider_code = $4 and query_hash = $2
+                 order by business_date desc
+                 limit $3
+            )";
+
 /// 来源与口径成对出现，库里的约束也是成对校验的，所以只在这一处决定。
 fn provider_and_basis(own_engine: bool) -> (&'static str, &'static str) {
     if own_engine {
@@ -801,25 +815,13 @@ pub async fn save_series(
     // some three thousand rows, and one is stored per business date, so a
     // combination on the page every day accumulates the same history over and
     // over. Bound it here, inside the same transaction that grew it.
-    sqlx::query(
-        // 只清自己这一路的：三禾与自研的 query_hash 可能相同（同一组腿），
-        // 不按 provider 分开会把另一路的历史一并删掉。
-        "delete from spread_provider_series
-          where workspace_id = $1 and provider_code = $4 and query_hash = $2
-            and business_date not in (
-                select business_date
-                  from spread_provider_series
-                 where workspace_id = $1 and provider_code = $4 and query_hash = $2
-                 order by business_date desc
-                 limit $3
-            )",
-    )
-    .bind(input.workspace_id)
-    .bind(input.query_hash)
-    .bind(CACHE_BUSINESS_DATES_KEPT)
-    .bind(provider_code)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query(SERIES_RETENTION_SQL)
+        .bind(input.workspace_id)
+        .bind(input.query_hash)
+        .bind(CACHE_BUSINESS_DATES_KEPT)
+        .bind(provider_code)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(series_id)
 }
@@ -1048,21 +1050,30 @@ mod tests {
     }
 
     #[test]
+    fn one_trading_day_yields_one_spread_point_even_with_two_sources() {
+        // price_history 的身份键里带 source，回填与日更对同一天各写一行都是合法的。
+        // 两条腿各自 join 一次，不先收敛成一行的话同一个交易日会在图上出现多次，
+        // 而且是静悄悄的——点数变多，形状还像那么回事。
+        assert!(
+            OWN_SPREAD_POINTS_SQL.contains("distinct on (contract, trade_date)"),
+            "两条腿必须先各自收敛到一天一行"
+        );
+        assert!(
+            !OWN_SPREAD_POINTS_SQL.contains("join price_history"),
+            "不能再直接 join 原表，那样就绕过了收敛"
+        );
+    }
+
+    #[test]
     fn the_retention_sweep_does_not_reach_across_providers() {
         // 同一组腿在三禾和自研下 query_hash 相同，清理时不按 provider 分开
         // 就会把另一路的历史一并删掉——两边对不上账，还查不出是谁删的。
-        let source = include_str!("spread_analytics.rs");
-        let sweep = source
-            .split("delete from spread_provider_series")
-            .nth(1)
-            .expect("留存清理那条语句还在");
-        let statement = &sweep[..sweep.find("\",").unwrap_or(sweep.len())];
         assert!(
-            !statement.contains("'sanhe'"),
-            "留存清理不能写死 sanhe：{statement}"
+            !SERIES_RETENTION_SQL.contains("'sanhe'"),
+            "留存清理不能写死 sanhe：{SERIES_RETENTION_SQL}"
         );
         assert_eq!(
-            statement.matches("provider_code = $4").count(),
+            SERIES_RETENTION_SQL.matches("provider_code = $4").count(),
             2,
             "外层删除与内层子查询都要按 provider 限定"
         );
@@ -1438,6 +1449,47 @@ pub async fn own_contract_months(
     Ok(rows)
 }
 
+/// 自建价差的取数 SQL。提成常量是为了让测试断言这一段本身——
+/// 让测试去 include_str! 自己的源码找锚点，测试里的字面量会先被匹配到，
+/// 结果是什么都没断言到还显示通过。已经踩过一次。
+const OWN_SPREAD_POINTS_SQL: &str = "with years as (
+             select generate_series(
+                 (select min(extract(year from trade_date))::int from price_history
+                   where workspace_id = $1 and instrument = $2),
+                 (select max(extract(year from trade_date))::int + 1 from price_history
+                   where workspace_id = $1 and instrument = $2)
+             ) as y
+         ), legs as (
+             select $2 || lpad((y % 100)::text, 2, '0') || lpad($3::text, 2, '0') as front,
+                    $2 || lpad(((case when $4 > $3 then y else y + 1 end) % 100)::text, 2, '0')
+                       || lpad($4::text, 2, '0') as back
+               from years
+         ), one_row_per_day as (
+             -- 同一合约同一天可能有不止一行：回填按交易所年度文件写，日更按每日接口
+             -- 写，两者 source 不同，而 price_history 的身份键里带 source，所以两行
+             -- 都合法地存在。不收敛成一行的话，下面两次 join 会把同一天算成多个点，
+             -- 一个交易日在图上出现两次。
+             --
+             -- 取 source 字典序最大的那一行是任意但**确定**的选择：真正重要的是同一
+             -- 天在两条腿上取的是同一套口径，且今天和明天取的是同一行。收盘价是交易所
+             -- 公布的同一个数，两个来源本就该一致；不一致说明有源坏了，那是采集侧的
+             -- 问题，不该在这里靠挑一个来掩盖。
+             select distinct on (contract, trade_date)
+                    contract, trade_date, close_price
+               from price_history
+              where workspace_id = $1 and instrument = $2 and close_price is not null
+              order by contract, trade_date, source desc
+         )
+         select a.trade_date,
+                -- ::text 而非直接取 numeric：sqlx 未开 decimal feature，
+                -- 而 numeric 转文本是无损的，精度不会在这里丢。
+                (a.close_price - b.close_price)::text as value,
+                l.front, l.back
+           from legs l
+           join one_row_per_day a on a.contract = l.front
+           join one_row_per_day b on b.contract = l.back and b.trade_date = a.trade_date
+          order by a.trade_date";
+
 /// 腿的年份由月份定：后腿月份大于前腿的，是同一年（01-05）；否则是次年（09-01 的
 /// 01 腿是次年的，否则先到期的就成了 01 腿，那是反向组合）。
 ///
@@ -1452,39 +1504,13 @@ pub async fn load_own_spread_points(
 ) -> Result<Vec<OwnSpreadPoint>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query(
-        "with years as (
-             select generate_series(
-                 (select min(extract(year from trade_date))::int from price_history
-                   where workspace_id = $1 and instrument = $2),
-                 (select max(extract(year from trade_date))::int + 1 from price_history
-                   where workspace_id = $1 and instrument = $2)
-             ) as y
-         ), legs as (
-             select $2 || lpad((y % 100)::text, 2, '0') || lpad($3::text, 2, '0') as front,
-                    $2 || lpad(((case when $4 > $3 then y else y + 1 end) % 100)::text, 2, '0')
-                       || lpad($4::text, 2, '0') as back
-               from years
-         )
-         select a.trade_date,
-                -- ::text 而非直接取 numeric：sqlx 未开 decimal feature，
-                -- 而 numeric 转文本是无损的，精度不会在这里丢。
-                (a.close_price - b.close_price)::text as value,
-                l.front, l.back
-           from legs l
-           join price_history a
-             on a.workspace_id = $1 and a.contract = l.front and a.close_price is not null
-           join price_history b
-             on b.workspace_id = $1 and b.contract = l.back
-            and b.trade_date = a.trade_date and b.close_price is not null
-          order by a.trade_date",
-    )
-    .bind(workspace_id)
-    .bind(instrument)
-    .bind(i32::from(front_month))
-    .bind(i32::from(back_month))
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows = sqlx::query(OWN_SPREAD_POINTS_SQL)
+        .bind(workspace_id)
+        .bind(instrument)
+        .bind(i32::from(front_month))
+        .bind(i32::from(back_month))
+        .fetch_all(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(rows
         .into_iter()
