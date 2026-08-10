@@ -71,6 +71,8 @@ pub struct SeriesPersistence<'a> {
 #[derive(Debug, Clone)]
 pub struct NewFavorite<'a> {
     pub workspace_id: Uuid,
+    /// 收藏是在哪条来源下存的。存错了，切回三禾比对时两边就对不上账。
+    pub provider_code: &'a str,
     pub actor_user_id: Uuid,
     pub request_id: Uuid,
     pub name: &'a str,
@@ -869,7 +871,7 @@ pub async fn create_favorite(
         "insert into spread_favorites
             (id, workspace_id, name, provider_code, leg1_json, leg2_json,
              normalized_hash, created_by)
-         values ($1, $2, $3, 'sanhe', $4, $5, $6, $7)
+         values ($1, $2, $3, $8, $4, $5, $6, $7)
          returning created_at",
     )
     .bind(id)
@@ -878,6 +880,7 @@ pub async fn create_favorite(
     .bind(serde_json::to_value(input.leg1).map_err(|_| SpreadRepositoryError::InvalidStoredData)?)
     .bind(serde_json::to_value(input.leg2).map_err(|_| SpreadRepositoryError::InvalidStoredData)?)
     .bind(input.normalized_hash)
+    .bind(input.provider_code)
     .bind(input.actor_user_id)
     .fetch_one(&mut *tx)
     .await

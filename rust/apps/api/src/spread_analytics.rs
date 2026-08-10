@@ -450,6 +450,41 @@ pub async fn list_own_months(
     .into_response())
 }
 
+/// 自研来源下，一条腿是否成立：品种要在我们自己有数据的列表里，
+/// 月份要是该品种当前挂牌的月份之一。
+async fn validate_own_selection(
+    state: &SpreadAnalyticsState,
+    workspace_id: Uuid,
+    leg: &FreeSpreadLeg,
+    request_id: Uuid,
+) -> Result<(), SpreadApiError> {
+    let known = database::spread_analytics::own_varieties(&state.auth.pool, workspace_id)
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let wanted = leg.variety.trim();
+    let matched = known
+        .into_iter()
+        .find(|item| item.name == wanted || item.symbol == leg.symbol.trim().to_ascii_uppercase())
+        .ok_or(SpreadApiError::Validation(
+            "provider_selection_invalid",
+            request_id,
+        ))?;
+    let months = database::spread_analytics::own_contract_months(
+        &state.auth.pool,
+        workspace_id,
+        &matched.symbol,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    if !months.iter().any(|month| month == leg.month.trim()) {
+        return Err(SpreadApiError::Validation(
+            "provider_selection_invalid",
+            request_id,
+        ));
+    }
+    Ok(())
+}
+
 /// 自建价差引擎的来源标识。与三禾并存而不是取代：切换只是请求里的一个字符串，
 /// 出了问题可以立刻切回去，也便于把两边的数字摆在一起比。
 const SELF_PROVIDER_CODE: &str = "self";
@@ -979,9 +1014,17 @@ pub async fn create_favorite(
     )
     .await?;
     validate_favorite(&request).map_err(|code| SpreadApiError::Validation(code, request_id))?;
-    validate_provider_selection(&state, &request.leg1, &request.leg2, request_id).await?;
+    let provider = request.provider.trim().to_string();
+    // 自研那条不去问三禾：腿合不合法要拿我们自己的品种和月份来判，
+    // 而不是让一个已经不用的上游来决定能不能收藏。
+    if provider == SELF_PROVIDER_CODE {
+        validate_own_selection(&state, context.workspace_id(), &request.leg1, request_id).await?;
+        validate_own_selection(&state, context.workspace_id(), &request.leg2, request_id).await?;
+    } else {
+        validate_provider_selection(&state, &request.leg1, &request.leg2, request_id).await?;
+    }
     let normalized = json!({
-        "provider": SANHE_PROVIDER_CODE,
+        "provider": &provider,
         "leg1": canonical_leg(&request.leg1),
         "leg2": canonical_leg(&request.leg2),
     });
@@ -989,6 +1032,7 @@ pub async fn create_favorite(
         &state.auth.pool,
         &NewFavorite {
             workspace_id: context.workspace_id(),
+            provider_code: &provider,
             actor_user_id: context.user_id(),
             request_id,
             name: request.name.trim(),
@@ -1763,8 +1807,13 @@ fn favorite_response(record: database::spread_analytics::FavoriteRecord) -> Favo
     }
 }
 
+/// 请求里允许出现的来源。三禾保留是为了能随时切回去比对，见 `DEC-046`。
+fn is_known_provider(provider: &str) -> bool {
+    matches!(provider, SANHE_PROVIDER_CODE | SELF_PROVIDER_CODE)
+}
+
 fn validate_query(request: &FreeSpreadQueryRequest) -> Result<(), &'static str> {
-    if request.provider != SANHE_PROVIDER_CODE {
+    if !is_known_provider(request.provider.trim()) {
         return Err("provider_invalid");
     }
     validate_leg(&request.leg1)?;
@@ -1773,7 +1822,7 @@ fn validate_query(request: &FreeSpreadQueryRequest) -> Result<(), &'static str> 
 }
 
 fn validate_favorite(request: &CreateFavoriteRequest) -> Result<(), &'static str> {
-    if request.provider != SANHE_PROVIDER_CODE {
+    if !is_known_provider(request.provider.trim()) {
         return Err("provider_invalid");
     }
     validate_text(&request.name, 1, 80)?;
@@ -1858,6 +1907,48 @@ mod tests {
             leg2: leg("焦煤", "JM", "01"),
         };
         assert_eq!(validate_query(&invalid), Err("provider_invalid"));
+    }
+
+    /// 自研的请求必须能过这道校验。
+    ///
+    /// 页面切成 self 之后第一次点「查看」就报 provider_invalid：校验在分支之前跑，
+    /// 只认 sanhe。当时那四个自研测试全是直接测 `own_engine_legs`，从入口进来的这段
+    /// 一行都没走到——测了引擎，没测「请求能不能进得来」。
+    #[test]
+    fn the_own_engine_request_gets_past_the_front_door() {
+        for provider in [SELF_PROVIDER_CODE, SANHE_PROVIDER_CODE] {
+            let request = FreeSpreadQueryRequest {
+                provider: provider.to_string(),
+                leg1: leg("焦煤", "JM", "09"),
+                leg2: leg("焦煤", "JM", "01"),
+            };
+            assert!(validate_query(&request).is_ok(), "{provider} 应当被放行");
+
+            let favorite = CreateFavoriteRequest {
+                name: "焦煤jm09-焦煤jm01".to_string(),
+                provider: provider.to_string(),
+                leg1: leg("焦煤", "JM", "09"),
+                leg2: leg("焦煤", "JM", "01"),
+            };
+            assert!(
+                validate_favorite(&favorite).is_ok(),
+                "{provider} 收藏应当被放行"
+            );
+        }
+    }
+
+    /// 收藏要记住它是在哪条来源下存的。
+    ///
+    /// 原来这里把 provider 写死成 sanhe——从自研页面存下来的收藏，记录上写着是三禾的。
+    #[test]
+    fn a_favorite_remembers_which_provider_it_was_saved_under() {
+        let body = include_str!("spread_analytics.rs");
+        let call = body.split("&NewFavorite {").nth(1).expect("收藏的构造还在");
+        let call = &call[..call.find('}').unwrap_or(call.len())];
+        assert!(
+            call.contains("provider_code: &provider"),
+            "收藏必须带上真实来源：{call}"
+        );
     }
 
     #[test]
