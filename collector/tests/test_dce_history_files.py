@@ -57,9 +57,7 @@ def test_market_rows_carry_the_settlement_price_the_aggregators_lack(tmp_path, m
     # aggregator that does reach back has no settlement price.
     root = make_dir(tmp_path, monkeypatch)
     annual_file(root / "jm_2015.xlsx", jm_rows())
-    rows = runner()._collect(
-        DCE_HISTORY_SOURCE, date(2015, 9, 1), "market", datetime.now(UTC), fallback=False
-    )
+    rows = runner()._collect(DCE_HISTORY_SOURCE, date(2015, 9, 1), "market", datetime.now(UTC))
     assert [(r["contract_code"], r["close_price"], r["settlement_price"]) for r in rows] == [
         ("JM1509", "705", "703"),
         ("JM1601", "695", "694"),
@@ -72,9 +70,7 @@ def test_a_catalog_lists_each_contract_once_not_once_per_day(tmp_path, monkeypat
     # of the year.
     root = make_dir(tmp_path, monkeypatch)
     annual_file(root / "jm_2015.xlsx", jm_rows())
-    rows = runner()._collect(
-        DCE_HISTORY_SOURCE, date(2015, 9, 1), "catalog", datetime.now(UTC), fallback=False
-    )
+    rows = runner()._collect(DCE_HISTORY_SOURCE, date(2015, 9, 1), "catalog", datetime.now(UTC))
     assert sorted(r["contract_code"] for r in rows) == ["JM1509", "JM1601"]
 
 
@@ -84,17 +80,13 @@ def test_a_day_the_exchange_published_nothing_is_refused(tmp_path, monkeypatch):
     root = make_dir(tmp_path, monkeypatch)
     annual_file(root / "jm_2015.xlsx", jm_rows())
     with pytest.raises(ValueError, match="no rows for the requested date"):
-        runner()._collect(
-            DCE_HISTORY_SOURCE, date(2015, 10, 3), "market", datetime.now(UTC), fallback=False
-        )
+        runner()._collect(DCE_HISTORY_SOURCE, date(2015, 10, 3), "market", datetime.now(UTC))
 
 
 def test_a_missing_file_names_what_is_missing(tmp_path, monkeypatch):
     make_dir(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="jm_2015.xlsx"):
-        runner()._collect(
-            DCE_HISTORY_SOURCE, date(2015, 9, 1), "market", datetime.now(UTC), fallback=False
-        )
+        runner()._collect(DCE_HISTORY_SOURCE, date(2015, 9, 1), "market", datetime.now(UTC))
 
 
 def test_the_history_source_never_claims_to_carry_seats(tmp_path, monkeypatch):
@@ -103,9 +95,7 @@ def test_the_history_source_never_claims_to_carry_seats(tmp_path, monkeypatch):
     root = make_dir(tmp_path, monkeypatch)
     annual_file(root / "jm_2015.xlsx", jm_rows())
     with pytest.raises(ValueError, match="no seat rankings"):
-        runner()._collect(
-            DCE_HISTORY_SOURCE, date(2015, 9, 1), "seats", datetime.now(UTC), fallback=False
-        )
+        runner()._collect(DCE_HISTORY_SOURCE, date(2015, 9, 1), "seats", datetime.now(UTC))
 
 
 def test_the_source_opens_no_socket() -> None:
@@ -136,8 +126,10 @@ def test_history_mode_replaces_dce_and_leaves_the_other_exchanges_alone(tmp_path
     made.run(date(2015, 9, 1), ["DCE"], ["market"], varieties=frozenset({"JM"}), history=True)
     assert submitted == [(DCE_HISTORY_SOURCE_CODE, "daily_market_prices_v1", 2)]
 
-    # Without the flag the live source is used, exactly as before.
-    assert SOURCES["DCE"].source_code == "akshare_dce_official"
+    # Without the flag the live source is used. It is Eastmoney's quote source
+    # since DEC-045; what matters here is that history mode does not leak into
+    # ordinary collection.
+    assert SOURCES["DCE"].source_code == "eastmoney_dce_market"
 
 
 def test_a_year_is_parsed_once_and_shared_across_dates(tmp_path, monkeypatch):

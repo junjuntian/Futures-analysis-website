@@ -585,10 +585,33 @@ fn automatic_source(code: &str) -> Option<AutomaticSourceDefinition> {
             base_domain: "datacenter-web.eastmoney.com",
             authorization_status: "whitelisted_exception",
             connector_code: "eastmoney_seats_v1",
-            // Below the Sina DCE fallback, which is itself below every
-            // exchange: Eastmoney is the last thing tried, and only for seats.
+            // The last thing tried, and only for seats.
             priority: 40,
             allowed_domains: &["datacenter-web.eastmoney.com"],
+        }),
+        // DCE's prices, after `DEC-045` retired both the exchange's own
+        // endpoints (HTTP 412 to every client since 2026-08-02) and the Sina
+        // fallback (no history at all for 105 of the 186 contracts DCE listed
+        // on 2026-08-07). It reaches four Eastmoney hosts: the contract table,
+        // the quote — whose settlement field is the whole reason this source
+        // can replace Sina — the delayed-quote host requests from outside the
+        // mainland are redirected to, and the candles that date them.
+        "eastmoney_dce_market" => Some(AutomaticSourceDefinition {
+            name: "东方财富（DCE 行情）",
+            source_type: "aggregator_public",
+            base_domain: "push2.eastmoney.com",
+            authorization_status: "whitelisted_exception",
+            connector_code: "eastmoney_dce_quote_v1",
+            // Above the seat report and the retired Sina fallback, below any
+            // exchange speaking for itself. DCE no longer does, but the
+            // ordering must not claim this source outranks one that would.
+            priority: 60,
+            allowed_domains: &[
+                "futsse-static.eastmoney.com",
+                "push2.eastmoney.com",
+                "push2delay.eastmoney.com",
+                "push2his.eastmoney.com",
+            ],
         }),
         "akshare_cffex_official" => Some(AutomaticSourceDefinition {
             name: "中国金融期货交易所",
@@ -3913,18 +3936,12 @@ mod tests {
 
     #[test]
     fn dce_fallback_is_the_only_aggregator_in_the_automatic_source_allowlist() {
+        // Retired by DEC-045 but still resolvable: batches collected through it
+        // point at its id, and they are part of the audit record.
         let fallback = automatic_source("akshare_sina_dce_fallback").unwrap();
         assert_eq!(fallback.source_type, "aggregator_public");
         assert_eq!(fallback.authorization_status, "whitelisted_exception");
         assert_eq!(fallback.priority, 50);
-        assert_eq!(
-            fallback.allowed_domains,
-            [
-                "vip.stock.finance.sina.com.cn",
-                "finance.sina.com.cn",
-                "stock2.finance.sina.com.cn",
-            ]
-        );
         assert!(automatic_source("akshare_sina_shfe_fallback").is_none());
         assert_eq!(fallback.connector_code, "akshare_v1");
 
@@ -3938,6 +3955,29 @@ mod tests {
         assert_eq!(eastmoney.connector_code, "eastmoney_seats_v1");
         assert!(eastmoney.priority < fallback.priority);
         assert_eq!(eastmoney.allowed_domains, ["datacenter-web.eastmoney.com"]);
+
+        // DCE's prices, after DEC-045. It carries the settlement price the seat
+        // report does not, so it must not share the seat connector code: one
+        // must never be able to answer for the other.
+        let quotes = automatic_source("eastmoney_dce_market").unwrap();
+        assert_eq!(quotes.source_type, "aggregator_public");
+        assert_eq!(quotes.authorization_status, "whitelisted_exception");
+        assert_eq!(quotes.connector_code, "eastmoney_dce_quote_v1");
+        assert_ne!(quotes.connector_code, eastmoney.connector_code);
+        // Above the seat report, below anything that is the exchange itself.
+        assert!(quotes.priority > eastmoney.priority);
+        assert!(quotes.priority < automatic_source("akshare_shfe_official").unwrap().priority);
+        // The redirect target has to be admitted: requests from outside the
+        // mainland are sent to the delayed-quote host mid-call, and a guard
+        // that refuses it would fail every collection from such a host.
+        assert!(quotes.allowed_domains.contains(&"push2delay.eastmoney.com"));
+        assert!(
+            quotes
+                .allowed_domains
+                .iter()
+                .all(|host| host.ends_with(".eastmoney.com")),
+            "a DCE source must not be able to reach the exchange's own WAF-blocked hosts"
+        );
 
         // The exchange's own history files: an exchange source that reads from
         // disk, so it must be admitted without granting it any host.

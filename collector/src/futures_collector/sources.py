@@ -10,10 +10,10 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 import akshare
 import pandas as pd
@@ -38,15 +38,41 @@ class ExchangeSource:
     catalog_takes_date: bool
 
 
+EASTMONEY_DCE_SOURCE_CODE = "eastmoney_dce_market"
+# DCE's own endpoints have answered HTTP 412 to every client since 2026-08-02
+# (`DEC-041`) and the Sina fallback chosen then covers only 44% of the contracts
+# the exchange lists -- 105 of 186 on 2026-08-07 had no history at Sina at all,
+# including the 生猪 contracts this platform needs. A fallback that can never be
+# complete is worse than no fallback, so `DEC-045` removes both and reads DCE
+# from Eastmoney instead.
+#
+# `DEC-041` rejected Eastmoney for market data because it "lacks the settlement
+# price". That was true of `futures_hist_em`, which is a candlestick endpoint --
+# candlesticks carry no settlement anywhere. The quote snapshot does carry it,
+# in field f130, verified against the SHFE official settlement for 2026-08-07 on
+# cu2609/cu2610/cu2612/cu2703, all four equal.
+EASTMONEY_DCE_DOMAINS = frozenset(
+    {
+        "futsse-static.eastmoney.com",
+        "push2.eastmoney.com",
+        # Requests from outside the mainland are redirected here, so the
+        # delayed-quote host is part of the same call, not an alternative to it.
+        "push2delay.eastmoney.com",
+        "push2his.eastmoney.com",
+    }
+)
+
 SOURCES: dict[str, ExchangeSource] = {
     "DCE": ExchangeSource(
         "DCE",
-        "akshare_dce_official",
+        EASTMONEY_DCE_SOURCE_CODE,
         "大连商品交易所",
-        frozenset({"www.dce.com.cn", "portal.dce.com.cn"}),
-        "futures_contract_info_dce",
-        "get_dce_daily",
-        "futures_dce_position_rank",
+        EASTMONEY_DCE_DOMAINS,
+        # Nothing here goes through akshare: it has no Eastmoney futures quote
+        # function, and its DCE functions all target the WAF-blocked endpoints.
+        "",
+        "",
+        "",
         False,
     ),
     "SHFE": ExchangeSource(
@@ -91,84 +117,41 @@ SOURCES: dict[str, ExchangeSource] = {
     ),
 }
 
-DCE_FALLBACK_SOURCE = ExchangeSource(
-    "DCE",
-    "akshare_sina_dce_fallback",
-    "大连商品交易所",
-    frozenset(
-        {
-            "vip.stock.finance.sina.com.cn",
-            "finance.sina.com.cn",
-            "stock2.finance.sina.com.cn",
-        }
-    ),
-    "sina_dce_catalog",
-    "futures_zh_daily_sina",
-    "futures_hold_pos_sina",
-    False,
-)
-
-
 # Eastmoney publishes the same member-level 龙虎榜 the exchanges do, but as one
 # report covering every market, refreshed earlier than the exchange files. It is
-# a seats-only source: `RPT_FUTU_DAILYPOSITION` carries no settlement price, so
-# it can never stand in for market data (the same reason Sina, not Eastmoney,
-# was chosen as the DCE market fallback).
-# DCE lists twelve consecutive delivery months, so the tradable set for a
-# variety on any given day is the delivery months from the current one through
-# twelve ahead. Deriving that from the date is the only way to know what was
-# listed on a historical day: the Sina instrument and realtime endpoints take no
-# date and answer for today, which is why backfilling an old date used to hunt
-# for contracts that did not exist yet and come back with nothing.
-DCE_FORWARD_DELIVERY_MONTHS = 12
-# Sina answers a rate limit with HTTP 456 and an HTML page. Verifying the
-# derived contract list tripped it after roughly 120 requests issued as fast as
-# the client could manage, so every Sina call is paced. The floor is a guess --
-# the published limit is unknown -- and deliberately tunable, because a backfill
-# date costs on the order of a hundred and fifty of these.
-SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 0.5
-
-
-def sina_min_request_interval_seconds() -> float:
-    """The floor, read at call time.
-
-    Read per call rather than at import so it can be raised on a box that is
-    already being throttled, without rebuilding an image.
-    """
-    raw = os.environ.get("FUTURES_SINA_MIN_INTERVAL_SECONDS")
-    if raw is None:
-        return SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
-    try:
-        return max(float(raw), 0.0)
-    except ValueError:
-        LOG.warning("sina_interval_override_invalid value=%s", raw)
-        return SINA_DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
-
-
-# Being rate limited looks exactly like every contract being unlisted, because
-# the HTML page reaches the parser as an ordinary parse error. Give up once this
-# many candidates have failed without a single one succeeding, rather than
-# spending the whole list confirming a block.
-SINA_MAX_CONSECUTIVE_UNUSABLE = 8
-# The Sina exception is DCE-only (DEC-041). Enumerating a variety DCE never
-# listed costs one request per delivery month and can only ever come back "not
-# listed", so varieties known to belong elsewhere are not derived. A variety
-# absent from this map is still derived: guessing it away would silently drop a
-# variety nobody classified.
-VARIETY_EXCHANGES = {
-    "JM": "DCE",
-    "JD": "DCE",
-    "LH": "DCE",
-    "AP": "CZCE",
-    "FG": "CZCE",
-    "SA": "CZCE",
-    "AU": "SHFE",
-    "AG": "SHFE",
-}
-# Contract parameters come from a live-contracts endpoint, so it is only asked
-# about contracts whose history reaches roughly the present. Asking it about a
-# delisted contract returns nothing and costs one request per contract per date.
-DCE_DETAIL_RECENCY_DAYS = 45
+# a seats-only source: `RPT_FUTU_DAILYPOSITION` carries no settlement price and
+# no contract list, so it can never stand in for market data or a catalog.
+EASTMONEY_CONTRACT_TABLE = "https://futsse-static.eastmoney.com/redis"
+EASTMONEY_QUOTE_ENDPOINT = "https://push2.eastmoney.com/api/qt/stock/get"
+EASTMONEY_KLINE_ENDPOINT = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# The candlestick endpoint resets the connection without this token; the quote
+# endpoint does not need it. It is a public constant embedded in Eastmoney's own
+# page scripts, not a credential.
+EASTMONEY_UT = "fa5fd1943c7b386f172d6893dbfba10b"
+EASTMONEY_DCE_MARKET_ID = "114"
+# Prices arrive as integers scaled by the instrument's own decimal count, which
+# the quote reports in f59: 焦煤 is 1, so 12555 means 1255.5, while 沪铜 is 0 and
+# 108020 means 108020. Ignoring it would be wrong by a factor of ten on some
+# varieties and right on others, which is the kind of error that looks fine.
+EASTMONEY_QUOTE_FIELDS = "f57,f58,f59,f43,f44,f45,f46,f47,f48,f60,f112,f130"
+EASTMONEY_KLINE_FIELDS_1 = "f1,f2,f3,f4,f5,f6"
+EASTMONEY_KLINE_FIELDS_2 = "f51,f52,f53,f54,f55,f56,f57"
+# How many candles to ask for. A daily collection needs the last few; the limit
+# exists so a malformed date cannot ask for a contract's entire life every run.
+EASTMONEY_KLINE_LIMIT = 40
+# One request per contract for the quote plus one for the candles. Our three DCE
+# varieties list about thirty contracts, so a day costs roughly sixty requests --
+# against the 186-per-day, half-empty Sina crawl this replaces.
+#
+# The candle endpoint answers too-frequent requests by closing the connection
+# with no status line, which arrives as a transport error and looks exactly like
+# the host being down. Measured on the production VPS: at 0.2s every run died
+# within a few contracts; at 1.5-2s, five consecutive requests succeeded and one
+# in six still aborted. So it is paced at a second and retried, rather than paced
+# alone -- pacing that made the aborts rare would still lose a whole day to one.
+EASTMONEY_MIN_REQUEST_INTERVAL_SECONDS = 1.0
+EASTMONEY_REQUEST_ATTEMPTS = 4
+EASTMONEY_RETRY_BACKOFF_SECONDS = 2.0
 
 # The exchange's own annual history files, which its site offers for every year
 # back to 2006 and which carry the settlement price the aggregators do not. They
@@ -177,10 +160,10 @@ DCE_DETAIL_RECENCY_DAYS = 45
 # contracts only back to about 2018-09, and Eastmoney keeps none at all.
 #
 # The files are not fetched here. The site's WAF refuses scripted clients and
-# writing code to defeat that is out of the question, so they are downloaded
-# once through a browser by the operator and read from disk. That is sound for
-# this data in a way it would not be for daily collection: history does not
-# change, so a one-time capture stays correct forever.
+# writing code to defeat that is out of the question, so they were fetched once
+# through the operator's browser at their instruction and are read from disk.
+# That is sound for this data in a way it would not be for daily collection:
+# history does not change, so a one-time capture stays correct forever.
 DCE_HISTORY_SOURCE_CODE = "dce_official_history"
 DCE_HISTORY_DIR_ENV = "FUTURES_DCE_HISTORY_DIR"
 # Columns as the exchange names them, mapped to what the normalizer already
@@ -267,12 +250,13 @@ class AkshareAdapter:
         self._dce_catalog_cache: dict[date, pd.DataFrame] = {}
         self._dce_market_cache: dict[date, pd.DataFrame] = {}
         self._eastmoney_seat_cache: dict[date, list[dict[str, Any]]] = {}
-        # Sina's whole history per contract, fetched once and shared by the
-        # catalog and market datasets so a contract never crosses the network
-        # twice. A None value records "Sina does not know this contract", the
-        # ordinary answer for a derived candidate that was never listed.
-        self._sina_history_cache: dict[str, pd.DataFrame | None] = {}
-        self._sina_next_request_at = 0.0
+        # Eastmoney's DCE variety table, and one entry per contract for the two
+        # readings a market row needs, so a contract crosses the network once
+        # for its candles and once for its quote however many datasets ask.
+        self._eastmoney_dce_varieties: dict[str, tuple[str, str]] | None = None
+        self._eastmoney_kline_cache: dict[str, dict[date, dict[str, str]]] = {}
+        self._eastmoney_quote_cache: dict[str, dict[str, str]] = {}
+        self._eastmoney_next_request_at = 0.0
         # One year of one variety per entry, parsed once and shared by the
         # catalog and market datasets across every date in that year.
         self._dce_history_cache: dict[tuple[str, int], pd.DataFrame] = {}
@@ -376,160 +360,237 @@ class AkshareAdapter:
         self._eastmoney_seat_cache[collection_date] = rows
         return rows
 
-    def fallback_catalog(
-        self,
-        source: ExchangeSource,
-        collection_date: date,
-        varieties: frozenset[str] | None = None,
+    def eastmoney_dce_catalog(
+        self, collection_date: date, varieties: frozenset[str] | None
     ) -> pd.DataFrame:
-        self._require_dce(source)
-        return self._dce_catalog(collection_date, varieties).copy()
+        """The contracts DCE lists, as Eastmoney's own contract table gives them.
 
-    def fallback_market(
-        self,
-        source: ExchangeSource,
-        collection_date: date,
-        varieties: frozenset[str] | None = None,
+        Read rather than derived. The Sina path this replaces had to guess the
+        listed set from the date, because Sina's endpoints take no date, and it
+        overshot on purpose: every guess that was never listed cost a request to
+        find out. Eastmoney publishes the list, so there is nothing to guess.
+        """
+        rows = [
+            {"品种名称": name, "合约": contract}
+            for contract, name in self._eastmoney_dce_contracts(varieties)
+        ]
+        if not rows:
+            raise ValueError("Eastmoney lists no DCE contracts for the requested varieties")
+        return pd.DataFrame(rows)
+
+    def eastmoney_dce_market(
+        self, collection_date: date, varieties: frozenset[str] | None
     ) -> pd.DataFrame:
-        self._require_dce(source)
+        """One row per contract that traded on the date, settlement included.
+
+        Two readings per contract, because neither alone is a complete day: the
+        candles carry a dated open/high/low/close/volume for any past session but
+        no settlement, and the quote carries the settlement of the most recent
+        completed session without saying which session that was.
+
+        Attributing that settlement therefore has to be proved, not assumed. A
+        settlement written against the wrong day is invisible in the data and
+        wrong in every number computed from it, so an unproved one is left out.
+        """
         cache_key = (collection_date, varieties)
         cached = self._dce_market_cache.get(cache_key)
         if cached is not None:
             return cached.copy()
-        # Narrowing here rather than after the crawl is the whole point: this
-        # loop issues one request per contract, and it is what makes a DCE
-        # backfill date take half an hour.
-        catalog = self._dce_catalog(collection_date, varieties)
-        contracts = catalog["合约"].drop_duplicates().tolist()
-        frames: list[pd.DataFrame] = []
-        skipped_count = 0
-        with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            for contract in contracts:
-                try:
-                    # Shared with the catalog build, so a contract's history
-                    # crosses the network once per run rather than twice.
-                    frame = self._sina_contract_history(contract)
-                    if frame is None:
-                        raise ValueError("Sina has no history for this contract")
-                    dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
-                    if dates.isna().all():
-                        raise ValueError("Sina market dates are invalid")
-                except OutboundPolicyError:
-                    raise
-                except Exception:
-                    skipped_count += 1
-                    LOG.warning(
-                        "dce_fallback_market_contract_skipped contract=%s skipped_count=%d",
-                        contract,
-                        skipped_count,
-                    )
+        contracts = self._eastmoney_dce_contracts(varieties)
+        rows: list[dict[str, Any]] = []
+        without_settlement: list[str] = []
+        with official_requests_only(EASTMONEY_DCE_DOMAINS):
+            for contract, _ in contracts:
+                bars = self._eastmoney_klines(contract)
+                bar = bars.get(collection_date)
+                if bar is None:
+                    # Not listed yet, or it did not trade. Either way the
+                    # exchange published no row for it that day.
                     continue
-                selected = frame[dates == collection_date].copy()
-                if selected.empty:
-                    LOG.info(
-                        "dce_fallback_market_contract_not_observed contract=%s collection_date=%s",
-                        contract,
-                        collection_date.isoformat(),
-                    )
-                    continue
-                selected["symbol"] = contract
-                frames.append(selected)
-        if skipped_count:
+                quote = self._eastmoney_quote(contract)
+                settlement = _attributable_settlement(collection_date, bars, quote)
+                if settlement is None:
+                    without_settlement.append(contract)
+                rows.append(
+                    {
+                        "symbol": contract,
+                        "date": collection_date.isoformat(),
+                        "open": bar["open"],
+                        "high": bar["high"],
+                        "low": bar["low"],
+                        "close": bar["close"],
+                        "settle": "" if settlement is None else settlement,
+                        "volume": bar["volume"],
+                        "turnover": bar["turnover"],
+                    }
+                )
+        if not rows:
+            raise ValueError(f"Eastmoney published no DCE rows for {collection_date.isoformat()}")
+        if len(without_settlement) == len(rows):
+            # Every contract failing the same proof is not thirty coincidences:
+            # it means this run is not one session behind the quote, so the day
+            # would land with no settlement anywhere. Seat cost is computed from
+            # settlement, so that is a failed collection, not a partial one.
+            raise DatasetCompletenessError("market", len(rows), len(rows))
+        if without_settlement:
             LOG.error(
-                "dce_fallback_dataset_incomplete dataset=market skipped_count=%d "
-                "expected_contracts=%d",
-                skipped_count,
-                len(contracts),
+                "eastmoney_dce_settlement_unattributable count=%d of=%d contracts=%s",
+                len(without_settlement),
+                len(rows),
+                ",".join(without_settlement[:10]),
             )
-            raise DatasetCompletenessError("market", skipped_count, len(contracts))
-        if not frames:
-            raise DatasetCompletenessError("market", len(contracts), len(contracts))
-        result = pd.concat(frames, ignore_index=True)
-        self._dce_market_cache[cache_key] = result
-        return result.copy()
+        frame = pd.DataFrame(rows)
+        self._dce_market_cache[cache_key] = frame
+        return frame.copy()
 
-    def fallback_seats(
-        self,
-        source: ExchangeSource,
-        collection_date: date,
-        varieties: frozenset[str] | None = None,
-    ) -> dict[str, pd.DataFrame]:
-        self._require_dce(source)
-        catalog = self._dce_catalog(collection_date, varieties)
-        contracts = catalog["合约"].drop_duplicates().tolist()
-        tables: dict[str, pd.DataFrame] = {}
-        skipped_count = 0
-        kinds = (
-            ("成交量", "vol_party_name", "vol"),
-            ("多单持仓", "long_party_name", "long_open_interest"),
-            ("空单持仓", "short_party_name", "short_open_interest"),
+    def _eastmoney_dce_contracts(self, varieties: frozenset[str] | None) -> list[tuple[str, str]]:
+        """(contract code, variety name) pairs, one request per variety."""
+        if self._eastmoney_dce_varieties is None:
+            with official_requests_only(EASTMONEY_DCE_DOMAINS):
+                payload = self._eastmoney_json(
+                    EASTMONEY_CONTRACT_TABLE, {"msgid": EASTMONEY_DCE_MARKET_ID}
+                )
+            if not isinstance(payload, list) or not payload:
+                raise ValueError("Eastmoney DCE variety table is empty")
+            self._eastmoney_dce_varieties = {
+                str(item.get("vcode") or "").upper(): (
+                    str(item.get("vtype") or ""),
+                    str(item.get("vname") or ""),
+                )
+                for item in payload
+                if isinstance(item, dict) and item.get("vcode") and item.get("vtype")
+            }
+        known = self._eastmoney_dce_varieties
+        wanted = sorted(known if varieties is None else set(varieties) & set(known))
+        pairs: list[tuple[str, str]] = []
+        with official_requests_only(EASTMONEY_DCE_DOMAINS):
+            for symbol in wanted:
+                vtype, vname = known[symbol]
+                payload = self._eastmoney_json(
+                    EASTMONEY_CONTRACT_TABLE,
+                    {"msgid": f"{EASTMONEY_DCE_MARKET_ID}_{vtype}"},
+                )
+                if not isinstance(payload, list):
+                    raise ValueError(f"Eastmoney contract list for {symbol} is not an array")
+                for item in payload:
+                    if not isinstance(item, dict):
+                        continue
+                    code = str(item.get("code") or "").strip().lower()
+                    # The table also carries continuous pseudo-codes -- jm, jmm,
+                    # jms -- which name no contract the exchange ever listed.
+                    if not re.fullmatch(r"[a-z]+\d{3,4}", code):
+                        continue
+                    pairs.append((code.upper(), vname or symbol))
+        return pairs
+
+    def _eastmoney_klines(self, contract: str) -> dict[date, dict[str, str]]:
+        cached = self._eastmoney_kline_cache.get(contract)
+        if cached is not None:
+            return cached
+        payload = self._eastmoney_json(
+            EASTMONEY_KLINE_ENDPOINT,
+            {
+                "secid": f"{EASTMONEY_DCE_MARKET_ID}.{contract.lower()}",
+                # Without this the endpoint resets the connection rather than
+                # answering. It is a constant from Eastmoney's own page scripts.
+                "ut": EASTMONEY_UT,
+                "klt": 101,
+                "fqt": 1,
+                "beg": 0,
+                "end": "20500101",
+                "lmt": EASTMONEY_KLINE_LIMIT,
+                "fields1": EASTMONEY_KLINE_FIELDS_1,
+                "fields2": EASTMONEY_KLINE_FIELDS_2,
+            },
         )
-        with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            for contract in contracts:
-                contract_frames: list[pd.DataFrame] = []
-                unpublished_rank_types: list[str] = []
-                contract_failed = False
-                for kind, party_field, value_field in kinds:
-                    self._pace_sina()
-                    try:
-                        frame = akshare.futures_hold_pos_sina(
-                            symbol=kind,
-                            contract=contract,
-                            date=collection_date.strftime("%Y%m%d"),
-                        )
-                    except OutboundPolicyError:
-                        raise
-                    except Exception:
-                        skipped_count += 1
-                        contract_failed = True
-                        LOG.warning(
-                            "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
-                            "skipped_count=%d",
-                            contract,
-                            kind,
-                            skipped_count,
-                        )
-                        continue
-                    normalized = _normalize_sina_seat_table(
-                        frame, contract, party_field, value_field
-                    )
-                    if normalized.empty:
-                        unpublished_rank_types.append(kind)
-                        continue
-                    contract_frames.append(normalized)
-                if contract_failed:
-                    continue
-                if contract_frames and unpublished_rank_types:
-                    skipped_count += len(unpublished_rank_types)
-                    for kind in unpublished_rank_types:
-                        LOG.warning(
-                            "dce_fallback_seat_contract_skipped contract=%s rank_type=%s "
-                            "skipped_count=%d",
-                            contract,
-                            kind,
-                            skipped_count,
-                        )
-                elif contract_frames:
-                    tables[contract] = pd.concat(contract_frames, ignore_index=True)
-                else:
-                    LOG.info(
-                        "dce_fallback_seat_contract_not_published contract=%s collection_date=%s",
-                        contract,
-                        collection_date.isoformat(),
-                    )
-        if skipped_count:
-            LOG.error(
-                "dce_fallback_dataset_incomplete dataset=seats skipped_count=%d "
-                "expected_requests=%d",
-                skipped_count,
-                len(contracts) * len(kinds),
+        data = payload.get("data") if isinstance(payload, dict) else None
+        bars: dict[date, dict[str, str]] = {}
+        for line in (data or {}).get("klines") or []:
+            parts = str(line).split(",")
+            if len(parts) < 7:
+                continue
+            try:
+                bar_date = date.fromisoformat(parts[0])
+            except ValueError:
+                continue
+            bars[bar_date] = {
+                "open": parts[1],
+                "close": parts[2],
+                "high": parts[3],
+                "low": parts[4],
+                "volume": parts[5],
+                "turnover": parts[6],
+            }
+        self._eastmoney_kline_cache[contract] = bars
+        return bars
+
+    def _eastmoney_quote(self, contract: str) -> dict[str, str]:
+        cached = self._eastmoney_quote_cache.get(contract)
+        if cached is not None:
+            return cached
+        payload = self._eastmoney_json(
+            EASTMONEY_QUOTE_ENDPOINT,
+            {
+                "secid": f"{EASTMONEY_DCE_MARKET_ID}.{contract.lower()}",
+                "fields": EASTMONEY_QUOTE_FIELDS,
+            },
+        )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        quote: dict[str, str] = {}
+        if isinstance(data, dict):
+            quote = {
+                "settlement": _eastmoney_scaled(data.get("f130"), data.get("f59")),
+                "previous_close": _eastmoney_scaled(data.get("f60"), data.get("f59")),
+            }
+        self._eastmoney_quote_cache[contract] = quote
+        return quote
+
+    def _eastmoney_json(self, url: str, params: dict[str, Any]) -> Any:
+        """One paced request, retried through the endpoint's connection aborts.
+
+        The abort is not a status code -- the connection closes with no status
+        line -- so it cannot be told apart from an unreachable host by anything
+        except trying again. Retrying here rather than letting the runner retry
+        the dataset matters: one flaky contract out of thirty would otherwise
+        re-crawl all thirty.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, EASTMONEY_REQUEST_ATTEMPTS + 1):
+            now = time.monotonic()
+            if now < self._eastmoney_next_request_at:
+                time.sleep(self._eastmoney_next_request_at - now)
+            self._eastmoney_next_request_at = (
+                time.monotonic() + EASTMONEY_MIN_REQUEST_INTERVAL_SECONDS
             )
-            raise DatasetCompletenessError("seats", skipped_count, len(contracts) * len(kinds))
-        if not tables:
-            raise DatasetCompletenessError(
-                "seats", len(contracts) * len(kinds), len(contracts) * len(kinds)
-            )
-        return tables
+            try:
+                response = requests.get(
+                    url,
+                    # Pre-encoded so the field lists keep their literal commas,
+                    # which is the shape Eastmoney's own page scripts send.
+                    params=_eastmoney_query(params),
+                    headers={
+                        "Referer": "https://quote.eastmoney.com/",
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                    timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                return response.json()
+            except OutboundPolicyError:
+                # The allowlist refused the host. Retrying cannot change that,
+                # and retrying a policy failure would obscure it.
+                raise
+            except requests.RequestException as error:
+                last_error = error
+                LOG.warning(
+                    "eastmoney_request_retry attempt=%d of=%d error=%s",
+                    attempt,
+                    EASTMONEY_REQUEST_ATTEMPTS,
+                    type(error).__name__,
+                )
+                if attempt < EASTMONEY_REQUEST_ATTEMPTS:
+                    time.sleep(EASTMONEY_RETRY_BACKOFF_SECONDS * attempt)
+        raise last_error if last_error else RuntimeError("eastmoney request loop fell through")
 
     def dce_history_frame(
         self, collection_date: date, varieties: frozenset[str] | None
@@ -564,234 +625,61 @@ class AkshareAdapter:
             )
         return pd.concat(frames, ignore_index=True)
 
-    def _pace_sina(self) -> None:
-        """Hold the floor between Sina requests.
 
-        Applied at every Sina call site rather than around the loops, so a new
-        call site cannot quietly skip it.
-        """
-        now = time.monotonic()
-        if now < self._sina_next_request_at:
-            time.sleep(self._sina_next_request_at - now)
-        self._sina_next_request_at = time.monotonic() + sina_min_request_interval_seconds()
+def _eastmoney_query(params: dict[str, Any]) -> str:
+    """A query string built the way Eastmoney's own page scripts build one.
 
-    def _sina_contract_history(self, contract: str) -> pd.DataFrame | None:
-        """Sina's whole history for one contract, or None if it has none.
-
-        Sina keeps delisted contracts for a few years and answers with an empty
-        table for anything older, or never listed. That empty answer surfaces as
-        a ValueError from the akshare wrapper, so it has to be told apart from a
-        transport failure: an unknown contract is an ordinary outcome for a
-        derived candidate, while a transport failure must still count as a skip.
-        """
-        if contract in self._sina_history_cache:
-            return self._sina_history_cache[contract]
-        self._pace_sina()
-        try:
-            frame = akshare.futures_zh_daily_sina(symbol=contract)
-        except OutboundPolicyError:
-            raise
-        except requests.RequestException:
-            # Sina never answered. That is a transport failure, not evidence
-            # about whether the contract exists, so it must keep propagating
-            # and be counted as a skip rather than silently shrinking a catalog.
-            raise
-        except Exception as error:
-            # Sina answered with something the wrapper cannot read as this
-            # contract's history, which it does in at least two different
-            # shapes: ValueError for a delisted contract older than Sina keeps,
-            # IndexError for one not listed yet. Neither says the contract
-            # traded, so the candidate is dropped -- logged with its type so an
-            # upstream format change shows up as every candidate failing rather
-            # than as a quietly empty day.
-            LOG.info(
-                "sina_contract_history_unusable contract=%s error=%s",
-                contract,
-                type(error).__name__,
-            )
-            self._sina_history_cache[contract] = None
-            return None
-        if frame is None or frame.empty or "date" not in frame.columns:
-            self._sina_history_cache[contract] = None
-            return None
-        self._sina_history_cache[contract] = frame
-        return frame
-
-    def _derived_dce_catalog(
-        self, collection_date: date, varieties: frozenset[str]
-    ) -> pd.DataFrame:
-        rows: list[dict[str, Any]] = []
-        unusable = 0
-        detail_floor = collection_date - timedelta(days=DCE_DETAIL_RECENCY_DAYS)
-        candidates = _derive_dce_contracts(collection_date, varieties)
-        with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            for contract in candidates:
-                history = self._sina_contract_history(contract)
-                if history is None:
-                    # Never listed, or older than Sina keeps. Not an error: the
-                    # candidate set is derived, so it is expected to overshoot.
-                    unusable += 1
-                    # Only while nothing has been found yet. Candidates run in
-                    # delivery-month order, so the unlisted ones cluster at the
-                    # tail -- a variety listed only a few months out ends every
-                    # healthy run with a streak of them. A block, by contrast,
-                    # fails from the very first request.
-                    if not rows and unusable >= SINA_MAX_CONSECUTIVE_UNUSABLE:
-                        raise ValueError(
-                            f"the first {unusable} DCE candidates for "
-                            f"{collection_date.isoformat()} were all unreadable; the "
-                            "upstream is refusing the run rather than the contracts "
-                            "being unlisted"
-                        )
-                    continue
-                detail: dict[str, str] = {}
-                last_seen = pd.to_datetime(history["date"], errors="coerce").dt.date.max()
-                if pd.notna(last_seen) and last_seen >= detail_floor:
-                    self._pace_sina()
-                    try:
-                        detail = _detail_map(akshare.futures_contract_detail(symbol=contract))
-                    except OutboundPolicyError:
-                        raise
-                    except Exception:
-                        LOG.info("dce_contract_detail_absent contract=%s", contract)
-                rows.append(
-                    {
-                        "品种名称": _contract_instrument(contract),
-                        "合约": contract,
-                        "交易单位": _numeric_value(detail.get("交易单位", "")),
-                        "最小变动价位": _numeric_value(detail.get("最小变动价位", "")),
-                        "开始交易日": detail.get("上市日期", detail.get("上市日", "")),
-                        "最后交易日": detail.get("最后交易日", ""),
-                    }
-                )
-        if not rows:
-            # Every candidate came back unreadable. A genuinely empty day is
-            # possible in principle, but far less likely than Sina refusing the
-            # whole run: it answers a rate limit with an HTML page and HTTP 456,
-            # which is a perfectly successful transaction as far as the client
-            # is concerned and reaches the parser as an ordinary parse error.
-            # Say both readings out loud rather than reporting the day as empty.
-            raise ValueError(
-                f"no usable DCE contract history for {collection_date.isoformat()}: "
-                f"all {unusable} derived candidates were unreadable, which usually "
-                "means the upstream refused the run rather than that nothing traded"
-            )
-        return pd.DataFrame(rows)
-
-    def _dce_catalog(
-        self, collection_date: date, varieties: frozenset[str] | None = None
-    ) -> pd.DataFrame:
-        cache_key = (collection_date, varieties)
-        cached = self._dce_catalog_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        if varieties is not None:
-            # Deriving needs to know which varieties to enumerate. With no
-            # selection there is nothing to derive from, so the live listing is
-            # still used: correct for today, and the only option available.
-            frame = self._derived_dce_catalog(collection_date, varieties)
-            self._dce_catalog_cache[cache_key] = frame
-            return frame
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        with official_requests_only(DCE_FALLBACK_SOURCE.domains):
-            self._pace_sina()
-            marks = akshare.futures_symbol_mark()
-            if marks is None or marks.empty or not {"exchange", "symbol"}.issubset(marks.columns):
-                raise ValueError("Sina DCE instrument response is invalid")
-            instruments = marks[marks["exchange"] == "大连商品交易所"]
-            for _, instrument in instruments.iterrows():
-                instrument_name = str(instrument["symbol"]).strip()
-                if not instrument_name:
-                    continue
-                self._pace_sina()
-                try:
-                    contracts = akshare.futures_zh_realtime(symbol=instrument_name)
-                except OutboundPolicyError:
-                    raise
-                except Exception:
-                    LOG.warning("dce_fallback_instrument_skipped instrument=%s", instrument_name)
-                    continue
-                if contracts is None or contracts.empty or "symbol" not in contracts.columns:
-                    continue
-                for raw_contract in contracts["symbol"].tolist():
-                    contract = str(raw_contract).strip().upper()
-                    if not re.fullmatch(r"[A-Z]+\d{3,4}", contract) or contract in seen:
-                        continue
-                    if varieties is not None and _contract_instrument(contract) not in varieties:
-                        # Skipped before the detail request, not after: that
-                        # request is issued once per contract and is half of
-                        # what makes building this catalog slow.
-                        continue
-                    seen.add(contract)
-                    detail: dict[str, str] = {}
-                    self._pace_sina()
-                    try:
-                        detail_frame = akshare.futures_contract_detail(symbol=contract)
-                        detail = _detail_map(detail_frame)
-                    except OutboundPolicyError:
-                        raise
-                    except Exception:
-                        LOG.warning("dce_fallback_contract_detail_missing contract=%s", contract)
-                    rows.append(
-                        {
-                            "品种名称": instrument_name,
-                            "合约": contract,
-                            "交易单位": _numeric_value(detail.get("交易单位", "")),
-                            "最小变动价位": _numeric_value(detail.get("最小变动价位", "")),
-                            "开始交易日": detail.get("上市日期", detail.get("上市日", "")),
-                            "最后交易日": detail.get("最后交易日", ""),
-                        }
-                    )
-        if not rows:
-            raise ValueError("DCE fallback catalog response is empty")
-        frame = pd.DataFrame(rows)
-        self._dce_catalog_cache[cache_key] = frame
-        return frame
-
-    @staticmethod
-    def _require_dce(source: ExchangeSource) -> None:
-        if source.code != "DCE":
-            raise ValueError("fallback is only authorized for DCE")
-
-
-def _detail_map(frame: pd.DataFrame) -> dict[str, str]:
-    if frame is None or frame.empty or not {"item", "value"}.issubset(frame.columns):
-        return {}
-    return {
-        str(row["item"]).strip(): str(row["value"]).strip()
-        for _, row in frame.iterrows()
-        if pd.notna(row["item"]) and pd.notna(row["value"])
-    }
-
-
-def _numeric_value(value: str) -> str:
-    match = re.search(r"[-+]?\d+(?:\.\d+)?", value.replace(",", ""))
-    return match.group(0) if match else ""
-
-
-def _derive_dce_contracts(collection_date: date, varieties: frozenset[str]) -> list[str]:
-    """Contract codes plausibly listed on a date, nearest delivery first.
-
-    Varieties known to be listed elsewhere are excluded outright: the Sina
-    exception is DCE-only, so enumerating them would spend a request per
-    delivery month to learn what the mapping already says. A variety nobody
-    classified is still enumerated rather than guessed away.
-
-    Within DCE the set deliberately overshoots: a candidate that was never
-    listed simply has no history at Sina and is dropped. Overshooting costs one
-    lookup; undershooting would silently omit a contract that really did trade.
+    The field list goes over the wire as `f1,f2,f3`; handed a dict, requests
+    percent-encodes the commas. Measured against the live endpoint, it accepts
+    both, so this is not load-bearing -- it is here to keep the request the same
+    shape as the upstream's own, which is one less thing to differ later.
     """
-    codes: list[str] = []
-    for symbol in sorted(varieties):
-        if VARIETY_EXCHANGES.get(symbol, "DCE") != "DCE":
-            continue
-        for offset in range(DCE_FORWARD_DELIVERY_MONTHS + 1):
-            month_index = collection_date.month - 1 + offset
-            year = collection_date.year + month_index // 12
-            month = month_index % 12 + 1
-            codes.append(f"{symbol}{year % 100:02d}{month:02d}")
-    return codes
+    return urlencode({key: str(value) for key, value in params.items()}, safe=",.")
+
+
+def _eastmoney_scaled(value: Any, decimals: Any) -> str:
+    """Eastmoney's integer price, put back on its own scale.
+
+    Prices arrive as integers scaled by the instrument's decimal count, which the
+    quote reports alongside them: 焦煤 is 1, so 12555 means 1255.5, while 沪铜 is
+    0 and 108020 means 108020. Ignoring the scale would be right on some
+    varieties and wrong by a factor of ten on others, which is the kind of error
+    that looks perfectly normal in the data.
+    """
+    if value is None or value == "-" or not isinstance(decimals, int):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number == 0:
+        return ""
+    scaled = number / (10**decimals)
+    return f"{scaled:.{decimals}f}" if decimals > 0 else str(int(scaled))
+
+
+def _attributable_settlement(
+    collection_date: date,
+    bars: dict[date, dict[str, str]],
+    quote: dict[str, str],
+) -> str | None:
+    """The quote's settlement, but only when it provably belongs to this date.
+
+    The quote reports the settlement and close of the session before the current
+    one, without naming it. So the date being collected has to be shown to be
+    that session: it must be one of the last two on record, and its candle close
+    must equal the close the quote reports. Two independent readings agreeing is
+    what makes the attribution safe; either one alone is a guess.
+    """
+    settlement = quote.get("settlement")
+    previous_close = quote.get("previous_close")
+    if not settlement or not previous_close:
+        return None
+    if collection_date not in sorted(bars)[-2:]:
+        return None
+    if bars[collection_date]["close"] != previous_close:
+        return None
+    return settlement
 
 
 def _contract_instrument(contract: str) -> str:
@@ -835,43 +723,6 @@ def _pivot_eastmoney_seats(rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame
     if not tables:
         raise ValueError("Eastmoney seat response has no ranked contracts")
     return tables
-
-
-def _normalize_sina_seat_table(
-    frame: pd.DataFrame,
-    contract: str,
-    party_field: str,
-    value_field: str,
-) -> pd.DataFrame:
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    rank_column = _find_column(frame, "名次")
-    party_column = _find_column(frame, "会员简称", "会员名称")
-    value_names = {
-        "vol": ("成交量",),
-        "long_open_interest": ("多单持仓", "持买单量"),
-        "short_open_interest": ("空单持仓", "持卖单量"),
-    }[value_field]
-    value_column = _find_column(frame, *value_names)
-    if not rank_column or not party_column or not value_column:
-        return pd.DataFrame()
-    result = pd.DataFrame(
-        {
-            "symbol": contract,
-            "rank": frame[rank_column],
-            party_field: frame[party_column],
-            value_field: frame[value_column],
-        }
-    )
-    return result.dropna(subset=["rank", party_field, value_field])
-
-
-def _find_column(frame: pd.DataFrame, *names: str) -> Any | None:
-    for column in frame.columns:
-        label = str(column).strip()
-        if label in names:
-            return column
-    return None
 
 
 def _resolve_public_host(

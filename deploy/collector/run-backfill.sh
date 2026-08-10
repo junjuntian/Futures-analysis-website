@@ -240,7 +240,11 @@ date_already_complete() {
           and batch.status = 'succeeded'
           and (
             (expected.exchange_code = 'DCE' and source.code in (
-              'akshare_dce_official', 'akshare_sina_dce_fallback'
+              -- DEC-045 retired the first two; a date collected before that
+              -- change still counts as processed, so they stay listed.
+              'akshare_dce_official', 'akshare_sina_dce_fallback',
+              'eastmoney_dce_market', 'eastmoney_seats_fallback',
+              'dce_official_history'
             ))
             or source.code = 'akshare_' || lower(expected.exchange_code) || '_official'
           )
@@ -458,11 +462,14 @@ WORKSPACE_ID=$(psql_scalar "
   select workspace_id
     from data_sources
    where code in (
-     'akshare_dce_official','akshare_shfe_official','akshare_czce_official',
+     -- DCE is deliberately absent: DEC-045 retired `akshare_dce_official`, so
+     -- a database created after that change never registers it and anchoring
+     -- on it would leave the workspace unfindable.
+     'akshare_shfe_official','akshare_czce_official',
      'akshare_gfex_official','akshare_cffex_official'
    )
    group by workspace_id
-  having count(distinct code) = 5
+  having count(distinct code) = 4
    order by workspace_id
    limit 1")
 [[ "$WORKSPACE_ID" =~ ^[0-9a-f-]{36}$ ]] || {

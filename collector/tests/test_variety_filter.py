@@ -47,9 +47,8 @@ class RecordingAdapter:
 
     def __init__(self) -> None:
         self.market_varieties = []
-        self.seat_varieties = []
 
-    def market(self, source, collection_date):
+    def _frame(self):
         return pd.DataFrame(
             [
                 {"symbol": "JM2609", "date": "2026-08-07", "close": 1277, "settle": 1275},
@@ -57,13 +56,15 @@ class RecordingAdapter:
             ]
         )
 
-    def fallback_market(self, source, collection_date, varieties=None):
-        self.market_varieties.append(varieties)
-        return self.market(source, collection_date)
+    def market(self, source, collection_date):
+        return self._frame()
 
-    def fallback_seats(self, source, collection_date, varieties=None):
-        self.seat_varieties.append(varieties)
-        return {}
+    def eastmoney_dce_market(self, collection_date, varieties=None):
+        self.market_varieties.append(varieties)
+        return self._frame()
+
+    def eastmoney_dce_catalog(self, collection_date, varieties=None):
+        return pd.DataFrame([{"品种名称": "焦煤", "合约": "JM2609"}])
 
 
 class Platform:
@@ -88,12 +89,13 @@ def test_whole_exchange_responses_are_narrowed_after_normalization() -> None:
 
 
 def test_the_narrowing_reaches_the_per_contract_crawl() -> None:
-    # Filtering after the crawl would still cost the half hour the crawl takes,
-    # so the selection has to arrive before the requests are issued.
+    # DCE costs one candle request and one quote request per contract, so
+    # filtering afterwards would pay for every variety we did not ask for. The
+    # selection has to arrive before the requests are issued.
     adapter = RecordingAdapter()
     runner = CollectionRunner(adapter, Platform(), retry_delay_seconds=0)
     runner._varieties = EIGHT
-    runner._collect(SOURCES["DCE"], date(2026, 8, 7), "market", datetime.now(UTC), fallback=True)
+    runner._collect(SOURCES["DCE"], date(2026, 8, 7), "market", datetime.now(UTC))
     assert adapter.market_varieties == [EIGHT]
 
 
@@ -110,9 +112,7 @@ def test_the_skip_is_a_dedicated_signal_not_a_generic_error() -> None:
     runner = CollectionRunner(RecordingAdapter(), Platform(), retry_delay_seconds=0)
     runner._varieties = frozenset({"CU"})
     with pytest.raises(EmptyAfterVarietyFilter):
-        runner._collect(
-            SOURCES["DCE"], date(2026, 8, 7), "market", datetime.now(UTC), fallback=False
-        )
+        runner._collect(SOURCES["DCE"], date(2026, 8, 7), "market", datetime.now(UTC))
 
 
 def test_the_eight_requested_varieties_touch_only_three_exchanges() -> None:
@@ -133,19 +133,19 @@ def test_the_eight_requested_varieties_touch_only_three_exchanges() -> None:
     assert "GFEX" not in mapping.values() and "CFFEX" not in mapping.values()
 
 
-def test_the_catalog_cache_key_pins_the_variety_narrowing() -> None:
-    # A key mismatch does not raise: `_dce_catalog` simply misses and falls
-    # through to the live network. That is how this suite once spent eight
-    # minutes issuing real requests after the key gained a second element.
-    # Pin the shape so any future change breaks here first, loudly.
+def test_the_market_cache_key_pins_the_variety_narrowing() -> None:
+    # A key mismatch does not raise: the lookup simply misses and falls through
+    # to the live network. That is how this suite once spent eight minutes
+    # issuing real requests after the key gained a second element. Pin the shape
+    # so any future change breaks here first, loudly.
     from futures_collector.sources import AkshareAdapter
 
     adapter = AkshareAdapter()
     day = date(2026, 8, 7)
-    unnarrowed = pd.DataFrame([{"合约": "JM2609"}])
-    adapter._dce_catalog_cache[(day, None)] = unnarrowed
-    assert adapter._dce_catalog(day) is unnarrowed
+    narrowed = pd.DataFrame([{"symbol": "JD2609"}])
+    adapter._dce_market_cache[(day, frozenset({"JD"}))] = narrowed
+    assert adapter.eastmoney_dce_market(day, frozenset({"JD"})).equals(narrowed)
 
-    narrowed = pd.DataFrame([{"合约": "JD2609"}])
-    adapter._dce_catalog_cache[(day, frozenset({"JD"}))] = narrowed
-    assert adapter._dce_catalog(day, frozenset({"JD"})) is narrowed
+    unnarrowed = pd.DataFrame([{"symbol": "JM2609"}])
+    adapter._dce_market_cache[(day, None)] = unnarrowed
+    assert adapter.eastmoney_dce_market(day, None).equals(unnarrowed)

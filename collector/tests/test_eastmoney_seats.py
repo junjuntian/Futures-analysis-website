@@ -203,7 +203,7 @@ def test_a_truncated_crawl_is_refused_rather_than_submitted(monkeypatch) -> None
         AkshareAdapter().eastmoney_seats(eastmoney_seats_source("DCE"), date(2026, 8, 7))
 
 
-def test_eastmoney_is_refused_for_every_dataset_but_seats() -> None:
+def test_the_seat_report_is_refused_for_every_dataset_but_seats() -> None:
     runner = CollectionRunner(AkshareAdapter(), SimpleNamespace(), retry_delay_seconds=0)
     for dataset in ("catalog", "market", "calendar"):
         with pytest.raises(ValueError, match="only serves the seats dataset"):
@@ -212,27 +212,32 @@ def test_eastmoney_is_refused_for_every_dataset_but_seats() -> None:
                 date(2026, 8, 7),
                 dataset,
                 None,
-                fallback=False,
             )
 
 
-def test_eastmoney_is_tried_last_and_never_ahead_of_a_working_exchange() -> None:
+def test_the_quote_source_and_the_seat_report_can_never_answer_for_each_other() -> None:
+    # Both are Eastmoney, and both are DCE, so nothing but this separation stops
+    # a seat batch being filed under the price source or the reverse. They are
+    # different endpoints carrying different data and are audited separately.
+    runner = CollectionRunner(AkshareAdapter(), SimpleNamespace(), retry_delay_seconds=0)
+    with pytest.raises(ValueError, match="no seat rankings"):
+        runner._collect(SOURCES["DCE"], date(2026, 8, 7), "seats", None)
+    assert SOURCES["DCE"].source_code != EASTMONEY_SEATS_SOURCE_CODE
+
+
+def test_seats_are_the_only_dataset_with_a_fallback_now_that_sina_is_gone() -> None:
     from futures_collector.runner import _fallback_chain
 
-    # Nothing is attempted before the official source fails at all: the chain is
-    # only consulted after it has.
-    dce_seats = [candidate.source_code for candidate, _ in _fallback_chain(SOURCES["DCE"], "seats")]
-    assert dce_seats == ["akshare_sina_dce_fallback", EASTMONEY_SEATS_SOURCE_CODE]
-
-    # DCE market keeps Sina only -- Eastmoney has no settlement price.
-    dce_market = [
-        candidate.source_code for candidate, _ in _fallback_chain(SOURCES["DCE"], "market")
-    ]
-    assert dce_market == ["akshare_sina_dce_fallback"]
-
-    for exchange in ("SHFE", "CZCE", "GFEX", "CFFEX"):
-        seats = [
-            candidate.source_code for candidate, _ in _fallback_chain(SOURCES[exchange], "seats")
-        ]
+    # The chain is only consulted after the primary has failed, so nothing here
+    # can pre-empt a source that is answering.
+    for exchange in ("DCE", "SHFE", "CZCE", "GFEX", "CFFEX"):
+        seats = [candidate.source_code for candidate in _fallback_chain(SOURCES[exchange], "seats")]
         assert seats == [EASTMONEY_SEATS_SOURCE_CODE]
-        assert _fallback_chain(SOURCES[exchange], "market") == []
+        # DEC-045 removed the Sina fallback: it had no history at all for 105 of
+        # the 186 contracts DCE listed on 2026-08-07, so it could never complete
+        # a day. Nothing replaced it -- DCE's prices now come from the primary.
+        for dataset in ("market", "catalog", "calendar"):
+            assert _fallback_chain(SOURCES[exchange], dataset) == []
+
+    # The seat report must not be handed itself as its own fallback.
+    assert _fallback_chain(eastmoney_seats_source("DCE"), "seats") == []

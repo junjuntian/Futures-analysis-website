@@ -13,9 +13,9 @@ from futures_collector.normalize import (
     normalize_seats,
 )
 from futures_collector.sources import (
-    DCE_FALLBACK_SOURCE,
     DCE_HISTORY_SOURCE,
     DCE_HISTORY_SOURCE_CODE,
+    EASTMONEY_DCE_SOURCE_CODE,
     EASTMONEY_SEATS_SOURCE_CODE,
     SOURCES,
     AkshareAdapter,
@@ -93,42 +93,50 @@ class CollectionRunner:
         failures = 0
         for dataset in datasets:
             dataset_type = _dataset_type(dataset)
-            effective_source = source
+            # DCE's quote source carries prices, not rankings, so for seats the
+            # seat report is the primary rather than a fallback. Going through
+            # the fallback path would first record a failed attempt that was
+            # never made.
+            primary = (
+                eastmoney_seats_source(source.code)
+                if dataset == "seats" and source.source_code == EASTMONEY_DCE_SOURCE_CODE
+                else source
+            )
+            effective_source = primary
             observed_at = datetime.now(UTC)
             try:
                 rows = self._collect_with_retries(
-                    source,
+                    primary,
                     collection_date,
                     dataset,
                     observed_at,
-                    fallback=False,
                 )
             except EmptyAfterVarietyFilter:
                 LOG.info(
                     "dataset_skipped_no_requested_variety exchange=%s dataset=%s",
-                    source.code,
+                    primary.code,
                     dataset_type,
                 )
                 continue
             except Exception as error:
                 LOG.error(
                     "dataset_failed exchange=%s dataset=%s error=%s",
-                    source.code,
+                    primary.code,
                     dataset_type,
                     safe_error_code(error),
                 )
-                reason = self.platform.record_failure(source, dataset_type, collection_date)
+                reason = self.platform.record_failure(primary, dataset_type, collection_date)
                 LOG.error(
                     "batch_failed exchange=%s dataset=%s reason=%s",
-                    source.code,
+                    primary.code,
                     dataset_type,
                     reason,
                 )
                 rows = None
-                for candidate, candidate_is_fallback in _fallback_chain(source, dataset):
+                for candidate in _fallback_chain(primary, dataset):
                     LOG.warning(
                         "fallback_activated exchange=%s dataset=%s source=%s",
-                        source.code,
+                        primary.code,
                         dataset_type,
                         candidate.source_code,
                     )
@@ -138,12 +146,11 @@ class CollectionRunner:
                             collection_date,
                             dataset,
                             observed_at,
-                            fallback=candidate_is_fallback,
                         )
                     except Exception as fallback_error:
                         LOG.error(
                             "fallback_failed exchange=%s dataset=%s source=%s error=%s",
-                            source.code,
+                            primary.code,
                             dataset_type,
                             candidate.source_code,
                             safe_error_code(fallback_error),
@@ -161,7 +168,7 @@ class CollectionRunner:
                         )
                         LOG.error(
                             "batch_failed exchange=%s dataset=%s source=%s reason=%s",
-                            source.code,
+                            primary.code,
                             dataset_type,
                             candidate.source_code,
                             fallback_reason,
@@ -211,10 +218,8 @@ class CollectionRunner:
         collection_date: date,
         dataset: str,
         observed_at: datetime,
-        *,
-        fallback: bool,
     ) -> list[dict[str, str]]:
-        max_attempts = 1 if source.code == "DCE" and not fallback else 3
+        max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._collect(
@@ -222,7 +227,6 @@ class CollectionRunner:
                     collection_date,
                     dataset,
                     observed_at,
-                    fallback=fallback,
                 )
             except Exception as error:
                 if attempt == max_attempts:
@@ -247,14 +251,29 @@ class CollectionRunner:
         collection_date: date,
         dataset: str,
         observed_at: datetime,
-        *,
-        fallback: bool,
     ) -> list[dict[str, str]]:
         if source.source_code == EASTMONEY_SEATS_SOURCE_CODE and dataset != "seats":
-            # Eastmoney's report carries no settlement price and no contract
+            # The seat report carries no settlement price and no contract
             # catalog, so it must never stand in for anything but seats.
-            raise ValueError("the Eastmoney source only serves the seats dataset")
+            raise ValueError("the Eastmoney seat source only serves the seats dataset")
         varieties = self._varieties
+        if source.source_code == EASTMONEY_DCE_SOURCE_CODE:
+            if dataset == "seats":
+                # Seats come from a different Eastmoney report with a source
+                # record of its own, so this source never answers for them.
+                raise ValueError("the Eastmoney DCE quote source carries no seat rankings")
+            if dataset == "catalog":
+                frame = self.adapter.eastmoney_dce_catalog(collection_date, varieties)
+                return self._narrow(normalize_catalog(source, collection_date, frame))
+            frame = self.adapter.eastmoney_dce_market(collection_date, varieties)
+            if dataset == "market":
+                return self._narrow(normalize_market(source, collection_date, frame, observed_at))
+            if dataset == "calendar":
+                # Proven the same way as for every other source: rows exist for
+                # this date, so it was a trading day.
+                normalize_market(source, collection_date, frame, observed_at)
+                return normalize_calendar(source, collection_date)
+            raise ValueError("unsupported dataset")
         if source.source_code == DCE_HISTORY_SOURCE_CODE:
             # The annual files carry the prices and the contracts that traded,
             # and nothing else. Seats for those years live in the exchange's
@@ -279,25 +298,13 @@ class CollectionRunner:
                 return normalize_calendar(source, collection_date)
             raise ValueError("unsupported dataset")
         if dataset == "catalog":
-            frame = (
-                self.adapter.fallback_catalog(source, collection_date, varieties)
-                if fallback
-                else self.adapter.catalog(source, collection_date)
-            )
+            frame = self.adapter.catalog(source, collection_date)
             return self._narrow(normalize_catalog(source, collection_date, frame))
         if dataset == "market":
-            frame = (
-                self.adapter.fallback_market(source, collection_date, varieties)
-                if fallback
-                else self.adapter.market(source, collection_date)
-            )
+            frame = self.adapter.market(source, collection_date)
             return self._narrow(normalize_market(source, collection_date, frame, observed_at))
         if dataset == "calendar":
-            frame = (
-                self.adapter.fallback_market(source, collection_date, varieties)
-                if fallback
-                else self.adapter.market(source, collection_date)
-            )
+            frame = self.adapter.market(source, collection_date)
             # The calendar is proven by the exchange answering for the date at
             # all, so it is normalized from the unnarrowed response and never
             # filtered: a trading day belongs to every variety.
@@ -306,8 +313,6 @@ class CollectionRunner:
         if dataset == "seats":
             if source.source_code == EASTMONEY_SEATS_SOURCE_CODE:
                 tables = self.adapter.eastmoney_seats(source, collection_date, varieties)
-            elif fallback:
-                tables = self.adapter.fallback_seats(source, collection_date, varieties)
             else:
                 tables = self.adapter.seats(source, collection_date)
             return self._narrow(normalize_seats(source, collection_date, tables))
@@ -322,21 +327,20 @@ class CollectionRunner:
         return narrowed
 
 
-def _fallback_chain(source: ExchangeSource, dataset: str) -> list[tuple[ExchangeSource, bool]]:
-    """Sources to try, in order, once the official one has failed.
+def _fallback_chain(source: ExchangeSource, dataset: str) -> list[ExchangeSource]:
+    """Sources to try, in order, once the primary one has failed.
 
-    Official first is the standing rule, so nothing here ever pre-empts an
-    exchange that is answering. DCE keeps its existing Sina fallback for every
-    dataset. Eastmoney is appended for seats only, and only last: it is the one
-    source that covers all five exchanges, so it turns a hard seat failure into
-    an attempt where previously there was none.
+    Only seats have one. DCE used to keep a Sina fallback for every dataset;
+    `DEC-045` removed it, because Sina had no history at all for 105 of the 186
+    contracts DCE listed on 2026-08-07 and so could never complete a day.
+
+    The Eastmoney seat report is the one source covering all five exchanges, so
+    for seats it turns what would be a hard failure into one more attempt. It is
+    never tried ahead of a source that is answering.
     """
-    chain: list[tuple[ExchangeSource, bool]] = []
-    if source.code == "DCE":
-        chain.append((DCE_FALLBACK_SOURCE, True))
-    if dataset == "seats":
-        chain.append((eastmoney_seats_source(source.code), False))
-    return chain
+    if dataset == "seats" and source.source_code != EASTMONEY_SEATS_SOURCE_CODE:
+        return [eastmoney_seats_source(source.code)]
+    return []
 
 
 def _dataset_type(dataset: str) -> str:

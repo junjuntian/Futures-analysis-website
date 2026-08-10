@@ -127,7 +127,7 @@ futures VPS 主密钥文件：
 - Collector 为一次性 `docker compose run --rm` 服务，`mem_limit: 512m`；三次 E2E 运行的 cgroup 实测最高峰值为 `130641920` bytes。
 - host cron 已安装为工作日 17:30、21:30 两次运行 `/usr/local/sbin/run-futures-collector`；脚本使用 `/run/lock/futures-collector.lock` 与非阻塞 `flock` 防止重叠。
 - 专用 analyst 服务账号由受控管理流程创建；凭据仅保存在 `/etc/futures-platform/secrets/collector-credentials`，部署核验 owner/mode 为 `root:root`/`0400` 并只读挂载。本文和部署日志不记录凭据内容。
-- 真实验收日期为 `2026-07-30`：五交易所目录、日历、行情、席位批次成功；DCE 官方失败后仅 DCE 激活 `akshare_sina_dce_fallback`，其正式行情和席位来源指向真实聚合源；其他四家保持官方直连。
+- 真实验收日期为 `2026-07-30`：五交易所目录、日历、行情、席位批次成功；DCE 官方失败后仅 DCE 激活 `akshare_sina_dce_fallback`，其正式行情和席位来源指向真实聚合源；其他四家保持官方直连。（该记录描述的是 2026-07-30 当天的实况。`DEC-045` 已于 2026-08-10 移除新浪兜底，大商所改由东方财富承担行情、目录与席位，此后的批次来源应指向 `eastmoney_dce_market` 与 `eastmoney_seats_fallback`。）
 - 正式 `market_prices`、`seat_positions` 均大于 0，业务唯一键重复为 0；完整同日重跑后行数不变。故障注入时 DCE 行情批次 `failed`，其余四家 `succeeded` 且正式行情行数不变。
 - RLS、批次/记录/正式事实表来源链、目录自动建档、手动批次整行指纹及用户稳定身份字段指纹全部通过。服务账号登录允许且仅允许更新 `last_login_at`/`updated_at` 登录元数据。
 - 部署前基线为 144 个手动批次、25 个自动批次、32 个用户；手动批次未删除或篡改。Phase 3C/3D 生产 E2E 未重跑，避免制造新的手动测试批次。
