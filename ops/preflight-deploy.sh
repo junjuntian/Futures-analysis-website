@@ -27,17 +27,23 @@ cd "$(dirname "$0")/.."
 
 step "一、本地仓库状态"
 
-# 已跟踪文件被改 = 手上的东西和要部署的那个提交不是一回事，必须拦。
-# 未跟踪文件不进构建产物（镜像按提交检出），只提醒不拦——否则仓库里躺着几个
-# 草稿脚本就永远部署不了。
-if git diff --quiet && git diff --cached --quiet; then
-  pass "已跟踪文件无未提交改动"
+# 只拦会进构建产物的那些路径。
+#
+# 运营者在另一个会话里做席位因子预测模型，产出落在 research/，那个目录会长期是
+# 改动状态。把它也算进来的话这道检查每次都红——而一个总是红的门禁很快就会被无视，
+# 那就等于没做。所以按「改了会不会影响部署出去的东西」来分。
+DEPLOYED_PATHS='^(rust|frontend|collector|deploy|\.github)/|^docker-compose'
+dirty_deployed=$(git status --porcelain --untracked-files=no |
+  awk '{print $2}' | grep -E "$DEPLOYED_PATHS" || true)
+if [ -z "$dirty_deployed" ]; then
+  pass "会进构建产物的路径没有未提交改动"
 else
-  fail "已跟踪文件被改动：$(git status --porcelain --untracked-files=no | head -3 | tr '\n' ' ')"
+  fail "这些改动会进构建产物却没提交：$(printf '%s' "$dirty_deployed" | head -3 | tr '\n' ' ')"
 fi
-untracked=$(git ls-files --others --exclude-standard | head -3 | tr '\n' ' ')
-if [ -n "$untracked" ]; then
-  printf '  \033[33m·\033[0m 未跟踪文件（不进构建，仅提醒）：%s\n' "$untracked"
+
+other=$(git status --porcelain | awk '{print $2}' | grep -Ev "$DEPLOYED_PATHS" | head -3 | tr '\n' ' ')
+if [ -n "$other" ]; then
+  printf '  \033[33m·\033[0m 其他改动（不进构建，仅提醒）：%s\n' "$other"
 fi
 
 SHA=$(git rev-parse HEAD)

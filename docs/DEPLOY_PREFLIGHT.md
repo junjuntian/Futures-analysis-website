@@ -13,13 +13,17 @@
 
 | 检查 | 被哪次失败教出来 |
 | --- | --- |
-| 工作区干净、HEAD 已推送且等于 `origin/分支` | 建完镜像又推了文档提交，部署被 `acceptance_sha` 守卫拒绝 |
+| 会进构建产物的路径无未提交改动、HEAD 已推送且等于 `origin/分支` | 建完镜像又推了文档提交，部署被 `acceptance_sha` 守卫拒绝 |
 | 每条迁移写了 `schema_versions`、版本号与文件名一致、带 `begin;` | 部署在打包步报 `migration_missing_version_record` |
 | 每条迁移列进了 `deploy-futures.yml` 的显式清单 | 漏列 = 代码上线而 schema 没到（leg-order 那次每个查询回 500） |
 | `deploy/collector/` 下每个文件都装进了发布包 | `project-history.sql` 没装进去，线上只打一行 `PROJECTION_SKIPPED` 然后每天安静地不投影 |
 | CI 在该提交上通过 | — |
 | 四个镜像都发布了 | 重启 runner 杀掉了正在跑的 `Publish api`，整体仍显示 success，但少一个镜像 |
 | runner 在线且空闲 | 同上：重启 runner 会杀掉它正在跑的作业 |
+
+只拦 `rust/`、`frontend/`、`collector/`、`deploy/`、`.github/` 和 `docker-compose*`
+这些会进构建产物的路径。`research/` 是运营者另一个会话在做的席位因子预测模型，
+长期处于改动状态；把它也算进来这道检查就每次都红，而一个总是红的门禁很快会被无视。
 
 ---
 
