@@ -1396,13 +1396,19 @@ pub async fn own_varieties(
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
     let rows = sqlx::query(
-        "select distinct on (p.instrument)
-                p.instrument, p.exchange, coalesce(i.name, p.instrument) as name
-           from price_history p
-           left join instruments i
-             on i.workspace_id = p.workspace_id and upper(i.code) = p.instrument
-          where p.workspace_id = $1
-          order by p.instrument",
+        // 名字取自品种范围表而不是 instruments：那张表是采集侧按上游给的名字填的，
+        // 眼下就不一致——焦煤是「焦煤」，玻璃是「平板玻璃期货」，黄金白银存的是代码。
+        //
+        // 范围与「有没有数据」取交集：范围里有但一根 K 线都没有的品种列出来，
+        // 点进去是空图，而空图比没有这个选项更糟，它看起来像是数据坏了。
+        "select s.instrument, s.exchange, s.display_name as name
+           from product_instrument_scope s
+          where s.workspace_id = $1
+            and exists (
+                select 1 from price_history p
+                 where p.workspace_id = s.workspace_id and p.instrument = s.instrument
+            )
+          order by s.instrument",
     )
     .bind(workspace_id)
     .fetch_all(&mut *tx)

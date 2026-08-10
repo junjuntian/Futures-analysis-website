@@ -14,13 +14,16 @@ create table product_instrument_scope (
     workspace_id uuid not null references workspaces(id) on delete restrict,
     exchange text not null,
     instrument text not null,
-    -- 为什么在范围内。空着也行，但写一句以后就不用猜了。
-    note text,
+    -- 界面上显示的品种名。不用 instruments.name：那张表是采集侧按上游给的名字填的，
+    -- 眼下就不一致——焦煤是「焦煤」，玻璃是「平板玻璃期货」，黄金白银干脆存的是
+    -- 代码 AU/AG。品种名是给人看的，得由这里定，不该随上游的措辞漂移。
+    display_name text not null,
     added_at timestamptz not null default now(),
 
     constraint product_instrument_scope_identity primary key (workspace_id, instrument),
     constraint product_instrument_scope_exchange check (exchange in ('DCE', 'CZCE', 'SHFE')),
-    constraint product_instrument_scope_shape check (instrument ~ '^[A-Z]{1,2}$')
+    constraint product_instrument_scope_shape check (instrument ~ '^[A-Z]{1,2}$'),
+    constraint product_instrument_scope_name_not_blank check (length(trim(display_name)) > 0)
 );
 
 alter table product_instrument_scope enable row level security;
@@ -46,7 +49,7 @@ begin
             raise exception 'workspace 上下文没设上，写进去的行会归错人';
         end if;
 
-        insert into product_instrument_scope (workspace_id, exchange, instrument, note)
+        insert into product_instrument_scope (workspace_id, exchange, instrument, display_name)
         values
             (target, 'DCE',  'JM', '焦煤'),
             (target, 'DCE',  'JD', '鸡蛋'),
