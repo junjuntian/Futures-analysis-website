@@ -706,14 +706,15 @@ pub async fn save_series(
             (id, workspace_id, provider_code, source_id, query_hash, business_date,
              query_json, fetched_at, data_cutoff_at, payload_hash, derivation_hash, price_basis,
              window_algorithm_version, statistics_algorithm_version, rule_version, created_by)
-         values ($1, $2, $15, $3, $4, $5, $6, $7, $8, $9, $10,
-                 $16, $11, $12, $13, $14)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 $12, $13, $14, $15, $16)
          on conflict (workspace_id, provider_code, query_hash, business_date, derivation_hash)
          do nothing
          returning id",
     )
     .bind(new_id)
     .bind(input.workspace_id)
+    .bind(provider_code)
     .bind(source_id)
     .bind(input.query_hash)
     .bind(input.business_date)
@@ -722,12 +723,11 @@ pub async fn save_series(
     .bind(input.data_cutoff_at)
     .bind(input.payload_hash)
     .bind(input.derivation_hash)
+    .bind(price_basis)
     .bind(WINDOW_ALGORITHM_VERSION)
     .bind(STATISTICS_ALGORITHM_VERSION)
     .bind(DEFAULT_RULE_VERSION)
     .bind(input.actor_user_id)
-    .bind(provider_code)
-    .bind(price_basis)
     .fetch_optional(&mut *tx)
     .await?;
     let series_id = if let Some(id) = inserted {
@@ -871,16 +871,19 @@ pub async fn create_favorite(
         "insert into spread_favorites
             (id, workspace_id, name, provider_code, leg1_json, leg2_json,
              normalized_hash, created_by)
-         values ($1, $2, $3, $8, $4, $5, $6, $7)
+         -- 占位符按绑定顺序排，不跳号：原来把新加的 provider_code 写成 $8 塞在中间，
+         -- 绑定却加在了 created_by 前面，于是 uuid 列收到文本、文本列收到 uuid，
+         -- 每次建收藏都 500。顺序一致就不会再有这种错位。
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
          returning created_at",
     )
     .bind(id)
     .bind(input.workspace_id)
     .bind(input.name)
+    .bind(input.provider_code)
     .bind(serde_json::to_value(input.leg1).map_err(|_| SpreadRepositoryError::InvalidStoredData)?)
     .bind(serde_json::to_value(input.leg2).map_err(|_| SpreadRepositoryError::InvalidStoredData)?)
     .bind(input.normalized_hash)
-    .bind(input.provider_code)
     .bind(input.actor_user_id)
     .fetch_one(&mut *tx)
     .await
@@ -1030,6 +1033,47 @@ mod tests {
         include_str!("../../../migrations/202608100005_spread_retention_delete_grants.sql");
     const SELF_PROVIDER: &str =
         include_str!("../../../migrations/202608100009_self_spread_provider.sql");
+
+    #[test]
+    fn every_insert_numbers_its_placeholders_in_order() {
+        // 跳号的占位符要求读代码的人在心里把列顺序和绑定顺序对齐一遍。我对错过
+        // 一次：新加的 provider_code 编号跳到末尾却塞在列表中间，绑定又加在
+        // created_by 前面，于是 uuid 列收到文本，每次建收藏都 500——静态测试看不见，
+        // 只有真连库的验收才会红。
+        //
+        // 注意：这段注释里不能出现占位符列表的样子，否则会被下面这段扫到自己身上。
+        // 同一个坑今天已经踩到第三次——凡是 include_str! 自己源码的测试，
+        // 锚点都必须是生产代码里才会出现的形状。
+        //
+        // 这里不判断绑定对不对（那要连库），只要求占位符从 $1 起顺序排列：
+        // 顺序一致时，列顺序就是绑定顺序，错位无从发生。
+        let source = include_str!("spread_analytics.rs");
+        for (index, chunk) in source.split("values (").enumerate().skip(1) {
+            let list = &chunk[..chunk.find(')').unwrap_or(0)];
+            if !list.starts_with('$') {
+                continue; // 不是占位符列表，例如 values ('a', 'b')
+            }
+            let numbers: Vec<u32> = list
+                .split(',')
+                .filter_map(|piece| piece.trim().strip_prefix('$'))
+                .filter_map(|piece| {
+                    piece
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .filter(|value| !value.is_empty())
+                        .and_then(|value| value.parse().ok())
+                })
+                .collect();
+            if numbers.is_empty() {
+                continue;
+            }
+            let expected: Vec<u32> = (1..=numbers.len() as u32).collect();
+            assert_eq!(
+                numbers, expected,
+                "第 {index} 处 insert 的占位符跳号了：{list}"
+            );
+        }
+    }
 
     #[test]
     fn self_computed_series_are_not_recorded_as_coming_from_sanhe() {
