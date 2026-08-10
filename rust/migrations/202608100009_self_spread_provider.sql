@@ -59,4 +59,8 @@ begin
 end
 $$;
 
+insert into schema_versions (version, description)
+values ('202608100009', 'Self-computed spread series recorded as its own provider')
+on conflict (version) do nothing;
+
 commit;

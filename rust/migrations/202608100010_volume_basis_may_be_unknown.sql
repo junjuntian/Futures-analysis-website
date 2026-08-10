@@ -31,4 +31,8 @@ begin
 end
 $$;
 
+insert into schema_versions (version, description)
+values ('202608100010', 'Volume basis may be unknown when it cannot be measured')
+on conflict (version) do nothing;
+
 commit;

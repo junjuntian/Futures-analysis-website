@@ -71,4 +71,8 @@ begin
 end
 $$;
 
+insert into schema_versions (version, description)
+values ('202608100011', 'The eight instruments the two products cover')
+on conflict (version) do nothing;
+
 commit;
