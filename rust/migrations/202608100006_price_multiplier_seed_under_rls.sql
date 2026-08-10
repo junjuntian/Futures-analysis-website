@@ -13,19 +13,34 @@ begin;
 -- assertion that cannot see the rows it is asserting about is not an assertion.
 --
 -- So this repeats the seed the way `202608030002` already established -- one
--- workspace at a time, with the context set -- and asserts in a way that fails
--- when it can see nothing at all.
+-- workspace at a time, with the context set -- and asserts the mechanism rather
+-- than the row count: that the context actually took effect. Asserting a count
+-- instead would call a fresh database broken, and a fresh database legitimately
+-- has no instruments yet -- which is how the first attempt at this assertion
+-- failed CI.
 
 do $$
 declare
     target_workspace_id uuid;
     present integer;
     seeded integer;
-    total_seeded integer := 0;
 begin
     for target_workspace_id in select id from workspaces order by id
     loop
         perform set_config('app.current_workspace_id', target_workspace_id::text, true);
+
+        -- Assert the mechanism, not the row count. What failed in
+        -- `202608100003` was that no context was set, so the policy hid
+        -- everything; with the context in place the workspace's rows are
+        -- visible and the counts below mean what they say. Counting rows
+        -- instead would call an empty database broken, which it is not -- a
+        -- fresh one legitimately has no instruments yet.
+        if app.current_workspace_id() is distinct from target_workspace_id then
+            raise exception
+                'workspace context did not take effect for %; the seed would be '
+                'hidden by row level security exactly as it was in 202608100003',
+                target_workspace_id;
+        end if;
 
         update instruments set price_multiplier = spec.multiplier,
                                updated_at = now()
@@ -75,16 +90,7 @@ begin
                 target_workspace_id;
         end if;
 
-        total_seeded := total_seeded + seeded;
     end loop;
-
-    -- The part `202608100003` was missing. Zero seeded across every workspace
-    -- means the rows were invisible, not that there was nothing to do, and that
-    -- is the exact failure being repaired here.
-    if total_seeded = 0 then
-        raise exception
-            'no instrument was reachable to seed; the migration role cannot see them';
-    end if;
 end $$;
 
 insert into schema_versions (version, description)
