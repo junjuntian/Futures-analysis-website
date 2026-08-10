@@ -159,22 +159,46 @@ EASTMONEY_RETRY_BACKOFF_SECONDS = 2.0
 # API has answered 412 to every client since 2026-08-02, Sina keeps delisted
 # contracts only back to about 2018-09, and Eastmoney keeps none at all.
 #
-# The files are not fetched here. The site's WAF refuses scripted clients and
-# writing code to defeat that is out of the question, so they were fetched once
-# through the operator's browser at their instruction and are read from disk.
-# That is sound for this data in a way it would not be for daily collection:
-# history does not change, so a one-time capture stays correct forever.
+# The site's WAF challenges scripted clients on its HTML pages and its JSON API,
+# which is why `DEC-041` exists. It does not challenge these files: they are
+# static CMS resources, and the VPS fetches them over plain HTTP with a 200
+# (verified 2026-08-10). Nothing here defeats a bot check -- there is none on
+# this path -- and nothing here may be written to defeat the one on the others.
+#
+# They are still read from disk rather than fetched on demand, because history
+# does not change: captured once, correct forever.
 DCE_HISTORY_SOURCE_CODE = "dce_official_history"
 DCE_HISTORY_DIR_ENV = "FUTURES_DCE_HISTORY_DIR"
 # Columns as the exchange names them, mapped to what the normalizer already
 # reads. Renaming here keeps the normalizer free of a per-source special case.
+#
+# The exchange changed its own layout at 2019. Both are mapped, because both are
+# on disk and a year is not a special case worth its own reader:
+#
+#   2013-2018  商品名称 合约名称 交易日期 开盘价 最高价 最低价 收盘价 前结算价 结算价 …
+#   2019-      ROWNUM   合约     日期     前收盘价 前结算价 开盘价 … 收盘价 结算价 …
+#
+# so the later files need only 日期 renamed; 合约 already carries the target
+# name, and everything else the normalizer reads is spelled the same.
 DCE_HISTORY_COLUMNS = {
     "合约名称": "合约",
     "交易日期": "交易日期",
+    "日期": "交易日期",
     "收盘价": "今收盘",
     "结算价": "今结算",
     "商品名称": "品种名称",
 }
+# The later files dropped the variety name column. Without it the catalog would
+# name 焦煤 "JM" for 2019 onward and 焦煤 before it -- the same instrument under
+# two names, split by a year nobody would think to look at.
+DCE_HISTORY_VARIETY_NAMES = {
+    "JM": "焦煤",
+    "JD": "鸡蛋",
+    "LH": "生猪",
+}
+# 2024 arrived as .xls where every earlier year is .xlsx. Both are read, in that
+# order, so a year present in only one format is still found.
+DCE_HISTORY_SUFFIXES = (".xlsx", ".xls")
 
 DCE_HISTORY_SOURCE = ExchangeSource(
     "DCE",
@@ -611,12 +635,28 @@ class AkshareAdapter:
             key = (symbol.upper(), collection_date.year)
             frame = self._dce_history_cache.get(key)
             if frame is None:
-                path = root / f"{symbol.lower()}_{collection_date.year}.xlsx"
-                if not path.is_file():
-                    missing.append(path.name)
+                stem = f"{symbol.lower()}_{collection_date.year}"
+                path = next(
+                    (
+                        root / f"{stem}{suffix}"
+                        for suffix in DCE_HISTORY_SUFFIXES
+                        if (root / f"{stem}{suffix}").is_file()
+                    ),
+                    None,
+                )
+                if path is None:
+                    missing.append(f"{stem}{DCE_HISTORY_SUFFIXES[0]}")
                     continue
                 frame = pd.read_excel(path, dtype=str)
+                # The exchange's own headers carry stray whitespace in some
+                # years, which would silently defeat the rename below and leave
+                # the file looking like an unknown layout.
+                frame.columns = [str(column).strip() for column in frame.columns]
                 frame = frame.rename(columns=DCE_HISTORY_COLUMNS)
+                if "品种名称" not in frame.columns:
+                    frame["品种名称"] = DCE_HISTORY_VARIETY_NAMES.get(
+                        symbol.upper(), symbol.upper()
+                    )
                 self._dce_history_cache[key] = frame
             frames.append(frame)
         if not frames:

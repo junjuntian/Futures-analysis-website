@@ -99,10 +99,9 @@ def test_the_history_source_never_claims_to_carry_seats(tmp_path, monkeypatch):
 
 
 def test_the_source_opens_no_socket() -> None:
-    # It reads files fetched once through the operator's browser at their
-    # instruction, not by this code. An empty allowlist means the
-    # outbound guard would reject any host, so a future edit that tried to fetch
-    # from here fails loudly instead of quietly bypassing the exchange's WAF.
+    # It reads files from disk, never the network. The empty allowlist is what
+    # enforces that: a future edit that tried to fetch from here would be
+    # refused by the outbound guard rather than quietly reaching the exchange.
     assert DCE_HISTORY_SOURCE.domains == frozenset()
     assert DCE_HISTORY_SOURCE.source_code == DCE_HISTORY_SOURCE_CODE
     assert DCE_HISTORY_SOURCE.code == "DCE"
@@ -130,6 +129,95 @@ def test_history_mode_replaces_dce_and_leaves_the_other_exchanges_alone(tmp_path
     # since DEC-045; what matters here is that history mode does not leak into
     # ordinary collection.
     assert SOURCES["DCE"].source_code == "eastmoney_dce_market"
+
+
+LATER_COLUMNS = [
+    "ROWNUM",
+    "合约",
+    "日期",
+    "前收盘价",
+    "前结算价",
+    "开盘价",
+    "最高价",
+    "最低价",
+    "收盘价",
+    "结算价",
+    "成交量",
+    "成交额",
+]
+
+
+def later_layout_file(path, rows):
+    # The exchange changed its own header at 2019: 合约 instead of 合约名称,
+    # 日期 instead of 交易日期, and no variety name column at all. Whitespace
+    # around the labels is the exchange's, not a typo here.
+    pd.DataFrame(rows, columns=LATER_COLUMNS).rename(
+        columns={"合约": " 合约 ", "日期": "日期 "}
+    ).to_excel(path, index=False)
+
+
+def test_the_header_the_exchange_switched_to_in_2019_is_read_too(tmp_path, monkeypatch):
+    root = make_dir(tmp_path, monkeypatch)
+    later_layout_file(
+        root / "jm_2019.xlsx",
+        [
+            [
+                "1",
+                "jm1901",
+                "20190102",
+                "1434",
+                "1445",
+                "1440",
+                "1448",
+                "1420.5",
+                "1447.5",
+                "1438.5",
+                "918",
+                "79249560",
+            ],
+        ],
+    )
+    rows = runner()._collect(DCE_HISTORY_SOURCE, date(2019, 1, 2), "market", datetime.now(UTC))
+    assert [
+        (r["contract_code"], r["close_price"], r["settlement_price"], r["open_price"]) for r in rows
+    ] == [("JM1901", "1447.5", "1438.5", "1440")]
+
+
+def test_the_later_files_still_name_the_variety(tmp_path, monkeypatch):
+    # Those files dropped the variety name column. Left alone the catalog would
+    # call 焦煤 "JM" from 2019 on and 焦煤 before it -- one instrument under two
+    # names, split by a year nobody would think to look at.
+    root = make_dir(tmp_path, monkeypatch)
+    later_layout_file(
+        root / "jm_2019.xlsx",
+        [
+            [
+                "1",
+                "jm1901",
+                "20190102",
+                "1434",
+                "1445",
+                "1440",
+                "1448",
+                "1420.5",
+                "1447.5",
+                "1438.5",
+                "918",
+                "79249560",
+            ],
+        ],
+    )
+    rows = runner()._collect(DCE_HISTORY_SOURCE, date(2019, 1, 2), "catalog", datetime.now(UTC))
+    assert rows[0]["instrument_name"] == "焦煤"
+
+
+def test_a_year_published_as_xls_is_found(tmp_path, monkeypatch):
+    # 2024 arrived as .xls where every earlier year is .xlsx. Looking only for
+    # .xlsx would report the year as missing while the file sits right there.
+    root = make_dir(tmp_path, monkeypatch)
+    annual_file(root / "jm_2015.xls", jm_rows())
+    rows = runner()._collect(DCE_HISTORY_SOURCE, date(2015, 9, 1), "market", datetime.now(UTC))
+    assert sorted(r["contract_code"] for r in rows) == ["JM1509", "JM1601"]
 
 
 def test_a_year_is_parsed_once_and_shared_across_dates(tmp_path, monkeypatch):
