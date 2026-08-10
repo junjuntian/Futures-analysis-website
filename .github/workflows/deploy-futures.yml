@@ -173,6 +173,7 @@ jobs:
             rust/migrations/202608100004_eastmoney_dce_market_source.sql \
             rust/migrations/202608100005_spread_retention_delete_grants.sql \
             rust/migrations/202608100006_price_multiplier_seed_under_rls.sql \
+            rust/migrations/202608100007_market_prices_volume_turnover.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline

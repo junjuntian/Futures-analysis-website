@@ -1715,6 +1715,13 @@ async fn insert_market_projection(
     let granularity = required_string(record, "granularity")?;
     let close_price = record_string(record, "close_price").unwrap_or_default();
     let settlement_price = record_string(record, "settlement_price").unwrap_or_default();
+    // The collector has been sending these since the daily range landed; the
+    // projection dropped them, so every row carried a close and no open.
+    let open_price = record_string(record, "open_price").unwrap_or_default();
+    let high_price = record_string(record, "high_price").unwrap_or_default();
+    let low_price = record_string(record, "low_price").unwrap_or_default();
+    let volume = record_string(record, "volume").unwrap_or_default();
+    let turnover = record_string(record, "turnover").unwrap_or_default();
     let currency_code = required_string(record, "currency_code")?.to_ascii_uppercase();
     let revision_no = required_string(record, "revision_no")?;
     let existing = sqlx::query(
@@ -1746,6 +1753,11 @@ async fn insert_market_projection(
                 set observed_at = $1::timestamptz,
                     close_price = nullif($2, '')::numeric,
                     settlement_price = nullif($3, '')::numeric,
+                    open_price = nullif($11, '')::numeric,
+                    high_price = nullif($12, '')::numeric,
+                    low_price = nullif($13, '')::numeric,
+                    volume = nullif($14, '')::numeric,
+                    turnover = nullif($15, '')::numeric,
                     currency_code = $4, calendar_version_id = $5,
                     source_import_batch_id = $6, source_row_number = $7,
                     row_version = row_version + 1
@@ -1763,6 +1775,11 @@ async fn insert_market_projection(
         .bind(job.workspace_id)
         .bind(record_id)
         .bind(expected_version)
+        .bind(&open_price)
+        .bind(&high_price)
+        .bind(&low_price)
+        .bind(&volume)
+        .bind(&turnover)
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(JobQueueError::SourceRevisionConflict)?;
@@ -1779,10 +1796,14 @@ async fn insert_market_projection(
         "insert into market_prices
             (workspace_id, source_id, contract_id, trade_date, session_type, observed_at,
              granularity, close_price, settlement_price, currency_code, calendar_version_id,
-             revision_no, source_import_batch_id, source_row_number, source_record_id)
+             revision_no, source_import_batch_id, source_row_number, source_record_id,
+             open_price, high_price, low_price, volume, turnover)
          values ($1, $2, $3, $4::date, $5, $6::timestamptz, $7,
                  nullif($8, '')::numeric, nullif($9, '')::numeric, $10, $11,
-                 $12::integer, $13, $14, $15)
+                 $12::integer, $13, $14, $15,
+                 nullif($16, '')::numeric, nullif($17, '')::numeric,
+                 nullif($18, '')::numeric, nullif($19, '')::numeric,
+                 nullif($20, '')::numeric)
          returning row_version,
                    to_jsonb(market_prices) - 'workspace_id' - 'created_at' as snapshot",
     )
@@ -1801,6 +1822,11 @@ async fn insert_market_projection(
     .bind(job.aggregate_id)
     .bind(row_number)
     .bind(record_id)
+    .bind(&open_price)
+    .bind(&high_price)
+    .bind(&low_price)
+    .bind(&volume)
+    .bind(&turnover)
     .fetch_one(&mut **tx)
     .await?;
     Ok(vec![FormalProjectionChange {
@@ -2514,6 +2540,55 @@ mod tests {
     use super::*;
 
     const WORKER_SOURCE: &str = include_str!("job_queue.rs");
+
+    /// Columns `market_prices` carries for the price itself, as opposed to the
+    /// bookkeeping around it. Every one of them has to be both written on
+    /// insert and refreshed on revision.
+    const MARKET_VALUE_COLUMNS: [&str; 7] = [
+        "close_price",
+        "settlement_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "turnover",
+    ];
+
+    #[test]
+    fn the_market_projection_writes_every_value_column_the_table_carries() {
+        // The daily range shipped as a migration and a collector field and
+        // stopped there: the columns existed, the collector sent the values,
+        // and this projection quietly wrote neither. Nothing failed -- 14,429
+        // rows carried a close and a settlement and not one carried an open,
+        // which is only visible if you go looking. The candlestick panel of
+        // 建仓过程 is that range, and the price-multiplier check is
+        // turnover / (volume x settlement); both would have come up empty.
+        let insert = WORKER_SOURCE
+            .split("insert into market_prices")
+            .nth(1)
+            .expect("the market projection must insert into market_prices");
+        let insert = &insert[..insert.find("returning").expect("insert returns a snapshot")];
+        for column in MARKET_VALUE_COLUMNS {
+            assert!(
+                insert.contains(column),
+                "market_prices insert does not write {column}; a column the collector \
+                 fills would land null on every row"
+            );
+        }
+
+        let update = WORKER_SOURCE
+            .split("update market_prices market_row")
+            .nth(1)
+            .expect("the market projection must update market_prices");
+        let update = &update[..update.find("where workspace_id").expect("update is scoped")];
+        for column in MARKET_VALUE_COLUMNS {
+            assert!(
+                update.contains(column),
+                "market_prices update does not refresh {column}; a revision would \
+                 leave the old value in place while the rest of the row moved on"
+            );
+        }
+    }
 
     #[test]
     fn automatic_revision_policy_is_limited_to_controlled_upsert_datasets() {
