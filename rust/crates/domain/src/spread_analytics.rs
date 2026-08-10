@@ -575,13 +575,33 @@ fn build_seasonal(points: &[ContinuousPoint], segments: &[WindowSegment]) -> Sea
         .filter_map(|segment| segment.window_year.map(|year| (segment.segment_no, year)))
         .collect();
     let current_year = segment_years.values().copied().max();
-    let anchor = current_year.and_then(|year| {
-        points
-            .iter()
-            .filter(|point| segment_years.get(&point.segment_no) == Some(&year))
-            .map(|point| month_day(point.trade_date))
-            .next()
+    // Whether this combination's window actually runs across a year end. For
+    // 09-01 it does not: the January leg only lists in mid-January, so every
+    // window runs January to August inside one calendar year. For something
+    // like 01-05 it does, and December has to sort before January.
+    //
+    // Anchoring on the current year's first day regardless is what put a few
+    // points at the wrong end of the axis: 2026's window opened 01-19 while
+    // 2024's opened 01-16, so 2024's first three days sorted past August and
+    // drew a cliff at the right edge that no spread ever traded.
+    let crosses_year_end = segments.iter().any(|segment| {
+        matches!(
+            (segment.window_start, segment.window_end),
+            (Some(start), Some(end))
+                if month_day_ordinal(&month_day(start)) > month_day_ordinal(&month_day(end))
+        )
     });
+    let anchor = crosses_year_end
+        .then(|| {
+            current_year.and_then(|year| {
+                points
+                    .iter()
+                    .filter(|point| segment_years.get(&point.segment_no) == Some(&year))
+                    .map(|point| month_day(point.trade_date))
+                    .next()
+            })
+        })
+        .flatten();
     let mut axis_keys = BTreeSet::new();
     let mut grouped: BTreeMap<i32, BTreeMap<String, (Date, Decimal)>> = BTreeMap::new();
     let mut segments_by_year: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
@@ -816,6 +836,60 @@ mod tests {
         assert!(result.continuous_points.is_empty());
         assert_eq!(result.quality.status, "empty");
         assert_eq!(result.quality.missing_contract_point_count, 1);
+    }
+
+    #[test]
+    fn a_window_inside_one_calendar_year_is_not_wrapped_around_it() {
+        // 09-01 opens in mid-January, when the following January leg lists, and
+        // closes at the September leg's retail deadline. Every window therefore
+        // sits inside one calendar year -- but they do not open on the same day,
+        // and anchoring the axis on the newest year's opening day sent the older
+        // years' first days past August. On the chart that drew a cliff at the
+        // right edge, several hundred points of spread that never traded.
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "JM2409".into(),
+            contract("JM2409", 2024, 9, date!(2024 - 08 - 30)),
+        );
+        contracts.insert(
+            "JM2501".into(),
+            contract("JM2501", 2025, 1, date!(2024 - 12 - 31)),
+        );
+        contracts.insert(
+            "JM2509".into(),
+            contract("JM2509", 2025, 9, date!(2025 - 08 - 29)),
+        );
+        contracts.insert(
+            "JM2601".into(),
+            contract("JM2601", 2026, 1, date!(2025 - 12 - 31)),
+        );
+        let result = calculate_windowed_analytics(
+            &[
+                // 2024 的窗口从 01-16 开，2025 的从 01-19 开。
+                point(date!(2024 - 01 - 16), 10.0, "JM2409", "JM2501"),
+                point(date!(2024 - 03 - 01), 11.0, "JM2409", "JM2501"),
+                point(date!(2024 - 08 - 29), 12.0, "JM2409", "JM2501"),
+                point(date!(2025 - 01 - 19), 20.0, "JM2509", "JM2601"),
+                point(date!(2025 - 03 - 01), 21.0, "JM2509", "JM2601"),
+                point(date!(2025 - 08 - 28), 22.0, "JM2509", "JM2601"),
+            ],
+            &contracts,
+            None,
+        )
+        .unwrap();
+        // 轴按自然日历顺序，1 月在最前、8 月在最后。
+        assert_eq!(
+            result.seasonal.axis.first().map(String::as_str),
+            Some("01-16")
+        );
+        assert_eq!(
+            result.seasonal.axis.last().map(String::as_str),
+            Some("08-29")
+        );
+        // 而且 01-19 排在 01-16 之后，不是被甩到八月以后。
+        let position = |key: &str| result.seasonal.axis.iter().position(|k| k == key);
+        assert!(position("01-16") < position("01-19"));
+        assert!(position("01-19") < position("08-28"));
     }
 
     #[test]
