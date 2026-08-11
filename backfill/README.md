@@ -6,6 +6,28 @@
 顺序是运营者定的：**先采原始文件 → 再看清楚里面是什么 → 再建表 → 最后灌**。
 反过来做的代价，2026-08-10 一天之内验证过四次：每次都是灌到一半才发现表里少一列。
 
+## 灌库前必读：workspace 挑哪一个
+
+**不要用 `select id from workspaces order by id limit 1`。**
+
+生产上有 31 个 workspace，绝大多数是历次验收留下的 E2E 空间。按 UUID 排序取第一个
+挑中的是 `Phase 3C E2E 1`，于是 2026-08-10 那次回填的 23.5 万行价格和 380 万行席位
+全落在一个测试空间里，运营者的个人 Workspace 只有每日采集写进去的最近八天——
+页面上看起来「几乎没有数据」，而库里明明躺着十三年。这个错不报任何异常。
+
+正确判据：**有 `market_prices` 的那个 workspace**。每日采集是以运营者的账号登录写
+进去的，所以有行情的空间必然是他在用的。
+
+```sql
+-- 装载时这样限定
+where exists (select 1 from market_prices m where m.workspace_id = <目标>)
+```
+
+另一个相关的坑：`product_instrument_scope` 是**逐 workspace** 播种的，每个空间都有
+一份。join 它而不限定 workspace，一份 CSV 会被复制成 31 份——同一天发生过，
+3639 行灌出 112809 行。
+
+
 ## 用法
 
 脚本跑在 VPS 上（`/opt/futures-platform/`），三步各自可断点续跑。

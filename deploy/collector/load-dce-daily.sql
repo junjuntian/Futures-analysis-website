@@ -32,7 +32,18 @@ select gen_random_uuid(), s.workspace_id, d.exchange, d.instrument, d.contract, 
   -- 只装两个产品覆盖的品种，且只装该 workspace 已经登记了范围的。
   join product_instrument_scope s
     on s.instrument = d.instrument and s.exchange = d.exchange
- where d.close_price is not null or d.settlement_price is not null
+ where (d.close_price is not null or d.settlement_price is not null)
+   -- 只装进**真正在用的**那个 workspace。
+   --
+   -- product_instrument_scope 每个 workspace 都有一份（迁移是逐 workspace 播的），
+   -- 不加这个条件，一份 CSV 会被复制成 31 份——生产上真发生过，3639 行灌出 112809 行。
+   --
+   -- 判据用「有没有 market_prices」而不是别的：每日采集是以运营者的账号登录写进去的，
+   -- 所以有行情的那个空间必然是他在用的。回填脚本当初用「UUID 最小的 workspace」，
+   -- 挑中的是一个 Phase 3C 的 E2E 测试空间，十三年的数据因此躺在运营者看不见的地方。
+   and exists (
+       select 1 from market_prices m where m.workspace_id = s.workspace_id
+   )
 on conflict (workspace_id, contract, trade_date, source) do update set
     open_price = excluded.open_price,
     high_price = excluded.high_price,
