@@ -1,7 +1,20 @@
-CRON_TZ=Asia/Shanghai
-30 17 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
-30 21 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
+# 时刻一律写 UTC，因为 CRON_TZ 在这台机器上不生效。
+#
+# 原来第一行是 CRON_TZ=Asia/Shanghai，下面按北京时间写 17:30 / 21:30。实测
+# （journalctl -u cron）它在 **17:30 和 21:30 UTC** 触发，也就是北京次日凌晨
+# 01:30 / 05:30——每天的行情与席位因此被推迟约八小时才入库。运营者 2026-08-11
+# 晚上问「为什么没有 8.11 的数据」，根因就是这个：当天收盘六小时后库里还是空的。
+# 机器 TZ 是 UTC，写 UTC 是唯一不依赖 cron 实现细节的写法。
+#
+# 北京时间对照（UTC+8，以下时刻均不跨日）：
+#   09:30 UTC = 17:30 北京  日盘收盘后，交易所已发布当日榜单
+#   13:30 UTC = 21:30 北京  兜底一次，补上第一趟时尚未发布的交易所
+#   15:00 UTC = 23:00 北京  价差预热，此时没人在看页面
+#
+# 星期用 1-5：09:30/13:30/15:00 UTC 与北京同日，不存在日界漂移。
+30 9 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
+30 13 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
 # Spread warming runs after the evening collection, when the upstream has
 # settled and nobody is on the page. Weekdays only: a weekend series is
 # identical to Friday's, so refreshing it would spend requests on nothing.
-0 23 * * 1-5 root /usr/local/sbin/run-futures-spread-warm >>/var/log/futures-spread-warm.log 2>&1
+0 15 * * 1-5 root /usr/local/sbin/run-futures-spread-warm >>/var/log/futures-spread-warm.log 2>&1
