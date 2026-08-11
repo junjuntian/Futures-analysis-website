@@ -41,7 +41,9 @@ else
   fail "这些改动会进构建产物却没提交：$(printf '%s' "$dirty_deployed" | head -3 | tr '\n' ' ')"
 fi
 
-other=$(git status --porcelain | awk '{print $2}' | grep -Ev "$DEPLOYED_PATHS" | head -3 | tr '\n' ' ')
+# || true：工作树完全干净时 grep 空匹配退出 1，会被 pipefail 打死——只在
+# 「一个未提交文件都没有」的日子才现形，第一次撞上时脚本连第二节都没跑到。
+other=$(git status --porcelain | awk '{print $2}' | grep -Ev "$DEPLOYED_PATHS" | head -3 | tr '\n' ' ' || true)
 if [ -n "$other" ]; then
   printf '  \033[33m·\033[0m 其他改动（不进构建，仅提醒）：%s\n' "$other"
 fi
