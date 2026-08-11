@@ -3,12 +3,6 @@ import { SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from './stores/auth'
 
 const auth = useAuthStore()
-
-// 机构资金是 nginx 直接服务的静态页(/smart-money/),不在 Vue 路由里,
-// 用整页跳转;其余菜单仍走 el-menu 的 router 模式。
-function openSmartMoney() {
-  window.location.assign('/smart-money/')
-}
 </script>
 
 <template>
@@ -46,7 +40,7 @@ function openSmartMoney() {
           <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
           <el-menu-item index="/seats?tab=building">建仓过程</el-menu-item>
         </el-sub-menu>
-        <el-menu-item index="/smart-money-external" @click="openSmartMoney">
+        <el-menu-item index="/smart-money-view">
           <span class="nav-emoji">💰</span>
           <span>机构资金</span>
         </el-menu-item>
