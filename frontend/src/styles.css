@@ -56,6 +56,15 @@ body {
   font-size: 11px;
 }
 
+/* 侧栏 emoji 图标:对齐原 el-icon 的占位(运营者 2026-08-11 拍板换彩色图标) */
+.nav-emoji {
+  width: 24px;
+  margin-right: 8px;
+  font-size: 17px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
 .page {
   max-width: 1120px;
   margin: 0 auto;

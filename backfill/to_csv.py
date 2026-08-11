@@ -95,7 +95,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--what", required=True, choices=["czce", "shfe", "sanhe", "all"])
     ap.add_argument("--limit", type=int, default=0)
+    # 每日增量:只解析文件名日期 >= SINCE 的原始文件(文件名即 YYYYMMDD 戳)。
+    # 全量回填不带此参,行为不变。
+    ap.add_argument("--since", default="")
     args = ap.parse_args()
+    since_stamp = args.since.replace("-", "")
     OUT.mkdir(parents=True, exist_ok=True)
 
     price_path = OUT / f"price_{args.what}.csv"
@@ -124,6 +128,9 @@ def main() -> int:
 
         for sub, fn, writer, shape, pattern in jobs:
             files = sorted(glob.glob(str(RAW / sub / pattern)))
+            if since_stamp:
+                files = [f for f in files
+                         if "".join(ch for ch in Path(f).stem if ch.isdigit()) >= since_stamp]
             if args.limit:
                 files = files[: args.limit]
             for path in files:

@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { Histogram, Cpu, DataAnalysis, HomeFilled, Key, SwitchButton, UploadFilled, User } from '@element-plus/icons-vue'
+import { SwitchButton } from '@element-plus/icons-vue'
 import { useAuthStore } from './stores/auth'
 
 const auth = useAuthStore()
+
+// 机构资金是 nginx 直接服务的静态页(/smart-money/),不在 Vue 路由里,
+// 用整页跳转;其余菜单仍走 el-menu 的 router 模式。
+function openSmartMoney() {
+  window.location.assign('/smart-money/')
+}
 </script>
 
 <template>
@@ -11,20 +17,20 @@ const auth = useAuthStore()
       <div class="brand">Futures Analysis</div>
       <el-menu router :default-active="$route.path">
         <el-menu-item index="/">
-          <el-icon><HomeFilled /></el-icon>
+          <span class="nav-emoji">🏠</span>
           <span>首页</span>
         </el-menu-item>
         <el-menu-item index="/auth">
-          <el-icon><Key /></el-icon>
+          <span class="nav-emoji">🔑</span>
           <span>身份认证</span>
         </el-menu-item>
         <el-menu-item index="/imports">
-          <el-icon><UploadFilled /></el-icon>
+          <span class="nav-emoji">☁️</span>
           <span>导入中心</span>
         </el-menu-item>
         <el-sub-menu index="spread-analytics">
           <template #title>
-            <el-icon><DataAnalysis /></el-icon>
+            <span class="nav-emoji">🧮</span>
             <span>套利分析</span>
           </template>
           <el-menu-item index="/spread-analytics/monitor" disabled>
@@ -34,18 +40,22 @@ const auth = useAuthStore()
         </el-sub-menu>
         <el-sub-menu index="seats">
           <template #title>
-            <el-icon><Histogram /></el-icon>
+            <span class="nav-emoji">📊</span>
             <span>席位</span>
           </template>
           <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
           <el-menu-item index="/seats?tab=building">建仓过程</el-menu-item>
         </el-sub-menu>
+        <el-menu-item index="/smart-money-external" @click="openSmartMoney">
+          <span class="nav-emoji">💰</span>
+          <span>机构资金</span>
+        </el-menu-item>
         <el-menu-item index="/sessions">
-          <el-icon><User /></el-icon>
+          <span class="nav-emoji">👤</span>
           <span>Session</span>
         </el-menu-item>
         <el-menu-item index="/system">
-          <el-icon><Cpu /></el-icon>
+          <span class="nav-emoji">⚙️</span>
           <span>系统状态</span>
         </el-menu-item>
       </el-menu>
