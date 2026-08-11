@@ -10,6 +10,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # 复用判定要列出本工作流的历史运行找基线。少了这条，API 403 被 fail-open 吞掉，
+  # 判定永远取不到基线、永远全量重建——行为安全但复用形同虚设，首跑就是这么空转的。
+  actions: read
 
 jobs:
   publish:
@@ -110,7 +113,12 @@ jobs:
           done < <(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/container-images.yml/runs?status=success&per_page=20" \
             | jq -r '.workflow_runs[].head_sha' || true)
-          if [[ -z "$base" ]]; then decide build; exit 0; fi
+          if [[ -z "$base" ]]; then
+            # 基线取不到就老实说一声再全量建，别让 403 之类的原因被静默吞掉。
+            echo "DECIDE_NOTE no baseline found (api perms? first run?), building"
+            decide build
+            exit 0
+          fi
           if ! git diff --quiet "$base" "$GITHUB_SHA" -- "${watched[@]}"; then decide build; exit 0; fi
           # 基线镜像必须真的在 GHCR 里，说了复用就要有东西可用。
           if ! docker buildx imagetools inspect "${IMAGE}:sha-${base}" >/dev/null 2>&1; then decide build; exit 0; fi
