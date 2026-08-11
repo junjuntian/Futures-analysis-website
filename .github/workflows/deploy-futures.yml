@@ -154,6 +154,10 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/run-spread-warm.sh"
           install -m 600 deploy/collector/project-history.sql \
             "${RELEASE_BUNDLE}/deploy/collector/project-history.sql"
+          install -m 600 deploy/collector/sina-dce-daily.py \
+            "${RELEASE_BUNDLE}/deploy/collector/sina-dce-daily.py"
+          install -m 600 deploy/collector/load-dce-daily.sql \
+            "${RELEASE_BUNDLE}/deploy/collector/load-dce-daily.sql"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \

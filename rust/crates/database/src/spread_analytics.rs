@@ -1097,6 +1097,27 @@ mod tests {
     }
 
     #[test]
+    fn the_exchanges_own_numbers_win_over_a_reseller() {
+        // 同一天同一合约可能同时有交易所年度文件和新浪两行——身份键里带 source，
+        // 两行都合法。原来按 source 字典序取，'sina' 排在 'dce_official_history'
+        // 之后，于是官方数据被聚合源盖掉，而且看不出来。
+        let ranking = OWN_SPREAD_POINTS_SQL
+            .split("order by contract, trade_date,")
+            .nth(1)
+            .expect("去重的排序还在");
+        let official = ranking.find("_official").expect("官方源要参与排序");
+        let sina = ranking.find("'sina'").expect("新浪要参与排序");
+        assert!(
+            official < sina,
+            "官方源必须排在新浪前面，否则官方数据会被盖掉"
+        );
+        assert!(
+            !ranking.starts_with(" source desc"),
+            "不能再按 source 字典序挑行"
+        );
+    }
+
+    #[test]
     fn one_trading_day_yields_one_spread_point_even_with_two_sources() {
         // price_history 的身份键里带 source，回填与日更对同一天各写一行都是合法的。
         // 两条腿各自 join 一次，不先收敛成一行的话同一个交易日会在图上出现多次，
@@ -1523,15 +1544,23 @@ const OWN_SPREAD_POINTS_SQL: &str = "with years as (
              -- 都合法地存在。不收敛成一行的话，下面两次 join 会把同一天算成多个点，
              -- 一个交易日在图上出现两次。
              --
-             -- 取 source 字典序最大的那一行是任意但**确定**的选择：真正重要的是同一
-             -- 天在两条腿上取的是同一套口径，且今天和明天取的是同一行。收盘价是交易所
-             -- 公布的同一个数，两个来源本就该一致；不一致说明有源坏了，那是采集侧的
-             -- 问题，不该在这里靠挑一个来掩盖。
+             -- 挑哪一行不是任意的：交易所自己发布的压过转手的聚合源。原来按 source
+             -- 字典序取，那只是「确定」而不是「对」——'sina' 排在 'dce_official_history'
+             -- 之后，官方数据反而会被盖掉。以后大商所官方通了、同一天两个来源都有时，
+             -- 官方的那行要自动胜出。
              select distinct on (contract, trade_date)
                     contract, trade_date, close_price
                from price_history
               where workspace_id = $1 and instrument = $2 and close_price is not null
-              order by contract, trade_date, source desc
+              order by contract, trade_date,
+                       case
+                           when source like '%_official%' then 0  -- 交易所年度文件
+                           when source = 'akshare_v1' then 1      -- 交易所公开接口的封装
+                           when source like 'eastmoney%' then 2
+                           when source = 'sina' then 3
+                           else 4
+                       end,
+                       source
          )
          select a.trade_date,
                 -- ::text 而非直接取 numeric：sqlx 未开 decimal feature，
