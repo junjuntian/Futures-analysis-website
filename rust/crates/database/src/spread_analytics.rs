@@ -1097,6 +1097,52 @@ mod tests {
     }
 
     #[test]
+    fn rust_normalisation_matches_the_sql_member_key() {
+        // 过滤在 Rust 里归一（seat_member_variants），展示与去重键在 SQL 里归一
+        // （MEMBER_KEY）。两边语义必须逐字相同，否则同一家会员在下拉里是一个名字、
+        // 在数据里是另一个，页面查不出任何东西还不报错。
+        for (raw, expected) in [
+            ("国泰君安（代客）", "国泰君安"),
+            ("国泰君安", "国泰君安"),
+            ("中信期货(代客)", "中信期货"),
+            // 结尾没有闭括号：正则不匹配，原样保留。
+            ("中信（国际", "中信（国际"),
+            // 只有闭括号没有开括号：不匹配。
+            ("某某)", "某某)"),
+            // 正则 [^）)]* 允许中间再有开括号——匹配从最左那个可行的开括号起。
+            ("甲（（乙）", "甲"),
+            // 前一组括号已闭合：只剥最后一组。
+            ("甲（乙）（丙）", "甲（乙）"),
+            ("", ""),
+        ] {
+            assert_eq!(normalize_member(raw), expected, "raw = {raw:?}");
+        }
+    }
+
+    #[test]
+    fn member_filters_run_on_the_raw_column_not_through_a_function() {
+        // RLS 教训：regexp_replace 不是 leakproof，放进过滤条件后优化器拒绝下推成
+        // 索引条件，runtime 角色下 60 秒超时。过滤必须是原始列上的纯比较。
+        let building = building_days_sql();
+        assert!(
+            building.contains("member = any($3::text[])"),
+            "建仓过程的会员过滤必须走原始列"
+        );
+        assert!(
+            !building.contains("regexp_replace(member, '[（(][^）)]*[）)]$', '') = $"),
+            "归一化表达式不许出现在过滤条件里"
+        );
+        assert!(
+            RAW_MEMBER_WALK_SQL.contains("member > walk.member"),
+            "跳跃扫描必须是纯列比较"
+        );
+        assert!(
+            !RAW_MEMBER_WALK_SQL.contains("regexp_replace"),
+            "跳跃扫描里不许有函数包装"
+        );
+    }
+
+    #[test]
     fn one_firm_stays_one_firm_across_sources() {
         // 同一家在不同源下写法不同：大商所 08-05 由 akshare 采写「国泰君安」，
         // 08-06 起改由东财采写「国泰君安（代客）」。不归一，页面上就是两个会员，
@@ -1668,7 +1714,76 @@ pub struct SeatPositionRow {
 ///
 /// `member` 原文一个字不改，归一只发生在查询时：交易所与数据源发布的名字是事实，
 /// 我们对它的理解是解释，两者不该混在一列里。
+/// **只许用于小结果集上的展示与去重键，绝不许出现在 WHERE 过滤里。**
+///
+/// 教训（2026-08-11 生产事故）：把它放进过滤条件后，futures_app 下 121 毫秒的查询在
+/// futures_runtime + RLS 下 60 秒超时——`regexp_replace` 不是 leakproof 函数，RLS 之下
+/// 优化器拒绝把它下推成索引条件，每次求值都退化成全表扫。席位页会员下拉因此整个空掉。
+/// 性能测试当时用 futures_app 跑的，绕过了 RLS，测的不是生产真实路径。
+///
+/// 过滤一律走原始 `member` 列（纯比较运算，RLS 友好），归一化在 Rust 里做
+/// （`normalize_member`，与本正则同语义，有测试盯两边一致）。
 const MEMBER_KEY: &str = "regexp_replace(member, '[（(][^）)]*[）)]$', '')";
+
+/// 原始会员名的跳跃扫描：沿 (workspace_id, member, …) 索引一个名字跳一次。
+/// 纯列比较，RLS 下照常走索引——这正是它存在的理由，见 `MEMBER_KEY` 上的教训。
+const RAW_MEMBER_WALK_SQL: &str = "with recursive walk as (
+     select min(member) as member from seat_history
+      where workspace_id = $1 and ($2::text is null or instrument = $2)
+     union all
+     select (select min(member) from seat_history
+              where workspace_id = $1 and ($2::text is null or instrument = $2)
+                and member > walk.member)
+       from walk where walk.member is not null
+ )
+ select member from walk where member is not null order by member limit 2000";
+
+/// 与 `MEMBER_KEY` 的正则**同语义**：剥掉结尾的一组括号限定词。
+/// 正则是 `[（(][^）)]*[）)]$`——匹配起点是「其后直到结尾都没有闭括号」的最左一个
+/// 开括号，也就是正文里最后一个闭括号之后的第一个开括号。改任何一边必须同步另一边，
+/// `rust_normalisation_matches_the_sql_member_key` 盯着。
+pub(crate) fn normalize_member(raw: &str) -> String {
+    if !(raw.ends_with('）') || raw.ends_with(')')) {
+        return raw.to_string();
+    }
+    let close_len = raw.chars().next_back().map_or(0, char::len_utf8);
+    let body = &raw[..raw.len() - close_len];
+    let after_last_close = body
+        .char_indices()
+        .rev()
+        .find(|(_, c)| matches!(c, '）' | ')'))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    match body[after_last_close..]
+        .char_indices()
+        .find(|(_, c)| matches!(c, '（' | '('))
+    {
+        Some((offset, _)) => body[..after_last_close + offset].to_string(),
+        None => raw.to_string(),
+    }
+}
+
+/// 一个归一化名字对应的全部原始写法（「国泰君安」→「国泰君安」「国泰君安（代客）」）。
+/// 过滤要拿原始写法做 `member = any(...)`，理由见 `MEMBER_KEY`。
+/// 名字不认识时原样返回：等值过滤自然得到空集，不须特判。
+async fn seat_member_variants(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    normalized: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let raw = sqlx::query_scalar::<_, String>(RAW_MEMBER_WALK_SQL)
+        .bind(workspace_id)
+        .bind(None::<&str>)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut variants: Vec<String> = raw
+        .into_iter()
+        .filter(|name| normalize_member(name) == normalized)
+        .collect();
+    if variants.is_empty() {
+        variants.push(normalized.to_string());
+    }
+    Ok(variants)
+}
 
 /// 席位来源的可信度。同一天同一榜同一会员可能有不止一个源——郑商所 08-07 就同时有
 /// czce_official 与 akshare_v1，两边数字未必一致。不排序去重的话，席位页会把同一天
@@ -1697,6 +1812,10 @@ pub async fn load_seat_positions(
 ) -> Result<Vec<SeatPositionRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
+    let member_variants = match member {
+        Some(name) => Some(seat_member_variants(&mut tx, workspace_id, name).await?),
+        None => None,
+    };
     let rows = sqlx::query(&format!(
         "select exchange, instrument, contract, is_variety_total, variety_total_is_computed,
                 rank_type, rank, member, quantity, change, source
@@ -1711,7 +1830,8 @@ pub async fn load_seat_positions(
                     quantity::text as quantity, change::text as change, source
                from seat_history
               where workspace_id = $1 and trade_date = $2
-                and ($3::text is null or {member_key} = $3)
+                -- 过滤走原始列（等值、索引可用）；归一只出现在展示与去重键上。
+                and ($3::text[] is null or member = any($3))
                 and ($4::text is null or instrument = $4)
               order by exchange, instrument, contract, is_variety_total,
                        rank_type, {member_key}, {source_rank}, source
@@ -1723,7 +1843,7 @@ pub async fn load_seat_positions(
     ))
     .bind(workspace_id)
     .bind(trade_date)
-    .bind(member)
+    .bind(member_variants)
     .bind(instrument)
     .fetch_all(&mut *tx)
     .await?;
@@ -1756,14 +1876,18 @@ pub async fn seat_trade_dates(
 ) -> Result<Vec<Date>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query_scalar::<_, Date>(&format!(
+    let member_variants = match member {
+        Some(name) => Some(seat_member_variants(&mut tx, workspace_id, name).await?),
+        None => None,
+    };
+    let rows = sqlx::query_scalar::<_, Date>(
+        // 过滤走原始列，理由见 MEMBER_KEY 上的教训。
         "select distinct trade_date from seat_history
-              where workspace_id = $1 and ($2::text is null or {member_key} = $2)
+              where workspace_id = $1 and ($2::text[] is null or member = any($2))
               order by trade_date desc limit $3",
-        member_key = MEMBER_KEY,
-    ))
+    )
     .bind(workspace_id)
-    .bind(member)
+    .bind(member_variants)
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -1782,7 +1906,7 @@ fn building_days_sql() -> String {
              select distinct on (trade_date, contract, is_variety_total, rank_type, {member_key})
                     trade_date, rank_type, quantity
                from seat_history
-              where workspace_id = $1 and instrument = $2 and {member_key} = $3
+              where workspace_id = $1 and instrument = $2 and member = any($3::text[])
                 and ($4::text is null or contract = $4)
                 -- 选了具体合约就只看逐合约行；没选就是品种汇总，
                 -- 那要把该席位在各合约上的持仓加起来，而不是混进汇总行。
@@ -1843,10 +1967,11 @@ pub async fn load_building_days(
 ) -> Result<Vec<BuildingDay>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
+    let member_variants = seat_member_variants(&mut tx, workspace_id, member).await?;
     let rows = sqlx::query(&building_days_sql())
         .bind(workspace_id)
         .bind(instrument)
-        .bind(member)
+        .bind(member_variants)
         .bind(contract)
         .fetch_all(&mut *tx)
         .await?;
@@ -1874,41 +1999,20 @@ pub async fn seat_members(
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    // 沿索引一个会员跳一次，而不是逐行扫。
-    //
-    // 原来是 `group by 会员 order by max(quantity)`：扫全库 380 万行只为数出 327 个
-    // 会员，生产实测 2.5 秒。运营者反馈「切换席位比三禾还慢」，六秒里有五秒花在这条
-    // 和它的姊妹查询上，真正取持仓明细只用 28 毫秒。
-    //
-    // 递归 CTE 每次只问「下一个比它大的会员名是谁」，走 seat_history_by_member_key
-    // 索引做 327 次单行定位。生产实测 121 毫秒，会员一个不少。
-    //
-    // 代价是不再按持仓量排序，改按名字。按持仓量排要读 quantity，那就必须回表，
-    // 索引救不了；而全库就 327 家、下拉框本来就能搜，按名字反而好找。
-    let rows = sqlx::query_scalar::<_, String>(&format!(
-        "with recursive walk as (
-             select (select {member_key} from seat_history
-                      where workspace_id = $1
-                        and ($2::text is null or instrument = $2)
-                      order by {member_key} limit 1) as member_key
-             union all
-             select (select {member_key} from seat_history s
-                      where s.workspace_id = $1
-                        and ($2::text is null or s.instrument = $2)
-                        and regexp_replace(s.member, '[（(][^）)]*[）)]$', '') > w.member_key
-                      order by regexp_replace(s.member, '[（(][^）)]*[）)]$', '') limit 1)
-               from walk w where w.member_key is not null
-         )
-         select member_key from walk where member_key is not null
-          order by 1 limit 500",
-        member_key = MEMBER_KEY,
-    ))
-    .bind(workspace_id)
-    .bind(instrument)
-    .fetch_all(&mut *tx)
-    .await?;
+    // 原始列跳跃扫描 + Rust 归一。曾把归一化正则放进 SQL 的分组与排序里，
+    // futures_runtime + RLS 下 60 秒超时（futures_app 下 121 毫秒），席位页会员
+    // 下拉整个空掉——教训全文见 MEMBER_KEY。生产实测本走法 RLS 下 235 毫秒。
+    let raw = sqlx::query_scalar::<_, String>(RAW_MEMBER_WALK_SQL)
+        .bind(workspace_id)
+        .bind(instrument)
+        .fetch_all(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(rows)
+    let mut names: Vec<String> = raw.iter().map(|name| normalize_member(name)).collect();
+    names.sort();
+    names.dedup();
+    names.truncate(500);
+    Ok(names)
 }
 
 /// 该品种的点值。盈亏必须乘它而不是合约单位——八个品种里只有鸡蛋两者不等。
