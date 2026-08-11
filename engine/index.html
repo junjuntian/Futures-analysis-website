@@ -164,7 +164,8 @@ function ratioCard(r) {
 
 function alertBlock(a) {
   const map = {buy: ["danger", "买入触发"], sell_now: ["danger", "卖出执行"], sell_watch: ["warn", "卖出监控"],
-               rare_flip: ["info", "稀有翻空"], pair_window: ["pair", "配对窗口"]};
+               rare_flip: ["info", "稀有翻空"], pair_window: ["pair", "配对窗口"],
+               flee: ["danger", "主力跑路"]};
   const [k, label] = map[a.type] || ["info", "提示"];
   return `<div class="alert ${k}"><span class="tag">${label}</span>
     <div>${a.text.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")}</div><span class="t">${a.date}</span></div>`;

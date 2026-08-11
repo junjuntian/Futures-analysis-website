@@ -620,6 +620,43 @@ def rare_flip_alerts(eng: MarketEngine, lookback_days: int = 60) -> list[dict]:
     return alerts
 
 
+def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
+    """主力跑路警报(运营者 2026-08-11 案例驱动,历史两次全中)。
+
+    结构 = 金银比历史极端低(<48,26 年 ~3% 分位)+ 八家近 5 日白银增空共振(>=3 家)。
+    可选确认 = 任一核心席位黄金多头大额消失(前日 >=2000 手、次日榜上无名)。
+    历史:2011-04(比值 31.7,金榜集体减多增空)→ 两周白银 -28%、黄金 -2%;
+         2026-01(比值 46.6,中财等全员空银 + 高盛清金多)→ 银 -30.6%、金 -12%。
+    样本仅两次,是结构警报不是统计规则——但错报成本是踏空几天,漏报成本是 -20%+。
+    """
+    if ratio["value"] >= RULES["ratio_extreme_low"]:
+        return None
+    d = min(au.dates[-1], ag.dates[-1])
+    w = pd.Timedelta(days=8)
+    shorters = sorted(set(
+        ag.ev_short[(ag.ev_short["trade_date"] > d - w) & (ag.ev_short["trade_date"] <= d)]["member"]))
+    if len(shorters) < 3:
+        return None
+    # 黄金多头大额消失确认(可选,升级警报文案)
+    vanished = []
+    au_dates = au.dates
+    for m in RULES["group8"]:
+        s = au.md[au.md["member"] == m].set_index("trade_date")["long_q"].dropna()
+        s = s[s.index.isin(au_dates)]
+        if len(s) < 2:
+            continue
+        last_seen, prev_q = s.index[-1], s.iloc[-1]
+        i = au_dates.get_loc(last_seen)
+        if prev_q >= 2000 and i + 1 < len(au_dates):  # 之后的交易日榜上无名
+            vanished.append(f"{m}({int(prev_q):,}手)")
+    confirm = f";且 {'、'.join(vanished)} 黄金多头已从榜上消失" if vanished else ""
+    return {"type": "flee", "level": "danger", "market": "AU+AG", "date": str(d.date()),
+            "text": (f"⚠ 主力跑路警报 — 金银比 {ratio['value']}(历史 {ratio['percentile']}% 分位,"
+                     f"极端区)且 {'、'.join(shorters)} 共 {len(shorters)} 家近 5 日集体增空白银{confirm}。"
+                     "历史同构两次(2011-05 / 2026-02)白银两周 -28%/-31%:"
+                     "**持有的金银多单建议立即离场或大幅收紧止损**;配对窗口(多金空银)开启")}
+
+
 def pair_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
     """机构配对形成:比值极端 + ≥3 家同时呈现「一边增多、另一边增空」。"""
     d = min(au.dates[-1], ag.dates[-1])
@@ -712,6 +749,9 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
             })
         alerts.extend(rare_flip_alerts(eng))
 
+    fa = flee_alert(au, ag, ratio)
+    if fa:
+        alerts.insert(0, fa)   # 最高优先级,置顶
     pa = pair_alert(au, ag, ratio)
     if pa:
         alerts.append(pa)
