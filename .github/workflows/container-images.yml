@@ -163,6 +163,20 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           # 与 buildx 推送时的日志同格式：ops/preflight-deploy.sh 靠这一行取 digest。
           echo "pushing manifest for ${IMAGE}:sha-${GITHUB_SHA}@${digest}"
+          # 申报「最初构建自」：复用会成链，唯一可靠的出身是基线镜像自己的
+          # revision 标签（deploy 侧核验的正是它）。读不到合法 sha 就失败，不猜。
+          # dadbeda 只改了消费方（echo 读 outputs.origin），漏了这段生产方——
+          # ORIGIN 恒为空回退成本次 sha，复用镜像的申报全错，Run 31511659679
+          # 因此被 VPS 标签核验拦下。改申报格式时，两端必须同一笔提交里改完。
+          origin=$(docker buildx imagetools inspect "${IMAGE}:sha-${BASE}" \
+            --format '{{ json .Image }}' |
+            jq -r 'if type == "object" and has("config") then . else (to_entries[0].value) end
+                   | .config.Labels["org.opencontainers.image.revision"] // empty')
+          if [[ ! "$origin" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "REUSE_FAIL 基线镜像没有可读的 revision 标签，无法据实申报来源" >&2
+            exit 1
+          fi
+          echo "origin=${origin}" >> "$GITHUB_OUTPUT"
 
       - name: Record immutable image digest
         shell: bash
