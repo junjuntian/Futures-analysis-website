@@ -6,6 +6,7 @@ import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
 import {
   getSeatBuilding,
   getSeatPositions,
+  getSpreadVarieties,
   type BuildingDay,
   type SeatPositionRow
 } from '../api'
@@ -29,6 +30,17 @@ const buildingContract = ref('')
 const days = ref<BuildingDay[]>([])
 const multiplier = ref<string | null>(null)
 const loadingBuilding = ref(false)
+
+// 品种的中文名。库里 product_instrument_scope 定了它，那张表也是套利页品种下拉的
+// 依据——两个页面显示同一个名字，不各写一份。取不到就退回代码，宁可少个中文名，
+// 也不要因为一次取名失败让整张表打不开。
+const varietyNames = ref<Record<string, string>>({})
+
+/** 「苹果 AP」而不是光秃秃的「AP」。运营者看的是品种，代码只是它的编号。 */
+function varietyLabel(code: string) {
+  const name = varietyNames.value[code]
+  return name && name !== code ? `${name} ${code}` : code
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -79,8 +91,18 @@ async function loadBuilding() {
   }
 }
 
+async function loadVarietyNames() {
+  try {
+    const { data } = await getSpreadVarieties('self')
+    varietyNames.value = Object.fromEntries(data.items.map((item) => [item.symbol, item.name]))
+  } catch {
+    // 只是个显示名。取不到就退回代码，不打断这个页面——这里报错会盖住真正要看的表。
+  }
+}
+
 onMounted(() => {
   if (route.query.tab === 'building') tab.value = 'building'
+  loadVarietyNames()
   loadPositions()
 })
 watch([member, tradeDate], () => {
@@ -289,7 +311,12 @@ const buildingContracts = computed(() => {
               placeholder="筛选商品显示"
               style="width: 260px"
             >
-              <el-option v-for="code in instruments" :key="code" :label="code" :value="code" />
+              <el-option
+                v-for="code in instruments"
+                :key="code"
+                :label="varietyLabel(code)"
+                :value="code"
+              />
             </el-select>
           </div>
         </template>
@@ -308,7 +335,7 @@ const buildingContracts = computed(() => {
             <template v-for="block in blocks" :key="block.instrument">
               <tr v-for="(line, index) in block.contracts" :key="line.contract">
                 <td v-if="index === 0" :rowspan="block.contracts.length" class="instrument">
-                  {{ block.instrument }}
+                  {{ varietyLabel(block.instrument) }}
                 </td>
                 <td v-if="index === 0" :rowspan="block.contracts.length" class="net">
                   <div :class="block.netTotal >= 0 ? 'long' : 'short'">
@@ -352,7 +379,12 @@ const buildingContracts = computed(() => {
             placeholder="选择品种"
             :disabled="loadingBuilding"
           >
-            <el-option v-for="code in instruments" :key="code" :label="code" :value="code" />
+            <el-option
+              v-for="code in instruments"
+              :key="code"
+              :label="varietyLabel(code)"
+              :value="code"
+            />
           </el-select>
           <el-select
             v-model="buildingContract"
