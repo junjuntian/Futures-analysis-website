@@ -1097,6 +1097,39 @@ mod tests {
     }
 
     #[test]
+    fn one_firm_stays_one_firm_across_sources() {
+        // 同一家在不同源下写法不同：大商所 08-05 由 akshare 采写「国泰君安」，
+        // 08-06 起改由东财采写「国泰君安（代客）」。不归一，页面上就是两个会员，
+        // 同一家的持仓变化被从中间劈开，建仓过程页直接断掉。
+        //
+        // 括号与自营/代客无关——郑商所两个源都带、89 家全带，上期所两个源都不带、
+        // 86 家全不带。一个交易所全带一个全不带，那是数据源的命名习惯。
+        assert!(MEMBER_KEY.contains("regexp_replace(member"));
+        // 全角半角都要认：源之间连括号字符都不统一。
+        assert!(MEMBER_KEY.contains('（') && MEMBER_KEY.contains('('));
+        // 只去尾部的括号。公司名里本来就带括号的（如「中信建投（国际）」若存在），
+        // 去掉中间的会把两家不同机构并成一家。
+        assert!(MEMBER_KEY.contains("$'"), "必须锚在结尾：{MEMBER_KEY}");
+    }
+
+    #[test]
+    fn the_building_chart_never_counts_a_day_twice() {
+        // 这条是四处里最贵的一处：建仓过程按会员逐日求和，同一天同一榜若有两个源
+        // 各一行，持仓被直接算成两倍，而图上看不出任何异常——线还是连续的，
+        // 形状还像那么回事，只是数值全错。
+        let query = building_days_sql();
+        let dedupe = query.find("distinct on").expect("求和之前必须先按来源去重");
+        let sum = query
+            .find("sum(case when rank_type")
+            .expect("建仓过程的求和还在");
+        assert!(dedupe < sum, "去重必须发生在求和之前，否则等于没去");
+        assert!(
+            query.contains("regexp_replace(member"),
+            "汇总必须按归一后的会员，否则同一家的两种写法各算一份"
+        );
+    }
+
+    #[test]
     fn the_exchanges_own_numbers_win_over_a_reseller() {
         // 同一天同一合约可能同时有交易所年度文件和新浪两行——身份键里带 source，
         // 两行都合法。原来按 source 字典序取，'sina' 排在 'dce_official_history'
@@ -1622,6 +1655,35 @@ pub struct SeatPositionRow {
     pub source: String,
 }
 
+/// 会员名归一：去掉尾部括号里的限定词。
+///
+/// 同一家机构在不同数据源下写法不同——大商所 08-05 由 akshare 采，写「国泰君安」；
+/// 08-06 起 akshare 那条路断了改由东财采，写「国泰君安（代客）」。同一家、同样的
+/// 行数、只是不同日子由不同源采的。不归一的话，页面上会把它当成两个会员，
+/// 同一家机构的持仓变化被从中间劈开，建仓过程页直接断掉。
+///
+/// **这个括号与自营/代客无关。** 郑商所两个源都写「（代客）」、89 家全带，
+/// 上期所两个源都不带、86 家全不带——一个交易所全带一个全不带，那不是业务区分，
+/// 是各家数据源的命名习惯。曾经按「不带括号=自营」理解过，是错的。
+///
+/// `member` 原文一个字不改，归一只发生在查询时：交易所与数据源发布的名字是事实，
+/// 我们对它的理解是解释，两者不该混在一列里。
+const MEMBER_KEY: &str = "regexp_replace(member, '[（(][^）)]*[）)]$', '')";
+
+/// 席位来源的可信度。同一天同一榜同一会员可能有不止一个源——郑商所 08-07 就同时有
+/// czce_official 与 akshare_v1，两边数字未必一致。不排序去重的话，席位页会把同一天
+/// 的同一家显示两次。
+///
+/// 交易所自己发布的压过封装，封装压过转手的聚合源。三禾排最后但不会被无谓丢弃：
+/// 它覆盖的是全部会员而非前二十，只在同一会员同时出现在官方榜上时才让位。
+const SEAT_SOURCE_RANK: &str = "case
+                when source like '%_official%' then 0
+                when source = 'akshare_v1' then 1
+                when source like 'eastmoney%' then 2
+                when source = 'sanhe' then 3
+                else 4
+            end";
+
 /// 某品种某交易日的全部席位行。
 ///
 /// 数量用文本承载而不是浮点：这些数字后面要拿去算持仓成本，一路保持精确比在
@@ -1635,16 +1697,30 @@ pub async fn load_seat_positions(
 ) -> Result<Vec<SeatPositionRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "select exchange, instrument, contract, is_variety_total, variety_total_is_computed,
-                rank_type, rank, member, quantity::text as quantity, change::text as change, source
-           from seat_history
-          where workspace_id = $1 and trade_date = $2
-            and ($3::text is null or member = $3)
-            and ($4::text is null or instrument = $4)
+                rank_type, rank, member, quantity, change, source
+           from (
+             -- 同一天同一榜同一会员只留一个源，见 SEAT_SOURCE_RANK。
+             select distinct on (exchange, instrument, contract, is_variety_total,
+                                 rank_type, {member_key})
+                    exchange, instrument, contract, is_variety_total,
+                    variety_total_is_computed, rank_type, rank,
+                    -- 归一后的名字才是给人看的那个；原文留在 source 那一路可查。
+                    {member_key} as member,
+                    quantity::text as quantity, change::text as change, source
+               from seat_history
+              where workspace_id = $1 and trade_date = $2
+                and ($3::text is null or {member_key} = $3)
+                and ($4::text is null or instrument = $4)
+              order by exchange, instrument, contract, is_variety_total,
+                       rank_type, {member_key}, {source_rank}, source
+           ) picked
           order by instrument, is_variety_total desc, contract nulls first,
                    rank_type, rank nulls last, member",
-    )
+        member_key = MEMBER_KEY,
+        source_rank = SEAT_SOURCE_RANK,
+    ))
     .bind(workspace_id)
     .bind(trade_date)
     .bind(member)
@@ -1680,11 +1756,12 @@ pub async fn seat_trade_dates(
 ) -> Result<Vec<Date>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query_scalar::<_, Date>(
+    let rows = sqlx::query_scalar::<_, Date>(&format!(
         "select distinct trade_date from seat_history
-          where workspace_id = $1 and ($2::text is null or member = $2)
-          order by trade_date desc limit $3",
-    )
+              where workspace_id = $1 and ($2::text is null or {member_key} = $2)
+              order by trade_date desc limit $3",
+        member_key = MEMBER_KEY,
+    ))
     .bind(workspace_id)
     .bind(member)
     .bind(limit)
@@ -1692,6 +1769,49 @@ pub async fn seat_trade_dates(
     .await?;
     tx.commit().await?;
     Ok(rows)
+}
+
+/// 建仓过程的取数 SQL。提成函数是为了让测试断言这一段本身——
+/// 让测试 include_str! 自己的源码找锚点，测试里的字面量会先被匹配到，
+/// 什么都没断言到还显示通过。同一个坑已经踩到第四次。
+fn building_days_sql() -> String {
+    format!(
+        "with picked as (
+             -- 先按来源去重再求和。这里最要紧：这条是按会员逐日汇总的，同一天同一榜
+             -- 若有两个源各一行，持仓会被直接算成两倍，而图上看不出任何异常。
+             select distinct on (trade_date, contract, is_variety_total, rank_type, {member_key})
+                    trade_date, rank_type, quantity
+               from seat_history
+              where workspace_id = $1 and instrument = $2 and {member_key} = $3
+                and ($4::text is null or contract = $4)
+                -- 选了具体合约就只看逐合约行；没选就是品种汇总，
+                -- 那要把该席位在各合约上的持仓加起来，而不是混进汇总行。
+                and is_variety_total = ($4::text is null)
+              order by trade_date, contract, is_variety_total, rank_type, {member_key},
+                       {source_rank}, source
+         ), seats as (
+             select trade_date,
+                    sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+               from picked
+              group by trade_date
+         ), prices as (
+             select trade_date, open_price, high_price, low_price, close_price, settlement_price
+               from price_history
+              where workspace_id = $1 and $4::text is not null and contract = $4
+         )
+         select coalesce(s.trade_date, p.trade_date) as trade_date,
+                p.open_price::text, p.high_price::text, p.low_price::text,
+                p.close_price::text, p.settlement_price::text,
+                coalesce(s.long_position, 0)::text as long_position,
+                coalesce(s.short_position, 0)::text as short_position
+           from seats s
+           full outer join prices p on p.trade_date = s.trade_date
+          where coalesce(s.trade_date, p.trade_date) is not null
+          order by 1",
+        member_key = MEMBER_KEY,
+        source_rank = SEAT_SOURCE_RANK,
+    )
 }
 
 /// 建仓过程一天的原始素材：K 线、该席位净持仓、当日结算价。
@@ -1723,39 +1843,13 @@ pub async fn load_building_days(
 ) -> Result<Vec<BuildingDay>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query(
-        "with seats as (
-             select trade_date,
-                    sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
-                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
-               from seat_history
-              where workspace_id = $1 and instrument = $2 and member = $3
-                and ($4::text is null or contract = $4)
-                -- 选了具体合约就只看逐合约行；没选就是品种汇总，
-                -- 那要把该席位在各合约上的持仓加起来，而不是混进汇总行。
-                and is_variety_total = ($4::text is null)
-              group by trade_date
-         ), prices as (
-             select trade_date, open_price, high_price, low_price, close_price, settlement_price
-               from price_history
-              where workspace_id = $1 and $4::text is not null and contract = $4
-         )
-         select coalesce(s.trade_date, p.trade_date) as trade_date,
-                p.open_price::text, p.high_price::text, p.low_price::text,
-                p.close_price::text, p.settlement_price::text,
-                coalesce(s.long_position, 0)::text as long_position,
-                coalesce(s.short_position, 0)::text as short_position
-           from seats s
-           full outer join prices p on p.trade_date = s.trade_date
-          where coalesce(s.trade_date, p.trade_date) is not null
-          order by 1",
-    )
-    .bind(workspace_id)
-    .bind(instrument)
-    .bind(member)
-    .bind(contract)
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows = sqlx::query(&building_days_sql())
+        .bind(workspace_id)
+        .bind(instrument)
+        .bind(member)
+        .bind(contract)
+        .fetch_all(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(rows
         .into_iter()
@@ -1780,11 +1874,12 @@ pub async fn seat_members(
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query_scalar::<_, String>(
-        "select member from seat_history
-          where workspace_id = $1 and ($2::text is null or instrument = $2)
-          group by member order by max(quantity) desc, member limit 500",
-    )
+    let rows = sqlx::query_scalar::<_, String>(&format!(
+        "select {member_key} as member from seat_history
+              where workspace_id = $1 and ($2::text is null or instrument = $2)
+              group by 1 order by max(quantity) desc, 1 limit 500",
+        member_key = MEMBER_KEY,
+    ))
     .bind(workspace_id)
     .bind(instrument)
     .fetch_all(&mut *tx)

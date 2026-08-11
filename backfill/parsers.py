@@ -7,6 +7,7 @@ plausible number.
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 WANT = {"AP", "FG", "SA", "AU", "AG", "JM", "JD", "LH"}
@@ -48,24 +49,37 @@ def num(text):
     return s
 
 
-def normalise_contract(raw, listed_year_hint=None):
-    """`AP501` and `ap2501` and `AU2412` all become the same four-digit form."""
+def normalise_contract(raw, trade_date=None):
+    """`AP501` and `ap2501` and `AU2412` all become the same four-digit form.
+
+    三位代码只带一个年份数字，十年一轮回，所以必须有个锚点才能补出世纪。
+
+    **锚点是这一行的交易日，不是品种的上市年。**原来锚在上市年上：
+    `year = listed - listed % 10 + digit`，苹果上市 2017，于是数字 7/8/9 停在
+    2017/2018/2019，只有 0–6 才被推到 2020 年代。结果 2026 年文件里的 `AP701`
+    （真实含义 2027-01）被展成了 `AP1701`——一个 2017 年就交割完的合约，出现在
+    2026 年的席位表里。生产上这样的行有 53 万条，占郑商所席位的 27%。
+
+    正确的锚点是交易日：取数字匹配、且**交割年月不早于交易年月**的最近一个年份。
+    合约不会在交割月之后还挂牌交易，所以这条规则没有歧义。对本来就正确的四位代码
+    和历史上正确的三位代码，这个函数都是幂等的。
+
+    没有交易日就拒绝解析而不是猜——猜出来的合约代码看不出对错，比解析失败糟得多。
+    """
     m = re.fullmatch(r"([A-Za-z]{1,2})(\d{3,4})", str(raw).strip())
     if not m:
         return None
     variety, month = m.group(1).upper(), m.group(2)
     if len(month) == 4:
         return f"{variety}{month}"
-    # Three digits: one year digit. Walk decades forward from the listing year
-    # until the last digit matches, which is exactly how the exchange means it.
-    listed = listed_year_hint or LISTED_YEAR.get(variety)
-    if listed is None:
+    if trade_date is None:
         return None
-    year_digit, mm = int(month[0]), month[1:]
-    year = listed - (listed % 10) + year_digit
-    while year < listed:
+    traded = date.fromisoformat(str(trade_date)) if not hasattr(trade_date, "year") else trade_date
+    year_digit, mm = int(month[0]), int(month[1:])
+    year = traded.year - (traded.year % 10) + year_digit
+    while (year, mm) < (traded.year, traded.month):
         year += 10
-    return f"{variety}{year % 100:02d}{mm}"
+    return f"{variety}{year % 100:02d}{mm:02d}"
 
 
 def _read_text(path):
@@ -104,7 +118,7 @@ def czce_market(path):
         # simply has no header row to skip.
         if len(parts) < 14 or parts[0] in ("合约代码", ""):
             continue
-        contract = normalise_contract(parts[0])
+        contract = normalise_contract(parts[0], trade_date)
         if not contract or contract[:2] not in WANT:
             continue
         turnover = num(parts[12])
@@ -158,7 +172,9 @@ def czce_seats(path):
                 )
                 contract = None
             else:
-                contract = normalise_contract(code.group(1)) if code else None
+                contract = (
+                    normalise_contract(code.group(1), trade_date) if code else None
+                )
                 instrument = contract[:2] if contract else None
             continue
         if instrument not in WANT:
@@ -321,7 +337,7 @@ def sanhe_seats(path):
         if variety not in WANT:
             continue
         for item in contracts:
-            contract = normalise_contract(item.get("code"))
+            contract = normalise_contract(item.get("code"), trade_date)
             if not contract:
                 continue
             for kind, qty_key, chg_key in (
