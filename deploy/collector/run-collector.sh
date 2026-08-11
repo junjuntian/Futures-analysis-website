@@ -95,6 +95,21 @@ else
   echo "PROJECTION_SKIPPED missing $PROJECTION" >&2
 fi
 
+# 品种汇总。大商所、上期所官方不发品种合计，郑商所的合计口径也要统一，这些
+# 汇总行是 compute-seat-totals.sql 从席位行自算出来的。它一直只在回填时手工
+# 跑过——发布包里装了这个文件，却没有任何定时任务执行它，于是汇总永远停在
+# 上一次有人手工跑的那天（2026-08-12 部署后验证时发现停在 08-10）。跟投影
+# 同理：必须跟在采集后面、在同一个脚本里按顺序跑。
+# window_days=10 只重算最近十天：日更只需要覆盖新落库的一两天，兜一点补采余量。
+SEAT_TOTALS="$previous_release_dir/deploy/collector/compute-seat-totals.sql"
+if [ -r "$SEAT_TOTALS" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 -v window_days=10 \
+    < "$SEAT_TOTALS"
+else
+  echo "SEAT_TOTALS_SKIPPED missing $SEAT_TOTALS" >&2
+fi
+
 # 投影做完了，现在才把采集的失败如实抛出去——cron 的邮件与退出码仍然看得到它，
 # 只是不再因为它而丢掉当天其余四家交易所的数据。
 exit "$COLLECTION_STATUS"
