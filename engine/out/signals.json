@@ -1,0 +1,1158 @@
+{
+  "generated_at": "2026-08-11 13:18:19",
+  "data_date": "2026-08-07",
+  "markets": {
+    "AU": {
+      "instrument": "AU",
+      "name": "黄金 AU",
+      "unit": "元/克",
+      "state": "holding",
+      "last_close": 936.76,
+      "main_contract": "AU2610",
+      "conditions": {
+        "score": {
+          "value": 43.68,
+          "target": 6.0,
+          "pass": true
+        },
+        "dist_low": {
+          "value": 7.4,
+          "target": 12.0,
+          "pass": true
+        },
+        "netq": {
+          "value": 72.0,
+          "target": 60.0,
+          "pass": false
+        }
+      },
+      "all_pass": false,
+      "prospective_zone": [
+        924.55,
+        934.55
+      ],
+      "prospective_cost": 929.55,
+      "position": {
+        "entry_date": "2026-06-30",
+        "entry_px": 885.1,
+        "zone": [
+          984.26,
+          994.26
+        ],
+        "inst_cost": 989.26,
+        "seats": [
+          {
+            "member": "中信期货",
+            "strength": 1.11,
+            "hands": 1229
+          },
+          {
+            "member": "华泰期货",
+            "strength": 1.05,
+            "hands": 441
+          },
+          {
+            "member": "国投期货",
+            "strength": 1.12,
+            "hands": 391
+          }
+        ],
+        "pnl_pct": 5.55,
+        "stop_px": 852.03,
+        "fade_days": 0,
+        "fade_target": 10,
+        "hold_days": 29
+      },
+      "weights": {
+        "中财期货": 3.71,
+        "中信期货": 4.73,
+        "海通期货": 4.58,
+        "国泰君安": 4.36,
+        "高盛期货": 5.0,
+        "东证期货": 3.95,
+        "华泰期货": 4.31,
+        "国投期货": 2.93
+      },
+      "theta": 6.0
+    },
+    "AG": {
+      "instrument": "AG",
+      "name": "白银 AG",
+      "unit": "元/千克",
+      "state": "holding",
+      "last_close": 15635.0,
+      "main_contract": "AG2610",
+      "conditions": {
+        "score": {
+          "value": 0.0,
+          "target": 4.63,
+          "pass": false
+        },
+        "dist_low": {
+          "value": 15.4,
+          "target": 12.0,
+          "pass": false
+        },
+        "netq": {
+          "value": 40.0,
+          "target": 60.0,
+          "pass": true
+        }
+      },
+      "all_pass": false,
+      "prospective_zone": null,
+      "prospective_cost": null,
+      "position": {
+        "entry_date": "2026-07-17",
+        "entry_px": 13611.0,
+        "zone": [
+          16103.0,
+          16113.0
+        ],
+        "inst_cost": 16108.0,
+        "seats": [
+          {
+            "member": "海通期货",
+            "strength": 1.95,
+            "hands": 1225
+          },
+          {
+            "member": "国投期货",
+            "strength": 1.02,
+            "hands": 870
+          }
+        ],
+        "pnl_pct": 14.87,
+        "stop_px": 13067.0,
+        "fade_days": 10,
+        "fade_target": 10,
+        "hold_days": 16
+      },
+      "weights": {
+        "中财期货": 3.86,
+        "中信期货": 1.84,
+        "海通期货": 1.4,
+        "国泰君安": 2.48,
+        "高盛期货": 0.0,
+        "东证期货": 1.61,
+        "华泰期货": 3.0,
+        "国投期货": 3.0
+      },
+      "theta": 4.63
+    }
+  },
+  "ratio": {
+    "value": 68.3,
+    "zone": "正常",
+    "note": "无环境限制",
+    "percentile": 50.8,
+    "as_of": "2026-08-07",
+    "mean": 68.8,
+    "thresholds": {
+      "extreme_low": 48.0,
+      "extreme_high": 85.0
+    }
+  },
+  "alerts": [
+    {
+      "type": "sell_watch",
+      "level": "warn",
+      "market": "AU",
+      "date": "2026-08-07",
+      "text": "黄金 AU 多单持有中 — 八席位已连续 0 日无增多事件(满 10 日次日开盘卖出);硬止损 852.03 盘中有效"
+    },
+    {
+      "type": "sell_watch",
+      "level": "warn",
+      "market": "AG",
+      "date": "2026-08-07",
+      "text": "白银 AG 多单持有中 — 八席位已连续 10 日无增多事件(满 10 日次日开盘卖出);硬止损 13067.0 盘中有效"
+    }
+  ],
+  "activity": [
+    {
+      "date": "2026-08-07",
+      "member": "中信期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 4.7,
+      "hands": 1701
+    },
+    {
+      "date": "2026-08-06",
+      "member": "华泰期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 2.3,
+      "weight": 4.3,
+      "hands": 1165
+    },
+    {
+      "date": "2026-08-05",
+      "member": "中信期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.4,
+      "weight": 4.7,
+      "hands": 1835
+    },
+    {
+      "date": "2026-08-05",
+      "member": "国泰君安",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 4.4,
+      "hands": 1875
+    },
+    {
+      "date": "2026-08-05",
+      "member": "高盛期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 2.5,
+      "weight": 5.0,
+      "hands": 1293
+    },
+    {
+      "date": "2026-08-05",
+      "member": "东证期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.3,
+      "weight": 3.9,
+      "hands": 1608
+    },
+    {
+      "date": "2026-08-05",
+      "member": "华泰期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.5,
+      "weight": 4.3,
+      "hands": 760
+    },
+    {
+      "date": "2026-08-05",
+      "member": "国投期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 2.9,
+      "hands": 506
+    },
+    {
+      "date": "2026-08-04",
+      "member": "华泰期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 4.3,
+      "hands": 539
+    },
+    {
+      "date": "2026-08-03",
+      "member": "东证期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.4,
+      "weight": 3.9,
+      "hands": 1672
+    },
+    {
+      "date": "2026-07-31",
+      "member": "国泰君安",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.6,
+      "weight": 4.4,
+      "hands": 2155
+    },
+    {
+      "date": "2026-07-31",
+      "member": "高盛期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.5,
+      "weight": 5.0,
+      "hands": 680
+    },
+    {
+      "date": "2026-07-30",
+      "member": "高盛期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.6,
+      "weight": 5.0,
+      "hands": 728
+    },
+    {
+      "date": "2026-07-27",
+      "member": "高盛期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.1,
+      "weight": 5.0,
+      "hands": 527
+    },
+    {
+      "date": "2026-07-24",
+      "member": "中财期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 3.7,
+      "hands": 657
+    },
+    {
+      "date": "2026-07-24",
+      "member": "中财期货",
+      "market": "AG",
+      "market_name": "白银 AG",
+      "action": "增多",
+      "strength": 2.9,
+      "weight": 3.9,
+      "hands": 1462
+    },
+    {
+      "date": "2026-07-23",
+      "member": "中财期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.2,
+      "weight": 3.7,
+      "hands": 642
+    },
+    {
+      "date": "2026-07-23",
+      "member": "国泰君安",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 2.2,
+      "weight": 4.4,
+      "hands": 3053
+    },
+    {
+      "date": "2026-07-22",
+      "member": "中财期货",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 3.0,
+      "weight": 3.7,
+      "hands": 1745
+    },
+    {
+      "date": "2026-07-22",
+      "member": "国泰君安",
+      "market": "AU",
+      "market_name": "黄金 AU",
+      "action": "增多",
+      "strength": 1.3,
+      "weight": 4.4,
+      "hands": 1778
+    }
+  ],
+  "history": [
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2026-07-16",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.95,
+          "hands": 1225
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.02,
+          "hands": 870
+        }
+      ],
+      "score": 5.8,
+      "zone": [
+        16103.0,
+        16113.0
+      ],
+      "inst_cost": 16108.0,
+      "entry_date": "2026-07-17",
+      "entry_px": 13611.0,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "持有中",
+      "ret_pct": 14.87,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2026-06-29",
+      "seats": [
+        {
+          "member": "中信期货",
+          "strength": 1.11,
+          "hands": 1229
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.05,
+          "hands": 441
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.12,
+          "hands": 391
+        }
+      ],
+      "score": 13.0,
+      "zone": [
+        984.26,
+        994.26
+      ],
+      "inst_cost": 989.26,
+      "entry_date": "2026-06-30",
+      "entry_px": 885.1,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "持有中",
+      "ret_pct": 5.55,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2026-06-10",
+      "seats": [
+        {
+          "member": "国投期货",
+          "strength": 2.13,
+          "hands": 783
+        }
+      ],
+      "score": 6.2,
+      "zone": [
+        992.88,
+        1002.88
+      ],
+      "inst_cost": 997.88,
+      "entry_date": "2026-06-11",
+      "entry_px": 906.94,
+      "exit_date": "2026-06-25",
+      "exit_px": 870.66,
+      "result": "止损",
+      "ret_pct": -4.0,
+      "marks": {
+        "cross_resonance": false,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2026-03-24",
+      "seats": [
+        {
+          "member": "中财期货",
+          "strength": 1.39,
+          "hands": 911
+        },
+        {
+          "member": "东证期货",
+          "strength": 1.18,
+          "hands": 1362
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.75,
+          "hands": 673
+        }
+      ],
+      "score": 14.9,
+      "zone": [
+        1024.54,
+        1034.54
+      ],
+      "inst_cost": 1029.54,
+      "entry_date": "2026-03-25",
+      "entry_px": 977.0,
+      "exit_date": "2026-05-25",
+      "exit_px": 993.98,
+      "result": "消退卖出",
+      "ret_pct": 1.47,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2026-03-23",
+      "seats": [
+        {
+          "member": "中财期货",
+          "strength": 3.0,
+          "hands": 3057
+        },
+        {
+          "member": "海通期货",
+          "strength": 1.02,
+          "hands": 697
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.43,
+          "hands": 2315
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.11,
+          "hands": 1811
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.78,
+          "hands": 1328
+        },
+        {
+          "member": "国投期货",
+          "strength": 3.0,
+          "hands": 2323
+        }
+      ],
+      "score": 14.7,
+      "zone": [
+        19697.0,
+        19707.0
+      ],
+      "inst_cost": 19702.0,
+      "entry_date": "2026-03-24",
+      "entry_px": 17000.0,
+      "exit_date": "2026-06-08",
+      "exit_px": 16350.0,
+      "result": "止损",
+      "ret_pct": -4.0,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2026-02-02",
+      "seats": [
+        {
+          "member": "高盛期货",
+          "strength": 1.37,
+          "hands": 848
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.5,
+          "hands": 720
+        }
+      ],
+      "score": 6.9,
+      "zone": [
+        1004.19,
+        1014.19
+      ],
+      "inst_cost": 1009.19,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": false,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2026-01-09",
+      "seats": [
+        {
+          "member": "中信期货",
+          "strength": 1.57,
+          "hands": 1903
+        }
+      ],
+      "score": 7.4,
+      "zone": [
+        925.47,
+        935.47
+      ],
+      "inst_cost": 930.47,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2025-08-20",
+      "seats": [
+        {
+          "member": "高盛期货",
+          "strength": 1.03,
+          "hands": 1963
+        },
+        {
+          "member": "国投期货",
+          "strength": 2.26,
+          "hands": 1854
+        }
+      ],
+      "score": 3.9,
+      "zone": [
+        9187.0,
+        9197.0
+      ],
+      "inst_cost": 9192.0,
+      "entry_date": "2025-08-21",
+      "entry_px": 9133.0,
+      "exit_date": "2026-02-09",
+      "exit_px": 19500.0,
+      "result": "消退卖出",
+      "ret_pct": 112.92,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2025-01-14",
+      "seats": [
+        {
+          "member": "国泰君安",
+          "strength": 2.5,
+          "hands": 10253
+        },
+        {
+          "member": "高盛期货",
+          "strength": 1.28,
+          "hands": 1636
+        },
+        {
+          "member": "高盛期货",
+          "strength": 1.19,
+          "hands": 1490
+        },
+        {
+          "member": "高盛期货",
+          "strength": 1.33,
+          "hands": 1720
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.21,
+          "hands": 1915
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.24,
+          "hands": 942
+        }
+      ],
+      "score": 4.4,
+      "zone": [
+        7710.0,
+        7720.0
+      ],
+      "inst_cost": 7715.0,
+      "entry_date": "2025-01-15",
+      "entry_px": 7605.0,
+      "exit_date": "2025-04-01",
+      "exit_px": 8470.0,
+      "result": "消退卖出",
+      "ret_pct": 11.08,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2025-01-02",
+      "seats": [
+        {
+          "member": "高盛期货",
+          "strength": 1.1,
+          "hands": 445
+        },
+        {
+          "member": "华泰期货",
+          "strength": 2.14,
+          "hands": 1177
+        }
+      ],
+      "score": 6.3,
+      "zone": [
+        615.71,
+        625.71
+      ],
+      "inst_cost": 620.71,
+      "entry_date": "2025-01-03",
+      "entry_px": 625.71,
+      "exit_date": "2025-07-15",
+      "exit_px": 777.0,
+      "result": "消退卖出",
+      "ret_pct": 23.32,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": true
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2024-11-25",
+      "seats": [
+        {
+          "member": "华泰期货",
+          "strength": 1.51,
+          "hands": 2691
+        },
+        {
+          "member": "国投期货",
+          "strength": 1.47,
+          "hands": 1334
+        }
+      ],
+      "score": 4.9,
+      "zone": [
+        7836.0,
+        7846.0
+      ],
+      "inst_cost": 7841.0,
+      "entry_date": "2024-11-26",
+      "entry_px": 7665.0,
+      "exit_date": "2024-12-30",
+      "exit_px": 7562.0,
+      "result": "消退卖出",
+      "ret_pct": -1.34,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2024-11-07",
+      "seats": [
+        {
+          "member": "华泰期货",
+          "strength": 1.03,
+          "hands": 1898
+        },
+        {
+          "member": "国投期货",
+          "strength": 2.19,
+          "hands": 2161
+        }
+      ],
+      "score": 5.2,
+      "zone": [
+        8064.0,
+        8074.0
+      ],
+      "inst_cost": 8069.0,
+      "entry_date": "2024-11-08",
+      "entry_px": 7735.0,
+      "exit_date": "2024-11-20",
+      "exit_px": 7850.0,
+      "result": "消退卖出",
+      "ret_pct": 1.12,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [
+          "华泰期货"
+        ],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2024-08-15",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.12,
+          "hands": 2640
+        },
+        {
+          "member": "国泰君安",
+          "strength": 2.0,
+          "hands": 6432
+        },
+        {
+          "member": "东证期货",
+          "strength": 1.93,
+          "hands": 5278
+        },
+        {
+          "member": "东证期货",
+          "strength": 1.74,
+          "hands": 4631
+        },
+        {
+          "member": "东证期货",
+          "strength": 2.25,
+          "hands": 6297
+        }
+      ],
+      "score": 3.6,
+      "zone": [
+        7156.0,
+        7166.0
+      ],
+      "inst_cost": 7161.0,
+      "entry_date": "2024-08-16",
+      "entry_px": 7166.0,
+      "exit_date": "2024-10-15",
+      "exit_px": 7724.0,
+      "result": "消退卖出",
+      "ret_pct": 7.79,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AG",
+      "name": "白银 AG",
+      "signal_date": "2024-07-29",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.73,
+          "hands": 3982
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.79,
+          "hands": 3461
+        }
+      ],
+      "score": 3.8,
+      "zone": [
+        7612.0,
+        7622.0
+      ],
+      "inst_cost": 7617.0,
+      "entry_date": "2024-07-30",
+      "entry_px": 7340.0,
+      "exit_date": "2024-08-06",
+      "exit_px": 7046.0,
+      "result": "止损",
+      "ret_pct": -4.0,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-28",
+      "seats": [
+        {
+          "member": "中信期货",
+          "strength": 1.09,
+          "hands": 1629
+        },
+        {
+          "member": "东证期货",
+          "strength": 1.45,
+          "hands": 1049
+        },
+        {
+          "member": "东证期货",
+          "strength": 2.29,
+          "hands": 1700
+        },
+        {
+          "member": "华泰期货",
+          "strength": 2.3,
+          "hands": 1273
+        }
+      ],
+      "score": 11.4,
+      "zone": [
+        546.49,
+        556.49
+      ],
+      "inst_cost": 551.49,
+      "entry_date": "2024-07-01",
+      "entry_px": 553.3,
+      "exit_date": "2024-12-26",
+      "exit_px": 619.32,
+      "result": "消退卖出",
+      "ret_pct": 10.8,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-26",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.11,
+          "hands": 420
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.11,
+          "hands": 676
+        }
+      ],
+      "score": 5.6,
+      "zone": [
+        522.9,
+        532.9
+      ],
+      "inst_cost": 527.9,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [
+          "海通期货"
+        ],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-25",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.11,
+          "hands": 420
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.11,
+          "hands": 676
+        }
+      ],
+      "score": 5.6,
+      "zone": [
+        522.97,
+        532.97
+      ],
+      "inst_cost": 527.97,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [
+          "海通期货"
+        ],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-24",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.11,
+          "hands": 420
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.11,
+          "hands": 676
+        }
+      ],
+      "score": 5.6,
+      "zone": [
+        523.0,
+        533.0
+      ],
+      "inst_cost": 528.0,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [
+          "海通期货"
+        ],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-20",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 1.11,
+          "hands": 420
+        },
+        {
+          "member": "华泰期货",
+          "strength": 1.11,
+          "hands": 676
+        }
+      ],
+      "score": 5.6,
+      "zone": [
+        522.66,
+        532.66
+      ],
+      "inst_cost": 527.66,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    },
+    {
+      "market": "AU",
+      "name": "黄金 AU",
+      "signal_date": "2024-06-13",
+      "seats": [
+        {
+          "member": "海通期货",
+          "strength": 2.98,
+          "hands": 1148
+        }
+      ],
+      "score": 7.9,
+      "zone": [
+        496.81,
+        506.81
+      ],
+      "inst_cost": 501.81,
+      "entry_date": null,
+      "entry_px": null,
+      "exit_date": null,
+      "exit_px": null,
+      "result": "未回踩放弃",
+      "ret_pct": null,
+      "marks": {
+        "cross_resonance": true,
+        "spread_legs": [],
+        "goldman_combo": false
+      }
+    }
+  ],
+  "stats": {
+    "AU": {
+      "count": 13,
+      "win_rate": 61.5,
+      "avg": 4.95,
+      "total": 64.3,
+      "since": "2019"
+    },
+    "AG": {
+      "count": 27,
+      "win_rate": 48.1,
+      "avg": 5.89,
+      "total": 159.1,
+      "since": "2019"
+    }
+  },
+  "rules": {
+    "group": [
+      "中财期货",
+      "中信期货",
+      "海通期货",
+      "国泰君安",
+      "高盛期货",
+      "东证期货",
+      "华泰期货",
+      "国投期货"
+    ],
+    "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 八席位净仓<60分位 → 机构成本±5元区间挂单(10日有效)",
+    "sell": "八席位连续10日无增多事件(次日开盘) / 进场价-4%盘中止损",
+    "cond_seats": [
+      "国泰君安",
+      "东证期货"
+    ]
+  }
+}

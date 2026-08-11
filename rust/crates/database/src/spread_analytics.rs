@@ -1874,10 +1874,33 @@ pub async fn seat_members(
 ) -> Result<Vec<String>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
+    // 沿索引一个会员跳一次，而不是逐行扫。
+    //
+    // 原来是 `group by 会员 order by max(quantity)`：扫全库 380 万行只为数出 327 个
+    // 会员，生产实测 2.5 秒。运营者反馈「切换席位比三禾还慢」，六秒里有五秒花在这条
+    // 和它的姊妹查询上，真正取持仓明细只用 28 毫秒。
+    //
+    // 递归 CTE 每次只问「下一个比它大的会员名是谁」，走 seat_history_by_member_key
+    // 索引做 327 次单行定位。生产实测 121 毫秒，会员一个不少。
+    //
+    // 代价是不再按持仓量排序，改按名字。按持仓量排要读 quantity，那就必须回表，
+    // 索引救不了；而全库就 327 家、下拉框本来就能搜，按名字反而好找。
     let rows = sqlx::query_scalar::<_, String>(&format!(
-        "select {member_key} as member from seat_history
-              where workspace_id = $1 and ($2::text is null or instrument = $2)
-              group by 1 order by max(quantity) desc, 1 limit 500",
+        "with recursive walk as (
+             select (select {member_key} from seat_history
+                      where workspace_id = $1
+                        and ($2::text is null or instrument = $2)
+                      order by {member_key} limit 1) as member_key
+             union all
+             select (select {member_key} from seat_history s
+                      where s.workspace_id = $1
+                        and ($2::text is null or s.instrument = $2)
+                        and regexp_replace(s.member, '[（(][^）)]*[）)]$', '') > w.member_key
+                      order by regexp_replace(s.member, '[（(][^）)]*[）)]$', '') limit 1)
+               from walk w where w.member_key is not null
+         )
+         select member_key from walk where member_key is not null
+          order by 1 limit 500",
         member_key = MEMBER_KEY,
     ))
     .bind(workspace_id)
