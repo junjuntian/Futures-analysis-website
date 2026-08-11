@@ -20,7 +20,10 @@
 
 begin;
 
-create index seat_history_by_member_key
+-- if not exists:这棵索引先用 create index concurrently 在生产上建好并实测,
+-- 才写进迁移(见上文实测数字)。迁移在生产重放时索引已在,撞名即整单失败——
+-- 2026-08-11 部署 Run 31465309414 因此回滚,故必须幂等。
+create index if not exists seat_history_by_member_key
     on seat_history (
         workspace_id,
         (regexp_replace(member, '[（(][^）)]*[）)]$', '')),
