@@ -48,6 +48,14 @@ pub struct CostPoint {
     /// 浮动盈亏 =（今结算 − 成本）× 今净持仓 × price_multiplier。
     #[schema(value_type = Option<f64>)]
     pub open_pnl: Option<Decimal>,
+    /// 该合约自序列开头至今的当日盈亏累计。
+    ///
+    /// **不可知的那几天按 0 计入而不是中断累计**：当日盈亏不可知（掉出前 20、
+    /// 零成交无结算价）意味着那天赚了多少我们不知道，但累计线不该因此归零或断掉——
+    /// 断掉会让人以为仓位平了。界面上用 `daily_pnl` 为空标出那几天，累计线如实
+    /// 说明它是「已知部分的累计」。
+    #[schema(value_type = f64)]
+    pub cumulative_pnl: Decimal,
     /// 该日成本不可知的原因，供界面如实标注而不是画一条假线。
     pub cost_unknown_reason: Option<&'static str>,
 }
@@ -58,6 +66,7 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
     let mut cost: Option<Decimal> = None;
     let mut previous_net = Decimal::ZERO;
     let mut previous_settlement: Option<Decimal> = None;
+    let mut cumulative = Decimal::ZERO;
 
     for point in points {
         let net = point.net_position;
@@ -71,18 +80,21 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
         }
 
         if net.is_zero() {
+            let today = daily_pnl(
+                previous_net,
+                previous_settlement,
+                point.settlement,
+                price_multiplier,
+            );
+            cumulative += today.unwrap_or(Decimal::ZERO);
             out.push(CostPoint {
                 trade_date: point.trade_date,
                 net_position: net,
                 cost: None,
-                daily_pnl: daily_pnl(
-                    previous_net,
-                    previous_settlement,
-                    point.settlement,
-                    price_multiplier,
-                ),
+                daily_pnl: today,
                 open_pnl: None,
                 cost_unknown_reason: None,
+                cumulative_pnl: cumulative,
             });
             previous_net = net;
             previous_settlement = point.settlement.or(previous_settlement);
@@ -125,18 +137,21 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
             reason = Some("position_opened_before_data");
         }
 
+        let today = daily_pnl(
+            previous_net,
+            previous_settlement,
+            point.settlement,
+            price_multiplier,
+        );
+        cumulative += today.unwrap_or(Decimal::ZERO);
         out.push(CostPoint {
             trade_date: point.trade_date,
             net_position: net,
             cost,
-            daily_pnl: daily_pnl(
-                previous_net,
-                previous_settlement,
-                point.settlement,
-                price_multiplier,
-            ),
+            daily_pnl: today,
             open_pnl,
             cost_unknown_reason: reason,
+            cumulative_pnl: cumulative,
         });
         previous_net = net;
         previous_settlement = point.settlement.or(previous_settlement);
@@ -169,6 +184,28 @@ mod tests {
             net_position: Decimal::from(net),
             settlement,
         }
+    }
+
+    #[test]
+    fn the_cumulative_line_is_the_running_sum_and_unknown_days_do_not_break_it() {
+        // 累计盈亏 = 已知当日盈亏的累加。不可知的那天按 0 计入而不是中断——
+        // 中断会让累计线断开或归零，看上去像仓位平了，那是另一回事。
+        let points = vec![
+            day(date!(2026 - 01 - 05), 10, Some(Decimal::from(100))),
+            day(date!(2026 - 01 - 06), 10, Some(Decimal::from(110))), // +10 × 10 × 1
+            day(date!(2026 - 01 - 07), 10, None),                     // 不可知
+            day(date!(2026 - 01 - 08), 10, Some(Decimal::from(115))), // 相对 110：+5 × 10
+        ];
+        let series = build_cost_series(&points, Decimal::ONE);
+        assert_eq!(series[0].cumulative_pnl, Decimal::ZERO);
+        assert_eq!(series[1].cumulative_pnl, Decimal::from(100));
+        // 不可知那天：当日为空，累计原地不动，不断开。
+        assert_eq!(series[2].daily_pnl, None);
+        assert_eq!(series[2].cumulative_pnl, Decimal::from(100));
+        assert_eq!(series[3].cumulative_pnl, Decimal::from(150));
+        // 累计必须等于各已知当日之和，不是重新算的另一个数。
+        let summed: Decimal = series.iter().filter_map(|p| p.daily_pnl).sum();
+        assert_eq!(series.last().unwrap().cumulative_pnl, summed);
     }
 
     #[test]

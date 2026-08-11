@@ -12,8 +12,21 @@ import {
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
 
+// 选过的席位记在本地，刷新、关标签页、明天再来都还在，直到下次主动改选。
+// 运营者盯的通常就是那么几家机构，每次进来重选一遍是纯粹的重复劳动。
+// 日期不记：数据每天在长，记住某个旧日期只会让人看到过期的表还以为是最新的。
+const MEMBER_KEY = 'seats.member'
+function rememberedMember() {
+  try {
+    return localStorage.getItem(MEMBER_KEY) ?? ''
+  } catch {
+    // 隐私模式下 localStorage 会抛异常。记不住是小事，页面打不开是大事。
+    return ''
+  }
+}
+
 // 席位与日期由两个子页共用：先选好一次，切标签不用重选。
-const member = ref('')
+const member = ref(rememberedMember())
 const tradeDate = ref('')
 const members = ref<string[]>([])
 const availableDates = ref<string[]>([])
@@ -42,6 +55,14 @@ function varietyLabel(code: string) {
   return name && name !== code ? `${name} ${code}` : code
 }
 
+watch(member, (value) => {
+  try {
+    if (value) localStorage.setItem(MEMBER_KEY, value)
+  } catch {
+    // 同上：存不住就算了，不影响用。
+  }
+})
+
 const route = useRoute()
 const router = useRouter()
 
@@ -56,8 +77,11 @@ async function loadPositions() {
     availableDates.value = data.available_dates
     rows.value = data.rows
     if (data.trade_date) tradeDate.value = data.trade_date
-    // 第一次进来没选会员：默认选名录里的第一个，而不是让人对着空白发呆。
-    if (!member.value && data.members.length) {
+    // 没选会员，或记住的那个已经不在名录里（机构改名、退市、数据源换写法），
+    // 都退回名录第一个——否则页面停在一张永远空的表上，看不出是「没数据」还是「坏了」。
+    const missing = Boolean(member.value) && !data.members.includes(member.value)
+    if ((!member.value || missing) && data.members.length) {
+      if (missing) ElMessage.info(`上次选的「${member.value}」已不在名录，改为 ${data.members[0]}`)
       member.value = data.members[0]
       await loadPositions()
     }
@@ -197,6 +221,25 @@ const dates = computed(() => days.value.map((day) => day.trade_date))
 const netSeries = computed(() => days.value.map((day) => num(day.net_position)))
 const costSeries = computed(() => days.value.map((day) => num(day.cost)))
 const pnlSeries = computed(() => days.value.map((day) => num(day.daily_pnl)))
+const cumulativeSeries = computed(() => days.value.map((day) => num(day.cumulative_pnl)))
+
+// 国内看盘的惯例：红涨绿跌。盈亏柱按正负着色，一眼能看出哪天在赚。
+const UP = '#c0392b'
+const DOWN = '#27ae60'
+function pnlBars(values: Array<number | null>) {
+  return values.map((value) => ({
+    value,
+    itemStyle: { color: (value ?? 0) >= 0 ? UP : DOWN }
+  }))
+}
+
+/** 金额按万/亿收敛，否则纵轴挤满零看不清量级。 */
+function money(value: number) {
+  const abs = Math.abs(value)
+  if (abs >= 1e8) return `${(value / 1e8).toFixed(2)} 亿`
+  if (abs >= 1e4) return `${(value / 1e4).toFixed(0)} 万`
+  return value.toFixed(0)
+}
 const candles = computed(() =>
   days.value.map((day) => {
     const open = num(day.open_price)
@@ -235,10 +278,11 @@ const priceOption = computed<EChartsOption>(() => ({
   ]
 }))
 const netOption = computed<EChartsOption>(() => ({
-  grid: { left: 60, right: 24, top: 16, bottom: 28 },
+  grid: { left: 72, right: 24, top: 16, bottom: 28 },
   tooltip: { trigger: 'axis' as const },
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, scale: true },
+  // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
+  yAxis: { type: 'value' as const },
   series: [
     {
       name: '净持仓',
@@ -246,17 +290,39 @@ const netOption = computed<EChartsOption>(() => ({
       data: netSeries.value,
       showSymbol: false,
       connectNulls: false,
-      areaStyle: {}
+      lineStyle: { width: 2 },
+      // 零轴：正的是净多、负的是净空，没有这条线读不出方向。
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        data: [{ yAxis: 0 }],
+        lineStyle: { color: '#999', type: 'dashed' as const },
+        label: { show: false }
+      }
     }
   ]
 }))
 const pnlOption = computed<EChartsOption>(() => ({
-  grid: { left: 60, right: 24, top: 16, bottom: 28 },
+  grid: { left: 72, right: 24, top: 16, bottom: 28 },
   tooltip: { trigger: 'axis' as const },
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, scale: true },
-  series: [{ name: '当日盈亏', type: 'bar' as const, data: pnlSeries.value }]
+  yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
+  series: [{ name: '当日盈亏', type: 'bar' as const, data: pnlBars(pnlSeries.value) }]
 }))
+const cumulativeOption = computed<EChartsOption>(() => ({
+  grid: { left: 72, right: 24, top: 16, bottom: 28 },
+  tooltip: { trigger: 'axis' as const },
+  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
+  yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
+  series: [
+    { name: '合约累计盈亏', type: 'bar' as const, data: pnlBars(cumulativeSeries.value) }
+  ]
+}))
+/** 末日累计值，放在标题旁边——图能看趋势，数字才好念。 */
+const cumulativeTotal = computed(() => {
+  const last = cumulativeSeries.value.filter((value) => value !== null).pop()
+  return last === undefined || last === null ? null : last
+})
 
 const buildingContracts = computed(() => {
   const block = blocks.value.find((item) => item.instrument === buildingInstrument.value)
@@ -424,11 +490,27 @@ const buildingContracts = computed(() => {
         </el-card>
         <el-card shadow="never">
           <template #header><h2>净持仓</h2></template>
-          <SpreadChart :option="netOption" :height="200" export-name="建仓过程-净持仓" />
+          <SpreadChart :option="netOption" :height="260" export-name="建仓过程-净持仓" />
         </el-card>
         <el-card shadow="never">
           <template #header><h2>当日盈亏</h2></template>
-          <SpreadChart :option="pnlOption" :height="200" export-name="建仓过程-当日盈亏" />
+          <SpreadChart :option="pnlOption" :height="260" export-name="建仓过程-当日盈亏" />
+        </el-card>
+        <el-card shadow="never">
+          <template #header>
+            <h2>
+              合约累计盈亏
+              <span v-if="cumulativeTotal !== null" :class="cumulativeTotal >= 0 ? 'up' : 'down'">
+                {{ cumulativeTotal >= 0 ? '累计盈利' : '累计亏损' }}
+                {{ money(Math.abs(cumulativeTotal)) }}
+              </span>
+            </h2>
+          </template>
+          <SpreadChart :option="cumulativeOption" :height="260" export-name="建仓过程-累计盈亏" />
+          <p class="note">
+            当日盈亏的逐日累加。当日盈亏不可知的那几天（掉出前 20 或当日无结算价）按 0 计入，
+            累计线不断开——断开会看起来像仓位平了。所以这是<strong>已知部分</strong>的累计。
+          </p>
         </el-card>
       </template>
     </template>
@@ -436,6 +518,16 @@ const buildingContracts = computed(() => {
 </template>
 
 <style scoped>
+.up {
+  color: #c0392b;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.down {
+  color: #27ae60;
+  font-weight: 600;
+  margin-left: 8px;
+}
 .seats {
   display: flex;
   flex-direction: column;

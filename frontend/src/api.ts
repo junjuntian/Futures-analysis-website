@@ -762,6 +762,8 @@ export interface BuildingDay {
   /** 净持仓成本（推算）——由公开持仓变化与结算价推出，不是成交均价。 */
   cost: string | null
   daily_pnl: string | null
+  /** 自序列开头至今的当日盈亏累计。不可知的天按 0 计入，累计线不断开。 */
+  cumulative_pnl: string
   open_pnl: string | null
   cost_unknown_reason: string | null
 }

@@ -657,6 +657,8 @@ pub struct BuildingDayItem {
     /// 净持仓成本（推算），不是成交均价——我们看不到成交明细。
     pub cost: Option<String>,
     pub daily_pnl: Option<String>,
+    /// 自序列开头至今的当日盈亏累计。不可知的天按 0 计入，累计线不断开。
+    pub cumulative_pnl: String,
     pub open_pnl: Option<String>,
     pub cost_unknown_reason: Option<String>,
 }
@@ -765,6 +767,7 @@ pub async fn query_seat_building(
                 net_position: cost.net_position.to_string(),
                 cost: cost.cost.map(|value| value.round_dp(4).to_string()),
                 daily_pnl: cost.daily_pnl.map(|value| value.round_dp(2).to_string()),
+                cumulative_pnl: cost.cumulative_pnl.round_dp(2).to_string(),
                 open_pnl: cost.open_pnl.map(|value| value.round_dp(2).to_string()),
                 cost_unknown_reason: cost.cost_unknown_reason.map(str::to_string),
             })
