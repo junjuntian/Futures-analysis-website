@@ -20,14 +20,14 @@ ALIAS = {"浙江永安": "永安期货", "乾坤期货": "高盛期货", "上海
 FOCUS = ["国泰君安", "中信期货", "东证期货", "永安期货", "海通期货", "浙商期货", "中财期货", "高盛期货"]
 
 
-def load_price() -> pd.DataFrame:
-    df = pd.read_csv(DATA / "au_price.csv.gz", parse_dates=["trade_date"])
+def load_price(prefix: str = "au") -> pd.DataFrame:
+    df = pd.read_csv(DATA / f"{prefix}_price.csv.gz", parse_dates=["trade_date"])
     df = df.sort_values(["trade_date", "contract"]).reset_index(drop=True)
     return df
 
 
-def load_seat() -> pd.DataFrame:
-    df = pd.read_csv(DATA / "au_seat.csv.gz", parse_dates=["trade_date"])
+def load_seat(prefix: str = "au") -> pd.DataFrame:
+    df = pd.read_csv(DATA / f"{prefix}_seat.csv.gz", parse_dates=["trade_date"])
     for c in ("is_variety_total", "variety_total_is_computed"):
         df[c] = df[c].map({"t": True, "f": False, True: True, False: False}).astype(bool)
     df["member"] = df["member"].replace(ALIAS)
