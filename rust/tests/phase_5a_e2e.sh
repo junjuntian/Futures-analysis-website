@@ -215,7 +215,9 @@ diff -u <(jq -S '.data' "$varieties_json") <(jq -S '.data' "$EVIDENCE_DIR/variet
 
 VARIETY_A=$(jq -r '.data.items[0].name' "$varieties_json")
 VARIETY_B=$(jq -r '.data.items[1].name' "$varieties_json")
+SYMBOL_A=$(jq -r '.data.items[0].symbol' "$varieties_json")
 test "$VARIETY_A" != "$VARIETY_B"
+test -n "$SYMBOL_A"
 PATH_A="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$VARIETY_A")/months"
 PATH_B="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$VARIETY_B")/months"
 throttle_before=$(psql_value -c \
@@ -333,19 +335,22 @@ echo "PHASE5A_E2E_STAGE live_provider_passed"
 
 echo "PHASE5A_E2E_STAGE favorites_and_rls"
 # Favorite uniqueness covers the leg pair only, not the name, so a probe using
-# jm 09-01 collides with the operator's own favorite for the combination they
-# are most likely to save. Pick two months outside the common spreads, and
+# a common pair collides with the operator's own favorite for the combination
+# they are most likely to save. Pick two months outside the common spreads, and
 # clear only rows this test created (matched by its own name) so a run
 # interrupted before cleanup cannot block the next one.
+# The probe variety follows the live-provider control pair (months-a.json is
+# VARIETY_A's month list fetched above); the old jm-months.json file no longer
+# exists in this harness and referencing it failed the 2026-08-11 deploy.
 FAVORITE_MONTH_ONE=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][0] // "09"' \
-  "$EVIDENCE_DIR/jm-months.json")
+  "$EVIDENCE_DIR/months-a.json")
 FAVORITE_MONTH_TWO=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][1] // "01"' \
-  "$EVIDENCE_DIR/jm-months.json")
+  "$EVIDENCE_DIR/months-a.json")
 test -n "$FAVORITE_MONTH_ONE"
 test -n "$FAVORITE_MONTH_TWO"
 test "$FAVORITE_MONTH_ONE" != "$FAVORITE_MONTH_TWO"
 psql_value -c "delete from spread_favorites where workspace_id='$WORKSPACE_ONE' and name='Phase 5A VPS E2E'" >/dev/null
-favorite_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" \
+favorite_body=$(jq -cn --arg variety "$VARIETY_A" --arg symbol "$SYMBOL_A" \
   --arg month1 "$FAVORITE_MONTH_ONE" --arg month2 "$FAVORITE_MONTH_TWO" '
   {name:"Phase 5A VPS E2E",provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:$month1},leg2:{variety:$variety,symbol:$symbol,month:$month2}}')
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
