@@ -119,8 +119,23 @@ if [ "$build_id" = "null" ] || [ -z "$build_id" ]; then
   digests=""
 else
   pass "镜像构建 $build_id 成功"
-  digests=$(gh run view "$build_id" --log 2>/dev/null |
+  build_log=$(gh run view "$build_id" --log 2>/dev/null)
+  digests=$(printf '%s\n' "$build_log" |
     grep -o "pushing manifest for ghcr.io[^ ]*@sha256:[0-9a-f]*" | sort -u)
+  # 构建工作流会打出 image-built-from <镜像> <提交>：复用旧镜像时那不是本次 HEAD。
+  # deploy 要据此核验「复用的镜像与本次 sha 在其输入路径上逐字节一致」，所以
+  # 把非 HEAD 的来源收进 image_sources 传给它。
+  image_sources=""
+  while read -r _ built_image built_sha; do
+    [ -z "$built_image" ] && continue
+    if [ "$built_sha" != "$SHA" ]; then
+      image_sources="${image_sources:+$image_sources,}$built_image=$built_sha"
+      printf '  \033[33m·\033[0m %s 镜像复用自 %s（输入路径未变，deploy 会核验等价）\n' \
+        "$built_image" "${built_sha:0:7}"
+    fi
+  done <<EOF_SOURCES
+$(printf '%s\n' "$build_log" | grep -oE "image-built-from [a-z]+ [0-9a-f]{40}" | sort -u)
+EOF_SOURCES
   for image in api worker frontend collector; do
     if printf '%s\n' "$digests" | grep -q -- "-$image:sha-$SHA@"; then
       pass "$image 镜像已发布"
@@ -174,7 +189,8 @@ gh workflow run deploy-futures.yml --ref $BRANCH \\
   -f collector_digest=$(digest_of collector) \\
   -f collection_date=$collection_date \\
   -f provision_collector=false \\
-  -f run_live_collection=false
+  -f run_live_collection=false${image_sources:+ \\
+  -f image_sources=$image_sources}
 EOF
 )
 

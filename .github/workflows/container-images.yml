@@ -21,17 +21,34 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          # paths 是该镜像的全部输入。复用判定按它 diff，deploy 侧核验「复用的镜像
+          # 与本次 sha 等价」也按同一组路径——两边必须一致，否则守卫形同虚设。
           - image: api
-            dockerfile: rust/Dockerfile.api
+            dockerfile: rust/Dockerfile.services
+            target: api
+            cache: rust
+            paths: rust/
           - image: worker
-            dockerfile: rust/Dockerfile.worker
+            dockerfile: rust/Dockerfile.services
+            target: worker
+            cache: rust
+            paths: rust/
           - image: frontend
             dockerfile: frontend/Dockerfile
+            target: ""
+            cache: frontend
+            paths: frontend/
           - image: collector
             dockerfile: collector/Dockerfile
+            target: ""
+            cache: collector
+            paths: collector/
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # 复用判定要对基线提交做 git diff，浅克隆看不到它。
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -64,12 +81,49 @@ jobs:
             echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
+      # 输入没变就不重建。此前不管改了什么四个镜像全部重建，一次约 25 分钟——
+      # 只改文档也是 25 分钟。判定失败的任何一步都回落到完整构建：宁可白编一次，
+      # 也不要因为判定逻辑出错而部署了旧代码。
+      - name: Decide build or reuse
+        id: decide
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          set -euo pipefail
+          decide() {
+            { echo "verdict=$1"; echo "base=${2:-}"; } >> "$GITHUB_OUTPUT"
+            echo "DECIDE image=${{ matrix.image }} verdict=$1 base=${2:-}"
+          }
+          # release 标签构建不复用：那是要长期留档的镜像，值得完整地建一次。
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then decide build; exit 0; fi
+          # 该镜像的输入路径、它的 Dockerfile、以及本工作流自身，任一变了都重建。
+          watched=(${{ matrix.paths }} "${{ matrix.dockerfile }}" .github/workflows/container-images.yml)
+          base=""
+          while read -r sha; do
+            [[ "$sha" == "$GITHUB_SHA" ]] && continue
+            git cat-file -e "${sha}^{commit}" 2>/dev/null || continue
+            git merge-base --is-ancestor "$sha" "$GITHUB_SHA" 2>/dev/null || continue
+            base="$sha"
+            break
+          done < <(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/container-images.yml/runs?status=success&per_page=20" \
+            | jq -r '.workflow_runs[].head_sha' || true)
+          if [[ -z "$base" ]]; then decide build; exit 0; fi
+          if ! git diff --quiet "$base" "$GITHUB_SHA" -- "${watched[@]}"; then decide build; exit 0; fi
+          # 基线镜像必须真的在 GHCR 里，说了复用就要有东西可用。
+          if ! docker buildx imagetools inspect "${IMAGE}:sha-${base}" >/dev/null 2>&1; then decide build; exit 0; fi
+          decide reuse "$base"
+
       - name: Build and publish
+        if: steps.decide.outputs.verdict != 'reuse'
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.tags }}
@@ -78,15 +132,46 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             GIT_SHA=${{ github.sha }}
-          cache-from: type=gha,scope=publish-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=publish-${{ matrix.image }}
+          # api 与 worker 共用 rust 缓存域：同一个 workspace 编一次，第二个作业命中缓存。
+          cache-from: type=gha,scope=publish-${{ matrix.cache }}
+          cache-to: type=gha,mode=max,scope=publish-${{ matrix.cache }}
+
+      # 复用：把基线镜像重打本次 sha 的标签（秒级，不动 manifest，digest 不变）。
+      # 镜像内的 revision 标签与 GIT_SHA 仍是基线的——deploy 侧按 image_sources
+      # 核验它与本次 sha 在输入路径上逐字节一致，守卫一条不放宽。
+      - name: Reuse previous image
+        if: steps.decide.outputs.verdict == 'reuse'
+        id: reuse
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          BASE: ${{ steps.decide.outputs.base }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMAGE}:sha-${GITHUB_SHA}" "${IMAGE}:sha-${BASE}"
+          digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}" \
+            --format '{{ .Manifest.Digest }}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          # 与 buildx 推送时的日志同格式：ops/preflight-deploy.sh 靠这一行取 digest。
+          echo "pushing manifest for ${IMAGE}:sha-${GITHUB_SHA}@${digest}"
 
       - name: Record immutable image digest
         shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest || steps.reuse.outputs.digest }}
+          BASE: ${{ steps.decide.outputs.base }}
         run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # image-built-from 是给 ops/preflight-deploy.sh 读的：复用时它据此
+          # 填 deploy 的 image_sources 输入。
+          echo "image-built-from ${{ matrix.image }} ${BASE:-${GITHUB_SHA}}"
           {
             echo "### ${{ matrix.image }}"
             echo
             echo "- Image: \`${{ steps.image.outputs.name }}:sha-${GITHUB_SHA}\`"
-            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            if [[ -n "${BASE}" ]]; then
+              echo "- Reused from: \`${BASE}\`"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"

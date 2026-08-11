@@ -81,6 +81,23 @@
 - 新迁移出现在 `schema_versions`
 - **构造一个真实请求打到新端点**，看它返回什么——不是看路由存在（401 只说明路由在）
 
+### 6. 镜像复用是常态，不是异常
+
+构建工作流按各镜像的输入路径判定要不要重建（`rust/` → api/worker、`frontend/` →
+frontend、`collector/` → collector）：路径没变就把上一版镜像重打本次 sha 的标签，
+秒级完成。只改文档的构建约 1 分钟，只改前端约 4 分钟；此前不管改什么都是 ~25 分钟。
+
+复用不放宽任何守卫，只是把「镜像来自本次 sha」细化成「镜像来自与本次 sha 在其输入
+路径上逐字节一致的提交」，且这条等价性在 deploy 的 runner 上用 git diff 实际核验：
+
+- 前置脚本从构建日志读 `image-built-from`，自动把复用来源填进 `image_sources` 输入
+- deploy runner 核验每个来源：合法 sha、是本次 sha 的祖先、输入路径 diff 为空
+- VPS 侧照旧核验镜像 revision 标签与 api `/version`，只是期望值换成各自的真实来源
+
+**两边的路径集必须一致**（`container-images.yml` 的 `paths` ↔ `deploy-futures.yml`
+的 `image_paths`），改任何一边必须同步另一边——不一致的方向要么白重建，要么放走
+旧代码。
+
 ---
 
 ## 三、部署失败后

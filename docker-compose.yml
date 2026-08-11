@@ -26,7 +26,8 @@ services:
   api:
     build:
       context: .
-      dockerfile: rust/Dockerfile.api
+      dockerfile: rust/Dockerfile.services
+      target: api
     restart: unless-stopped
     environment:
       APP_NAME: ${APP_NAME:-futures-analysis-platform}
@@ -60,7 +61,8 @@ services:
   worker:
     build:
       context: .
-      dockerfile: rust/Dockerfile.worker
+      dockerfile: rust/Dockerfile.services
+      target: worker
     restart: unless-stopped
     environment:
       APP_NAME: ${APP_NAME:-futures-analysis-platform-worker}

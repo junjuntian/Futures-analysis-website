@@ -41,6 +41,11 @@ on:
         required: true
         default: true
         type: boolean
+      image_sources:
+        description: Per-image build-source shas (api=<sha>,worker=<sha>,...) when the build reused images from an earlier commit. Filled by ops/preflight-deploy.sh; empty means every image was built at git_sha. Each entry is verified byte-identical to git_sha over that image's input paths before anything runs.
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -117,6 +122,29 @@ jobs:
             done
             printf '%s\n' "${changed_files[@]}" |
               grep -Ex 'rust/tests/phase_(4a|5a)_e2e\.sh' >/dev/null
+          fi
+          # 复用镜像的等价核验。构建工作流按各镜像的输入路径判定复用；这里用同一组
+          # 路径重验一遍：声称复用自 S 的镜像，S 与本次 sha 在这些路径上必须逐字节
+          # 一致，否则就是把旧代码当新代码部署。路径集两边必须保持一致。
+          image_sources='${{ inputs.image_sources }}'
+          if test -n "$image_sources"; then
+            declare -A image_paths=(
+              [api]='rust/ .github/workflows/container-images.yml'
+              [worker]='rust/ .github/workflows/container-images.yml'
+              [frontend]='frontend/ .github/workflows/container-images.yml'
+              [collector]='collector/ .github/workflows/container-images.yml'
+            )
+            IFS=',' read -ra source_pairs <<<"$image_sources"
+            for source_pair in "${source_pairs[@]}"; do
+              source_image="${source_pair%%=*}"
+              source_sha="${source_pair#*=}"
+              test -n "${image_paths[$source_image]:-}"
+              [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+              git cat-file -e "${source_sha}^{commit}"
+              git merge-base --is-ancestor "$source_sha" "$runtime_sha"
+              # shellcheck disable=SC2086
+              git diff --quiet "$source_sha" "$runtime_sha" -- ${image_paths[$source_image]}
+            done
           fi
 
       - name: Install strict SSH identity
@@ -236,6 +264,7 @@ jobs:
           PROVISION_COLLECTOR=${10}
           ACCEPTANCE_SHA=${11}
           RUN_LIVE_COLLECTION=${12}
+          IMAGE_SOURCES=${13}
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
@@ -264,6 +293,28 @@ jobs:
           [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
           [[ "$PROVISION_COLLECTOR" = true || "$PROVISION_COLLECTOR" = false ]]
           [[ "$RUN_LIVE_COLLECTION" = true || "$RUN_LIVE_COLLECTION" = false ]]
+          # 各镜像实际构建自的提交。默认 = 本次 sha；构建复用了旧镜像时由
+          # image_sources 覆盖。runner 侧已核验每个来源与本次 sha 在该镜像的
+          # 输入路径上逐字节一致，这里只负责「镜像确实是那个来源建出来的」。
+          API_SOURCE_SHA="$SOURCE_SHA"
+          WORKER_SOURCE_SHA="$SOURCE_SHA"
+          FRONTEND_SOURCE_SHA="$SOURCE_SHA"
+          COLLECTOR_SOURCE_SHA="$SOURCE_SHA"
+          if [ -n "$IMAGE_SOURCES" ]; then
+            IFS=',' read -ra image_source_pairs <<<"$IMAGE_SOURCES"
+            for image_source_pair in "${image_source_pairs[@]}"; do
+              case "${image_source_pair%%=*}" in
+                api) API_SOURCE_SHA="${image_source_pair#*=}" ;;
+                worker) WORKER_SOURCE_SHA="${image_source_pair#*=}" ;;
+                frontend) FRONTEND_SOURCE_SHA="${image_source_pair#*=}" ;;
+                collector) COLLECTOR_SOURCE_SHA="${image_source_pair#*=}" ;;
+                *) echo "DEPLOY_FAIL unknown_image_source" >&2; exit 1 ;;
+              esac
+            done
+          fi
+          for image_source_sha in "$API_SOURCE_SHA" "$WORKER_SOURCE_SHA"                                   "$FRONTEND_SOURCE_SHA" "$COLLECTOR_SOURCE_SHA"; do
+            [[ "$image_source_sha" =~ ^[0-9a-f]{40}$ ]]
+          done
           for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
@@ -468,8 +519,8 @@ jobs:
           pull_exact "$WORKER_IMAGE" "$WORKER_DIGEST"
           pull_exact "$FRONTEND_IMAGE" "$FRONTEND_DIGEST"
           pull_exact "$COLLECTOR_IMAGE" "$COLLECTOR_DIGEST"
-          for ref in "$API_REF" "$WORKER_REF" "$FRONTEND_REF" "$COLLECTOR_REF"; do
-            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ref")" = "$SOURCE_SHA"
+          for spec in "$API_REF=$API_SOURCE_SHA" "$WORKER_REF=$WORKER_SOURCE_SHA"                       "$FRONTEND_REF=$FRONTEND_SOURCE_SHA" "$COLLECTOR_REF=$COLLECTOR_SOURCE_SHA"; do
+            test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${spec%%=*}")" = "${spec#*=}"
           done
 
           PREVIOUS_RUNTIME="$STATE_ROOT/previous-runtime-${SOURCE_SHA}-${GITHUB_RUN_ID:-manual}.env"
@@ -685,7 +736,7 @@ jobs:
           VERSION_VERIFIED=0
           for version_attempt in {1..20}; do
             if curl -fsS http://127.0.0.1:8088/api/v1/version >"$VERSION_JSON" &&
-               jq -e --arg sha "$SOURCE_SHA" \
+               jq -e --arg sha "$API_SOURCE_SHA" \
                  '.data.git_sha == $sha and .data.git_sha != "local"' \
                  "$VERSION_JSON" >/dev/null; then
               VERSION_VERIFIED=1
@@ -876,7 +927,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}' '${{ inputs.run_live_collection }}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}' '${{ inputs.run_live_collection }}' '${{ inputs.image_sources }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
