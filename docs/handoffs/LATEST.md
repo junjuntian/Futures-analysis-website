@@ -1,5 +1,11 @@
 # 最新交接状态
 
+- **最新权威交接：`docs/handoffs/HANDOFF_20260811_1320.md`**（当日下午场），与同日 `HANDOFF_20260811_0310.md` 配合读，其余历史条目不变。
+- **两张历史表已全部灌满（先采数据阶段完成，机构资金 M0 前置就位）**：八品种价格 + 席位 + 品种汇总，全部到 2026-08-10，全在运营者 workspace，汇总零重复。三禾 783/783 交易日、0 失败。大商所/上期所**从来没有**官方品种汇总行，已自算补齐 143 万行（`variety_total_is_computed` 与官方分清，只补官方缺的组合）。
+- **RLS 性能红线（本轮事故）**：`regexp_replace` 等非 leakproof 函数放进 seat_history 的 WHERE 过滤，RLS 下索引全废——futures_app 121ms 的查询在 futures_runtime 下 60 秒超时，席位页会员下拉整个空掉。**性能验证必须 `set role futures_runtime` + `set_config` 后做**，futures_app 绕过 RLS 测的不是生产路径。过滤一律原始列，归一化在 Rust；有测试盯着。
+- **psql 脚本红线**：文件内 `\set` 会覆盖命令行 `-v`，带参数的脚本必须 `\if :{?var}` 守护默认值——compute-seat-totals 的日更小窗口曾因此从未生效。
+- **构建提速已上线**：变更感知（输入路径没变→重打标签复用，等价性 deploy 三层实核）+ api/worker 合并编译。全量 25→10~17.5 分钟；复用路径因缺 `actions: read` 首跑空转已修，实战首验见 1320 交接的「下一步」。构建侧 `paths` 与 deploy 侧 `image_paths` 必须同步改。
+
 - **最新权威交接：`docs/handoffs/HANDOFF_20260811_0310.md`。** 之前的 `20260809_2130` 及同日两份仍然有效，其中被本轮取代的地方在下面逐条标注，历史结论未删改。
 - **本轮最重要的一条：数据曾整体落在错误的 workspace，且不报任何错。** 生产上有 31 个 workspace，绝大多数是历次验收留下的 E2E 空间；回填装载脚本用 `select id from workspaces order by id limit 1` 取到的是 `Phase 3C E2E 1`。于是 23.5 万行价格、380 万行席位落在测试空间，运营者的 `019f94f3-c26a-7391-bbee-2d2fd4f8abb4` 只有每日采集写的最近八天——页面上是「几乎没有数据」，而库里躺着 380 万行。**此前每次验证都用「行数最多的那个 workspace」取数，所以一直在验运营者看不见的那一份。** 已搬迁完成并备份。**今后判据：有 `market_prices` 的那个 workspace。** 见 `backfill/README.md` 置顶段落。
 - **部署前置条件已经脚本化，不再靠记性：先跑 `ops/preflight-deploy.sh`，全绿再读 `docs/DEPLOY_PREFLIGHT.md` 第二节。** 它会打印出可直接执行的 dispatch 命令，digest 由它从构建产物取，不要手抄。这份东西是 2026-08-10 连续三次部署失败之后立的（漏 `schema_versions`、漏入口校验、绑定错位），之后两次部署均一次通过。**`1111` 第 0 节的部署铁律仍然有效，脚本把其中能机械查的都覆盖了。**
