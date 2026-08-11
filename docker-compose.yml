@@ -134,6 +134,9 @@ services:
       - "8088:80"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 机构资金信号页(引擎产物,生产固定在 legacy 路径,不随 release 目录轮换;
+      # 开发机无此目录时 Docker 建空目录,该页 404,不影响其余服务)
+      - /opt/futures-platform/smart-money/web:/usr/share/nginx/smart-money:ro
     depends_on:
       - api
     networks:
