@@ -1114,9 +1114,39 @@ mod tests {
             // 前一组括号已闭合：只剥最后一组。
             ("甲（乙）（丙）", "甲（乙）"),
             ("", ""),
+            // 更名别名：剥完括号后套用。乾坤期货 2026-05-26 更名高盛期货，
+            // 不并的话选「高盛期货」只看得到更名后的 55 天。
+            ("乾坤期货", "高盛期货"),
+            ("乾坤期货（代客）", "高盛期货"),
+            ("浙江永安", "永安期货"),
+            ("上海东证", "东证期货"),
+            ("国投安信", "国投期货"),
+            ("国投安信期货", "国投期货"),
+            // 现用名不受别名影响。
+            ("高盛期货（代客）", "高盛期货"),
         ] {
             assert_eq!(normalize_member(raw), expected, "raw = {raw:?}");
         }
+    }
+
+    #[test]
+    fn every_alias_is_in_the_sql_key_and_none_is_self_referential() {
+        // SQL 键与 Rust 归一都从 MEMBER_ALIASES 生成，这里断言生成结果真的
+        // 把每一对都带上了——生成函数写错（比如漏了循环体）时测试才有得抓。
+        let sql = member_key_sql();
+        for (old, new) in MEMBER_ALIASES {
+            assert!(
+                sql.contains(&format!("when '{old}' then '{new}'")),
+                "SQL 键缺别名 {old} → {new}：{sql}"
+            );
+            assert_ne!(old, new, "自引用别名没有意义");
+            // 别名的目标必须是终点：A→B、B→C 这样的链条两边各归一次就会不一致。
+            assert!(
+                !MEMBER_ALIASES.iter().any(|(o, _)| o == new),
+                "别名目标 {new} 自身又是别名源，链式映射两侧行为会分叉"
+            );
+        }
+        assert!(sql.starts_with("case ") && sql.ends_with(" end"));
     }
 
     #[test]
@@ -1725,6 +1755,37 @@ pub struct SeatPositionRow {
 /// （`normalize_member`，与本正则同语义，有测试盯两边一致）。
 const MEMBER_KEY: &str = "regexp_replace(member, '[（(][^）)]*[）)]$', '')";
 
+/// 会员更名别名：老名字 → 现用名。剥完括号之后再套用。
+///
+/// 这些不是猜的：每一对都在库里查过起止日期、且经运营者确认是同一家——
+/// 乾坤期货 2026-05-26 更名高盛期货（选「高盛期货」曾只看得到 55 天，
+/// 前面十七年都在旧名下）；浙江永安→永安期货、上海东证→东证期货、
+/// 国投安信/国投安信期货→国投期货同理。
+/// 「申银万国」与「申万期货」两名并存十四年，是否同一家未经运营者确认，不并。
+///
+/// **SQL 侧的 `member_key_sql()` 与 Rust 侧的 `normalize_member` 都从这张表生成**，
+/// 别名只在这里改——高盛更名修复的前一课（dadbeda）就是同一个事实两处维护、
+/// 只改了一处。
+const MEMBER_ALIASES: &[(&str, &str)] = &[
+    ("乾坤期货", "高盛期货"),
+    ("浙江永安", "永安期货"),
+    ("上海东证", "东证期货"),
+    ("国投安信", "国投期货"),
+    ("国投安信期货", "国投期货"),
+];
+
+/// 展示与去重键的完整 SQL 表达式：剥括号 + 套别名。
+/// 只许出现在 SELECT / distinct on / order by 里，绝不许进 WHERE——
+/// 理由见 `MEMBER_KEY` 上的 RLS 教训。
+fn member_key_sql() -> String {
+    let mut sql = format!("case {MEMBER_KEY}");
+    for (old, new) in MEMBER_ALIASES {
+        sql.push_str(&format!(" when '{old}' then '{new}'"));
+    }
+    sql.push_str(&format!(" else {MEMBER_KEY} end"));
+    sql
+}
+
 /// 原始会员名的跳跃扫描：沿 (workspace_id, member, …) 索引一个名字跳一次。
 /// 纯列比较，RLS 下照常走索引——这正是它存在的理由，见 `MEMBER_KEY` 上的教训。
 const RAW_MEMBER_WALK_SQL: &str = "with recursive walk as (
@@ -1743,6 +1804,16 @@ const RAW_MEMBER_WALK_SQL: &str = "with recursive walk as (
 /// 开括号，也就是正文里最后一个闭括号之后的第一个开括号。改任何一边必须同步另一边，
 /// `rust_normalisation_matches_the_sql_member_key` 盯着。
 pub(crate) fn normalize_member(raw: &str) -> String {
+    let stripped = strip_member_qualifier(raw);
+    for (old, new) in MEMBER_ALIASES {
+        if stripped == *old {
+            return (*new).to_string();
+        }
+    }
+    stripped
+}
+
+fn strip_member_qualifier(raw: &str) -> String {
     if !(raw.ends_with('）') || raw.ends_with(')')) {
         return raw.to_string();
     }
@@ -1838,7 +1909,7 @@ pub async fn load_seat_positions(
            ) picked
           order by instrument, is_variety_total desc, contract nulls first,
                    rank_type, rank nulls last, member",
-        member_key = MEMBER_KEY,
+        member_key = member_key_sql(),
         source_rank = SEAT_SOURCE_RANK,
     ))
     .bind(workspace_id)
@@ -1933,7 +2004,7 @@ fn building_days_sql() -> String {
            full outer join prices p on p.trade_date = s.trade_date
           where coalesce(s.trade_date, p.trade_date) is not null
           order by 1",
-        member_key = MEMBER_KEY,
+        member_key = member_key_sql(),
         source_rank = SEAT_SOURCE_RANK,
     )
 }

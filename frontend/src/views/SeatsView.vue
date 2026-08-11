@@ -30,6 +30,13 @@ const member = ref(rememberedMember())
 const tradeDate = ref('')
 const members = ref<string[]>([])
 const availableDates = ref<string[]>([])
+// 日历上只让点有数据的交易日。比较用本地时区的年月日拼串,不能用 toISOString——
+// 它按 UTC 取日期,东八区晚上会差一天。
+const availableDateSet = computed(() => new Set(availableDates.value))
+function isNotTradingDay(day: Date) {
+  const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
+  return !availableDateSet.value.has(key)
+}
 const tab = ref<'positions' | 'building'>('positions')
 
 // 席位持仓
@@ -348,15 +355,16 @@ const buildingContracts = computed(() => {
         >
           <el-option v-for="name in members" :key="name" :label="name" :value="name" />
         </el-select>
-        <el-select
+        <el-date-picker
           v-model="tradeDate"
+          type="date"
           style="width: 180px"
-          filterable
           placeholder="交易日"
+          value-format="YYYY-MM-DD"
+          :clearable="false"
+          :disabled-date="isNotTradingDay"
           :disabled="loadingPositions || !availableDates.length"
-        >
-          <el-option v-for="day in availableDates" :key="day" :label="day" :value="day" />
-        </el-select>
+        />
       </div>
       <el-radio-group v-model="tab" class="tabs">
         <el-radio-button value="positions">席位持仓</el-radio-button>
