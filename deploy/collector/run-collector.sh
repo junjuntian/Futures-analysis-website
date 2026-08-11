@@ -45,7 +45,20 @@ else
 fi
 [[ "$COLLECTION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
 
-"${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE"
+# 采集失败也要往下走，但失败状态留到最后再退出。
+#
+# 大商所的行情按 DEC-047 是已知采不到的（官网 412、akshare 同源、东财端点拒绝），
+# 采集器因此每天都以非零退出。而这个脚本是 set -e：它当场就死了，后面的投影、
+# 新浪日更、汇总一步都跑不到——于是数据停在 market_prices，永远进不了 price_history。
+# **日更投影其实从来没有自动成功过**，2026-08-11 运营者问「为什么没有 8.11 的数据」
+# 时才查出来（那天先查出 cron 时区不生效，修完仍然没数据，才发现还有这一层）。
+#
+# 一部分交易所失败不该让另外四家的数据也进不了库。状态记下来，最后如实退出。
+COLLECTION_STATUS=0
+"${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE" || COLLECTION_STATUS=$?
+if [ "$COLLECTION_STATUS" -ne 0 ]; then
+  echo "COLLECTION_PARTIAL exit=$COLLECTION_STATUS 继续做投影，最后仍以此状态退出" >&2
+fi
 
 # 采到的东西还要投影进两张历史表，套利页和席位页读的是那两张。放在采集之后同一个
 # 脚本里而不是另开一条 cron：顺序是硬要求，投影必须看得到刚落库的那一天，两条独立
@@ -81,3 +94,7 @@ else
   # 报一声让日志里留下痕迹就够了。
   echo "PROJECTION_SKIPPED missing $PROJECTION" >&2
 fi
+
+# 投影做完了，现在才把采集的失败如实抛出去——cron 的邮件与退出码仍然看得到它，
+# 只是不再因为它而丢掉当天其余四家交易所的数据。
+exit "$COLLECTION_STATUS"
