@@ -104,6 +104,19 @@ for file in deploy/collector/*; do
   fi
 done
 
+# 教训：2026-08-11 把 cron 从北京时间写法改成 UTC，验收脚本里断言 cron 时刻的
+# 两行没跟着改，部署走到最后一步被拦下回滚，整轮重来。验收断言的就是安装产物，
+# 两边必须一致——把 phase_4a_e2e.sh 里每个对 cron 文件的 grep 模式拿出来，
+# 在本地的 cron 源文件上逐个验一遍。
+while IFS= read -r pattern; do
+  if grep -Eq "$pattern" deploy/collector/futures-collector.cron; then
+    pass "验收断言的 cron 模式在源文件里：$pattern"
+  else
+    fail "验收脚本断言了「$pattern」但 futures-collector.cron 里没有——部署会在最后一步被拦下"
+  fi
+done < <(grep -o "grep -c '[^']*' /etc/cron.d/futures-collector" rust/tests/phase_4a_e2e.sh \
+           | sed "s/^grep -c '//; s/' \/etc\/cron\.d\/futures-collector$//")
+
 step "四、CI 与镜像"
 
 ci_status=$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=50" \

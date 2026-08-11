@@ -33,8 +33,11 @@ test -s /etc/futures-platform/secrets/collector-credentials
 test "$(stat -c %U:%G /etc/futures-platform/secrets/collector-credentials)" = root:root
 test "$(stat -c %a /etc/futures-platform/secrets/collector-credentials)" = 400
 test "$(stat -c %a /etc/cron.d/futures-collector)" = 600
-test "$(grep -c '^30 17 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
-test "$(grep -c '^30 21 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
+# 这两条断言的时刻必须与 deploy/collector/futures-collector.cron 一致。
+# 2026-08-11 把 cron 从北京时间写法改成 UTC（09:30/13:30）时漏改了这里，
+# 部署被本脚本拦下回滚——断言的就是安装产物，改产物必须同步改断言。
+test "$(grep -c '^30 9 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
+test "$(grep -c '^30 13 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
 test -x /usr/local/sbin/run-futures-collector
 echo "PHASE4A_E2E_STAGE preconditions_passed"
 
