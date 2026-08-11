@@ -10,7 +10,9 @@ WEB="$ROOT/web"
 PG_CONTAINER=futures-analysis-platform-postgres-1
 PG_USER=futures_app
 PG_DB=futures_platform
-IMAGE=$(docker images --format '{{.ID}} {{.Repository}}' | grep collector | head -1 | cut -d' ' -f1)
+# awk 读完整个流再输出首个匹配:head -1 会提前关管道,镜像多时上游收到
+# SIGPIPE(退出码 141),在 pipefail 下判死整个脚本——2026-08-11 实测踩坑。
+IMAGE=$(docker images --format '{{.ID}} {{.Repository}}' | awk '/collector/{if(!f){print $1;f=1}}')
 
 if [ -z "$IMAGE" ]; then
   echo "[smart-money] 找不到 collector 镜像,中止" >&2

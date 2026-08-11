@@ -300,6 +300,7 @@ class Trade:
     ret_pct: float | None = None
     fade_count: int = 0
     stop_px_real: float | None = None
+    is_relay: bool = False
 
 
 class MarketEngine:
@@ -390,13 +391,23 @@ class MarketEngine:
         f_last = f[-1]
         fade = self.fade_run.to_numpy()
 
-        sig_mask = ((self.score >= self.theta) & (self.theta > 0)
-                    & (self.dist60 < RULES["dist_low_max"])
-                    & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
+        # 首次进场:三条件(分数 + 贴低点 + 机构低仓)。
+        full_mask = ((self.score >= self.theta) & (self.theta > 0)
+                     & (self.dist60 < RULES["dist_low_max"])
+                     & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
+        # 中继再进场(2026-08-11 运营者案例驱动,回测全期 +81%→+116%):
+        # 消退卖出后,八家再度共振(仅分数门槛)即视为同一轮趋势的延续,
+        # 免"贴低点/低仓"两个起点条件;止损出场则趋势被否,回到严格三条件。
+        relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
         trades, busy = [], -1
-        for d in self.dates[sig_mask]:
+        relay_armed = False
+        for d in self.dates:
             i = pos[d]
             if i + 1 >= len(self.dates) or i < busy:
+                continue
+            is_full = bool(full_mask[d])
+            is_relay = (not is_full) and relay_armed and bool(relay_mask[d])
+            if not (is_full or is_relay):
                 continue
             recent = self.trigger_seats(d)
             # 同一席位窗口内多日有事件时只保留最强的一次,避免重复列出
@@ -404,7 +415,7 @@ class MarketEngine:
                    .drop_duplicates("member"))
             seats = [{"member": r.member, "strength": round(float(r.strength), 2),
                       "hands": int(r.hands)} for r in agg.itertuples()]
-            zone = self.cost_zone(d)
+            zone = None if is_relay else self.cost_zone(d)
             i0 = p0r = None
             if zone:
                 for j in range(i + 1, min(i + 1 + RULES["zone_valid_days"], len(self.dates))):
@@ -425,7 +436,8 @@ class MarketEngine:
                     continue
             p0a = p0r * f_last / f[i0]
             stop_a = p0a * (1 - RULES["stop_loss"])
-            t = Trade(d, self.dates[i0], float(p0r), zone, seats, float(self.score[d]))
+            t = Trade(d, self.dates[i0], float(p0r), zone, seats, float(self.score[d]),
+                      is_relay=is_relay)
             fade_from = None
             for j in range(i0, len(self.dates)):
                 if np.isnan(lo_a[j]):
@@ -451,6 +463,10 @@ class MarketEngine:
                 busy = last
             else:
                 busy = pos[t.exit_date]
+            if t.result == "消退卖出":
+                relay_armed = True
+            elif t.result in ("止损", "持有中"):
+                relay_armed = False
             trades.append(t)
         return trades
 
@@ -717,6 +733,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                 "exit_date": str(t.exit_date.date()) if t.exit_date else None,
                 "exit_px": round(t.exit_px, eng.meta["decimals"]) if t.exit_px else None,
                 "result": t.result,
+                "relay": t.is_relay,
                 "ret_pct": round(t.ret_pct, 2) if t.ret_pct is not None else None,
                 "marks": marks,
             })
