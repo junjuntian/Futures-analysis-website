@@ -623,7 +623,8 @@ def rare_flip_alerts(eng: MarketEngine, lookback_days: int = 60) -> list[dict]:
         was_long = (hist.tail(250) > 0).mean() > 0.9
         now_short = recent.iloc[-1] < 0
         extreme = recent.min() <= hist.min()
-        if (was_long and now_short) or (now_short and extreme):
+        big = recent.iloc[-1] <= -8000   # 历史级规模才响:常规翻空对冲(2~5千手)是噪音
+        if big and ((was_long and now_short) or (now_short and extreme)):
             alerts.append({
                 "type": "rare_flip", "level": "warn",
                 "market": eng.instrument,
@@ -671,6 +672,49 @@ def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
                      f"极端区)且 {'、'.join(shorters)} 共 {len(shorters)} 家近 5 日集体增空白银{confirm}。"
                      "历史同构两次(2011-05 / 2026-02)白银两周 -28%/-31%:"
                      "**持有的金银多单建议立即离场或大幅收紧止损**;配对窗口(多金空银)开启")}
+
+
+
+def historical_alerts(au: MarketEngine, ag: MarketEngine, ratio_s: pd.Series) -> list[dict]:
+    """回算全历史的做空侧警报触发段,供历史页展示(运营者 2026-08-11 要求:
+    警报响过要留痕,否则 2026-01 那次做空窗口在历史里不可见)。
+
+    单边跟随机构空单已被三次检验否定(增空后银平均+1.25%涨,空单主体是产业
+    套保),故做空侧只有环境+共振复合警报,不是逐笔交易信号。
+    """
+    out = []
+    dates = ag.dates
+    ratio = pd.Series([ratio_s.asof(d) for d in dates], index=dates)
+    # 主力跑路:比值<48 且 5 日内 >=3 家增空白银(连续日合并为段)
+    w = pd.Timedelta(days=8)
+    hot = []
+    for d in dates:
+        if not (ratio[d] == ratio[d]) or ratio[d] >= RULES["ratio_extreme_low"]:
+            hot.append(False)
+            continue
+        n = ag.ev_short[(ag.ev_short["trade_date"] > d - w)
+                        & (ag.ev_short["trade_date"] <= d)]["member"].nunique()
+        hot.append(n >= 3)
+    hot = pd.Series(hot, index=dates)
+    seg_start = None
+    for d, v in hot.items():
+        if v and seg_start is None:
+            seg_start = d
+        elif not v and seg_start is not None:
+            out.append({"type": "flee", "label": "主力跑路", "market": "AU+AG",
+                        "start": str(seg_start.date()), "end": str(d.date()),
+                        "note": f"金银比 {ratio[seg_start]:.1f} 极端区 + ≥3 家集体空银;"
+                                "多单离场 / 配对(多金空银)窗口"})
+            seg_start = None
+    if seg_start is not None:
+        out.append({"type": "flee", "label": "主力跑路", "market": "AU+AG",
+                    "start": str(seg_start.date()), "end": "至今",
+                    "note": f"金银比 {ratio[seg_start]:.1f} 极端区 + ≥3 家集体空银"})
+    # 稀有翻空不入历史:回算显示该形态 2015-2026 触发 38 次,大多不在顶部
+    # (海通/华泰的翻空是常规对冲),与「机构空单被套保污染」的事件研究一致。
+    # 可靠的做空窗口指示只有上面的复合警报(比值极端 + 集体空银)。
+    out.sort(key=lambda x: x["start"], reverse=True)
+    return out
 
 
 def pair_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
@@ -809,6 +853,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "alerts": alerts,
         "activity": activity[:20],
         "history": sorted(history, key=lambda x: x["signal_date"], reverse=True)[:20],
+        "alert_history": historical_alerts(au, ag, ratio_s),
         "stats": stats,
         "rules": {
             "group": RULES["group8"],

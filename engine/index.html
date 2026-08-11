@@ -243,7 +243,14 @@ function render() {
             <td><span class="pill ${rcls}">${h.result}</span></td>
             <td class="${cls(h.ret_pct)}">${h.ret_pct == null ? "—" : pct(h.ret_pct)}</td></tr>`;
         }).join("")}
-      </table></div></div>`;
+      </table></div>
+      <h2 style="margin-top:22px">警报历史(做空侧窗口)</h2>
+      <div class="desc">单边跟随机构空单已被回测否定(空单主体是产业套保);做空窗口只认「主力跑路」复合警报:金银比历史极端区 + 八家集体空银。历史同构两次(2011-05 / 2026-02)白银两周 -28%/-31%。</div>
+      ${(d.alert_history && d.alert_history.length) ? d.alert_history.map(a => `
+        <div class="alert pair"><span class="tag">${a.label}</span>
+          <div><b>${a.start}${a.end && a.end !== a.start ? " ~ " + a.end : ""}</b> — ${a.note}</div></div>`).join("")
+        : '<div class="gray">历史无触发</div>'}
+      </div>`;
   } else if (TAB === "weights") {
     const rows = d.rules.group.map(m => `<tr><td>${m}</td>
       <td>${d.markets.AU.weights[m] ?? "—"}</td><td>${d.markets.AG.weights[m] ?? "—"}</td>
