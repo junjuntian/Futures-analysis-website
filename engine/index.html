@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机构资金 — 期货与套利数据分析平台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:"Helvetica Neue",Helvetica,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+body{background:#f5f7fa;color:#303133;font-size:14px}
+.topbar{height:8px;background:#d5205a}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:230px;background:#fff;border-right:1px solid #e4e7ed;padding:24px 0;flex-shrink:0}
+.logo{font-size:20px;font-weight:700;padding:0 24px 28px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:13px 24px;color:#303133;cursor:pointer;text-decoration:none}
+.nav-item .ico{width:18px;text-align:center;opacity:.75}
+.nav-item.active{background:#ecf5ff;color:#409EFF;border-right:3px solid #409EFF;font-weight:600}
+.main{flex:1;padding:0 32px 48px;max-width:1250px;min-width:0}
+.page-title{font-size:15px;font-weight:600;padding:20px 0;border-bottom:1px solid #e4e7ed;margin-bottom:22px}
+h1{font-size:26px;font-weight:700;margin-bottom:6px}
+.sub{color:#909399;margin-bottom:22px}
+.cards{display:flex;gap:16px;margin-bottom:22px;flex-wrap:wrap}
+.card{background:#fff;border:1px solid #e4e7ed;border-radius:6px;padding:18px 20px;flex:1;min-width:290px}
+.card h3{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.dot.hold{background:#f56c6c;box-shadow:0 0 6px #f56c6c88}
+.dot.watch{background:#c0c4cc}
+.dot.ok{background:#67c23a}
+.big{font-size:22px;font-weight:700;margin-bottom:6px}
+.red{color:#f56c6c}.green{color:#67c23a}.gray{color:#909399}.blue{color:#409EFF}
+.kv{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;gap:10px}
+.kv .k{color:#909399;white-space:nowrap}
+.kv .v{text-align:right}
+.section{background:#fff;border:1px solid #e4e7ed;border-radius:6px;padding:20px 22px;margin-bottom:22px}
+.section h2{font-size:16px;margin-bottom:4px}
+.section .desc{color:#909399;font-size:12.5px;margin-bottom:14px}
+.alert{display:flex;gap:12px;padding:13px 16px;border-radius:6px;margin-bottom:10px;align-items:flex-start}
+.alert .tag{font-size:12px;padding:2px 10px;border-radius:4px;white-space:nowrap;font-weight:600;margin-top:1px}
+.alert.danger{background:#fef0f0;border:1px solid #fbc4c4}
+.alert.danger .tag{background:#f56c6c;color:#fff}
+.alert.warn{background:#fdf6ec;border:1px solid #f5dab1}
+.alert.warn .tag{background:#e6a23c;color:#fff}
+.alert.info{background:#f4f4f5;border:1px solid #e4e7ed}
+.alert.info .tag{background:#909399;color:#fff}
+.alert.pair{background:#ecf5ff;border:1px solid #b3d8ff}
+.alert.pair .tag{background:#409EFF;color:#fff}
+.alert .t{color:#909399;font-size:12px;margin-left:auto;white-space:nowrap}
+.alert b{font-size:15px}
+.cond{display:flex;gap:26px;flex-wrap:wrap}
+.cond .item{flex:1;min-width:230px}
+.cond .name{font-size:13px;color:#606266;margin-bottom:6px;display:flex;justify-content:space-between;gap:8px}
+.bar{height:8px;background:#ebeef5;border-radius:4px;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:4px;background:#c0c4cc}
+.bar.pass i{background:#67c23a}
+.bar.warn i{background:#e6a23c}
+.badge{display:inline-flex;align-items:center;gap:6px;border:1px solid #e4e7ed;border-radius:16px;padding:5px 14px;font-size:13px;margin:0 8px 8px 0;background:#fafafa}
+.badge .s{width:8px;height:8px;border-radius:50%;background:#c0c4cc}
+.badge.on{background:#fef0f0;border-color:#fbc4c4}
+.badge.on .s{background:#f56c6c}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:#909399;font-weight:500;padding:9px 10px;border-bottom:1px solid #ebeef5;background:#fafafa;white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid #f2f6fc;white-space:nowrap}
+.pill{font-size:12px;padding:1px 8px;border-radius:4px;background:#f4f4f5;color:#606266}
+.pill.au{background:#fdf6ec;color:#b88230}
+.pill.ag{background:#f4f4f5;color:#606266}
+.pill.win{background:#f0f9eb;color:#67c23a}
+.pill.loss{background:#fef0f0;color:#f56c6c}
+.pill.hold{background:#ecf5ff;color:#409EFF}
+.gauge{display:flex;align-items:center;gap:14px}
+.gtrack{flex:1;height:10px;border-radius:5px;position:relative;
+  background:linear-gradient(90deg,#f56c6c 0 14%,#e6a23c 14% 24%,#67c23a 24% 62%,#e6a23c 62% 78%,#f56c6c 78% 100%)}
+.gneedle{position:absolute;top:-5px;width:2.5px;height:20px;background:#303133;border-radius:2px;transition:left .4s}
+.gscale{display:flex;justify-content:space-between;color:#909399;font-size:11px;margin-top:4px}
+.footnote{color:#c0c4cc;font-size:12px;margin-top:6px}
+.tabbar{display:flex;margin-bottom:16px;border-bottom:2px solid #ebeef5}
+.tab{padding:9px 22px;cursor:pointer;color:#606266;border-bottom:2px solid transparent;margin-bottom:-2px}
+.tab.on{color:#409EFF;border-color:#409EFF;font-weight:600}
+.loading{padding:60px;text-align:center;color:#909399}
+.err{padding:20px;background:#fef0f0;border:1px solid #fbc4c4;border-radius:6px;color:#f56c6c}
+.rule-line{padding:7px 0;border-bottom:1px dashed #ebeef5;display:flex;gap:14px}
+.rule-line .lab{color:#909399;width:80px;flex-shrink:0}
+@media(max-width:900px){.sidebar{display:none}.main{padding:0 14px 40px}}
+</style>
+</head>
+<body>
+<div class="topbar"></div>
+<div class="layout">
+  <div class="sidebar">
+    <div class="logo">Futures Analysis</div>
+    <a class="nav-item" href="/"><span class="ico">🏠</span>首页</a>
+    <a class="nav-item" href="/imports"><span class="ico">☁️</span>导入中心</a>
+    <a class="nav-item" href="/spread-analytics/free-spread"><span class="ico">🧮</span>套利分析</a>
+    <a class="nav-item" href="/seats?tab=positions"><span class="ico">📊</span>席位</a>
+    <a class="nav-item active" href="#"><span class="ico">💰</span>机构资金</a>
+    <a class="nav-item" href="/system"><span class="ico">⚙️</span>系统状态</a>
+  </div>
+  <div class="main">
+    <div class="page-title">期货与套利数据分析平台</div>
+    <h1>机构资金</h1>
+    <div class="sub" id="sub">加载中…</div>
+    <div class="tabbar">
+      <div class="tab on" data-tab="today">今日信号</div>
+      <div class="tab" data-tab="history">历史信号</div>
+      <div class="tab" data-tab="weights">席位权重</div>
+      <div class="tab" data-tab="rules">策略方案</div>
+    </div>
+    <div id="app"><div class="loading">正在读取信号数据…</div></div>
+  </div>
+</div>
+
+<script>
+const fmt = (v, d) => v == null ? "—" : Number(v).toLocaleString("zh-CN", {minimumFractionDigits: d ?? 0, maximumFractionDigits: d ?? 0});
+const pct = v => v == null ? "—" : (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+const cls = v => v > 0 ? "red" : (v < 0 ? "green" : "gray");
+let DATA = null, TAB = "today";
+
+function marketCard(m) {
+  const p = m.position;
+  const dec = m.instrument === "AU" ? 2 : 0;
+  if (p) {
+    const edge = p.inst_cost ? ((p.inst_cost - p.entry_px) / p.inst_cost * 100) : null;
+    return `<div class="card">
+      <h3><span class="dot hold"></span>${m.name} — 持有中</h3>
+      <div class="big ${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</div>
+      <div class="kv"><span class="k">买入</span><span class="v">${p.entry_date} @ ${fmt(p.entry_px, dec)}</span></div>
+      ${p.inst_cost ? `<div class="kv"><span class="k">机构加权成本</span><span class="v">${fmt(p.inst_cost, dec)}
+        ${edge > 0 ? `<span class="green">(我方低 ${edge.toFixed(1)}%)</span>` : ""}</span></div>` : ""}
+      <div class="kv"><span class="k">现价</span><span class="v">${fmt(m.last_close, dec)} · ${m.main_contract}</span></div>
+      <div class="kv"><span class="k">止损价</span><span class="v red">${fmt(p.stop_px, dec)}</span></div>
+      <div class="kv"><span class="k">卖出监控</span><span class="v">${p.fade_days >= p.fade_target
+        ? `<b class="red">已满足,下一交易日开盘卖出</b>`
+        : `静默 <b>${p.fade_days}/${p.fade_target}</b> 日`}</span></div>
+      <div class="kv"><span class="k">持有</span><span class="v">${p.hold_days} 个交易日</span></div>
+    </div>`;
+  }
+  const okCount = Object.values(m.conditions).filter(c => c.pass).length;
+  return `<div class="card">
+    <h3><span class="dot ${m.all_pass ? "hold" : "watch"}"></span>${m.name} — ${m.all_pass ? "买入触发" : "观察中"}</h3>
+    <div class="big gray">${m.all_pass ? "待挂单" : "无持仓"}</div>
+    <div class="kv"><span class="k">三条件</span><span class="v">${okCount} / 3 满足</span></div>
+    <div class="kv"><span class="k">现价</span><span class="v">${fmt(m.last_close, dec)} · ${m.main_contract}</span></div>
+    ${m.prospective_zone ? `<div class="kv"><span class="k">参考买入上限</span><span class="v">≤ ${fmt(m.prospective_zone[1], dec)}
+      <span class="gray">(机构成本 ${fmt(m.prospective_cost, dec)})</span></span></div>` : ""}
+    ${m.env_block ? `<div class="kv"><span class="k">环境</span><span class="v red">${m.env_block}</span></div>` : ""}
+    ${m.env_boost ? `<div class="kv"><span class="k">环境</span><span class="v green">${m.env_boost}</span></div>` : ""}
+  </div>`;
+}
+
+function ratioCard(r) {
+  const posPct = Math.max(0, Math.min(100, (r.value - 40) / 60 * 100));
+  return `<div class="card">
+    <h3><span class="dot ok"></span>金银比环境</h3>
+    <div class="gauge">
+      <div style="flex:1">
+        <div class="gtrack"><div class="gneedle" style="left:${posPct}%"></div></div>
+        <div class="gscale"><span>&lt;48 银高估</span><span>55~85 正常</span><span>&gt;85 银低估</span></div>
+      </div>
+      <div class="big" style="margin:0">${r.value}</div>
+    </div>
+    <div class="kv" style="margin-top:8px"><span class="k">状态</span><span class="v"><b>${r.zone}</b></span></div>
+    <div class="kv"><span class="k">历史分位</span><span class="v">${r.percentile}%(均值 ${r.mean})</span></div>
+    <div class="footnote">${r.note}<br>${r.source || ""}</div>
+  </div>`;
+}
+
+function alertBlock(a) {
+  const map = {buy: ["danger", "买入触发"], sell_now: ["danger", "卖出执行"], sell_watch: ["warn", "卖出监控"],
+               rare_flip: ["info", "稀有翻空"], pair_window: ["pair", "配对窗口"]};
+  const [k, label] = map[a.type] || ["info", "提示"];
+  return `<div class="alert ${k}"><span class="tag">${label}</span>
+    <div>${a.text.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")}</div><span class="t">${a.date}</span></div>`;
+}
+
+function condBlock(m) {
+  const c = m.conditions;
+  const bar = (v, ok, w) => `<div class="bar ${ok ? "pass" : (w ? "warn" : "")}"><i style="width:${Math.max(2, Math.min(100, v))}%"></i></div>`;
+  return `<div style="margin-bottom:8px;font-weight:600">${m.name}
+      <span class="gray" style="font-weight:400">(门槛 θ=${m.theta})</span></div>
+    <div class="cond">
+      <div class="item"><div class="name"><span>① 加权增多分数</span>
+        <span class="${c.score.pass ? "green" : "gray"}">${c.score.value} / ${c.score.target} ${c.score.pass ? "✓" : ""}</span></div>
+        ${bar(c.score.value / c.score.target * 100, c.score.pass)}</div>
+      <div class="item"><div class="name"><span>② 距 60 日低点 &lt;12%</span>
+        <span class="${c.dist_low.pass ? "green" : "red"}">+${c.dist_low.value}% ${c.dist_low.pass ? "✓" : "✗"}</span></div>
+        ${bar(c.dist_low.value / 12 * 100, c.dist_low.pass, true)}</div>
+      <div class="item"><div class="name"><span>③ 八席位净仓 &lt;60 分位</span>
+        <span class="${c.netq.pass ? "green" : "red"}">${c.netq.value} 分位 ${c.netq.pass ? "✓" : "✗"}</span></div>
+        ${bar(c.netq.value, c.netq.pass, true)}</div>
+    </div>`;
+}
+
+function render() {
+  const d = DATA, app = document.getElementById("app");
+  document.getElementById("sub").innerHTML =
+    `跟随金银双强八席位资金动向,每日收盘后自动计算。数据日期 <b>${d.data_date}</b> · 计算于 ${d.generated_at}`;
+  if (TAB === "today") {
+    const marks = d.history[0] ? d.history[0].marks : {};
+    app.innerHTML = `
+      <div class="cards">${marketCard(d.markets.AU)}${marketCard(d.markets.AG)}${ratioCard(d.ratio)}</div>
+      <div class="section"><h2>触发提示</h2>
+        <div class="desc">收盘后席位数据入库即计算;买卖执行均为次日开盘(T+1)。</div>
+        ${d.alerts.length ? d.alerts.map(alertBlock).join("") : '<div class="gray">当前无触发提示</div>'}
+      </div>
+      <div class="section"><h2>买点三条件</h2>
+        <div class="desc">全部满足 → 次日按机构成本区间挂单。门槛按各品种权重每年自动校准。</div>
+        ${condBlock(d.markets.AU)}<div style="height:16px"></div>${condBlock(d.markets.AG)}
+      </div>
+      <div class="section"><h2>八席位近期动态</h2>
+        <div class="desc">最近三周的有效增多事件(权重为当年生效值)。</div>
+        <div style="overflow-x:auto"><table>
+          <tr><th>日期</th><th>席位</th><th>品种</th><th>动作</th><th>强度</th><th>权重</th><th>单日净增</th></tr>
+          ${d.activity.map(a => `<tr><td>${a.date}</td><td>${a.member}</td>
+            <td><span class="pill ${a.market.toLowerCase()}">${a.market_name}</span></td>
+            <td>${a.action}</td><td>${a.strength}${a.strength >= 3 ? "(满)" : ""}</td>
+            <td>${a.weight}</td><td class="red">+${fmt(a.hands)} 手</td></tr>`).join("") ||
+            '<tr><td colspan="7" class="gray">近三周无事件</td></tr>'}
+        </table></div>
+      </div>
+      <div class="section"><h2>参考标记</h2>
+        <div class="desc">不改变买卖规则,提供人工复核维度(取最近一次信号的标记状态)。</div>
+        <span class="badge ${marks.cross_resonance ? "on" : ""}"><span class="s"></span>金银共振</span>
+        <span class="badge ${(marks.spread_legs || []).length ? "on" : ""}"><span class="s"></span>比价腿警示${(marks.spread_legs || []).length ? "(" + marks.spread_legs.join("、") + ")" : ""}</span>
+        <span class="badge ${marks.goldman_combo ? "on" : ""}"><span class="s"></span>高盛金银组合(历史命中 91%)</span>
+        <span class="badge on"><span class="s"></span>金银比 ${d.ratio.value} ${d.ratio.zone}</span>
+      </div>`;
+  } else if (TAB === "history") {
+    app.innerHTML = `<div class="section"><h2>历史信号</h2>
+      <div class="desc">最近 20 条。收益按复权价计算,已扣双边成本。成熟期统计:
+        ${Object.entries(d.stats).map(([k, s]) => `${d.markets[k].name} ${s.count} 笔 / 胜率 ${s.win_rate}% / 累计 ${s.total}%`).join(" · ")}</div>
+      <div style="overflow-x:auto"><table>
+        <tr><th>品种</th><th>信号日</th><th>分数</th><th>触发席位</th><th>买入上限</th><th>机构成本</th>
+            <th>进场</th><th>出场</th><th>结果</th><th>收益</th></tr>
+        ${d.history.map(h => {
+          const dec = h.market === "AU" ? 2 : 0;
+          const rcls = h.result === "持有中" ? "hold" : (h.ret_pct > 0 ? "win" : "loss");
+          return `<tr><td><span class="pill ${h.market.toLowerCase()}">${h.name}</span></td>
+            <td>${h.signal_date}</td><td>${h.score}</td>
+            <td>${h.seats.map(s => s.member + "(" + s.strength + ")").join("、") || "—"}</td>
+            <td>${h.zone ? "≤" + fmt(h.zone[1], dec) : "市价"}</td>
+            <td class="gray">${h.inst_cost ? fmt(h.inst_cost, dec) : "—"}</td>
+            <td>${h.entry_date ? h.entry_date + " @ " + fmt(h.entry_px, dec) : "—"}</td>
+            <td>${h.exit_date ? h.exit_date + " @ " + fmt(h.exit_px, dec) : "—"}</td>
+            <td><span class="pill ${rcls}">${h.result}</span></td>
+            <td class="${cls(h.ret_pct)}">${h.ret_pct == null ? "—" : pct(h.ret_pct)}</td></tr>`;
+        }).join("")}
+      </table></div></div>`;
+  } else if (TAB === "weights") {
+    const rows = d.rules.group.map(m => `<tr><td>${m}</td>
+      <td>${d.markets.AU.weights[m] ?? "—"}</td><td>${d.markets.AG.weights[m] ?? "—"}</td>
+      <td class="gray">${d.rules.cond_seats.includes(m) ? "仅贴 60 日低点 <5% 时计分" : "全场景计分"}</td></tr>`).join("");
+    app.innerHTML = `<div class="section"><h2>席位权重(当年生效)</h2>
+      <div class="desc">权重 = 该席位截至上年末全部增多事件"后 20 日收益"的 t 值,截断 [0,5],样本 &lt;30 记 0。
+        每年 1 月 1 日自动重算,不手工设定。门槛 θ = 1.2 × 组内最大权重
+        (黄金 ${d.markets.AU.theta} / 白银 ${d.markets.AG.theta})。</div>
+      <table><tr><th>席位</th><th>黄金权重</th><th>白银权重</th><th>计分条件</th></tr>${rows}</table>
+      <div class="footnote">名单标准:金银两个品种都盈利且都进各自前 30 名、事件预测力 t 值双 ≥1.5(单品种选手已剔除)。</div>
+    </div>`;
+  } else {
+    app.innerHTML = `<div class="section"><h2>策略方案</h2>
+      <div class="desc">跟随金银双强席位的持仓变化,不使用任何趋势/突破类价格指标。</div>
+      <div class="rule-line"><span class="lab">信号组</span><span>${d.rules.group.join(" · ")}</span></div>
+      <div class="rule-line"><span class="lab">买点</span><span>${d.rules.buy}</span></div>
+      <div class="rule-line"><span class="lab">卖点</span><span>${d.rules.sell}</span></div>
+      <div class="rule-line"><span class="lab">事件定义</span><span>净多增加且多头腿主导,且 |ΔNet/全市场持仓| ≥ 该席位近 250 个上榜日的 80 分位(每家自适应门槛)</span></div>
+      <div class="rule-line"><span class="lab">时序</span><span>15:00 收盘后席位数据入库 → 当晚计算信号 → 次日开盘执行(买卖同)</span></div>
+      <div class="rule-line"><span class="lab">环境调制</span><span>金银比 &lt;48 白银禁新买点;&gt;85 白银买点建议加倍仓位</span></div>
+      <div class="rule-line"><span class="lab">已验证无效</span><span class="gray">跟随机构撤退卖出 · 机构止损跟随 · 顶部预测信号 · 趋势突破确认 · 金字塔加仓(V 型市负贡献)</span></div>
+      <div class="footnote">完整回测与验证过程见 research/REPORT_AU_v1.md</div>
+    </div>`;
+  }
+}
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+  t.classList.add("on"); TAB = t.dataset.tab; render();
+});
+
+fetch("signals.json?t=" + Date.now())
+  .then(r => r.json())
+  .then(d => { DATA = d; render(); })
+  .catch(e => document.getElementById("app").innerHTML =
+    `<div class="err">读取 signals.json 失败:${e}。请确认引擎已运行并生成信号文件。</div>`);
+</script>
+</body>
+</html>

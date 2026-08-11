@@ -1,0 +1,4 @@
+web/signals.json
+data/gold_silver_ratio.csv
+tmp/
+__pycache__/

@@ -90,10 +90,18 @@ def load_from_pg(instrument: str, container: str, pg_user: str, pg_db: str,
 
 
 def load_from_csv(data_dir: Path, instrument: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """接受 .csv 或 .csv.gz(生产由宿主机 psql \\copy 导出明文 csv)。"""
     p = instrument.lower()
-    price = pd.read_csv(data_dir / f"{p}_price.csv.gz", parse_dates=["trade_date"])
-    seat = pd.read_csv(data_dir / f"{p}_seat.csv.gz", parse_dates=["trade_date"])
-    return price, seat
+
+    def pick(kind: str) -> Path:
+        for ext in (".csv.gz", ".csv"):
+            f = data_dir / f"{p}_{kind}{ext}"
+            if f.exists():
+                return f
+        raise FileNotFoundError(f"缺少 {data_dir}/{p}_{kind}.csv[.gz]")
+
+    return (pd.read_csv(pick("price"), parse_dates=["trade_date"]),
+            pd.read_csv(pick("seat"), parse_dates=["trade_date"]))
 
 
 def clean_price(price: pd.DataFrame) -> pd.DataFrame:
@@ -117,8 +125,16 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
         seat["is_variety_total"] = (col.astype(str).str.strip().str.lower()
                                     .isin(["t", "true", "1", "yes"]))
     seat["member"] = seat["member"].replace(RULES["alias"])
-    seat = seat.drop_duplicates(
-        ["trade_date", "contract", "is_variety_total", "rank_type", "member"])
+    # 多来源重复行必须按优先级去重:交易所官方 > 其它源,change 非空 > 空。
+    # 实测 akshare_v1 自 2026-07-31 起写入与官方重复的席位行且 change 全为空,
+    # 若保留了它,ΔNet 会变 0,当周信号会整体消失。
+    is_official = seat["source"].astype(str).str.contains("official", na=False)
+    seat["_pri"] = (~is_official).astype(int) * 2 + seat["change"].isna().astype(int)
+    keys = ["trade_date", "contract", "is_variety_total", "rank_type", "member"]
+    seat = (seat.sort_values(keys + ["_pri"])
+            .drop_duplicates(keys, keep="first")
+            .drop(columns="_pri")
+            .reset_index(drop=True))
     return seat
 
 
@@ -383,8 +399,11 @@ class MarketEngine:
             if i + 1 >= len(self.dates) or i < busy:
                 continue
             recent = self.trigger_seats(d)
+            # 同一席位窗口内多日有事件时只保留最强的一次,避免重复列出
+            agg = (recent.sort_values("strength", ascending=False)
+                   .drop_duplicates("member"))
             seats = [{"member": r.member, "strength": round(float(r.strength), 2),
-                      "hands": int(r.hands)} for r in recent.itertuples()]
+                      "hands": int(r.hands)} for r in agg.itertuples()]
             zone = self.cost_zone(d)
             i0 = p0r = None
             if zone:
@@ -482,13 +501,57 @@ class MarketEngine:
 
 # ---------------------------------------------------------------- 金银比
 
-def london_ratio(data_dir: Path) -> pd.Series:
-    xau = pd.read_csv(data_dir / "london_xau.csv", parse_dates=["Date"]).set_index("Date")["Close"]
-    xag = pd.read_csv(data_dir / "london_xag.csv", parse_dates=["Date"]).set_index("Date")["Close"]
-    return (xau / xag).dropna().sort_index()
+def _fetch_comex_ratio(since_year: int = 2010) -> pd.Series:
+    """COMEX 金/银连续收盘比值。与伦敦现货比值实质等价(实测 2026-01-29 两者同为 46.6),
+    优点是可每日自动更新。网络失败时抛出,由调用方回退到缓存。"""
+    import time
+    import urllib.request
+
+    p1 = int(time.mktime((since_year, 1, 1, 0, 0, 0, 0, 0, 0)))
+    p2 = int(time.time())
+    legs = {}
+    for sym in ("GC=F", "SI=F"):
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+               f"?period1={p1}&period2={p2}&interval=1d")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.load(r)["chart"]["result"][0]
+        s = pd.Series(d["indicators"]["quote"][0]["close"],
+                      index=pd.to_datetime(d["timestamp"], unit="s").normalize()).dropna()
+        legs[sym] = s[~s.index.duplicated(keep="last")]
+    df = pd.DataFrame({"xau": legs["GC=F"], "xag": legs["SI=F"]}).dropna()
+    return (df["xau"] / df["xag"]).sort_index()
 
 
-def ratio_state(ratio: pd.Series, as_of: pd.Timestamp) -> dict:
+def load_ratio(data_dir: Path) -> tuple[pd.Series, str]:
+    """金银比序列 + 数据源说明。缓存优先保证可用性,每次运行尝试增量更新。
+
+    阈值 48/55/85/100 来自伦敦现货 2000-2026 共 26 年统计(均值 68.8),
+    是绝对水平锚,不随样本期变化。"""
+    cache = data_dir / "gold_silver_ratio.csv"
+    hist = pd.Series(dtype=float)
+    if cache.exists():
+        df = pd.read_csv(cache, parse_dates=["date"])
+        hist = df.set_index("date")["ratio"].sort_index()
+    # 手工导入的伦敦历史(若存在)作为更长基线
+    lx, lg = data_dir / "london_xau.csv", data_dir / "london_xag.csv"
+    if lx.exists() and lg.exists():
+        a = pd.read_csv(lx, parse_dates=["Date"]).set_index("Date")["Close"]
+        b = pd.read_csv(lg, parse_dates=["Date"]).set_index("Date")["Close"]
+        hist = (a / b).dropna().combine_first(hist).sort_index()
+    try:
+        fresh = _fetch_comex_ratio()
+        merged = fresh.combine_first(hist).sort_index()
+        (merged.rename("ratio").rename_axis("date").reset_index()
+         .to_csv(cache, index=False))
+        return merged, f"COMEX 连续(自动更新至 {merged.index[-1].date()})"
+    except Exception as e:                                   # 网络/上游异常
+        if len(hist):
+            return hist, f"缓存({hist.index[-1].date()},更新失败:{type(e).__name__})"
+        raise RuntimeError(f"金银比数据不可用且无缓存:{e}")
+
+
+def ratio_state(ratio: pd.Series, as_of: pd.Timestamp, source: str = "") -> dict:
     v = float(ratio.asof(as_of))
     lo, hi = RULES["ratio_normal"]
     if v < RULES["ratio_extreme_low"]:
@@ -502,7 +565,7 @@ def ratio_state(ratio: pd.Series, as_of: pd.Timestamp) -> dict:
     else:
         zone, note = "史诗区", "26 年仅两次,均为白银一年翻倍起点"
     pct = float((ratio <= v).mean() * 100)
-    return {"value": round(v, 1), "zone": zone, "note": note,
+    return {"value": round(v, 1), "zone": zone, "note": note, "source": source,
             "percentile": round(pct, 1),
             "as_of": str(ratio.index[ratio.index <= as_of][-1].date()),
             "mean": round(float(ratio.mean()), 1),
@@ -583,10 +646,11 @@ def pair_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
 
 # ---------------------------------------------------------------- 输出
 
-def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp) -> dict:
+def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
+                  ratio_source: str = "") -> dict:
     au, ag = engines["AU"], engines["AG"]
     trades = {k: e.replay() for k, e in engines.items()}
-    ratio = ratio_state(ratio_s, data_date)
+    ratio = ratio_state(ratio_s, data_date, ratio_source)
 
     markets, alerts, history = {}, [], []
     for key, eng in engines.items():
@@ -715,9 +779,9 @@ def main():
                 os.environ.get("PG_DB", "futures_platform"))
         engines[inst] = MarketEngine(inst, price, seat)
 
-    ratio = london_ratio(data_dir)
+    ratio, ratio_src = load_ratio(data_dir)
     data_date = min(e.dates[-1] for e in engines.values())
-    payload = build_payload(engines, ratio, data_date)
+    payload = build_payload(engines, ratio, data_date, ratio_src)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(".tmp")
