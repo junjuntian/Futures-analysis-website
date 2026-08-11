@@ -47,6 +47,14 @@ RULES = {
     "netq_window": 250, "netq_max": 0.60,
     "zone_half_width": 5.0, "zone_valid_days": 10,
     "stop_loss": 0.04, "fade_days": 10,
+    # 主力跑路警报触发后,压制「中继再进场」的交易日数(两市场同压)。
+    # 2026-08-12 全历史回测:警报仅 2026-01-27~29 触发过一次,最后警报日到
+    # 银崩末段 3-19 的中继信号相隔 29 个交易日;窗口 30~40 结果相同
+    # (AG 全期 +130.5%→+142.8%,切掉 3-16/18/19 三笔连续中继止损 -12.3%),
+    # 取 40 留余量不卡线;AU 66 笔 +125.8% 零变化(3-24 是三条件新信号不受压制)。
+    # 语义自洽:警报说「机构在跑」,窗口内还中继接多单是自相矛盾。样本=1,
+    # 这是让规则自洽的结构约束,不是统计验证过的规律。
+    "flee_suppress_days": 40,
     "replay_start": "2015-01-01",
     "ratio_extreme_low": 48.0,    # 银高估:禁买银 / 配对窗口
     "ratio_warn_low": 55.0,
@@ -378,7 +386,8 @@ class MarketEngine:
         return (c - h, c + h, c)
 
     # -------- 全量重放
-    def replay(self) -> list[Trade]:
+    def replay(self, suppress: list[tuple] | None = None) -> list[Trade]:
+        suppress = suppress or []
         d0 = pd.Timestamp(RULES["replay_start"])
         pos = {d: i for i, d in enumerate(self.dates)}
         lo_r = self.cont["low"].to_numpy()
@@ -397,7 +406,7 @@ class MarketEngine:
                      & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
         # 中继再进场(2026-08-11 运营者案例驱动,回测全期 +81%→+116%):
         # 消退卖出后,八家再度共振(仅分数门槛)即视为同一轮趋势的延续,
-        # 免"贴低点/低仓"两个起点条件;止损出场则趋势被否,回到严格三条件。
+        # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
         relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
         trades, busy = [], -1
         relay_armed = False
@@ -406,7 +415,12 @@ class MarketEngine:
             if i + 1 >= len(self.dates) or i < busy:
                 continue
             is_full = bool(full_mask[d])
-            is_relay = (not is_full) and relay_armed and bool(relay_mask[d])
+            # 主力跑路警报窗口内禁止中继(2026-08-12 全历史回测拍板):警报本身
+            # 就在说「机构在跑」,窗口内中继接多单自相矛盾——2026-03 银崩期
+            # 三笔连续中继止损(-12.3%)全部由此切除;三条件新信号不受影响
+            # (真正的新一轮启动仍可进场,如 2026-03-24 黄金)。
+            suppressed = any(a <= d <= b for a, b in suppress)
+            is_relay = (not is_full) and relay_armed and bool(relay_mask[d]) and not suppressed
             if not (is_full or is_relay):
                 continue
             recent = self.trigger_seats(d)
@@ -463,10 +477,11 @@ class MarketEngine:
                 busy = last
             else:
                 busy = pos[t.exit_date]
-            if t.result == "消退卖出":
+            # 止损后同样保持中继待命(2026-08-12 运营者裁定,回测 +116%→+126%,
+            # 2020 接飞刀年零恶化):-4% 止损是自身风险纪律,不代表机构观点——
+            # 2025-11-17 假摔止损时高盛们根本没离场,趋势死活由席位共振/消退判定。
+            if t.result in ("消退卖出", "止损"):
                 relay_armed = True
-            elif t.result in ("止损", "持有中"):
-                relay_armed = False
             trades.append(t)
         return trades
 
@@ -675,6 +690,38 @@ def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
 
 
 
+def flee_hot_days(ag: MarketEngine, ratio_s: pd.Series) -> pd.Series:
+    """回算全历史的主力跑路警报热日:比值<48 且 5 日内 >=3 家增空白银。
+    供 historical_alerts(展示)与中继压制窗口(交易逻辑)共用同一份判定。"""
+    dates = ag.dates
+    ratio = pd.Series([ratio_s.asof(d) for d in dates], index=dates)
+    w = pd.Timedelta(days=8)
+    hot = []
+    for d in dates:
+        if not (ratio[d] == ratio[d]) or ratio[d] >= RULES["ratio_extreme_low"]:
+            hot.append(False)
+            continue
+        n = ag.ev_short[(ag.ev_short["trade_date"] > d - w)
+                        & (ag.ev_short["trade_date"] <= d)]["member"].nunique()
+        hot.append(n >= 3)
+    return pd.Series(hot, index=dates)
+
+
+def flee_suppress_windows(ag: MarketEngine, ratio_s: pd.Series) -> list[tuple]:
+    """警报热日 → 中继压制的日历区间列表 [(起, 止)]。
+    每个热日向后覆盖 flee_suppress_days 个 AG 交易日,重叠段自然被区间判定吸收;
+    用日历区间而非交易日下标,让 AU(节假日历可能不同)也能直接套用。"""
+    hot = flee_hot_days(ag, ratio_s)
+    dates = ag.dates
+    n = RULES["flee_suppress_days"]
+    wins = []
+    for i, d in enumerate(dates):
+        if hot[d]:
+            j = min(i + n, len(dates) - 1)
+            wins.append((d, dates[j]))
+    return wins
+
+
 def historical_alerts(au: MarketEngine, ag: MarketEngine, ratio_s: pd.Series) -> list[dict]:
     """回算全历史的做空侧警报触发段,供历史页展示(运营者 2026-08-11 要求:
     警报响过要留痕,否则 2026-01 那次做空窗口在历史里不可见)。
@@ -686,16 +733,7 @@ def historical_alerts(au: MarketEngine, ag: MarketEngine, ratio_s: pd.Series) ->
     dates = ag.dates
     ratio = pd.Series([ratio_s.asof(d) for d in dates], index=dates)
     # 主力跑路:比值<48 且 5 日内 >=3 家增空白银(连续日合并为段)
-    w = pd.Timedelta(days=8)
-    hot = []
-    for d in dates:
-        if not (ratio[d] == ratio[d]) or ratio[d] >= RULES["ratio_extreme_low"]:
-            hot.append(False)
-            continue
-        n = ag.ev_short[(ag.ev_short["trade_date"] > d - w)
-                        & (ag.ev_short["trade_date"] <= d)]["member"].nunique()
-        hot.append(n >= 3)
-    hot = pd.Series(hot, index=dates)
+    hot = flee_hot_days(ag, ratio_s)
     seg_start = None
     for d, v in hot.items():
         if v and seg_start is None:
@@ -746,7 +784,8 @@ def pair_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
 def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                   ratio_source: str = "") -> dict:
     au, ag = engines["AU"], engines["AG"]
-    trades = {k: e.replay() for k, e in engines.items()}
+    suppress = flee_suppress_windows(ag, ratio_s)
+    trades = {k: e.replay(suppress) for k, e in engines.items()}
     ratio = ratio_state(ratio_s, data_date, ratio_source)
 
     markets, alerts, history = {}, [], []
