@@ -323,6 +323,17 @@ class MarketEngine:
         self.dates = self.cont.index
         self.group = RULES["group8"]
 
+        # 分合约多头榜明细(仅八席位)与每日各合约多头榜门槛(第20名持仓量)。
+        # 用途:龙虎榜是前20截断数据,"榜上无名"≠清仓(2026-08-12 实证:高盛
+        # 2025-08-20 掉榜实持 1830 手、2026-07-29 掉榜实持 1691 手,与三禾反推
+        # 一致)。门槛用于给掉榜席位的减仓幅度定下界;回榜日 change 可反推
+        # 榜下真实持仓(交易所 change 相对会员昨日全量仓计算)。
+        raw_long = seat[(~seat["is_variety_total"]) & (seat["rank_type"] == "long")
+                        & seat["contract"].notna() & (seat["contract"] != "")]
+        self.long_floor = raw_long.groupby(["trade_date", "contract"])["quantity"].min()
+        self.seat_long = raw_long[raw_long["member"].isin(self.group)][
+            ["trade_date", "member", "contract", "quantity"]].reset_index(drop=True)
+
         self.ev_long = detect_events(self.md, self.cont, self.group, "long")
         self.ev_short = detect_events(self.md, self.cont, self.group, "short")
         years = range(self.dates[0].year, self.dates[-1].year + 1)
@@ -669,25 +680,85 @@ def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
         ag.ev_short[(ag.ev_short["trade_date"] > d - w) & (ag.ev_short["trade_date"] <= d)]["member"]))
     if len(shorters) < 3:
         return None
-    # 黄金多头大额消失确认(可选,升级警报文案)
+    # 黄金多头大额撤离确认(可选,升级警报文案)。
+    # ⚠ 榜上无名≠清仓(前20截断):必须用「掉榜日原合约门槛」给减仓下界,
+    # 排除不了"仅跌出榜单"的一律不确认(2026-08-12 运营者拍板修复;假阳性
+    # 实例:高盛 2025-08-20 无名实持 1830 手、2026-07-29 无名实持 1691 手)。
     vanished = []
     au_dates = au.dates
     for m in RULES["group8"]:
-        s = au.md[au.md["member"] == m].set_index("trade_date")["long_q"].dropna()
-        s = s[s.index.isin(au_dates)]
-        if len(s) < 2:
+        rows = au.seat_long[au.seat_long["member"] == m]
+        if rows.empty:
             continue
-        last_seen, prev_q = s.index[-1], s.iloc[-1]
+        last_seen = rows["trade_date"].max()
+        prev = rows[rows["trade_date"] == last_seen]
+        prev_q = float(prev["quantity"].sum())
+        if last_seen not in au_dates:
+            continue
         i = au_dates.get_loc(last_seen)
-        if prev_q >= 2000 and i + 1 < len(au_dates):  # 之后的交易日榜上无名
-            vanished.append(f"{m}({int(prev_q):,}手)")
-    confirm = f";且 {'、'.join(vanished)} 黄金多头已从榜上消失" if vanished else ""
+        if prev_q < 2000 or i + 1 >= len(au_dates):
+            continue
+        gone = au_dates[i + 1]
+        # 若仓位原样不动,它应仍在原合约榜上;掉榜 → 各原合约持仓均已低于
+        # 当日门槛,榜下上界 = 原合约门槛之和,减仓下界随之可算。
+        cap = sum(float(au.long_floor.get((gone, ct), 0.0))
+                  for ct in prev["contract"].unique())
+        cut_min = 1 - cap / prev_q if prev_q > 0 else 0.0
+        if cut_min >= 0.3:
+            vanished.append(f"{m}(前日 {int(prev_q):,} 手→已至少减仓 {cut_min*100:.0f}%,"
+                            f"榜下余仓 ≤{int(cap):,} 手)")
+    confirm = f";且 {'、'.join(vanished)} 黄金多头大额撤离" if vanished else ""
     return {"type": "flee", "level": "danger", "market": "AU+AG", "date": str(d.date()),
             "text": (f"⚠ 主力跑路警报 — 金银比 {ratio['value']}(历史 {ratio['percentile']}% 分位,"
                      f"极端区)且 {'、'.join(shorters)} 共 {len(shorters)} 家近 5 日集体增空白银{confirm}。"
                      "历史同构两次(2011-05 / 2026-02)白银两周 -28%/-31%:"
                      "**持有的金银多单建议立即离场或大幅收紧止损**;配对窗口(多金空银)开启")}
 
+
+
+def reboard_verify_alerts(eng: MarketEngine) -> list[dict]:
+    """回榜日事后验证(2026-08-12 运营者拍板):席位掉榜(榜上无名)期间的
+    真实仓位,在它回榜当日可由 change 字段反推——交易所的增减是相对该会员
+    昨日全量持仓计算的,回榜量 - 当日增减 = 回榜前一日真实仓。据此把此前的
+    「榜上无名」定性为真撤离还是仅跌出前20(实证:高盛 2026-01-30 榜下实持
+    1588 手=真砍 54%;2025-08-20 榜下实持 1830 手=仅掉榜)。"""
+    out = []
+    d = eng.dates[-1]
+    i = eng.dates.get_loc(d)
+    if i == 0:
+        return out
+    for m in eng.group:
+        s = eng.md[eng.md["member"] == m].set_index("trade_date")
+        lq = s["long_q"].dropna()
+        lq = lq[lq.index.isin(eng.dates)]
+        if d not in lq.index or len(lq) < 2:
+            continue
+        k = lq.index.get_loc(d)
+        prev_seen = lq.index[k - 1]
+        if i - eng.dates.get_loc(prev_seen) <= 1:
+            continue                      # 昨日就在榜,没有掉榜段
+        prev_q = float(lq.iloc[k - 1])
+        if prev_q < 2000:
+            continue
+        dl = s.loc[d, "dlong"]
+        if pd.isna(dl):
+            continue
+        hidden = float(lq.iloc[k]) - float(dl)   # 回榜前一日真实仓
+        cut = 1 - hidden / prev_q if prev_q > 0 else 0.0
+        if cut >= 0.4:
+            verdict = "真实大额撤离,此前的消失警示证实"
+        elif cut <= 0.15:
+            verdict = "未实质减仓,此前的榜上无名仅是跌出前20"
+        else:
+            verdict = "部分减仓"
+        out.append({
+            "type": "reboard", "level": "info", "market": eng.instrument,
+            "date": str(d.date()),
+            "text": (f"{eng.meta['name']} {m} 多头回榜验证 — 掉榜前 {int(prev_q):,} 手,"
+                     f"榜下真实余仓(回榜前日)≈{int(hidden):,} 手,"
+                     f"实际减仓 {cut*100:.0f}% → {verdict}"),
+        })
+    return out
 
 
 def flee_hot_days(ag: MarketEngine, ratio_s: pd.Series) -> pd.Series:
@@ -848,6 +919,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                 "text": f"{eng.meta['name']} 买入触发 — {where};止损 -4%",
             })
         alerts.extend(rare_flip_alerts(eng))
+        alerts.extend(reboard_verify_alerts(eng))
 
     fa = flee_alert(au, ag, ratio)
     if fa:

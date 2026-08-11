@@ -70,8 +70,17 @@ interface SignalsPayload {
     exit_date: string | null
     exit_px: number | null
     result: string
+    relay: boolean
     ret_pct: number | null
     marks: { cross_resonance: boolean; spread_legs: string[]; goldman_combo: boolean }
+  }[]
+  alert_history: {
+    type: string
+    label: string
+    market: string
+    start: string
+    end: string
+    note: string
   }[]
   stats: Record<string, { count: number; win_rate: number; avg: number; total: number; since: string }>
   rules: { group: string[]; buy: string; sell: string; cond_seats: string[] }
@@ -367,7 +376,10 @@ onMounted(async () => {
             <tbody>
               <tr v-for="(row, index) in data.history" :key="index">
                 <td><span class="pill" :class="row.market.toLowerCase()">{{ row.name }}</span></td>
-                <td>{{ row.signal_date }}</td>
+                <td>
+                  {{ row.signal_date }}
+                  <span v-if="row.relay" class="pill relay" title="消退/止损离场后席位再共振的再进场,免贴低点与低仓条件,次日开盘市价">中继</span>
+                </td>
                 <td>{{ row.score }}</td>
                 <td class="wrap">{{ row.seats.map((s) => `${s.member}(${s.strength})`).join('、') || '—' }}</td>
                 <td>{{ row.zone ? `≤${fmt(row.zone[1], decimalsOf(row.market))}` : '市价' }}</td>
@@ -384,6 +396,29 @@ onMounted(async () => {
             </tbody>
           </table>
         </div>
+
+        <h2 class="alert-history-title">警报历史</h2>
+        <div class="desc">
+          做空侧只有复合结构警报,不是逐笔交易信号(单边跟随机构空单已被数据三次否定,空单主体是产业套保)。
+          警报活跃段内:持有的金银多单建议离场,且警报后 40 个交易日内系统自动禁止中继再进场。
+        </div>
+        <div v-if="data.alert_history?.length" class="scroll-x">
+          <table>
+            <thead>
+              <tr><th>类型</th><th>市场</th><th>起</th><th>止</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="(seg, index) in data.alert_history" :key="index">
+                <td><span class="pill loss">{{ seg.label }}</span></td>
+                <td>{{ seg.market }}</td>
+                <td>{{ seg.start }}</td>
+                <td>{{ seg.end }}</td>
+                <td class="wrap gray">{{ seg.note }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="gray">全历史暂无警报触发段</div>
       </div>
 
       <div v-else-if="tab === 'weights'" class="section">
@@ -498,6 +533,8 @@ td.wrap { white-space: normal; min-width: 220px; }
 .pill.win { background: #f0f9eb; color: #67c23a; }
 .pill.loss { background: #fef0f0; color: #f56c6c; }
 .pill.holding { background: #ecf5ff; color: #409eff; }
+.pill.relay { background: #fdf2e9; color: #e6a23c; margin-left: 4px; cursor: help; }
+.alert-history-title { margin-top: 28px; }
 .gauge { display: flex; align-items: center; gap: 14px; }
 .gwrap { flex: 1; }
 .gtrack { height: 10px; border-radius: 5px; position: relative;
