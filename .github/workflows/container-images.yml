@@ -169,17 +169,20 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest || steps.reuse.outputs.digest }}
           BASE: ${{ steps.decide.outputs.base }}
+          # 复用时报镜像**最初构建自**的提交（可能比 BASE 更早，见上一步注释），
+          # 而不是上一跳。这个值要与镜像里的 revision 标签逐字相同。
+          ORIGIN: ${{ steps.reuse.outputs.origin }}
         run: |
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           # image-built-from 是给 ops/preflight-deploy.sh 读的：复用时它据此
           # 填 deploy 的 image_sources 输入。
-          echo "image-built-from ${{ matrix.image }} ${BASE:-${GITHUB_SHA}}"
+          echo "image-built-from ${{ matrix.image }} ${ORIGIN:-${GITHUB_SHA}}"
           {
             echo "### ${{ matrix.image }}"
             echo
             echo "- Image: \`${{ steps.image.outputs.name }}:sha-${GITHUB_SHA}\`"
             echo "- Digest: \`${DIGEST}\`"
             if [[ -n "${BASE}" ]]; then
-              echo "- Reused from: \`${BASE}\`"
+              echo "- Reused from: \`${BASE}\` (originally built at \`${ORIGIN}\`)"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
