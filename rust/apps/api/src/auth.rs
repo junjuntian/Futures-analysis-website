@@ -198,11 +198,20 @@ pub async fn provision_collector_account(pool: &PgPool, config: &AuthConfig) -> 
             .execute(&mut *tx)
             .await?;
             // 旧密码开出的会话一并作废。采集器每轮自己登录，不靠长会话，
-            // 这里清掉只影响拿旧凭据的人。
-            sqlx::query("delete from sessions where user_id = $1")
-                .bind(user_id)
-                .execute(&mut *tx)
-                .await?;
+            // 这里撤销掉只影响拿旧凭据的人。
+            //
+            // 是 revoke 不是 delete：futures_runtime 对 sessions 只有
+            // select/insert/update（迁移 202607240002 有意为之——会话史是审计素材），
+            // 全库也无一处 delete 会话。第一版写了 delete，生产轮换当场
+            // permission denied，事务回滚，文件已换库未换，采集器登不进去。
+            sqlx::query(
+                "update sessions
+                    set revoked_at = now(), revoke_reason = 'password_rotated'
+                  where user_id = $1 and revoked_at is null",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         }
         user_id
     } else {
