@@ -1,14 +1,23 @@
-"""采三禾的大商所席位历史。
+"""采三禾的席位历史。
 
-焦煤、鸡蛋、生猪的席位，交易所自己不给（脚本 412、真实浏览器 500），东财只到
-2025-11 且到 2026 年中都残缺。三禾是唯一覆盖到 2023-08-10 的来源。
+**为什么不能只用交易所官方龙虎榜**：官方只公布前二十名。掉出前二十和真的清仓是
+两回事，而趋势跟随策略必须分得清这两者。2026-06-15 高盛的黄金归零、06-16 只剩
+4 手，官方文件里都没有这一行——页面上看起来像「这家不做黄金」，实际是它刚清完仓。
+三禾覆盖全部会员，这是它不可替代的地方。
+
+大商所那三个品种另有一层理由：交易所自己不给（脚本 412、真实浏览器 500），东财
+只到 2025-11 且到 2026 年中都残缺，三禾是唯一覆盖到 2023-08 的来源。
 
 三禾按**会员**组织而不是按合约，所以要拼出「某合约当日的席位表」，得把会员逐个走
-一遍。`sanhe_survey.py` 已经筛出真正持有这三个品种的 108 家（208 家里的一半），
-其余的每天都取只是白费请求。
+一遍。名单由 `sanhe_survey_all.py` 筛出（208 家里真正碰这八个品种的那些），其余
+的每天都取只是白费请求。
 
-**从最近的日期往回采**：这样中途停下也是手里握着最有用的那一段，而不是握着三年前
-的一段、最近的反而没有。
+**从最近的日期往回采**：中途停下也是手里握着最有用的那一段，而不是握着三年前的
+一段、最近的反而没有。
+
+**落盘时带 scope 标记**：2023-08 那轮只存了大商所三个品种，文件却和全品种的长得
+一样。没有标记的话，「文件已存在就跳过」会把那些只有大商所的文件当成采全了，
+于是另外五个品种永远补不上——而且没有任何报错。
 """
 
 import json
@@ -22,7 +31,12 @@ import requests
 
 ROOT = Path("/opt/futures-platform/sanhe-seats")
 RAW = ROOT / "raw"
-WANT = {"焦煤", "鸡蛋", "生猪"}
+# 八个品种，**用三禾的叫法**：它管黄金叫「沪金」、白银叫「沪银」，而交易所与东财
+# 写「黄金」「白银」。写错了不会报错，只会让金银一行都采不到。
+# 解析侧由 parsers.VARIETY_BY_NAME 把这两个名字映回 AU/AG。
+WANT = {"焦煤", "鸡蛋", "生猪", "苹果", "玻璃", "纯碱", "沪金", "沪银"}
+# 写进每个文件，标明这一份是按哪个品种集合采的。见模块 docstring。
+SCOPE = "eight-varieties-v1"
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
@@ -55,6 +69,21 @@ def post(path, data=None):
     raise last
 
 
+def already_full(target: Path) -> bool:
+    """这个文件是不是已经按当前品种集合采过了。
+
+    只看 scope 标记，不看文件存不存在：2023-08 那轮写下的文件没有这个字段，
+    内容只有大商所三个品种，当成「采过了」会让另外五个品种永远补不上。
+    """
+    if not target.exists():
+        return False
+    try:
+        return json.loads(target.read_text(encoding="utf-8")).get("scope") == SCOPE
+    except (json.JSONDecodeError, OSError):
+        # 读不动就当没采过：重采一次的代价，远小于把一个坏文件当成好数据。
+        return False
+
+
 def main() -> int:
     start = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date(2023, 8, 10)
     end = (
@@ -63,7 +92,9 @@ def main() -> int:
         else datetime.now(UTC).date()
     )  # 三禾窗口以 last_date 为准，下面还会再收一次口
 
-    brokers = json.loads((ROOT / "dce_brokers.json").read_text(encoding="utf-8"))
+    # 名单文件可以用参数换掉：普查完成前先跑大商所那份也能出活。
+    roster = Path(os.environ.get("SANHE_ROSTER", ROOT / "all_brokers_eight.json"))
+    brokers = json.loads(roster.read_text(encoding="utf-8"))
     window = post("broker_dates.php").get("data") or {}
     # 三禾是滚动窗口，早于 first_date 的日期请求了也只会拿到空。
     first = date.fromisoformat(window["first_date"])
@@ -74,6 +105,28 @@ def main() -> int:
         f"会员 {len(brokers)} 家，区间 {start}..{end}（三禾窗口 {first}..{last}）",
         flush=True,
     )
+
+    # 开跑前先确认每个名字在三禾那边真的有数。
+    #
+    # 三禾的会员名与我们库里的写法不一定一样，而且它对不认识的名字**返回空而不是
+    # 报错**：`上海中财` 与 `国投期货` 实测都回 0 个品种，活的名字是 `中财期货`
+    # 与 `国投安信`。名单里混进一个死名字，这个会员就整段采不到，而日志里只有一行
+    # 「命中 0」——跑完几小时才发现，那时窗口已经滚过去了。
+    dead = []
+    for broker in brokers:
+        time.sleep(PACE)
+        try:
+            payload = post("broker_positions.php", {"broker": broker, "date": last.isoformat()})
+        except Exception as error:  # noqa: BLE001
+            print(f"ROSTER_PROBE_FAIL {broker} {type(error).__name__}", flush=True)
+            dead.append(broker)
+            continue
+        if not ((payload.get("data") or {}).get("positions") or {}):
+            dead.append(broker)
+    if dead:
+        print(f"这些名字在三禾查不到任何持仓，先确认写法再跑：{dead}", flush=True)
+        return 1
+    print(f"名单自检通过：{len(brokers)} 家在 {last} 都有数", flush=True)
 
     days = [
         day
@@ -91,7 +144,7 @@ def main() -> int:
         found = 0
         for broker in brokers:
             target = day_dir / f"{broker}.json"
-            if target.exists():
+            if already_full(target):
                 continue
             time.sleep(PACE)
             try:
@@ -110,6 +163,7 @@ def main() -> int:
                         {
                             "date": data.get("date"),
                             "broker": data.get("broker"),
+                            "scope": SCOPE,
                             "positions": mine,
                         },
                         ensure_ascii=False,

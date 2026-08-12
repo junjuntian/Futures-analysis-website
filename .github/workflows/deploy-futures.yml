@@ -208,6 +208,7 @@ jobs:
           install -m 600 backfill/load_history.py "${RELEASE_BUNDLE}/backfill/load_history.py"
           install -m 600 backfill/sina_coverage.py "${RELEASE_BUNDLE}/backfill/sina_coverage.py"
           install -m 600 backfill/sina_fields.py "${RELEASE_BUNDLE}/backfill/sina_fields.py"
+          install -m 600 backfill/sanhe_survey_all.py "${RELEASE_BUNDLE}/backfill/sanhe_survey_all.py"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
