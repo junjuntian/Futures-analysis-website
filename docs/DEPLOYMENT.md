@@ -112,6 +112,43 @@ futures VPS 主密钥文件：
 4. 将 `key_version_metadata` 中旧版本标记为 retired。
 5. 数据库备份与主密钥恢复副本分开保存。
 
+## 采集账号密码轮换（2026-08-12 实证）
+
+凭据文件 `/etc/futures-platform/secrets/collector-credentials`（root:root 0400，JSON）
+是采集器登录用的唯一事实源。轮换 = 换文件里的 `password`，再让库向文件收敛：
+
+```bash
+# 全程在服务器上做，新密码不出这台机器。
+set -euo pipefail; umask 077
+. /var/lib/futures-platform/deployments/stable.env
+export IMAGE_TAG="sha-${previous_git_sha}"
+C=(docker compose -f "$previous_release_dir/docker-compose.yml"    -f "$previous_release_dir/docker-compose.production.yml"    -f "$previous_release_dir/docker-compose.release.yml")
+FILE=/etc/futures-platform/secrets/collector-credentials
+new_password=$(openssl rand -base64 48 | tr -d '
+' | tr '+/' '-_')
+tmp=$(mktemp /etc/futures-platform/secrets/.collector.XXXXXX)
+jq -c --arg p "$new_password" '.password = $p' "$FILE" > "$tmp"
+unset new_password
+chown root:root "$tmp"; chmod 400 "$tmp"; mv "$tmp" "$FILE"
+"${C[@]}" run --rm --no-deps api /app/api --provision-collector-account
+```
+
+`--provision-collector-account` 自 2026-08-12 起是收敛式的：账号已存在且密码与文件
+不同 → 更新哈希并把该用户现存会话标记 `revoke_reason='password_rotated'`；停用的
+账号仍然报错（复活是管理决定，不是采集配置）。在那之前它是只创建，文件与库不一致
+直接报错——轮换无路可走。
+
+两个踩过的坑：
+
+- **换文件与跑收敛之间不要停。** 文件已换、收敛失败的中间态里采集器登不进去。
+  第一次轮换正是卡在这里（收敛命令里有句 `delete from sessions`，futures_runtime
+  对 sessions 没有 delete 权限——迁移 202607240002 有意只给 select/insert/update，
+  会话史是审计素材，作废会话一律 update revoked_at）。**不要用回退文件的方式脱困**：
+  需要轮换多半意味着旧密码已经泄露，回退等于把泄露的密码放回生产。修收敛命令，
+  再往前走。
+- 验证登录用 collector 镜像里的 python 读文件直接 POST `/api/v1/auth/login`，
+  只打印状态码，密码不进 shell 历史也不进日志。
+
 ## Phase 4A Collector 生产部署实证（2026-08-03）
 
 - 候选：`944a4defe578d5922b9f1ea83f951ddbd6fb005e`。
