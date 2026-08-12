@@ -17,6 +17,21 @@ WANT = {"AP", "FG", "SA", "AU", "AG", "JM", "JD", "LH"}
 # 品种中文名 → 代码。**同一个品种在不同来源叫法不同**：交易所与东财写「黄金」
 # 「白银」，三禾写「沪金」「沪银」。少一个别名不会报错，只会让那个品种一行都采不到——
 # 2026-08-12 差点就这么把金银整段漏掉，因为大商所那三个品种两边叫法碰巧一致。
+# 品种 → 交易所。三禾按会员组织，响应里**只有品种名没有交易所**，得由我们补。
+# 原来 sanhe_seats 把 exchange 写死成 "DCE"——那时只采大商所三个品种碰巧对；
+# 扩到八品种后，苹果玻璃纯碱(郑商所)与沪金沪银(上期所)都会被标成 DCE。
+# 交易所是 seat_history 身份键的一部分：官方的 SHFE/AU 与三禾的 DCE/AU 不会互相
+# 去重，页面上同一家会显示两遍，而两行的数字还都对——最难看出来的那种错。
+EXCHANGE_BY_VARIETY = {
+    "JM": "DCE",
+    "JD": "DCE",
+    "LH": "DCE",
+    "AP": "CZCE",
+    "FG": "CZCE",
+    "SA": "CZCE",
+    "AU": "SHFE",
+    "AG": "SHFE",
+}
 VARIETY_BY_NAME = {
     "沪金": "AU",
     "沪银": "AG",
@@ -29,6 +44,18 @@ VARIETY_BY_NAME = {
     "鸡蛋": "JD",
     "生猪": "LH",
 }
+
+# 自证：每个要处理的品种都得有交易所。少配一个不会报错，只会把那个品种的行
+# 标到错误的交易所去，而交易所是 seat_history 身份键的一部分——同一家会员会
+# 在页面上显示两遍，两行的数字还都对。宁可导入时就炸。
+assert WANT == set(EXCHANGE_BY_VARIETY), (
+    f"品种与交易所对不上：缺 {WANT - set(EXCHANGE_BY_VARIETY)}，"
+    f"多 {set(EXCHANGE_BY_VARIETY) - WANT}"
+)
+# 每个中文名都得映到我们认识的代码上，否则那个品种会被静默跳过。
+assert set(VARIETY_BY_NAME.values()) <= WANT, (
+    f"中文名映到了不认识的代码：{set(VARIETY_BY_NAME.values()) - WANT}"
+)
 
 
 def num(text):
@@ -345,7 +372,7 @@ def sanhe_seats(path):
                     continue
                 rows.append(
                     {
-                        "exchange": "DCE",
+                        "exchange": EXCHANGE_BY_VARIETY[variety],
                         "instrument": variety,
                         "contract": contract,
                         "is_variety_total": False,
