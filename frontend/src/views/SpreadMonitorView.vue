@@ -139,14 +139,16 @@ function signedSpread(text: string) {
   return value > 0 ? `+${value.toLocaleString('zh-CN')}` : value.toLocaleString('zh-CN')
 }
 
+// 带着这一组合约跳到自由价差页，那边会自动填好并查出来（见 applyDeepLink）。
+// 传品种**代码**不传中文名：中文名在 product_instrument_scope 里可改，
+// 拿会变的东西做链接参数迟早对不上。
 function openDetail(item: SpreadMonitorItem) {
   void router.push({
     path: '/spread-analytics/free-spread',
     query: {
-      provider: 'self',
-      variety1: item.instrument_1,
+      symbol1: item.instrument_1,
       month1: item.contract_1.slice(-2),
-      variety2: item.instrument_2,
+      symbol2: item.instrument_2,
       month2: item.contract_2.slice(-2)
     }
   })

@@ -2,6 +2,7 @@
 import { Download, Plus, RefreshRight, Star } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   ApiError,
   createSpreadFavorite,
@@ -24,6 +25,8 @@ type LegKey = 'leg1' | 'leg2'
 type ExportableChart = { download: (type: 'png' | 'svg') => void }
 
 const auth = useAuthStore()
+// useRoute 必须在 setup 同步阶段调用,放进 onMounted 的 await 之后就拿不到实例了。
+const route = useRoute()
 const varieties = ref<SpreadVariety[]>([])
 const months = reactive<Record<LegKey, string[]>>({ leg1: [], leg2: [] })
 const legs = reactive<Record<LegKey, FreeSpreadLeg>>({
@@ -236,6 +239,34 @@ function downloadCsv() {
   URL.revokeObjectURL(url)
 }
 
+/** 深链接：套利监控点「看价差走势」过来时，直接把那一组合约填好并查出来。
+ *
+ * 只跳转不填参数等于把人扔在一个空表单前，还得自己回想刚才看的是哪两条腿。
+ * 参数用**品种代码**（AP/FG）而不是中文名：调用方拿到的是代码，而中文名在
+ * product_instrument_scope 里是可改的，拿会变的东西做链接参数迟早对不上。
+ */
+async function applyDeepLink(query: Record<string, unknown>) {
+  const pick = (key: string) => {
+    const value = query[key]
+    return typeof value === 'string' && value.trim() ? value.trim().toUpperCase() : ''
+  }
+  const wanted: Array<[LegKey, string, string]> = [
+    ['leg1', pick('symbol1'), pick('month1')],
+    ['leg2', pick('symbol2'), pick('month2')]
+  ]
+  if (wanted.some(([, symbol, month]) => !symbol || !month)) return
+  for (const [key, symbol, month] of wanted) {
+    const item = varieties.value.find((v) => v.symbol.toUpperCase() === symbol)
+    if (!item) return
+    legs[key].variety = item.name
+    await changeVariety(key, month)
+    // 月份对不上就停手，不要拿默认月份查一组人家没点的合约——
+    // 图会正常画出来，而画的根本不是他想看的那一对。
+    if (legs[key].month !== month) return
+  }
+  await runQuery()
+}
+
 onMounted(async () => {
   loadingVarieties.value = true
   errorMessage.value = ''
@@ -248,6 +279,9 @@ onMounted(async () => {
   } finally {
     loadingVarieties.value = false
   }
+  // 组件在单元测试里是不挂路由直接 mount 的，那时 useRoute() 是 undefined。
+  // 深链接只是增强，没有路由就没有深链接——不该因此把整个页面的挂载搞崩。
+  await applyDeepLink(route?.query ?? {})
 })
 </script>
 

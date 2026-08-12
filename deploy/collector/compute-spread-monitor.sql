@@ -20,6 +20,18 @@ begin;
 create temp table monitor_scope (instrument text primary key);
 insert into monitor_scope values ('JD'), ('LH'), ('JM'), ('AP'), ('FG'), ('SA');
 
+-- 主力月份。运营者 2026-08-12 明确：玻璃、纯碱、焦煤的主力合约是 1、5、9 月，
+-- **其余月份不做套利，也不进监控**。非主力月份的合约成交稀疏，价差是几手撮出来的，
+-- 报出来也没法交易。
+--
+-- 只列运营者点名的三个品种。鸡蛋、生猪、苹果没说，就不限制——**猜一个月份清单去
+-- 悄悄删掉人家的组合，比多报几组糟得多**。要限制时往这张表里加一行即可。
+create temp table main_month (instrument text, mm int);
+insert into main_month values
+    ('FG', 1), ('FG', 5), ('FG', 9),
+    ('SA', 1), ('SA', 5), ('SA', 9),
+    ('JM', 1), ('JM', 5), ('JM', 9);
+
 create temp table legs as
 select p.workspace_id, p.instrument, p.contract, p.trade_date,
        p.close_price, p.open_interest,
@@ -47,7 +59,11 @@ select l.*
                   from legs group by 1, 2) t
             on t.workspace_id = l.workspace_id and t.instrument = l.instrument
            and t.d = l.trade_date) l
- where l.oi_rank <= 6;
+ where l.oi_rank <= 6
+   -- 主力月份限制。没在 main_month 里列出的品种不受限（见那张表上的注释）。
+   and (not exists (select 1 from main_month m where m.instrument = l.instrument)
+        or exists (select 1 from main_month m
+                    where m.instrument = l.instrument and m.mm = l.mm));
 
 create temp table combo as
 select a.workspace_id, a.instrument i1, a.contract c1, a.mm m1, a.yy y1,
