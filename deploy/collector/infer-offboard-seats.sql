@@ -13,10 +13,14 @@
 -- 2416 且增减 +725。若交易所按「昨日为 0」算，增减该是 +2416；实际是 +725，
 -- 所以交易所知道昨天真实是 1691。反推得 2416 − 725 = 1691。
 --
--- **这是数学上的极限，只能往回推一天。** 掉榜段更早的日子（07-29 之前若还有）
--- 需要 07-29 当天的增减，而那天没有行。推不出来的日子**不写行**——
--- 缺行的含义是「不知道」，而写一个 0 是断言「他清仓了」。
--- 三禾就是在这里把 0 当成事实填进去的，我们不跟。
+-- **这条恒等式已在生产上验证**：把官方数据按会员+合约+榜别排序，相邻交易日
+-- （日期差 1 天）的 267,373 个样本里，`持仓 − 增减 = 前一日持仓` 成立 267,373 次，
+-- 100.000%，零例外。而日期差 2 天的样本只有 2% 成立——正因为中间那个交易日他
+-- 掉榜了，前值不是真值。这反过来划出了公式的适用边界，恰好就是反推要用的场景。
+--
+-- **这是数学上的极限，只能往回推一天。** 掉榜段更早的日子需要那天的增减，而那天
+-- 没有行。推不出来的日子**不写行**——缺行的含义是「不知道」，写一个 0 是断言
+-- 「他清仓了」。三禾就是在这里把 0 当成事实填进去的，我们不跟。
 --
 -- 只从官方源反推。三禾那一路的增减字段本身就是「清零差分」（掉榜日显示
 -- −前日持仓），拿它去反推是把错误再乘一遍。
@@ -35,6 +39,11 @@ delete from seat_history
  where source = 'reboard_inferred'
    and trade_date >= current_date - :window_days;
 
+-- 全部用窗口函数，不用相关子查询。
+--
+-- 第一版是 `not exists (select 1 from official where ... trade_date = prev_date)`，
+-- 在几百万行的 CTE 上对每一候选行各查一次，生产上跑了一小时没出来。
+-- 「昨天他在不在榜上」这件事，用他自己序列的 lag 一次算完就够了。
 with official as (
     select workspace_id, exchange, instrument, contract, rank_type, member,
            trade_date, quantity, change
@@ -42,35 +51,40 @@ with official as (
      where not is_variety_total and contract is not null
        and source like '%\_official' and change is not null
 ),
--- 合约的交易日历：官方那天发过这个合约，就说明那天有交易。用它找「前一个交易日」，
--- 而不是 trade_date - 1：中间隔着周末与长假，减一天会指到一个根本没有数据的日子。
+-- 合约的交易日历：官方那天发过这个合约，就说明那天有交易。必须用它找「前一个
+-- 交易日」，不能用 trade_date - 1：中间隔着周末与长假，减一天会指到一个根本
+-- 没有数据的日子。
 calendar as (
     select distinct workspace_id, exchange, instrument, contract, trade_date
       from official
 ),
-with_prev as (
+calendar_prev as (
     select c.*,
            lag(trade_date) over (partition by workspace_id, exchange, instrument, contract
                                  order by trade_date) prev_date
       from calendar c
 ),
-inferred as (
-    select o.workspace_id, o.exchange, o.instrument, o.contract, o.rank_type, o.member,
-           p.prev_date trade_date, o.quantity - o.change quantity
+-- 每个会员在这条合约+榜别上，自己上一次出现在榜上是哪天。
+member_prev as (
+    select o.*,
+           lag(trade_date) over (partition by workspace_id, exchange, instrument,
+                                              contract, rank_type, member
+                                 order by trade_date) own_prev
       from official o
-      join with_prev p
-        on p.workspace_id = o.workspace_id and p.exchange = o.exchange
-       and p.instrument = o.instrument and p.contract = o.contract
-       and p.trade_date = o.trade_date
-     where p.prev_date is not null
-       and p.prev_date >= current_date - :window_days
-       -- 昨天没有他这一行，才需要反推；有的话官方数就是真值。
-       and not exists (
-           select 1 from official x
-            where x.workspace_id = o.workspace_id and x.exchange = o.exchange
-              and x.instrument = o.instrument and x.contract = o.contract
-              and x.rank_type = o.rank_type and x.member = o.member
-              and x.trade_date = p.prev_date)
+),
+inferred as (
+    select m.workspace_id, m.exchange, m.instrument, m.contract, m.rank_type, m.member,
+           c.prev_date trade_date, m.quantity - m.change quantity
+      from member_prev m
+      join calendar_prev c
+        on c.workspace_id = m.workspace_id and c.exchange = m.exchange
+       and c.instrument = m.instrument and c.contract = m.contract
+       and c.trade_date = m.trade_date
+     where c.prev_date is not null
+       and c.prev_date >= current_date - :window_days
+       -- 他自己上一次上榜早于「前一个交易日」，说明前一个交易日他不在榜上：
+       -- 那天才需要反推。own_prev 为空表示这是他第一次出现，同样需要。
+       and (m.own_prev is null or m.own_prev < c.prev_date)
 )
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
@@ -79,31 +93,20 @@ select gen_random_uuid(), i.workspace_id, i.exchange, i.instrument, i.contract,
        false, false, i.trade_date, i.rank_type,
        -- 名次留空：他那天本来就不在榜上，编一个名次是凭空捏造。
        null, i.member, i.quantity,
-       -- 增减只在**再前一天也知道**时才算得出来。算不出就留空——
-       -- 留空是「不知道」，填 0 是「没变化」，这两件事差得很远。
-       (select i.quantity - x.quantity
-          from seat_history x
-         where x.workspace_id = i.workspace_id and x.exchange = i.exchange
-           and x.instrument = i.instrument and x.contract = i.contract
-           and x.rank_type = i.rank_type and x.member = i.member
-           and not x.is_variety_total and x.source like '%\_official'
-           and x.trade_date = (
-               select max(c.trade_date) from calendar c
-                where c.workspace_id = i.workspace_id and c.exchange = i.exchange
-                  and c.instrument = i.instrument and c.contract = i.contract
-                  and c.trade_date < i.trade_date)),
-       'reboard_inferred'
+       -- 增减留空。要算它得知道再前一天的持仓，而那天多半也不在榜上；留空是
+       -- 「不知道」，填 0 是「没变化」——三禾的 1691 配 −2038 就是不肯留空的结果。
+       null, 'reboard_inferred'
   from inferred i
  where i.quantity >= 0  -- 负持仓说明这一组数据本身有问题，宁可不写
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
-    quantity = excluded.quantity, change = excluded.change, loaded_at = now();
+    quantity = excluded.quantity, loaded_at = now();
 
 commit;
 
 -- 落地核对。反推行数为 0 而窗口里明明有官方数据，多半是日历那一段写错了。
-select trade_date 交易日, instrument 品种, count(*) 反推行数,
-       count(change) 连增减也算出来的, min(quantity) 最小持仓
+select instrument 品种, count(*) 反推行数,
+       min(trade_date) 起, max(trade_date) 止, min(quantity) 最小持仓
   from seat_history
- where source = 'reboard_inferred' and trade_date >= current_date - :window_days
- group by 1, 2 order by 1 desc, 2;
+ where source = 'reboard_inferred'
+ group by 1 order by 1;
