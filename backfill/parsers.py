@@ -11,18 +11,9 @@ from datetime import date
 from pathlib import Path
 
 WANT = {"AP", "FG", "SA", "AU", "AG", "JM", "JD", "LH"}
-# The century a three-digit CZCE month belongs to comes from when the variety
-# was listed, not from a rule of thumb about the current year.
-LISTED_YEAR = {
-    "AP": 2017,
-    "FG": 2012,
-    "SA": 2019,
-    "AU": 2008,
-    "AG": 2012,
-    "JM": 2013,
-    "JD": 2013,
-    "LH": 2021,
-}
+# 这里曾有一张 LISTED_YEAR（品种上市年）表，用来给三位郑商所代码补世纪。
+# 那条规则是错的，见 normalise_contract 的说明——锚点必须是交易日。表已删除：
+# 留着一份写着错误规则的现成数据，下一个人很容易「顺手」再用上它。
 VARIETY_BY_NAME = {
     "苹果": "AP",
     "玻璃": "FG",
