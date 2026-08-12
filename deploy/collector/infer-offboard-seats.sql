@@ -22,10 +22,28 @@
 -- 没有行。推不出来的日子**不写行**——缺行的含义是「不知道」，写一个 0 是断言
 -- 「他清仓了」。三禾就是在这里把 0 当成事实填进去的，我们不跟。
 --
--- 只从官方源反推。三禾那一路的增减字段本身就是「清零差分」（掉榜日显示
--- −前日持仓），拿它去反推是把错误再乘一遍。
+-- 源的范围：交易所官方，**外加大商所的三禾**。
+--
+-- 大商所没有官方那条路（WAF 全局拦截，见 DEC-041），三禾是唯一有历史的源，而
+-- 鸡蛋、生猪、焦煤三个品种全在那里。原来这里只认 `*_official`，理由是三禾的增减是
+-- 「清零差分」，拿它反推等于把错误再乘一遍——那个顾虑是对的，但范围划大了：
+-- 清零差分只出现在**它自己回写过的那些行**上，指纹是 `增减 = −前一行持仓`，精确可辨。
+-- 2026-08-12 全库实测：排除带指纹的行之后，三禾在榜日的增减在 32.8 万个相邻交易日
+-- 样本上 99.997% 复现恒等式，与官方源一个水准；而真正要用到的「掉榜段之后的回榜行」
+-- 那一侧，10,722 个样本里**一个指纹都没有**（回写行紧贴掉榜段末尾，天然是相邻的），
+-- 反推值全部非负。
+--
+-- 带指纹的行由 fix-sanhe-fabricated-changes.sql 在管线里先修成真实增减。这里仍然把
+-- 指纹再挡一道：那个脚本要是哪天没跑成，这里不该跟着写出错的数。
 --
 -- 幂等：先删本次窗口内自己写过的行，再重算。
+--
+-- 实现用带索引的临时表，不用一条巨型 CTE。**窗口参数必须真的缩小扫描范围**：
+-- 第一版把整张 seat_history 拉进 CTE 做窗口函数，再在最后一步按日期过滤输出，
+-- 于是 window_days=7 的日更和 window_days=7000 的全量回填一样贵——2026-08-12
+-- 实测全量跑到十一分钟还没完，而日更管线里这一步每天都要跑。现在按
+-- window_days 加 40 天余量先把行数砍掉，日更只碰最近几十天的数据。
+-- 余量给的是长假：找「前一个交易日」时春节能隔十来天，卡得太紧会把边界那几天算漏。
 
 \set ON_ERROR_STOP on
 \if :{?window_days}
@@ -39,72 +57,103 @@ delete from seat_history
  where source = 'reboard_inferred'
    and trade_date >= current_date - :window_days;
 
--- 全部用窗口函数，不用相关子查询。
+-- 「那天他在不在榜上」的判据。
 --
--- 第一版是 `not exists (select 1 from official where ... trade_date = prev_date)`，
--- 在几百万行的 CTE 上对每一候选行各查一次，生产上跑了一小时没出来。
--- 「昨天他在不在榜上」这件事，用他自己序列的 lag 一次算完就够了。
-with official as (
+-- **必须看所有行，不能只看有增减的行。** fix-sanhe-fabricated-zeros.sql 修过的行
+-- 增减是空的（清零差分与修正后的持仓自相矛盾，只能留空）。拿「有增减的行」当判据，
+-- 那些行会被当成「不在榜上」，于是给一个**已经知道持仓的日子**再写一条反推行——
+-- 同一天同一会员两个数，而且都言之凿凿。
+create temp table presence as
+select distinct workspace_id, exchange, instrument, contract, rank_type, member, trade_date
+  from seat_history
+ where not is_variety_total and contract is not null
+   and source <> 'reboard_inferred'
+   and trade_date >= current_date - (:window_days + 40);
+
+create index presence_key on presence
+  (workspace_id, exchange, instrument, contract, rank_type, member, trade_date);
+analyze presence;
+
+-- 合约的交易日历。必须用它找「前一个交易日」，不能用 trade_date - 1：中间隔着
+-- 周末与长假，减一天会指到一个根本没有数据的日子。
+create temp table calendar_prev as
+select workspace_id, exchange, instrument, contract, trade_date,
+       lag(trade_date) over (partition by workspace_id, exchange, instrument, contract
+                             order by trade_date) prev_date
+  from (select distinct workspace_id, exchange, instrument, contract, trade_date
+          from presence) d;
+
+create index calendar_prev_key on calendar_prev
+  (workspace_id, exchange, instrument, contract, trade_date);
+analyze calendar_prev;
+
+-- 反推的算术依据：带增减的行。
+create temp table basis as
+select workspace_id, exchange, instrument, contract, rank_type, member,
+       trade_date, quantity, change
+  from (
     select workspace_id, exchange, instrument, contract, rank_type, member,
-           trade_date, quantity, change
+           trade_date, quantity, change,
+           lag(quantity) over m prev_q
       from seat_history
-     where not is_variety_total and contract is not null
-       and source like '%\_official' and change is not null
-),
--- 合约的交易日历：官方那天发过这个合约，就说明那天有交易。必须用它找「前一个
--- 交易日」，不能用 trade_date - 1：中间隔着周末与长假，减一天会指到一个根本
--- 没有数据的日子。
-calendar as (
-    select distinct workspace_id, exchange, instrument, contract, trade_date
-      from official
-),
-calendar_prev as (
-    select c.*,
-           lag(trade_date) over (partition by workspace_id, exchange, instrument, contract
-                                 order by trade_date) prev_date
-      from calendar c
-),
--- 每个会员在这条合约+榜别上，自己上一次出现在榜上是哪天。
-member_prev as (
-    select o.*,
-           lag(trade_date) over (partition by workspace_id, exchange, instrument,
-                                              contract, rank_type, member
-                                 order by trade_date) own_prev
-      from official o
-),
-inferred as (
-    select m.workspace_id, m.exchange, m.instrument, m.contract, m.rank_type, m.member,
-           c.prev_date trade_date, m.quantity - m.change quantity
-      from member_prev m
-      join calendar_prev c
-        on c.workspace_id = m.workspace_id and c.exchange = m.exchange
-       and c.instrument = m.instrument and c.contract = m.contract
-       and c.trade_date = m.trade_date
-     where c.prev_date is not null
-       and c.prev_date >= current_date - :window_days
-       -- 他自己上一次上榜早于「前一个交易日」，说明前一个交易日他不在榜上：
-       -- 那天才需要反推。own_prev 为空表示这是他第一次出现，同样需要。
-       and (m.own_prev is null or m.own_prev < c.prev_date)
-)
+     where not is_variety_total and contract is not null and change is not null
+       and trade_date >= current_date - (:window_days + 40)
+       and (source like '%\_official'
+            -- 三禾只有大商所的数据（郑商所、上期所那五个品种一行都没有），
+            -- 写死 exchange 是为了将来它真的多出别家数据时不会悄悄混进来。
+            or (source = 'sanhe' and exchange = 'DCE'))
+    window m as (partition by workspace_id, exchange, instrument, contract,
+                              rank_type, member
+                 order by trade_date)
+  ) t
+ -- 清零差分指纹：增减恰好等于上一行持仓的相反数。见开头的说明。
+ -- 这是第二道闸——fix-sanhe-fabricated-changes.sql 应该已经把它们修好了，
+ -- 但那个脚本要是哪天没跑成，这里不该跟着写出错的数。
+ where prev_q is null or change is distinct from -prev_q;
+
+create index basis_key on basis
+  (workspace_id, exchange, instrument, contract, trade_date);
+analyze basis;
+
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
     variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source)
-select gen_random_uuid(), i.workspace_id, i.exchange, i.instrument, i.contract,
-       false, false, i.trade_date, i.rank_type,
+select gen_random_uuid(), b.workspace_id, b.exchange, b.instrument, b.contract,
+       false, false, c.prev_date, b.rank_type,
        -- 名次留空：他那天本来就不在榜上，编一个名次是凭空捏造。
-       null, i.member, i.quantity,
+       null, b.member, b.quantity - b.change,
        -- 增减留空。要算它得知道再前一天的持仓，而那天多半也不在榜上；留空是
        -- 「不知道」，填 0 是「没变化」——三禾的 1691 配 −2038 就是不肯留空的结果。
        null, 'reboard_inferred'
-  from inferred i
- where i.quantity >= 0  -- 负持仓说明这一组数据本身有问题，宁可不写
+  from basis b
+  join calendar_prev c
+    on c.workspace_id = b.workspace_id and c.exchange = b.exchange
+   and c.instrument = b.instrument and c.contract = b.contract
+   and c.trade_date = b.trade_date
+ where c.prev_date is not null
+   and c.prev_date >= current_date - :window_days
+   -- 前一个交易日他不在榜上：那天才需要反推。
+   --
+   -- 这里是对**带索引的临时表**做反连接，不是第一版那种在无索引 CTE 上逐行探测。
+   -- 那一版生产上跑一小时没出来，改成窗口函数才活过来；后来窗口函数版本又因为
+   -- 不受窗口参数约束而在日更里过慢。有索引 + analyze 之后规划器走哈希反连接，
+   -- 两个毛病都没有——别看到 not exists 就往回改。
+   and not exists (
+       select 1 from presence p
+        where p.workspace_id = b.workspace_id and p.exchange = b.exchange
+          and p.instrument = b.instrument and p.contract = b.contract
+          and p.rank_type = b.rank_type and p.member = b.member
+          and p.trade_date = c.prev_date
+   )
+   -- 负持仓说明这一组数据本身有问题，宁可不写。
+   and b.quantity - b.change >= 0
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
     quantity = excluded.quantity, loaded_at = now();
 
 commit;
 
--- 落地核对。反推行数为 0 而窗口里明明有官方数据，多半是日历那一段写错了。
+-- 落地核对。反推行数为 0 而窗口里明明有数据，多半是日历那一段写错了。
 select instrument 品种, count(*) 反推行数,
        min(trade_date) 起, max(trade_date) 止, min(quantity) 最小持仓
   from seat_history

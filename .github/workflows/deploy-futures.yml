@@ -195,6 +195,8 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/infer-offboard-seats.sql"
           install -m 600 deploy/collector/fix-sanhe-fabricated-zeros.sql \
             "${RELEASE_BUNDLE}/deploy/collector/fix-sanhe-fabricated-zeros.sql"
+          install -m 600 deploy/collector/fix-sanhe-fabricated-changes.sql \
+            "${RELEASE_BUNDLE}/deploy/collector/fix-sanhe-fabricated-changes.sql"
           # 采集与解析的 Python 一起发。这几个此前只存在于服务器上的手工副本，与仓库版
           # 各自演化：2026-08-12 查出服务器那份 parsers.py 还在按「品种上市年」补三位
           # 郑商所代码的世纪，把 2026 年的 FG608 解析成 FG1608，跟真实存在过的 2016 年

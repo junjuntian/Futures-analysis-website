@@ -109,6 +109,19 @@ else
   echo "SANHE_ZEROS_SKIPPED missing $SANHE_ZEROS" >&2
 fi
 
+# 修掉三禾回写持仓后没跟着改的「增减」。紧跟在零持仓那一步之后：它要读「昨日持仓」，
+# 而零持仓脚本刚刚改写和删除过那些行。也必须在品种汇总之前——汇总会把增减求和。
+#
+# 上一步管的是持仓仍是 0 的行；这一步管它已经回写过持仓、却把清零差分留在增减里的行
+# （财达 JD2505 04-17 的 `215 (−822)`，真实增减是 −607）。趋势跟随读的就是增减。
+SANHE_CHANGES="$previous_release_dir/deploy/collector/fix-sanhe-fabricated-changes.sql"
+if [ -r "$SANHE_CHANGES" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$SANHE_CHANGES"
+else
+  echo "SANHE_CHANGES_SKIPPED missing $SANHE_CHANGES" >&2
+fi
+
 # 品种汇总。大商所、上期所官方不发品种合计，郑商所的合计口径也要统一，这些
 # 汇总行是 compute-seat-totals.sql 从席位行自算出来的。它一直只在回填时手工
 # 跑过——发布包里装了这个文件，却没有任何定时任务执行它，于是汇总永远停在
