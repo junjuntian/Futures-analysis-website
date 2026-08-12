@@ -66,6 +66,7 @@ use uuid::Uuid;
         spread_analytics::query_free_spread,
         spread_analytics::query_seat_positions,
         spread_analytics::query_seat_building,
+        spread_analytics::query_spread_monitor,
         spread_analytics::list_favorites,
         spread_analytics::create_favorite,
         spread_analytics::delete_favorite
@@ -200,6 +201,9 @@ use uuid::Uuid;
         ,spread_analytics::SeatPositionItem
         ,spread_analytics::SeatBuildingResponse
         ,spread_analytics::BuildingDayItem
+        ,spread_analytics::SpreadMonitorResponse
+        ,spread_analytics::SpreadMonitorItem
+        ,spread_analytics::SpreadMonitorTrack
     )),
     modifiers(&SecurityAddon)
 )]
@@ -438,6 +442,10 @@ fn router(
         .route(
             "/api/v1/spread-analytics/seats/building",
             get(spread_analytics::query_seat_building),
+        )
+        .route(
+            "/api/v1/spread-analytics/monitor",
+            get(spread_analytics::query_spread_monitor),
         )
         .route(
             "/api/v1/spread-analytics/favorites",
@@ -767,6 +775,7 @@ mod tests {
             ("/api/v1/spread-analytics/free-spread/query", "post"),
             ("/api/v1/spread-analytics/seats/positions", "get"),
             ("/api/v1/spread-analytics/seats/building", "get"),
+            ("/api/v1/spread-analytics/monitor", "get"),
             ("/api/v1/spread-analytics/favorites", "get"),
             ("/api/v1/spread-analytics/favorites", "post"),
             ("/api/v1/spread-analytics/favorites/{favorite_id}", "delete"),
@@ -781,7 +790,9 @@ mod tests {
         }
         assert!(!paths.keys().any(|path| path.contains("broker")));
         assert!(!paths.keys().any(|path| path.contains("backtest")));
-        assert!(!paths.keys().any(|path| path.contains("monitor")));
+        // monitor 曾经也在这份「还不该存在」的名单里——那是 Phase 5A 时期的守卫，
+        // 用来挡住把 5B 的表面提前暴露出去。5B 现在正式开工，端点已立项并注册，
+        // 守卫随之退场。broker 与 backtest 仍未立项，继续挡着。
 
         let query = &paths["/api/v1/spread-analytics/free-spread/query"]["post"];
         let parameters = query["parameters"].as_array().expect("query headers");

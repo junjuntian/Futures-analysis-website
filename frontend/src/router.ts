@@ -13,6 +13,7 @@ export const router = createRouter({
     { path: '/', component: HomeView },
     { path: '/auth', component: AuthView },
     { path: '/imports', component: ImportCenterView },
+    { path: '/spread-analytics/monitor', component: () => import('./views/SpreadMonitorView.vue') },
     { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
     { path: '/seats', component: () => import('./views/SeatsView.vue') },
     { path: '/smart-money-view', component: () => import('./views/SmartMoneyView.vue') },

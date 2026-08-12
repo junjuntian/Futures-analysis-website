@@ -47,15 +47,6 @@ body {
   font-weight: 500;
 }
 
-.phase-badge {
-  margin-left: 8px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: #f0efec;
-  color: #8d8c87;
-  font-size: 11px;
-}
-
 /* 侧栏 emoji 图标:对齐原 el-icon 的占位(运营者 2026-08-11 拍板换彩色图标) */
 .nav-emoji {
   width: 24px;

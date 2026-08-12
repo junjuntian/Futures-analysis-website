@@ -27,9 +27,7 @@ const auth = useAuthStore()
             <span class="nav-emoji">🧮</span>
             <span>套利分析</span>
           </template>
-          <el-menu-item index="/spread-analytics/monitor" disabled>
-            套利监控 <span class="phase-badge">5B</span>
-          </el-menu-item>
+          <el-menu-item index="/spread-analytics/monitor">套利监控</el-menu-item>
           <el-menu-item index="/spread-analytics/free-spread">自由价差</el-menu-item>
         </el-sub-menu>
         <el-sub-menu index="seats">

@@ -1917,6 +1917,81 @@ fn stable_kind(code: &str) -> SpreadProviderErrorKind {
 }
 
 #[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    fn track(position: f64, threshold: f64) -> SpreadMonitorTrack {
+        SpreadMonitorTrack {
+            low: "0".into(),
+            high: "1".into(),
+            position: Some(position.to_string()),
+            days: Some(200),
+            alert: monitor_alert(Some(position), threshold).map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_threshold_is_applied_at_read_time_not_baked_in() {
+        // 同一个位置，阈值不同结论不同——这正是「存位置不存结论」换来的自由度。
+        assert_eq!(monitor_alert(Some(0.85), 0.10), None);
+        assert_eq!(monitor_alert(Some(0.85), 0.20), Some("high"));
+        assert_eq!(monitor_alert(Some(0.15), 0.10), None);
+        assert_eq!(monitor_alert(Some(0.15), 0.20), Some("low"));
+    }
+
+    #[test]
+    fn a_position_outside_the_band_is_a_stronger_alert_not_a_missing_one() {
+        // 历年轨用的是第 2.5 / 97.5 百分位，当前价差可以落在区间之外：位置为负或
+        // 大于 1。那比「贴着边」更极端，绝不能因为不在 [0,1] 里就漏报。
+        assert_eq!(monitor_alert(Some(-0.014), 0.10), Some("low"));
+        assert_eq!(monitor_alert(Some(1.332), 0.10), Some("high"));
+    }
+
+    #[test]
+    fn when_the_two_tracks_disagree_the_more_extreme_one_wins() {
+        // 生产实例：焦煤 JM2609−JM2701 在 2026-08-11 是当年 95.1%、历年 16.1%。
+        // 在 20% 阈值下两条都触发且方向相反；离中线的距离 0.451 对 0.339，
+        // 所以报「当年高位」。
+        //
+        // 这条测试存在的理由：原来那版用 max_by 配了个恒等比较器，等于随便挑第一条，
+        // 有一半机会把方向说反——而页面上看不出它挑错了。
+        let pair = track(0.951, 0.20);
+        let years = track(0.161, 0.20);
+        assert_eq!(pair.alert.as_deref(), Some("high"));
+        assert_eq!(years.alert.as_deref(), Some("low"));
+        assert_eq!(combined_alert(&pair, Some(&years)), Some("high"));
+
+        // 同一组数据在默认的 10% 阈值下只有当年那条触发——16.1% 够不着 10% 的低位带。
+        // 写在这里是为了记住：设计图里那些「历年低位」的说法用的是 20% 阈值。
+        let pair_10 = track(0.951, 0.10);
+        let years_10 = track(0.161, 0.10);
+        assert_eq!(years_10.alert, None);
+        assert_eq!(combined_alert(&pair_10, Some(&years_10)), Some("high"));
+
+        // 反过来也要对：历年更极端时报历年那条。
+        let pair_mild = track(0.88, 0.15);
+        let years_wild = track(-0.20, 0.15);
+        assert_eq!(combined_alert(&pair_mild, Some(&years_wild)), Some("low"));
+    }
+
+    #[test]
+    fn no_alert_anywhere_means_no_alert() {
+        let pair = track(0.5, 0.10);
+        let years = track(0.42, 0.10);
+        assert_eq!(combined_alert(&pair, Some(&years)), None);
+        assert_eq!(combined_alert(&pair, None), None);
+    }
+
+    #[test]
+    fn a_combination_without_a_years_track_still_works() {
+        // 历年轨可能缺席：跨品种组合的历史年份不够，或该月份组合是头一年出现。
+        // 缺席不该让整行消失。
+        let pair = track(0.97, 0.10);
+        assert_eq!(combined_alert(&pair, None), Some("high"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2036,4 +2111,232 @@ mod tests {
         // 同月两腿相减恒为零，那不是价差，是把一个错误的选择画成一条直线。
         assert!(own_engine_legs(&own_request(("jm", "09"), ("jm", "09"))).is_none());
     }
+}
+
+/// 触发阈值的默认值与边界。
+///
+/// 10% 是拿真实数据定的：同一批 73 组组合，落在两端 20% 的有 33 组（45% 都在报，
+/// 太吵），落在两端 10% 的 19 组。运营者要更多或更少就在页面上调，不必改代码。
+///
+/// 上限 0.5 是护栏：到 50% 就是「整个区间都算触发」，那不是阈值而是关掉了过滤。
+const MONITOR_THRESHOLD_DEFAULT: f64 = 0.10;
+const MONITOR_THRESHOLD_MAX: f64 = 0.50;
+/// 合约到期后不再有新快照，它的最后一条会永远留在表里。超过这些天没更新就不算「当前」。
+const MONITOR_STALE_DAYS: i32 = 7;
+
+#[derive(Debug, Deserialize)]
+pub struct SpreadMonitorQuery {
+    /// 落在区间两端多少算触发，0 到 0.5。不传用 0.10。
+    pub threshold: Option<f64>,
+    /// 看某一天的历史快照。不传看当前。
+    pub trade_date: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpreadMonitorTrack {
+    /// 该口径下的历史最低 / 最高。历年轨是第 2.5 / 97.5 百分位，不是原始极值。
+    pub low: String,
+    pub high: String,
+    /// 当前价差在区间里的位置。历年轨用百分位区间，所以允许落在 0~1 之外。
+    pub position: Option<String>,
+    pub days: Option<i32>,
+    /// "high" / "low" / null。按本次请求的阈值算出来的，不是存下来的。
+    pub alert: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpreadMonitorItem {
+    pub trade_date: String,
+    pub instrument_1: String,
+    pub contract_1: String,
+    pub instrument_2: String,
+    pub contract_2: String,
+    pub is_cross_variety: bool,
+    pub spread: String,
+    pub pair: SpreadMonitorTrack,
+    pub years: Option<SpreadMonitorTrack>,
+    /// 两条轨里只要有一条触发就不为空。两条方向相反时以「更极端的那条」为准。
+    pub alert: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpreadMonitorResponse {
+    /// 本次采用的阈值，原样回给界面——省得界面自己记一份默认值。
+    pub threshold: String,
+    pub as_of: Option<String>,
+    pub available_dates: Vec<String>,
+    pub items: Vec<SpreadMonitorItem>,
+}
+
+/// 一条轨的触发判定。位置在下端 `threshold` 之内报低位，上端之内报高位。
+///
+/// **越界也算触发**：历年轨用的是百分位区间，当前价差可以落在第 2.5 百分位之下
+/// （位置为负）或第 97.5 之上（位置大于 1）。那是比「贴着边」更强的信号，
+/// 用 `<=` / `>=` 自然覆盖，不需要额外分支。
+fn monitor_alert(position: Option<f64>, threshold: f64) -> Option<&'static str> {
+    let position = position?;
+    if position <= threshold {
+        Some("low")
+    } else if position >= 1.0 - threshold {
+        Some("high")
+    } else {
+        None
+    }
+}
+
+/// 一条轨离中线有多远。0.5 是正中央，越大越极端；越界（位置在 0~1 之外）大于 0.5。
+fn monitor_extremity(track: &SpreadMonitorTrack) -> Option<f64> {
+    track.alert.as_ref()?;
+    let position: f64 = track.position.as_deref()?.parse().ok()?;
+    Some((position - 0.5).abs())
+}
+
+/// 两条轨合成一个结论。
+///
+/// **方向可能相反**：焦煤 JM2609−JM2701 在 2026-08-11 就是当年高位（95.1%）、
+/// 历年低位（16.1%）。这时报「更极端的那条」——离中线更远的一个。随便挑一条
+/// 会有一半的机会把方向说反，而页面上看不出它挑错了。
+fn combined_alert<'a>(
+    pair: &'a SpreadMonitorTrack,
+    years: Option<&'a SpreadMonitorTrack>,
+) -> Option<&'a str> {
+    [Some(pair), years]
+        .into_iter()
+        .flatten()
+        .filter_map(|track| monitor_extremity(track).map(|far| (far, track)))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .and_then(|(_, track)| track.alert.as_deref())
+}
+
+fn monitor_track(
+    low: Option<String>,
+    high: Option<String>,
+    position: Option<String>,
+    days: Option<i32>,
+    threshold: f64,
+) -> Option<SpreadMonitorTrack> {
+    let (low, high) = (low?, high?);
+    let alert = monitor_alert(
+        position.as_deref().and_then(|value| value.parse().ok()),
+        threshold,
+    );
+    Some(SpreadMonitorTrack {
+        low,
+        high,
+        position,
+        days,
+        alert: alert.map(str::to_string),
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/monitor",
+    params(
+        ("threshold" = Option<f64>, Query),
+        ("trade_date" = Option<String>, Query)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SpreadMonitorResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn query_spread_monitor(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<SpreadMonitorQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+
+    let threshold = query.threshold.unwrap_or(MONITOR_THRESHOLD_DEFAULT);
+    if !threshold.is_finite() || threshold <= 0.0 || threshold > MONITOR_THRESHOLD_MAX {
+        return Err(SpreadApiError::Validation("invalid_threshold", request_id));
+    }
+
+    let trade_date = match query.trade_date.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(value) => Some(
+            Date::parse(value, &time::format_description::well_known::Iso8601::DATE)
+                .map_err(|_| SpreadApiError::Validation("invalid_trade_date", request_id))?,
+        ),
+    };
+
+    let rows = match trade_date {
+        Some(day) => {
+            database::spread_analytics::spread_monitor_on(
+                &state.auth.pool,
+                context.workspace_id(),
+                day,
+            )
+            .await
+        }
+        None => {
+            database::spread_analytics::spread_monitor_snapshot(
+                &state.auth.pool,
+                context.workspace_id(),
+                MONITOR_STALE_DAYS,
+            )
+            .await
+        }
+    }
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let dates = database::spread_analytics::spread_monitor_dates(
+        &state.auth.pool,
+        context.workspace_id(),
+        400,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let items: Vec<SpreadMonitorItem> = rows
+        .into_iter()
+        .map(|row| {
+            let pair = monitor_track(
+                Some(row.pair_low),
+                Some(row.pair_high),
+                row.pair_position,
+                Some(row.pair_days),
+                threshold,
+            )
+            .expect("当年轨的上下界在库里是 not null");
+            let years = monitor_track(
+                row.years_low,
+                row.years_high,
+                row.years_position,
+                row.years_days,
+                threshold,
+            );
+            let alert = combined_alert(&pair, years.as_ref()).map(str::to_string);
+            SpreadMonitorItem {
+                trade_date: row.trade_date.to_string(),
+                instrument_1: row.instrument_1,
+                contract_1: row.contract_1,
+                instrument_2: row.instrument_2,
+                contract_2: row.contract_2,
+                is_cross_variety: row.is_cross_variety,
+                spread: row.spread,
+                pair,
+                years,
+                alert,
+            }
+        })
+        .collect();
+
+    let as_of = items.iter().map(|item| item.trade_date.clone()).max();
+
+    Ok(Json(ApiResponse::new(
+        SpreadMonitorResponse {
+            threshold: threshold.to_string(),
+            as_of,
+            available_dates: dates.iter().map(ToString::to_string).collect(),
+            items,
+        },
+        request_id,
+    ))
+    .into_response())
 }

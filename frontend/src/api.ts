@@ -789,3 +789,44 @@ export function getSeatBuilding(
   if (contract) params.set('contract', contract)
   return getJson(`/api/v1/spread-analytics/seats/building?${params.toString()}`)
 }
+
+/** 套利监控里一条口径轨。历年轨用的是百分位区间，位置可以落在 0~1 之外。 */
+export interface SpreadMonitorTrack {
+  low: string
+  high: string
+  position: string | null
+  days: number | null
+  /** 'high' | 'low' | null。按请求里的阈值算的，不是存下来的。 */
+  alert: string | null
+}
+
+export interface SpreadMonitorItem {
+  trade_date: string
+  instrument_1: string
+  contract_1: string
+  instrument_2: string
+  contract_2: string
+  is_cross_variety: boolean
+  spread: string
+  pair: SpreadMonitorTrack
+  years: SpreadMonitorTrack | null
+  alert: string | null
+}
+
+export interface SpreadMonitorResponse {
+  threshold: string
+  as_of: string | null
+  available_dates: string[]
+  items: SpreadMonitorItem[]
+}
+
+export function getSpreadMonitor(
+  threshold?: number,
+  tradeDate?: string
+): Promise<ApiEnvelope<SpreadMonitorResponse>> {
+  const params = new URLSearchParams()
+  if (threshold !== undefined) params.set('threshold', String(threshold))
+  if (tradeDate) params.set('trade_date', tradeDate)
+  const query = params.toString()
+  return getJson(`/api/v1/spread-analytics/monitor${query ? `?${query}` : ''}`)
+}
