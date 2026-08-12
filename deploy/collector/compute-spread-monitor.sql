@@ -111,6 +111,16 @@ select k.workspace_id, k.c1, k.c2, count(*) days,
              and y.yy = x.yy + (k.y2 - k.y1)
  group by 1, 2, 3;
 
+-- 先清掉窗口内的旧快照，再重算。
+--
+-- 只做 upsert 是不够的：**监控范围变小时，upsert 不会删掉已经不该存在的行。**
+-- 2026-08-12 实证——当天 09:30 的日更用的还是加主力月份限制之前的脚本，写进了
+-- FG2703、FG2704 这些非主力月的组合；部署后重算，新脚本不再产出它们，upsert
+-- 自然也不会碰它们，于是那些组合就一直挂在页面上，而且看不出是陈的。
+-- 品种汇总脚本早就有这么一句 delete，这里当初漏了。
+delete from spread_monitor_daily
+ where trade_date >= current_date - (:window_days || ' days')::interval;
+
 insert into spread_monitor_daily (
     id, workspace_id, trade_date, instrument_1, contract_1, instrument_2, contract_2,
     is_cross_variety, spread, pair_days, pair_low, pair_high, pair_position,
