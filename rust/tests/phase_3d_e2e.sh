@@ -269,7 +269,6 @@ SSE_TOKEN_HASH=$(hash_token "$SSE_TOKEN")
 CSRF1_HASH=$(hash_token "$CSRF1")
 CSRF2_HASH=$(hash_token "$CSRF2")
 SSE_CSRF_HASH=$(hash_token "$SSE_CSRF")
-CLEANED=0
 P3C_WS1=
 P3C_WS2=
 P3C_USER1=
@@ -422,7 +421,6 @@ cleanup() {
     cleanup_object_files "$P3C_WS1" >/dev/null 2>&1
     cleanup_object_files "$P3C_WS2" >/dev/null 2>&1
   fi
-  CLEANED=1
   if [ "$status" -ne 0 ]; then
     echo "PHASE3D_E2E_FAIL line=${BASH_LINENO[0]:-unknown}" >&2
   fi
@@ -1092,7 +1090,6 @@ assert_eq "$(psqlq "select count(*) from users where id in ('$P3C_USER1','$P3C_U
 assert_eq "$(object_file_count "$P3C_WS1")" 0 "phase3c workspace one objects cleaned"
 assert_eq "$(object_file_count "$P3C_WS2")" 0 "phase3c workspace two objects cleaned"
 assert_eq "$(psqlq "select count(*) from pg_trigger where not tgisinternal and tgname like 'phase3d_e2e_%'")" 0 "test triggers cleaned"
-CLEANED=1
 trap - EXIT
 
 echo "PHASE3D_E2E_PASS"
