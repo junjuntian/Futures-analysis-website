@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { addChange, sideDelta, signedChange } from '../seatChange'
 import { ElMessage } from 'element-plus'
 import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
 import {
@@ -157,16 +158,18 @@ const num = (value: string | null) => (value === null || value === '' ? null : N
 interface ContractLine {
   contract: string
   long: number
-  longChange: number | null
+  longChange: number | null | undefined
   short: number
-  shortChange: number | null
+  shortChange: number | null | undefined
 }
 interface InstrumentBlock {
   instrument: string
   netTotal: number
-  netChange: number
+  netChange: number | null | undefined
   contracts: ContractLine[]
 }
+
+// 增减量三态（未知 / 无行 / 真值）与吸收律见 src/seatChange.ts，那里有测试盯着。
 
 const blocks = computed<InstrumentBlock[]>(() => {
   const wanted = new Set(instrumentFilter.value)
@@ -179,18 +182,18 @@ const blocks = computed<InstrumentBlock[]>(() => {
     const line = contracts.get(row.contract) ?? {
       contract: row.contract,
       long: 0,
-      longChange: null,
+      longChange: undefined,
       short: 0,
-      shortChange: null
+      shortChange: undefined
     }
     const quantity = Number(row.quantity)
     const change = num(row.change)
     if (row.rank_type === 'long') {
       line.long += quantity
-      line.longChange = (line.longChange ?? 0) + (change ?? 0)
+      line.longChange = addChange(line.longChange, change)
     } else {
       line.short += quantity
-      line.shortChange = (line.shortChange ?? 0) + (change ?? 0)
+      line.shortChange = addChange(line.shortChange, change)
     }
     contracts.set(row.contract, line)
     byInstrument.set(row.instrument, contracts)
@@ -201,10 +204,15 @@ const blocks = computed<InstrumentBlock[]>(() => {
       return {
         instrument,
         netTotal: lines.reduce((sum, line) => sum + line.long - line.short, 0),
-        netChange: lines.reduce(
-          (sum, line) => sum + (line.longChange ?? 0) - (line.shortChange ?? 0),
-          0
-        ),
+        // 净变化 = Σ多头增减 − Σ空头增减，同样遵吸收律：任一合约的任一侧
+        // **有行但增减量未知**，整个品种的净变化就是未知。
+        // 一侧根本没有行（undefined）不算未知，它就是 0——某合约只上了空头榜，
+        // 不代表它的多头变化不可知。
+        netChange: lines.reduce<number | null | undefined>((sum, line) => {
+          const long = sideDelta(line.longChange)
+          const short = sideDelta(line.shortChange)
+          return addChange(addChange(sum, long), short === null ? null : -short)
+        }, undefined),
         contracts: lines
       }
     })
@@ -217,10 +225,7 @@ function openBuilding(instrument: string, contract?: string) {
   tab.value = 'building'
 }
 
-function signed(value: number | null) {
-  if (value === null) return ''
-  return value > 0 ? `+${value}` : String(value)
-}
+const signed = signedChange
 const fmt = (value: number) => value.toLocaleString('zh-CN')
 
 // —— 建仓过程的三联图 ——
