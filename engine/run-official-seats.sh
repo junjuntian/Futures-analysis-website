@@ -10,6 +10,13 @@
 # 幂等:fetch 对已有文件跳过;灌库是 upsert;删除按 (日期, 来源) 定点。
 set -euo pipefail
 
+# 与日更、部署、预热同一把维护锁。这个脚本写 price_history/seat_history，
+# 撞上部署的 owner 迁移就是死锁；回滚的 pg_terminate_backend 还会反杀本进程，
+# 留下价格已提交、席位未 upsert 的半轮数据。等 15 分钟等不到就放弃本轮，
+# 下一个 cron 窗口再来——7 天回看窗会把漏的补回来。
+exec 8>/run/lock/futures-collector.lock
+flock -w 900 8 || { echo "[official-seats] 拿不到维护锁，本轮跳过"; exit 0; }
+
 cd /opt/futures-platform
 PG=futures-analysis-platform-postgres-1
 SINCE=$(date -d "7 days ago" +%F)   # 7 天回看窗,补节假日与偶发漏采

@@ -19,6 +19,43 @@
 
 begin;
 
+-- 投影来源清单。**两处 delete 与守卫都用它**：投影写进历史表的行，source 记的
+-- 是连接器代码；先把窗口内这些来源的行删掉再重建，canonical 侧被回滚删除的
+-- 批次才不会在历史表里留下陈行——原来只有 upsert，direct rollback 之后已撤销
+-- 的价格与席位会被套利、监控、汇总继续使用，且没有任何征兆。
+-- 窗口外的行不动（交易所不会再修更早的数据，回滚也回滚不到那么远——真要
+-- 回滚旧批次，先把窗口临时调大）。
+-- sina 日更（source='sina'）与官方增量（*_official）不经 canonical，不在此列，
+-- 删了就没人会重建它们。
+create temp table projected_sources (connector text primary key);
+insert into projected_sources values
+    ('akshare_v1'), ('eastmoney_dce_quote_v1'), ('eastmoney_seats_v1');
+
+-- 清单过期守卫：canonical 里出现了清单外的新连接器，说明有人加了来源却没同步
+-- 这里——它的行删不掉，回滚陈行问题对新来源原样复发。case 惰性求值，只有
+-- 真出现时才走到除零，ON_ERROR_STOP 会把整个管线停在这里。
+select case when count(*) = 0 then 1
+            else 1 / (count(*) - count(*))  -- 故意除零：投影来源清单过期
+       end as projected_sources_guard
+  from (select distinct ds.connector_code
+          from market_prices m
+          join data_sources ds on ds.id = m.data_source_id and ds.workspace_id = m.workspace_id
+         where m.trade_date >= current_date - :window_days
+        union
+        select distinct ds.connector_code
+          from seat_positions sp
+          join data_sources ds on ds.id = sp.data_source_id and ds.workspace_id = sp.workspace_id
+         where sp.trade_date >= current_date - :window_days) live
+ where live.connector_code not in (select connector from projected_sources);
+
+delete from price_history
+ where trade_date >= current_date - :window_days
+   and source in (select connector from projected_sources);
+
+delete from seat_history
+ where trade_date >= current_date - :window_days
+   and source in (select connector from projected_sources);
+
 -- 价格。
 --
 -- 来源如实记连接器代码（akshare_v1 / eastmoney_dce_quote_v1 …），不冒充回填时

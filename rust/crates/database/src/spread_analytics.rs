@@ -1254,6 +1254,22 @@ mod tests {
     }
 
     #[test]
+    fn the_building_chart_prices_collapse_to_one_row_per_day() {
+        // 席位那侧早有 distinct on，行情这侧曾经没有——同一合约同一天日更源与
+        // 官方历史源各一行（生产 AU/AG 实测 140 组），同一交易日进成本引擎两次：
+        // 页面重复日期、多余盈亏柱，两源结算不同时成本还随行序摆。
+        let query = building_days_sql();
+        let prices = query.find("prices as (").expect("行情 CTE 还在");
+        let dedupe = query[prices..]
+            .find("distinct on (trade_date)")
+            .expect("行情必须按交易日收敛为一行");
+        let rank = query[prices..]
+            .find("_official")
+            .expect("行情去重必须带来源优先级，交易所自己的数字压过转售源");
+        assert!(dedupe < rank, "distinct on 与来源排序都要在行情 CTE 里");
+    }
+
+    #[test]
     fn a_day_the_seat_is_off_the_board_stays_null_not_zero() {
         // 交易所只发前二十名。某席位掉出榜单的那天，官方文件里没有他这一行——
         // 那是「不知道」，不是「零」。原来这里 coalesce 成 0，错误一路传下去：
@@ -2058,9 +2074,21 @@ fn building_days_sql() -> String {
                from picked
               group by trade_date
          ), prices as (
-             select trade_date, open_price, high_price, low_price, close_price, settlement_price
+             -- 行情也要按来源去重，跟席位同一条纪律。同一合约同一天日更源与官方
+             -- 历史源各有一行（生产 AU/AG 实测 140 组），不去重则同一交易日进
+             -- 成本引擎两次：页面出重复日期与多余盈亏柱，两源结算不同时成本
+             -- 还取决于行序这种没人保证的东西。
+             select distinct on (trade_date)
+                    trade_date, open_price, high_price, low_price, close_price, settlement_price
                from price_history
               where workspace_id = $1 and $4::text is not null and contract = $4
+              order by trade_date,
+                       case when source like '%_official%' then 0
+                            when source = 'akshare_v1' then 1
+                            when source like 'eastmoney%' then 2
+                            when source like 'sina%' then 3
+                            else 4 end,
+                       source
          )
          select coalesce(s.trade_date, p.trade_date) as trade_date,
                 p.open_price::text, p.high_price::text, p.low_price::text,

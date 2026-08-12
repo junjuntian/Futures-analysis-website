@@ -270,18 +270,27 @@ test "$throttle_hit_after" = "$throttle_hit_before"
 diff -u <(jq -S '.data' "$EVIDENCE_DIR/months-a.json") \
   <(jq -S '.data' "$EVIDENCE_DIR/months-a-hit.json")
 
-JM_NAME=$(jq -r '.data.items[] | select((.symbol|ascii_upcase)=="JM") | .name' \
+# 动态选一个真实组合。原来硬编码 JM 且断言月份表同时含 09/01：三禾哪天调整
+# 品种或月份，API、库、schema 全健康也会在这里失败并触发整库回滚——外部数据的
+# 具体形状不是本平台的验收对象，「任选一个真实组合能查通」才是。JM-09-01 的
+# 固定断言属于 mock/夹具契约测试，不属于生产切换条件。
+PROBE_NAME=$VARIETY_A
+PROBE_JSON="$EVIDENCE_DIR/months-a.json"
+if test "$(jq -r '.data.months | length' "$PROBE_JSON")" -lt 2; then
+  PROBE_NAME=$VARIETY_B
+  PROBE_JSON="$EVIDENCE_DIR/months-b.json"
+fi
+test "$(jq -r '.data.months | length' "$PROBE_JSON")" -ge 2
+PROBE_SYMBOL=$(jq -r --arg name "$PROBE_NAME" '.data.items[] | select(.name==$name) | .symbol' \
   "$varieties_json" | head -n1)
-test -n "$JM_NAME"
-JM_SYMBOL=$(jq -r --arg name "$JM_NAME" '.data.items[] | select(.name==$name) | .symbol' \
-  "$varieties_json" | head -n1)
-JM_PATH="/api/v1/spread-analytics/providers/sanhe/varieties/$(urlencode "$JM_NAME")/months"
-assert_status "$(api_get "$TOKEN_ONE" "$JM_PATH" "$EVIDENCE_DIR/jm-months.json")" 200 "jm months"
-jq -e '.data.months | index("09") and index("01")' "$EVIDENCE_DIR/jm-months.json" >/dev/null
+test -n "$PROBE_SYMBOL"
+MONTH_ONE=$(jq -r '.data.months[0]' "$PROBE_JSON")
+MONTH_TWO=$(jq -r '.data.months[1]' "$PROBE_JSON")
 
-query_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" '
-  {provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:"09"},leg2:{variety:$variety,symbol:$symbol,month:"01"}}')
-query_json="$EVIDENCE_DIR/jm-09-01.json"
+query_body=$(jq -cn --arg variety "$PROBE_NAME" --arg symbol "$PROBE_SYMBOL" \
+  --arg m1 "$MONTH_ONE" --arg m2 "$MONTH_TWO" '
+  {provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:$m1},leg2:{variety:$variety,symbol:$symbol,month:$m2}}')
+query_json="$EVIDENCE_DIR/live-combo.json"
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
   '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_json")" 200 "jm 09-01"
 jq -e '
@@ -308,7 +317,7 @@ test "$(psql_value -c "select count(*) from spread_provider_observations where s
 query_cache_count_before=$(psql_value -c "select count(*) from spread_provider_cache")
 query_throttle_before=$(psql_value -c \
   "select floor(extract(epoch from last_requested_at)*1000)::bigint from spread_provider_throttles where provider_code='sanhe'")
-query_hit_json="$EVIDENCE_DIR/jm-09-01-hit.json"
+query_hit_json="$EVIDENCE_DIR/live-combo-hit.json"
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
   '/api/v1/spread-analytics/free-spread/query' "$query_body" "$query_hit_json")" 200 "jm 09-01 cache hit"
 test "$(psql_value -c "select count(*) from spread_provider_cache")" = "$query_cache_count_before"
@@ -325,14 +334,14 @@ echo "PHASE5A_E2E_STAGE favorites_and_rls"
 # clear only rows this test created (matched by its own name) so a run
 # interrupted before cleanup cannot block the next one.
 FAVORITE_MONTH_ONE=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][0] // "09"' \
-  "$EVIDENCE_DIR/jm-months.json")
+  "$PROBE_JSON")
 FAVORITE_MONTH_TWO=$(jq -r '[.data.months[] | select(. != "09" and . != "01" and . != "05" and . != "10")][1] // "01"' \
-  "$EVIDENCE_DIR/jm-months.json")
+  "$PROBE_JSON")
 test -n "$FAVORITE_MONTH_ONE"
 test -n "$FAVORITE_MONTH_TWO"
 test "$FAVORITE_MONTH_ONE" != "$FAVORITE_MONTH_TWO"
 psql_value -c "delete from spread_favorites where workspace_id='$WORKSPACE_ONE' and name='Phase 5A VPS E2E'" >/dev/null
-favorite_body=$(jq -cn --arg variety "$JM_NAME" --arg symbol "$JM_SYMBOL" \
+favorite_body=$(jq -cn --arg variety "$PROBE_NAME" --arg symbol "$PROBE_SYMBOL" \
   --arg month1 "$FAVORITE_MONTH_ONE" --arg month2 "$FAVORITE_MONTH_TWO" '
   {name:"Phase 5A VPS E2E",provider:"sanhe",leg1:{variety:$variety,symbol:$symbol,month:$month1},leg2:{variety:$variety,symbol:$symbol,month:$month2}}')
 assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" POST \
@@ -366,7 +375,8 @@ excluded_points=$(jq -r '.data.quality.excluded_point_count' "$query_json")
 segment_count=$(jq -r '.data.segments | length' "$query_json")
 fetched_at=$(jq -r '.data.source.fetched_at' "$query_json")
 source_code=$(jq -r '.data.source.source_code' "$query_json")
-printf 'PHASE5A_REAL_QUERY combination=JM-09-01 input_points=%s retained_points=%s excluded_points=%s segments=%s source=%s fetched_at=%s throttle_concurrent_delta_ms=%s\n' \
+printf 'PHASE5A_REAL_QUERY combination=%s-%s-%s input_points=%s retained_points=%s excluded_points=%s segments=%s source=%s fetched_at=%s throttle_concurrent_delta_ms=%s\n' \
+  "$PROBE_SYMBOL" "$MONTH_ONE" "$MONTH_TWO" \
   "$input_points" "$retained_points" "$excluded_points" "$segment_count" \
   "$source_code" "$fetched_at" "$throttle_delta_ms"
 echo PHASE5A_E2E_PASS

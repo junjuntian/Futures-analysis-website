@@ -162,7 +162,7 @@ def main() -> int:
     contracts = listed_contracts()
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
 
-    kept = rejected = 0
+    kept = rejected = failed = 0
     with Path(args.out).open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(COLUMNS)
@@ -174,6 +174,7 @@ def main() -> int:
                 bars = daily(symbol)
             except Exception as error:  # noqa: BLE001 - 报出来，继续下一个合约
                 print(f"FAIL {symbol}: {type(error).__name__}", file=sys.stderr, flush=True)
+                failed += 1
                 continue
             for bar in bars or []:
                 day = str(bar.get("d") or "")
@@ -210,7 +211,18 @@ def main() -> int:
                 ])
                 kept += 1
 
-    print(f"合约 {len(contracts)} 个，自 {since} 起写出 {kept} 行，拒绝 {rejected} 行 -> {args.out}")
+    print(
+        f"合约 {len(contracts)} 个，自 {since} 起写出 {kept} 行，"
+        f"拒绝 {rejected} 行，失败 {failed} 个合约 -> {args.out}"
+    )
+    # 零产出必须是失败。原来这里无条件 return 0：上游全挂、一行没写出来，
+    # loader 拿着只有表头的 CSV「成功」跑完，日更看起来一切正常，数据却停在
+    # 昨天——正是「从来没自动跑过」家族里最难发现的那种静默。
+    # 部分合约失败仍返回 0：新浪偶发单合约抽风，upsert 到手的那部分好过全丢，
+    # 失败数已经打在日志里，连续出现自然会被看到。
+    if kept == 0:
+        print("SINA_DCE_ZERO_OUTPUT 一行未写出，判失败", file=sys.stderr, flush=True)
+        return 1
     return 0
 
 

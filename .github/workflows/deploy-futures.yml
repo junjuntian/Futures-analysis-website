@@ -131,7 +131,7 @@ jobs:
             declare -A image_paths=(
               [api]='rust/ .github/workflows/container-images.yml'
               [worker]='rust/ .github/workflows/container-images.yml'
-              [frontend]='frontend/ .github/workflows/container-images.yml'
+              [frontend]='frontend/ package.json pnpm-lock.yaml pnpm-workspace.yaml .github/workflows/container-images.yml'
               [collector]='collector/ .github/workflows/container-images.yml'
             )
             IFS=',' read -ra source_pairs <<<"$image_sources"
@@ -215,6 +215,7 @@ jobs:
           install -m 600 backfill/sina_coverage.py "${RELEASE_BUNDLE}/backfill/sina_coverage.py"
           install -m 600 backfill/sina_fields.py "${RELEASE_BUNDLE}/backfill/sina_fields.py"
           install -m 600 backfill/sanhe_survey_all.py "${RELEASE_BUNDLE}/backfill/sanhe_survey_all.py"
+          install -m 600 backfill/load_sanhe_seats.sql "${RELEASE_BUNDLE}/backfill/load_sanhe_seats.sql"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
@@ -275,6 +276,10 @@ jobs:
               exit 1
             fi
           done
+          install -d -m 700 "${RELEASE_BUNDLE}/engine"
+          install -m 700 engine/run-official-seats.sh "${RELEASE_BUNDLE}/engine/run-official-seats.sh"
+          install -m 700 engine/run-smart-money.sh "${RELEASE_BUNDLE}/engine/run-smart-money.sh"
+          install -m 600 engine/smart_money.py "${RELEASE_BUNDLE}/engine/smart_money.py"
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
           install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
 
@@ -333,6 +338,9 @@ jobs:
           MIGRATION_STARTED=0
           REGISTRY_CLEANED=0
           BACKUP_PATH=
+          HOST_INSTALL_STARTED=0
+          HOST_BACKUP_TAR=
+          CREDENTIAL_CREATED=0
           PREVIOUS_STABLE=
           PREVIOUS_RUNTIME=
           EVIDENCE_DIR=
@@ -469,17 +477,26 @@ jobs:
                 exec -T postgres psql -X -U futures_app -d futures_platform \
                 -Atq -c "select pg_terminate_backend(pid) from pg_stat_activity where datname='futures_platform' and pid <> pg_backend_pid()" \
                 >/dev/null 2>&1
+              db_restore_failed=0
               docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres dropdb -U futures_app --if-exists futures_platform \
-                >/dev/null 2>&1 || rollback_status=1
+                >/dev/null 2>&1 || db_restore_failed=1
               docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres createdb -U futures_app -O futures_app futures_platform \
-                >/dev/null 2>&1 || rollback_status=1
+                >/dev/null 2>&1 || db_restore_failed=1
               if ! docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres pg_restore -U futures_app -d futures_platform \
                 --no-owner --exit-on-error --single-transaction \
                 <"$BACKUP_PATH" >/dev/null; then
-                rollback_status=1
+                db_restore_failed=1
+              fi
+              # 数据库没恢复好就**不要再启动业务服务**。原来这里只把状态累计成 1
+              # 继续往下走，旧 binary 对着半迁移/半恢复的 schema 跑起来，比停机
+              # 更难收拾。保持服务停止，转人工恢复。
+              if test "$db_restore_failed" -eq 1; then
+                echo "ROLLBACK_DB_RESTORE_FAILED services_left_stopped manual_recovery_required backup=$BACKUP_PATH" >&2
+                set -e
+                return 1
               fi
               docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres psql -X -U futures_app -d futures_platform \
@@ -491,7 +508,24 @@ jobs:
           ROLLBACK_SQL
             fi
 
+            # 宿主机 wrapper/cron/引擎恢复到安装前的快照。E2E 失败时这些文件已经
+            # 是候选版，只回数据库不回它们，下一个 cron 就拿新脚本跑旧 schema。
+            if test "$HOST_INSTALL_STARTED" -eq 1 && test -n "$HOST_BACKUP_TAR" &&
+               test -f "$HOST_BACKUP_TAR"; then
+              tar -C / -xpf "$HOST_BACKUP_TAR" || rollback_status=1
+            fi
+            # 本轮新造的采集凭据一并撤掉：恢复后的库里没有这个账号（备份在建号
+            # 前拍），文件留下就是「文件在、账号无」的永久中间态。
+            if test "$CREDENTIAL_CREATED" -eq 1; then
+              rm -f /etc/futures-platform/secrets/collector-credentials
+              echo "ROLLBACK_REMOVED_ORPHAN_CREDENTIAL"
+            fi
             if test -n "$PREVIOUS_STABLE" && test -f "$PREVIOUS_STABLE"; then
+              # stable 指针也要回。它在验收后、报告前就被写成候选；之后任何失败
+              # 只回滚服务不回指针的话，collector/spread wrapper source 到的还是
+              # 没通过验收的 release。
+              cp "$PREVIOUS_STABLE" "$STATE_ROOT/stable.env" || rollback_status=1
+              chmod 600 "$STATE_ROOT/stable.env" 2>/dev/null || true
               # shellcheck disable=SC1090
               . "$PREVIOUS_STABLE"
               if ! docker compose \
@@ -499,6 +533,13 @@ jobs:
                 -f "$previous_release_dir/docker-compose.production.yml" \
                 -f "$previous_release_dir/docker-compose.release.yml" \
                 up -d --no-build --remove-orphans >/dev/null; then
+                rollback_status=1
+              fi
+              # up -d 返回 0 不等于活了：API 可能起来即崩，原来这里照样打
+              # ROLLBACK_PASS。就绪探测通过才算回滚成功。
+              if ! timeout 180 bash -c \
+                'until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null 2>&1; do sleep 3; done'; then
+                echo "ROLLBACK_SERVICES_NOT_READY" >&2
                 rollback_status=1
               fi
             else
@@ -683,6 +724,11 @@ jobs:
             chmod 400 "$credential_tmp"
             mv "$credential_tmp" "$COLLECTOR_CREDENTIAL_FILE"
             unset collector_password
+            # 本轮新造的凭据。数据库账号要到 provision 那步才建，备份也在建号
+            # 前拍——中途任何失败回滚后，库里没有这个账号，文件却永久留下，
+            # 下一轮 provision=false 只查文件非空就放行，日更从此登录失败。
+            # 回滚时按此标志把文件删掉，让下一轮重新走 provision。
+            CREDENTIAL_CREATED=1
           fi
           test -s "$COLLECTOR_CREDENTIAL_FILE"
           test "$(stat -c %U:%G "$COLLECTOR_CREDENTIAL_FILE")" = root:root
@@ -779,6 +825,18 @@ jobs:
               /app/api --provision-collector-account >/dev/null
           fi
 
+          # 迁移窗口结束，立刻收回 migrator 的登录能力。原来只有回滚路径 NOLOGIN，
+          # 成功部署后 futures_migrator 一直保持 LOGIN——而它是库、schema 和全部
+          # 表的 owner，本地 socket 又是 trust 认证，等于任何能碰到 socket 的进程
+          # 都能以 owner 身份 ALTER/DROP。owner 角色常态就该是 NOLOGIN，
+          # 下一轮部署自己会再打开。
+          docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            psql -X -U futures_app -d futures_platform -Atq \
+            -c 'alter role futures_migrator nologin' >/dev/null
+          test "$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" exec -T postgres \
+            psql -X -U futures_app -d futures_platform -Atq \
+            -c "select rolcanlogin from pg_roles where rolname='futures_migrator'")" = f
+
           "${COMPOSE[@]}" up -d --no-build --remove-orphans
           timeout 240 bash -c "until curl -fsS http://127.0.0.1:8088/api/v1/health/ready >/dev/null; do sleep 3; done"
           VERSION_JSON=$(mktemp)
@@ -807,6 +865,34 @@ jobs:
           done
           docker image inspect "$COLLECTOR_REF" >/dev/null
           echo "DEPLOY_STAGE runtime_images_verified"
+
+          # 覆盖宿主机文件之前先整体快照。E2E 在这些覆盖**之后**才跑，失败回滚
+          # 原来只还原数据库和容器——宿主机上留着候选版 wrapper/cron 对着旧
+          # schema 跑，下一个 cron 就是半新半旧的组合。快照进 release 目录，
+          # 回滚时整包解回去。
+          HOST_BACKUP_TAR="$RELEASE_DIR/host-rollback.tar"
+          host_paths=(
+            usr/local/sbin/run-futures-collector
+            usr/local/sbin/run-futures-backfill
+            usr/local/sbin/run-futures-spread-warm
+            usr/local/sbin/run-official-seats
+            usr/local/sbin/run-smart-money
+            etc/cron.d/futures-collector
+            etc/logrotate.d/futures-collector
+            opt/futures-platform/smart-money/smart_money.py
+          )
+          for script in "$RELEASE_DIR"/backfill/*; do
+            host_paths+=("opt/futures-platform/$(basename "$script")")
+          done
+          host_existing=()
+          for host_path in "${host_paths[@]}"; do
+            test -e "/$host_path" && host_existing+=("$host_path")
+          done
+          if test "${#host_existing[@]}" -gt 0; then
+            tar -C / -cpf "$HOST_BACKUP_TAR" "${host_existing[@]}"
+            chmod 600 "$HOST_BACKUP_TAR"
+          fi
+          HOST_INSTALL_STARTED=1
 
           install -m 700 "$RELEASE_DIR/deploy/collector/run-collector.sh" \
             /usr/local/sbin/run-futures-collector
@@ -837,6 +923,24 @@ jobs:
             /etc/cron.d/futures-collector
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
             /etc/logrotate.d/futures-collector
+          # engine 从此随发布链走。它此前完全不在发布单元里：仓库改了 wrapper 或
+          # 引擎，CI/preflight/deploy 全绿，生产 cron 继续跑手工旧副本——与当年
+          # parsers.py 漂移同一种病。smart_money.py 有差异先备份再覆盖，口径同
+          # backfill；静态页 index.html 仍由运营者手工管理，不在此列。
+          install -m 700 "$RELEASE_DIR/engine/run-official-seats.sh" \
+            /usr/local/sbin/run-official-seats
+          install -m 700 "$RELEASE_DIR/engine/run-smart-money.sh" \
+            /usr/local/sbin/run-smart-money
+          if test -d /opt/futures-platform/smart-money; then
+            engine_live=/opt/futures-platform/smart-money/smart_money.py
+            if test -f "$engine_live" &&
+               ! cmp -s "$RELEASE_DIR/engine/smart_money.py" "$engine_live"; then
+              install -d -m 700 "$superseded_dir"
+              cp -a "$engine_live" "$superseded_dir/smart_money.py"
+              echo "ENGINE_SUPERSEDED smart_money.py"
+            fi
+            install -m 644 "$RELEASE_DIR/engine/smart_money.py" "$engine_live"
+          fi
           echo "DEPLOY_STAGE collector_schedule_installed"
 
           EVIDENCE_DIR="$EVIDENCE_ROOT/${SOURCE_SHA}-${timestamp}"
@@ -886,20 +990,6 @@ jobs:
           fi
 
           DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          if test -f "$STATE_ROOT/stable.env"; then
-            cp "$STATE_ROOT/stable.env" "$STATE_ROOT/stable.previous.env"
-          fi
-          {
-            printf 'previous_git_sha=%q\n' "$SOURCE_SHA"
-            printf 'previous_api_ref=%q\n' "$API_REF"
-            printf 'previous_worker_ref=%q\n' "$WORKER_REF"
-            printf 'previous_frontend_ref=%q\n' "$FRONTEND_REF"
-            printf 'previous_collector_ref=%q\n' "$COLLECTOR_REF"
-            printf 'previous_release_dir=%q\n' "$RELEASE_DIR"
-            printf 'previous_backup_path=%q\n' "$BACKUP_PATH"
-            printf 'previous_deployed_at=%q\n' "$DEPLOYED_AT"
-          } >"$STATE_ROOT/stable.env"
-          chmod 600 "$STATE_ROOT/stable.env"
 
           REPORT="$EVIDENCE_DIR/deployment-report.txt"
           {
@@ -932,6 +1022,27 @@ jobs:
           } >"$REPORT"
           cp "$REPORT" "$STATE_ROOT/latest-deployment-report.txt"
           chmod 600 "$STATE_ROOT/latest-deployment-report.txt"
+
+          # stable 指针放到**最后**、用临时文件原子提交。它是 collector/spread
+          # wrapper 的运行时真源：写早了，后面报告/校验任何一步失败，回滚把服务
+          # 回旧，指针却还指着候选——下一个 cron 就把没通过验收的 release 又拉
+          # 起来。写到这里，它后面没有任何会失败的步骤。
+          if test -f "$STATE_ROOT/stable.env"; then
+            cp "$STATE_ROOT/stable.env" "$STATE_ROOT/stable.previous.env"
+          fi
+          stable_tmp=$(mktemp "$STATE_ROOT/.stable.XXXXXX")
+          {
+            printf 'previous_git_sha=%q\n' "$SOURCE_SHA"
+            printf 'previous_api_ref=%q\n' "$API_REF"
+            printf 'previous_worker_ref=%q\n' "$WORKER_REF"
+            printf 'previous_frontend_ref=%q\n' "$FRONTEND_REF"
+            printf 'previous_collector_ref=%q\n' "$COLLECTOR_REF"
+            printf 'previous_release_dir=%q\n' "$RELEASE_DIR"
+            printf 'previous_backup_path=%q\n' "$BACKUP_PATH"
+            printf 'previous_deployed_at=%q\n' "$DEPLOYED_AT"
+          } >"$stable_tmp"
+          chmod 600 "$stable_tmp"
+          mv "$stable_tmp" "$STATE_ROOT/stable.env"
           SUCCESS=1
           echo "DEPLOYMENT_PASS"
           cat "$REPORT"

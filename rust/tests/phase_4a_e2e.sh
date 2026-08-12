@@ -33,11 +33,11 @@ test -s /etc/futures-platform/secrets/collector-credentials
 test "$(stat -c %U:%G /etc/futures-platform/secrets/collector-credentials)" = root:root
 test "$(stat -c %a /etc/futures-platform/secrets/collector-credentials)" = 400
 test "$(stat -c %a /etc/cron.d/futures-collector)" = 600
-# 这两条断言的时刻必须与 deploy/collector/futures-collector.cron 一致。
-# 2026-08-11 把 cron 从北京时间写法改成 UTC（09:30/13:30）时漏改了这里，
-# 部署被本脚本拦下回滚——断言的就是安装产物，改产物必须同步改断言。
-test "$(grep -c '^30 9 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
-test "$(grep -c '^30 13 \* \* 1-5 root ' /etc/cron.d/futures-collector)" = 1
+# 与发布包里的源文件整文件比对，不再逐条断言时刻。逐条 grep 兑现过两个坑：
+# 改时刻漏改断言（2026-08-11 整轮回滚），以及只断言两条、第三条 15:00
+# spread-warm 行被删了也发现不了。部署就是把 bundle 里那份 install 过来的，
+# 逐字节一致是唯一不会漂移的断言。
+diff -u "$RELEASE_DIR/deploy/collector/futures-collector.cron" /etc/cron.d/futures-collector
 test -x /usr/local/sbin/run-futures-collector
 echo "PHASE4A_E2E_STAGE preconditions_passed"
 
@@ -168,7 +168,10 @@ users_before=$(psql_value -c "select count(*) from users")
 users_identity_fingerprint_before=$(psql_value -c \
   "select md5(coalesce(string_agg((to_jsonb(app_user) - 'updated_at' - 'last_login_at')::text, '|' order by id), '')) from users app_user")
 echo "PHASE4A_E2E_BASELINE manual_batches=$legacy_batches_before automatic_batches=$automatic_batches_before users=$users_before"
-test "$legacy_batches_before" -ge 127
+# 不设绝对数量门槛。这里曾写死 -ge 127——那是某天生产恰好有的手工批次数,
+# 按保留策略清理旧批次或从合法备份恢复后,业务与 schema 全对也会在这里失败
+# 并整轮回滚。「本轮没弄丢批次」由下方与结尾的 count+fingerprint 前后对比保证,
+# 那才是部署该背的不变式;生产历史有多少批次不是。
 echo "PHASE4A_E2E_STAGE baseline_counts_passed"
 
 # Deploys that do not touch collection or Phase 4A run a light regression
@@ -243,23 +246,31 @@ test "$(psql_value -c "select count(*) from user_roles where user_id='$admin_use
 psql_value -c "insert into sessions(id,user_id,token_hash,csrf_hash,absolute_expires_at,idle_expires_at,user_agent) values ('$E2E_COLLECTOR_SESSION','$collector_user_id','$collector_token_hash','$collector_csrf_hash',now()+interval '2 hours',now()+interval '2 hours','phase4a-evaluator-fix-e2e'),('$E2E_ADMIN_SESSION','$admin_user_id','$admin_token_hash','$admin_csrf_hash',now()+interval '2 hours',now()+interval '2 hours','phase4a-evaluator-fix-e2e')" >/dev/null
 unset collector_token_hash admin_token_hash collector_csrf_hash admin_csrf_hash
 
+# DCE 的常态来源。必须与 collector/src/futures_collector/sources.py 的
+# EASTMONEY_DCE_SOURCE_CODE / EASTMONEY_SEATS_SOURCE_CODE 一致——preflight 会
+# 逐字比对。上一版这里还写着退役的 akshare_dce_official/akshare_sina_dce_fallback,
+# collector 早已切到东财,打开 live 采集这些断言必失败并触发整库回滚:
+# 验收脚本自己手抄来源集合,就是又一份会漂移的副本。
+DCE_MARKET_SOURCE=eastmoney_dce_market
+DCE_SEATS_SOURCE=eastmoney_seats_fallback
 expected_official_sources=akshare_cffex_official,akshare_czce_official,akshare_gfex_official,akshare_shfe_official
 for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
   actual_official_sources=$(psql_value -c \
     "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_cffex_official','akshare_czce_official','akshare_gfex_official','akshare_shfe_official')")
   test "$actual_official_sources" = "$expected_official_sources"
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")" = 1
+  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE')")" = 1
   test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started'")" = 5
 done
 
-test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='akshare_sina_dce_fallback' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='akshare_v1'")" = 1
+test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='$DCE_MARKET_SOURCE' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='eastmoney_dce_quote_v1'")" = 1
+test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='$DCE_SEATS_SOURCE' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='eastmoney_seats_v1'")" = 1
 for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback')")" = 1
+  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE')")" = 1
 done
-dce_market_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='daily_market_prices_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback') order by batch.created_at desc limit 1")
-dce_seat_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='seat_positions_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_dce_official','akshare_sina_dce_fallback') order by batch.created_at desc limit 1")
+dce_market_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='daily_market_prices_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE') order by batch.created_at desc limit 1")
+dce_seat_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='seat_positions_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE') order by batch.created_at desc limit 1")
 case "$dce_market_source:$dce_seat_source" in
-  akshare_dce_official:akshare_dce_official|akshare_sina_dce_fallback:akshare_sina_dce_fallback) ;;
+  "$DCE_MARKET_SOURCE:$DCE_SEATS_SOURCE") ;;
   *) echo "PHASE4A_E2E_FAIL inconsistent_dce_source" >&2; exit 1 ;;
 esac
 
@@ -304,7 +315,7 @@ if run_collector_with_peak "$EVIDENCE_DIR/fault-run.log" \
   echo "PHASE4A_E2E_FAIL injected_failure_returned_success" >&2
   exit 1
 fi
-test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_dce_official' and job.dataset_type='daily_market_prices_v1' and job.status='failed' and job.started_at >= timestamptz '$fault_started'")" -ge 1
+test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='$DCE_MARKET_SOURCE' and job.dataset_type='daily_market_prices_v1' and job.status='failed' and job.started_at >= timestamptz '$fault_started'")" -ge 1
 test "$(psql_value -c "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and job.dataset_type='daily_market_prices_v1' and job.status='succeeded' and job.started_at >= timestamptz '$fault_started'")" = "$expected_official_sources"
 test "$(psql_value -c "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")" = "$market_before"
 

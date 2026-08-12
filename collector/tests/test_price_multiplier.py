@@ -70,11 +70,20 @@ def test_the_migration_seeds_every_collected_variety() -> None:
     # Anchored to this file, not the working directory: the suite runs from
     # collector/ and CI runs it from elsewhere again.
     repo = pathlib.Path(__file__).resolve().parents[2]
-    sql = (repo / "rust/migrations/202608100003_instrument_price_multiplier.sql").read_text(
-        encoding="utf-8"
-    )
-    for code, expected in EXPECTED.items():
-        assert f"('{code}', {expected}" in sql, f"{code} is not seeded"
+    # Both migrations, not just the first. 202608100003 seeded zero rows in
+    # production (RLS swallowed the insert) and 202608100006 re-seeded the
+    # same eight values under a workspace context — so the *final* state of a
+    # fresh database comes from 0006. A test that only reads 0003 would keep
+    # passing while an edit to 0006 silently changed what new deployments get.
+    migrations = [
+        "rust/migrations/202608100003_instrument_price_multiplier.sql",
+        "rust/migrations/202608100006_price_multiplier_seed_under_rls.sql",
+    ]
+    for name in migrations:
+        sql = (repo / name).read_text(encoding="utf-8")
+        for code, expected in EXPECTED.items():
+            assert f"('{code}', {expected}" in sql, f"{code} is not seeded in {name}"
+    sql = (repo / migrations[0]).read_text(encoding="utf-8")
     # The column must be distinct from the contract size, or the ambiguity that
     # caused this is simply moved rather than removed.
     assert "price_multiplier" in sql

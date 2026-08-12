@@ -40,7 +40,10 @@ jobs:
             dockerfile: frontend/Dockerfile
             target: ""
             cache: frontend
-            paths: frontend/
+            # Dockerfile 还 COPY 了根级 package.json/pnpm-lock.yaml/pnpm-workspace.yaml，
+            # 只写 frontend/ 会把「仅改根 lockfile」判成可复用旧镜像——依赖修了个
+            # 安全漏洞，生产镜像却原地不动，而部署报告一路绿。
+            paths: frontend/ package.json pnpm-lock.yaml pnpm-workspace.yaml
           - image: collector
             dockerfile: collector/Dockerfile
             target: ""

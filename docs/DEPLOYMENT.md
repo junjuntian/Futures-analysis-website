@@ -112,6 +112,20 @@ futures VPS 主密钥文件：
 4. 将 `key_version_metadata` 中旧版本标记为 retired。
 5. 数据库备份与主密钥恢复副本分开保存。
 
+## 生产为什么跑在 APP_ENV=acceptance（2026-08-12 记录，知情取舍）
+
+独立审查（FULL_AUDIT_20260812 HIGH-01）指出生产 API 长期运行在
+`APP_ENV=acceptance`，production 级守卫（强制 HTTPS origin、Secure cookie、
+禁环境变量 BOOTSTRAP_TOKEN、强制 DATABASE_URL_FILE）没有生效。**这是现状约束的
+结果，不是遗漏**：站点按运营者拍板暂不配 TLS（明文 HTTP + IP 端口访问，等全站
+完工后自己加域名再上 TLS），而 Rust 的 production 守卫会强制 HTTPS 与 Secure
+cookie——现在切 production，登录当场瘫掉。单人自用面板，风险敞口有限。
+
+**TLS 上线时必须一并做**：release overlay 把 `APP_ENV` 切回 production、
+`AUTH_COOKIE_SECURE=true`、`PUBLIC_ORIGIN` 换 https 域名，并重新验证
+ready/version 与登录。更彻底的解法（把验收开关与安全等级解耦）等那时一起做，
+现在解耦只有成本没有收益。
+
 ## 采集账号密码轮换（2026-08-12 实证）
 
 凭据文件 `/etc/futures-platform/secrets/collector-credentials`（root:root 0400，JSON）

@@ -35,8 +35,12 @@ import pandas as pd
 RULES = {
     "group8": ["中财期货", "中信期货", "海通期货", "国泰君安",
                "高盛期货", "东证期货", "华泰期货", "国投期货"],
+    # 与 Rust 端 MEMBER_ALIASES(spread_analytics.rs)保持同集——那边多出的两条
+    # 这里曾缺失:来源真会写「国投安信期货」(全库 3.4 万行),不归一则该机构整段
+    # 历史被静默排除在 group8 之外,权重和事件分数全丢。
     "alias": {"浙江永安": "永安期货", "乾坤期货": "高盛期货",
-              "上海东证": "东证期货", "国投安信": "国投期货"},
+              "上海东证": "东证期货", "国投安信": "国投期货",
+              "国投安信期货": "国投期货", "申银万国": "申万期货"},
     "cond_seats": ["国泰君安", "东证期货"],   # 仅贴低点(<5%)计分
     "spread_seats": ["国泰君安", "华泰期货", "海通期货"],  # 比价腿警示对象
     "event_q": 0.80, "event_window": 250, "event_min_hist": 120,
@@ -126,6 +130,12 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
     """注意:PG 的 boolean 经 csv 导出为 't'/'f';pandas 新版按 str dtype 读入,
     直接 astype(bool) 会把 'f' 也判成 True(非空字符串)。必须显式判定。"""
     seat = seat.copy()
+    # 反推行(reboard_inferred)不进任何汇总——与 compute-seat-totals.sql 同一条
+    # 口径,理由也相同:它只覆盖「掉榜前一日」那一天、某会员某合约有别的合约没有,
+    # 混进 member_day 的求和就是一份「有时含反推、有时不含」的净仓序列,会凭空
+    # 造出 ΔNet 跳变(实测 AG 八席位 2023-04-18 净仓差 -11,454 手)。
+    # 对趋势跟随,跳变是假信号,比稳定少算更糟。
+    seat = seat[seat["source"].astype(str) != "reboard_inferred"]
     col = seat["is_variety_total"]
     if col.dtype == bool:
         seat["is_variety_total"] = col

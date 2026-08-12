@@ -32,7 +32,9 @@ step "一、本地仓库状态"
 # 运营者在另一个会话里做席位因子预测模型，产出落在 research/，那个目录会长期是
 # 改动状态。把它也算进来的话这道检查每次都红——而一个总是红的门禁很快就会被无视，
 # 那就等于没做。所以按「改了会不会影响部署出去的东西」来分。
-DEPLOYED_PATHS='^(rust|frontend|collector|deploy|\.github)/|^docker-compose'
+# 根级 package.json/pnpm-lock.yaml/pnpm-workspace.yaml 也进前端镜像
+#（frontend/Dockerfile COPY 了它们），漏了会放过「只改根 lockfile」的构建。
+DEPLOYED_PATHS='^(rust|frontend|collector|deploy|backfill|engine|\.github)/|^docker-compose|^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
 dirty_deployed=$(git status --porcelain --untracked-files=no |
   awk '{print $2}' | grep -E "$DEPLOYED_PATHS" || true)
 if [ -z "$dirty_deployed" ]; then
@@ -124,7 +126,10 @@ done
 # 「品种上市年」补三位郑商所代码的世纪，把 2026 年的 FG608 解析成 FG1608，与真实
 # 存在过的 2016 年合约撞进同一条序列。仓库那份早修好了，改动从来没走到机器上。
 # 现在这些脚本随发布包下发，清单是显式的——所以必须有人盯着「新增了却没列进去」。
-for file in backfill/*.py; do
+# .sql 也要:load_sanhe_seats.sql 曾是「仓库有、发布包没有」——文档把它当装载
+# 入口,机器上却根本找不到这个文件,重灌历史只能手抄。
+for file in backfill/*.py backfill/*.sql; do
+  [ -f "$file" ] || continue
   name=$(basename "$file")
   if grep -q "backfill/$name" .github/workflows/deploy-futures.yml; then
     pass "backfill/$name 已装进发布包"
@@ -133,18 +138,26 @@ for file in backfill/*.py; do
   fi
 done
 
-# 教训：2026-08-11 把 cron 从北京时间写法改成 UTC，验收脚本里断言 cron 时刻的
-# 两行没跟着改，部署走到最后一步被拦下回滚，整轮重来。验收断言的就是安装产物，
-# 两边必须一致——把 phase_4a_e2e.sh 里每个对 cron 文件的 grep 模式拿出来，
-# 在本地的 cron 源文件上逐个验一遍。
-while IFS= read -r pattern; do
-  if grep -Eq "$pattern" deploy/collector/futures-collector.cron; then
-    pass "验收断言的 cron 模式在源文件里：$pattern"
-  else
-    fail "验收脚本断言了「$pattern」但 futures-collector.cron 里没有——部署会在最后一步被拦下"
-  fi
-done < <(grep -o "grep -c '[^']*' /etc/cron.d/futures-collector" rust/tests/phase_4a_e2e.sh \
-           | sed "s/^grep -c '//; s/' \/etc\/cron\.d\/futures-collector$//")
+# cron 断言已改成 e2e 里对发布包源文件整文件 diff（2026-08-12），验收与产物
+# 不可能再漂移，原来的「提取 grep 模式逐个比对」检查随之退役。这里只守住
+# 一件事：e2e 还在做那个 diff，没人把它删掉换回逐条断言。
+if grep -q 'diff -u "$RELEASE_DIR/deploy/collector/futures-collector.cron"' rust/tests/phase_4a_e2e.sh; then
+  pass "验收对 cron 做整文件比对"
+else
+  fail "phase_4a_e2e.sh 不再整文件比对 cron——逐条断言会重蹈时刻漂移与漏行"
+fi
+
+# 验收脚本手抄的 DCE 来源必须与 collector 的常量逐字一致。上一版验收还写着
+# 退役的 akshare 来源，打开 live 采集必失败并整库回滚——H06 的教训。
+collector_market=$(grep -o 'EASTMONEY_DCE_SOURCE_CODE = "[^"]*"' collector/src/futures_collector/sources.py | cut -d'"' -f2)
+collector_seats=$(grep -o 'EASTMONEY_SEATS_SOURCE_CODE = "[^"]*"' collector/src/futures_collector/sources.py | cut -d'"' -f2)
+e2e_market=$(grep -o '^DCE_MARKET_SOURCE=.*' rust/tests/phase_4a_e2e.sh | cut -d= -f2)
+e2e_seats=$(grep -o '^DCE_SEATS_SOURCE=.*' rust/tests/phase_4a_e2e.sh | cut -d= -f2)
+if [ -n "$collector_market" ] && [ "$collector_market" = "$e2e_market" ] && [ "$collector_seats" = "$e2e_seats" ]; then
+  pass "验收的 DCE 来源与 collector 常量一致（$collector_market / $collector_seats）"
+else
+  fail "DCE 来源漂移：collector=($collector_market,$collector_seats) e2e=($e2e_market,$e2e_seats)"
+fi
 
 step "四、CI 与镜像"
 
@@ -163,7 +176,12 @@ if [ "$build_id" = "null" ] || [ -z "$build_id" ]; then
   digests=""
 else
   pass "镜像构建 $build_id 成功"
-  build_log=$(gh run view "$build_id" --log 2>/dev/null)
+  # 日志拿不到就明确红——原来 2>/dev/null 加 set -e 会静默退出，操作者只看到
+  # 流程突然消失，还以为脚本跑完了。
+  if ! build_log=$(gh run view "$build_id" --log 2>&1); then
+    fail "读取构建日志失败（gh run view $build_id）——没有日志就提不出 digest，不要盲部署"
+    build_log=""
+  fi
   digests=$(printf '%s\n' "$build_log" |
     grep -o "pushing manifest for ghcr.io[^ ]*@sha256:[0-9a-f]*" | sort -u)
   # 构建工作流会打出 image-built-from <镜像> <提交>：复用旧镜像时那不是本次 HEAD。
@@ -210,6 +228,30 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
+# run_live_collection 按改动路径决定，不再无脑 false。
+#
+# false 是 2026-08-09 加的提速开关（跳过三次真采省约一小时），但 preflight 把它
+# 写死成了默认——采集器本身的改动也被跳过，坏 collector 直接上线，要等第二天
+# cron 才真实失败。改成：与上一次成功部署的提交做 diff，碰了采集链路
+#（collector/、deploy/collector/、backfill/、采集相关 e2e）就必须真采一轮。
+# 拿不到上次部署的提交时宁可 true：多花一小时，好过跳过唯一的集成门。
+last_deployed_sha=$(gh api "repos/$REPO/actions/runs?per_page=20" \
+  --jq '[.workflow_runs[] | select(.name == "Deploy futures" and .conclusion == "success")] | first | .head_sha' 2>/dev/null || echo "")
+run_live=true
+if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ] &&
+   git cat-file -e "$last_deployed_sha" 2>/dev/null; then
+  collector_changes=$(git diff --name-only "$last_deployed_sha" HEAD -- \
+    collector/ deploy/collector/ backfill/ rust/tests/phase_4a_e2e.sh | head -5)
+  if [ -z "$collector_changes" ]; then
+    run_live=false
+    pass "采集链路自上次部署（${last_deployed_sha:0:7}）无改动，run_live_collection=false"
+  else
+    pass "采集链路有改动，run_live_collection=true：$(printf '%s' "$collector_changes" | tr '\n' ' ')"
+  fi
+else
+  pass "查不到上次成功部署的提交，保守 run_live_collection=true"
+fi
+
 # 最近一个已收盘的工作日，给验收用。
 collection_date=$(python -c "
 from datetime import date, timedelta
@@ -233,7 +275,7 @@ gh workflow run deploy-futures.yml --ref $BRANCH \\
   -f collector_digest=$(digest_of collector) \\
   -f collection_date=$collection_date \\
   -f provision_collector=false \\
-  -f run_live_collection=false${image_sources:+ \\
+  -f run_live_collection=$run_live${image_sources:+ \\
   -f image_sources=$image_sources}
 EOF
 )

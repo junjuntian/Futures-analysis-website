@@ -40,7 +40,12 @@ insert into seat_history (
 )
 select gen_random_uuid(), s.workspace_id, s.exchange, s.instrument,
        null, true, true, s.trade_date, s.rank_type, null, s.member,
-       sum(s.quantity), sum(s.change), s.source
+       sum(s.quantity),
+       -- 任何一个合约的增减未知，合计增减就未知。sum() 会跳过 NULL 把部分和
+       -- 伪装成完整值：东吴 JD 2026-08-07 空头三合约里一个 NULL、两个合计 -458，
+       -- 汇总写 -458 等于断言那个未知合约增减为 0——正是三态口径要禁止的。
+       case when count(s.change) = count(*) then sum(s.change) end,
+       s.source
   from seat_history s
  where not s.is_variety_total
    -- 反推出来的行（infer-offboard-seats.sql）不进品种汇总。

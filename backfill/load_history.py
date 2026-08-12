@@ -114,15 +114,25 @@ def flush(cur, sql, rows):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--what", required=True, choices=["czce", "shfe", "sanhe", "dce", "all"])
+    # dce 不在列表里:曾经列了却没有任何执行分支,--what dce 打印 0 行然后
+    # 成功退出,人和调度都会把「什么都没干」读成「回填完成」。DCE 的装载
+    # 走 dce_to_csv.py + load_all.sh 那条路,不从这里进。
+    ap.add_argument("--what", required=True, choices=["czce", "shfe", "sanhe", "all"])
+    ap.add_argument(
+        "--workspace-id", required=True,
+        help="目标 workspace 的 UUID。必填:此前按「UUID 最小的 workspace」猜,"
+             "生产上最小的是 Phase 3C 的测试租户,全部历史会灌进测试空间而页面无变化。")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个文件，用于验收")
     args = ap.parse_args()
 
     conn = psycopg2.connect(os.environ["PGDSN"])
     conn.autocommit = False
     cur = conn.cursor()
-    cur.execute("select id from workspaces order by id limit 1")
-    workspace = cur.fetchone()[0]
+    cur.execute("select id from workspaces where id = %s", (args.workspace_id,))
+    row = cur.fetchone()
+    if row is None:
+        raise SystemExit(f"workspace {args.workspace_id} 不存在,拒绝装载")
+    workspace = row[0]
 
     prices = seats = 0
     jobs = []
