@@ -32,14 +32,28 @@ insert into main_month values
     ('SA', 1), ('SA', 5), ('SA', 9),
     ('JM', 1), ('JM', 5), ('JM', 9);
 
+-- **必须按来源去重。** 同一合约同一天在多个源下各有一行（郑商所 08-11 就同时有
+-- czce_official 与 akshare_v1），不去重的后果有两个，一个吵一个哑：
+--   吵：逐日快照的 insert 会对同一组合同一天产生两行，直接撞 on conflict 报错。
+--   哑：旧版有 group by 兜着不报错，但 `pair_days` 被算成两倍——「至少 60 天历史」
+--       那道门实际上是按 30 天在放行，而且没人看得出来。
+-- 交易所自己发的压过封装源，与席位那边的 SEAT_SOURCE_RANK 同一套道理。
 create temp table legs as
-select p.workspace_id, p.instrument, p.contract, p.trade_date,
+select distinct on (p.workspace_id, p.instrument, p.contract, p.trade_date)
+       p.workspace_id, p.instrument, p.contract, p.trade_date,
        p.close_price, p.open_interest,
        substring(p.contract from '([0-9]{2})[0-9]{2}$')::int yy,
        substring(p.contract from '[0-9]{2}$')::int mm
   from price_history p
   join monitor_scope s on s.instrument = p.instrument
- where p.close_price is not null;
+ where p.close_price is not null
+ order by p.workspace_id, p.instrument, p.contract, p.trade_date,
+          case when p.source like '%\_official' then 0
+               when p.source = 'akshare_v1' then 1
+               when p.source like 'eastmoney%' then 2
+               when p.source like 'sina%' then 3
+               else 4 end,
+          p.source;
 
 create index legs_by_contract on legs (workspace_id, contract, trade_date);
 create index legs_by_month on legs (workspace_id, instrument, mm, trade_date);
@@ -81,35 +95,64 @@ select a.workspace_id, a.instrument, a.contract, a.mm, a.yy,
 
 -- 当年：该合约对自身的全部历史，原始最低/最高。
 -- 不足 60 天的组合直接不监控——「五天的历史极值」不是极值。
-create temp table pair_stat as
-select k.workspace_id, k.c1, k.c2, count(*) days,
-       min(x.close_price - y.close_price) lo,
-       max(x.close_price - y.close_price) hi,
-       (array_agg(x.close_price - y.close_price order by x.trade_date desc))[1] now,
-       max(x.trade_date) trade_date
+-- 每个组合的完整价差序列，以及**截至当日**的滚动最低/最高。
+--
+-- 滚动，不是全期极值。这张表是给「触发留记录」用的：要回答「8 月 12 日那天页面上
+-- 报了什么」，区间就必须只含 8 月 12 日及之前的数据。用全期极值算出来的历史记录
+-- 带着未来信息，拿去回测策略是自欺——那天根本不可能知道后面会出什么极值。
+create temp table pair_series as
+select k.workspace_id, k.c1, k.c2, x.trade_date,
+       (x.close_price - y.close_price) v
   from combo k
   join legs x on x.workspace_id = k.workspace_id and x.contract = k.c1
   join legs y on y.workspace_id = k.workspace_id and y.contract = k.c2
-             and y.trade_date = x.trade_date
- group by 1, 2, 3
-having count(*) >= 60;
+             and y.trade_date = x.trade_date;
 
--- 历年：同月份组合在所有年份上的第 2.5 / 97.5 百分位。去极端值的理由见迁移注释。
+create index pair_series_key on pair_series (workspace_id, c1, c2, trade_date);
+analyze pair_series;
+
+create temp table pair_stat as
+select workspace_id, c1, c2, trade_date, v now,
+       min(v) over w lo,
+       max(v) over w hi,
+       count(*) over w days
+  from pair_series
+window w as (partition by workspace_id, c1, c2 order by trade_date
+             rows between unbounded preceding and current row);
+
+-- 只保留窗口内、且到那天为止已积累够 60 天的行。
+-- 60 天的门槛也按当日算：一个组合在它上市第 30 天时，「历史极值」确实还没有意义。
+delete from pair_stat
+ where days < 60
+    or trade_date < current_date - (:window_days || ' days')::interval;
+
+create index pair_stat_key on pair_stat (workspace_id, c1, c2, trade_date);
+analyze pair_stat;
+
+-- 历年：同月份组合在所有年份上的第 2.5 / 97.5 百分位，**同样截至当日**。
 --
--- **这一步是整段的瓶颈：生产实测 75.7 秒**（2026-08-12 回滚式预演，全部 workspace，
--- legs 15.9 万行）。整段合计约 77 秒。放在每日批里可以接受——采集本身就要十几分钟；
--- 但它也是这份 SQL 里唯一值得再优化的地方，真要动手先量，别凭直觉改索引。
--- 页面不吃这个代价：API 读的是这张表，不重算。
+-- percentile_cont 是有序集聚合，不能当窗口函数用，所以这里对每个 (组合, 日期)
+-- 各算一次。看着贵，实际不贵：日更窗口只有三天，组合数几十个，一共百来次。
+-- 去极端值的理由见迁移 202608120001 的注释（苹果历年最低 −10686 会把区间撑到
+-- 12536，百分比长期贴在中间不动）。
 create temp table years_stat as
-select k.workspace_id, k.c1, k.c2, count(*) days,
-       percentile_cont(0.025) within group (order by x.close_price - y.close_price) lo,
-       percentile_cont(0.975) within group (order by x.close_price - y.close_price) hi
-  from combo k
-  join legs x on x.workspace_id = k.workspace_id and x.instrument = k.i1 and x.mm = k.m1
-  join legs y on y.workspace_id = k.workspace_id and y.instrument = k.i2
-             and y.trade_date = x.trade_date and y.mm = k.m2
-             and y.yy = x.yy + (k.y2 - k.y1)
- group by 1, 2, 3;
+select p.workspace_id, p.c1, p.c2, p.trade_date, y.days, y.lo, y.hi
+  from pair_stat p
+  join combo k on k.workspace_id = p.workspace_id and k.c1 = p.c1 and k.c2 = p.c2
+  cross join lateral (
+      select count(*) days,
+             percentile_cont(0.025) within group (order by x.close_price - y2.close_price) lo,
+             percentile_cont(0.975) within group (order by x.close_price - y2.close_price) hi
+        from legs x
+        join legs y2 on y2.workspace_id = x.workspace_id and y2.instrument = k.i2
+                    and y2.trade_date = x.trade_date and y2.mm = k.m2
+                    and y2.yy = x.yy + (k.y2 - k.y1)
+       where x.workspace_id = k.workspace_id and x.instrument = k.i1 and x.mm = k.m1
+         and x.trade_date <= p.trade_date
+  ) y;
+
+create index years_stat_key on years_stat (workspace_id, c1, c2, trade_date);
+analyze years_stat;
 
 -- 先清掉窗口内的旧快照，再重算。
 --
@@ -133,8 +176,8 @@ select gen_random_uuid(), p.workspace_id, p.trade_date,
        case when y.hi > y.lo then (p.now - y.lo) / (y.hi - y.lo) end
   from pair_stat p
   join combo k on k.workspace_id = p.workspace_id and k.c1 = p.c1 and k.c2 = p.c2
-  left join years_stat y on y.workspace_id = p.workspace_id and y.c1 = p.c1 and y.c2 = p.c2
- where p.trade_date >= current_date - (:window_days || ' days')::interval
+  left join years_stat y on y.workspace_id = p.workspace_id and y.c1 = p.c1
+                        and y.c2 = p.c2 and y.trade_date = p.trade_date
 on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     spread = excluded.spread,
     pair_days = excluded.pair_days, pair_low = excluded.pair_low,
