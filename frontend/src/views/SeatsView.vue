@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { addChange, sideDelta, signedChange } from '../seatChange'
+import { offBoardBands } from '../offBoard'
 import { ElMessage } from 'element-plus'
 import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
 import {
@@ -273,6 +274,29 @@ const candles = computed(() =>
 const hasCandles = computed(() => candles.value.some((item) => item !== '-'))
 const gapDays = computed(() => days.value.filter((day) => day.cost === null).length)
 
+// —— 掉榜区间 ——
+//
+// 交易所只发前 20 名。该席位掉出榜单的那些天，官方文件里没有他这一行——那是
+// 「不知道」，不是「零」。曲线在这里必须断开（connectNulls: false 已经做到），
+// 但光断开看不出是缺数据还是真平仓，所以把这些天用底色圈出来并写明原因。
+const offBoardDays = computed(
+  () => days.value.filter((day) => day.net_position === null).length
+)
+
+// 区间合并在 offBoard.ts 里，那边有测试：差一格就会把回榜那天也涂成空白。
+const bands = computed(() =>
+  offBoardBands(
+    days.value.map((day) => ({ trade_date: day.trade_date, known: day.net_position !== null }))
+  )
+)
+
+const offBoardMark = computed(() => ({
+  silent: true,
+  itemStyle: { color: 'rgba(230, 162, 60, 0.16)' },
+  label: { show: false },
+  data: bands.value
+}))
+
 const priceOption = computed<EChartsOption>(() => ({
   grid: { left: 60, right: 24, top: 24, bottom: 28 },
   tooltip: { trigger: 'axis' as const },
@@ -291,7 +315,8 @@ const priceOption = computed<EChartsOption>(() => ({
       showSymbol: false,
       // 成本不可知的那几天必须断开，连线是画一条猜出来的线。
       connectNulls: false,
-      lineStyle: { width: 2 }
+      lineStyle: { width: 2 },
+      markArea: offBoardMark.value
     }
   ]
 }))
@@ -309,6 +334,8 @@ const netOption = computed<EChartsOption>(() => ({
       showSymbol: false,
       connectNulls: false,
       lineStyle: { width: 2 },
+      // 掉榜区间的底色。断开加底色，才分得清「缺数据」和「真的平了」。
+      markArea: offBoardMark.value,
       // 零轴：正的是净多、负的是净空，没有这条线读不出方向。
       markLine: {
         silent: true,
@@ -488,6 +515,13 @@ const cumulativeTotal = computed(() => {
             其中 <strong>{{ gapDays }}</strong> 天成本不可知（掉出前 20 或当日无结算价），图上断开显示。
           </template>
         </p>
+        <p v-if="offBoardDays" class="note off-board">
+          <span class="swatch" aria-hidden="true"></span>
+          <span>
+            <strong>{{ offBoardDays }}</strong> 天该席位掉出交易所前 20 榜，
+            <strong>持仓未知</strong>——不是清仓。交易所只公布前 20 名，那些天文件里没有他这一行。
+            图上以此底色标出并断开曲线；成本与累计盈亏在这几天原地保留，回榜后接着算。
+        </p>
       </el-card>
 
       <el-empty v-if="!loadingBuilding && !days.length" description="选一个品种，或该席位在此品种上没有持仓" />
@@ -533,6 +567,20 @@ const cumulativeTotal = computed(() => {
 </template>
 
 <style scoped>
+.note.off-board {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.note.off-board .swatch {
+  flex: none;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  background: rgba(230, 162, 60, 0.16);
+  border: 1px solid rgba(230, 162, 60, 0.5);
+}
+
 .up {
   color: #c0392b;
   font-weight: 600;

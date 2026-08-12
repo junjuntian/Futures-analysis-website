@@ -1254,6 +1254,24 @@ mod tests {
     }
 
     #[test]
+    fn a_day_the_seat_is_off_the_board_stays_null_not_zero() {
+        // 交易所只发前二十名。某席位掉出榜单的那天，官方文件里没有他这一行——
+        // 那是「不知道」，不是「零」。原来这里 coalesce 成 0，错误一路传下去：
+        // 成本引擎读成平仓清掉成本，累计盈亏凭空多出一次巨额了结
+        // （高盛 AU2610：2038 → 0 → 2416）。留 NULL，界面才标得出「掉榜 · 持仓未知」。
+        let query = building_days_sql();
+        assert!(
+            !query.contains("coalesce(s.long_position, 0)")
+                && !query.contains("coalesce(s.short_position, 0)"),
+            "掉榜日的持仓不许补零：{query}"
+        );
+        assert!(
+            query.contains("s.long_position::text") && query.contains("s.short_position::text"),
+            "缺席的日子必须原样返回 NULL"
+        );
+    }
+
+    #[test]
     fn the_exchanges_own_numbers_win_over_a_reseller() {
         // 同一天同一合约可能同时有交易所年度文件和新浪两行——身份键里带 source，
         // 两行都合法。原来按 source 字典序取，'sina' 排在 'dce_official_history'
@@ -2047,8 +2065,12 @@ fn building_days_sql() -> String {
          select coalesce(s.trade_date, p.trade_date) as trade_date,
                 p.open_price::text, p.high_price::text, p.low_price::text,
                 p.close_price::text, p.settlement_price::text,
-                coalesce(s.long_position, 0)::text as long_position,
-                coalesce(s.short_position, 0)::text as short_position
+                -- **不要 coalesce 成 0。** 那天没有他的行，意思是他掉出了前二十，
+                -- 不是他清仓了。补一个 0 下去，成本引擎会读成平仓、清掉成本，
+                -- 累计盈亏跟着算出一次不存在的巨额了结（净持仓 2038 → 0 → 2416）。
+                -- 留 NULL，一路传到界面上如实标成「掉榜 · 持仓未知」。
+                s.long_position::text as long_position,
+                s.short_position::text as short_position
            from seats s
            full outer join prices p on p.trade_date = s.trade_date
           where coalesce(s.trade_date, p.trade_date) is not null
@@ -2067,8 +2089,9 @@ pub struct BuildingDay {
     pub low_price: Option<String>,
     pub close_price: Option<String>,
     pub settlement_price: Option<String>,
-    pub long_position: String,
-    pub short_position: String,
+    /// `None` = 那天该席位不在前二十榜上，持仓未知（不是零）。
+    pub long_position: Option<String>,
+    pub short_position: Option<String>,
 }
 
 /// 某席位在某合约（或某品种汇总）的逐日持仓与行情。

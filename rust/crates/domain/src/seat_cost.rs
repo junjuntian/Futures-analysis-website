@@ -26,7 +26,12 @@ use utoipa::ToSchema;
 pub struct DailyPosition {
     pub trade_date: Date,
     /// 净持仓：持买减持卖。正为净多，负为净空。
-    pub net_position: Decimal,
+    ///
+    /// **`None` 表示那天不知道，不是零。** 交易所只公布前二十名，该席位掉出榜单的
+    /// 日子官方文件里根本没有他这一行。把缺失当零，成本引擎会读成「这笔仓位平了」，
+    /// 于是清掉成本、重新起算——2026-07-29 高盛焦煤那种掉一天又回来的情形，
+    /// 成本线会凭空断开，当日盈亏也会算成一次巨额平仓。
+    pub net_position: Option<Decimal>,
     /// 当日结算价。没有则该日成本不可知——零成交日的结算价是推导值不是真实成交。
     pub settlement: Option<Decimal>,
 }
@@ -37,7 +42,8 @@ pub struct CostPoint {
     #[schema(value_type = String, format = Date)]
     pub trade_date: Date,
     #[schema(value_type = f64)]
-    pub net_position: Decimal,
+    /// `None` 表示那天该席位不在榜上，持仓未知——与「持仓为零」是两回事。
+    pub net_position: Option<Decimal>,
     /// 净持仓成本（推算）。仓位为零、或建仓当日无结算价时为空。
     #[schema(value_type = Option<f64>)]
     pub cost: Option<Decimal>,
@@ -69,7 +75,25 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
     let mut cumulative = Decimal::ZERO;
 
     for point in points {
-        let net = point.net_position;
+        // 那天不知道他持了多少：**什么状态都不动**。
+        //
+        // 不能按零处理（会被下面读成平仓，清掉成本并算出一次假的巨额盈亏），
+        // 也不能沿用前值假装没变（那是编数据）。已知的成本、上一日净持仓、上一日
+        // 结算价原样保留，等有数据的那天接着算；这一天的成本与盈亏如实报未知。
+        let Some(net) = point.net_position else {
+            out.push(CostPoint {
+                trade_date: point.trade_date,
+                net_position: None,
+                cost: None,
+                daily_pnl: None,
+                open_pnl: None,
+                cost_unknown_reason: Some("seat_off_the_board"),
+                cumulative_pnl: cumulative,
+            });
+            // previous_settlement 仍然跟进：结算价来自行情，与他上不上榜无关。
+            previous_settlement = point.settlement.or(previous_settlement);
+            continue;
+        };
         let mut reason: Option<&'static str> = None;
 
         // 翻向或归零：这笔仓位结束了，成本不再延续。
@@ -89,7 +113,7 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
             cumulative += today.unwrap_or(Decimal::ZERO);
             out.push(CostPoint {
                 trade_date: point.trade_date,
-                net_position: net,
+                net_position: Some(net),
                 cost: None,
                 daily_pnl: today,
                 open_pnl: None,
@@ -146,7 +170,7 @@ pub fn build_cost_series(points: &[DailyPosition], price_multiplier: Decimal) ->
         cumulative += today.unwrap_or(Decimal::ZERO);
         out.push(CostPoint {
             trade_date: point.trade_date,
-            net_position: net,
+            net_position: Some(net),
             cost,
             daily_pnl: today,
             open_pnl,
@@ -181,9 +205,63 @@ mod tests {
     fn day(d: Date, net: i64, settlement: Option<Decimal>) -> DailyPosition {
         DailyPosition {
             trade_date: d,
-            net_position: Decimal::from(net),
+            net_position: Some(Decimal::from(net)),
             settlement,
         }
+    }
+
+    /// 该席位那天不在榜上：持仓未知。
+    fn absent(d: Date, settlement: Option<Decimal>) -> DailyPosition {
+        DailyPosition {
+            trade_date: d,
+            net_position: None,
+            settlement,
+        }
+    }
+
+    #[test]
+    fn a_day_off_the_board_is_unknown_and_must_not_reset_the_cost() {
+        // 生产实例：高盛 AU2610 多头 07-28 在榜 2038、07-29 掉出前二十、07-30 回榜 2416。
+        // 把 07-29 当成「持仓 0」，引擎会读成平仓：清掉成本、当日盈亏算出一次巨额了结，
+        // 07-30 再从头起算——成本线断开，而图上看不出这是数据缺失还是真的平了。
+        let points = vec![
+            day(date!(2026 - 07 - 27), 10, Some(Decimal::from(100))),
+            day(date!(2026 - 07 - 28), 10, Some(Decimal::from(110))),
+            absent(date!(2026 - 07 - 29), Some(Decimal::from(120))),
+            day(date!(2026 - 07 - 30), 10, Some(Decimal::from(130))),
+        ];
+        let series = build_cost_series(&points, Decimal::ONE);
+
+        // 掉榜那天：持仓、成本、盈亏一律未知，并说明原因。
+        assert_eq!(series[2].net_position, None);
+        assert_eq!(series[2].cost, None);
+        assert_eq!(series[2].daily_pnl, None);
+        assert_eq!(series[2].cost_unknown_reason, Some("seat_off_the_board"));
+
+        // 回榜那天成本仍然是 100，没有被重置成 130。
+        assert_eq!(series[3].cost, Some(Decimal::from(100)));
+        assert_eq!(series[3].net_position, Some(Decimal::from(10)));
+
+        // 累计盈亏在未知那天不动，回榜后接着按结算价推进：
+        // 07-28 相对 100 涨 10 → +100；07-29 未知不计；07-30 相对 120 涨 10 → +100。
+        assert_eq!(series[1].cumulative_pnl, Decimal::from(100));
+        assert_eq!(series[2].cumulative_pnl, Decimal::from(100));
+        assert_eq!(series[3].cumulative_pnl, Decimal::from(200));
+    }
+
+    #[test]
+    fn a_real_zero_still_ends_the_position() {
+        // 未知不等于零，但零仍然是零：真的平到零，成本就该结束。
+        let points = vec![
+            day(date!(2026 - 07 - 27), 10, Some(Decimal::from(100))),
+            day(date!(2026 - 07 - 28), 0, Some(Decimal::from(110))),
+            day(date!(2026 - 07 - 29), 10, Some(Decimal::from(120))),
+        ];
+        let series = build_cost_series(&points, Decimal::ONE);
+        assert_eq!(series[1].net_position, Some(Decimal::ZERO));
+        assert_eq!(series[1].cost, None);
+        // 平掉之后再建仓，成本从新的结算价起算，不是旧的 100。
+        assert_eq!(series[2].cost, Some(Decimal::from(120)));
     }
 
     #[test]

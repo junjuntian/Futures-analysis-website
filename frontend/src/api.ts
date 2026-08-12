@@ -756,9 +756,10 @@ export interface BuildingDay {
   low_price: string | null
   close_price: string | null
   settlement_price: string | null
-  long_position: string
-  short_position: string
-  net_position: string
+  /** `null` = 那天该席位掉出了交易所前 20 榜，持仓**未知**，不是零。 */
+  long_position: string | null
+  short_position: string | null
+  net_position: string | null
   /** 净持仓成本（推算）——由公开持仓变化与结算价推出，不是成交均价。 */
   cost: string | null
   daily_pnl: string | null

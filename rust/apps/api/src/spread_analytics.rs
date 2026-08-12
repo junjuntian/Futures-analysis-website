@@ -664,9 +664,11 @@ pub struct BuildingDayItem {
     pub low_price: Option<String>,
     pub close_price: Option<String>,
     pub settlement_price: Option<String>,
-    pub long_position: String,
-    pub short_position: String,
-    pub net_position: String,
+    /// 三者皆可为 `None`：那天该席位掉出了前二十，持仓未知——**不是零**。
+    /// 界面据此断开曲线并标注，而不是画一条穿过零的线。
+    pub long_position: Option<String>,
+    pub short_position: Option<String>,
+    pub net_position: Option<String>,
     /// 净持仓成本（推算），不是成交均价——我们看不到成交明细。
     pub cost: Option<String>,
     pub daily_pnl: Option<String>,
@@ -777,8 +779,16 @@ pub async fn query_seat_building(
             .iter()
             .map(|row| DailyPosition {
                 trade_date: row.trade_date,
-                net_position: parse_decimal(&row.long_position)
-                    - parse_decimal(&row.short_position),
+                // 两边都没有行 = 那天他不在榜上，持仓未知。
+                // 只缺一边（例如只上了多头榜）沿用旧口径按 0 计：那是「不在空头
+                // 前二十」，对这些主力席位而言与无空仓接近，且历来如此。
+                net_position: match (&row.long_position, &row.short_position) {
+                    (None, None) => None,
+                    (long, short) => Some(
+                        long.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO)
+                            - short.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO),
+                    ),
+                },
                 settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
             })
             .collect();
@@ -795,7 +805,7 @@ pub async fn query_seat_building(
                 settlement_price: row.settlement_price,
                 long_position: row.long_position,
                 short_position: row.short_position,
-                net_position: cost.net_position.to_string(),
+                net_position: cost.net_position.map(|value| value.to_string()),
                 cost: cost.cost.map(|value| value.round_dp(4).to_string()),
                 daily_pnl: cost.daily_pnl.map(|value| value.round_dp(2).to_string()),
                 cumulative_pnl: cost.cumulative_pnl.round_dp(2).to_string(),
