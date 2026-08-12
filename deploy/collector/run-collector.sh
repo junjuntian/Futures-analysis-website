@@ -110,6 +110,18 @@ else
   echo "SEAT_TOTALS_SKIPPED missing $SEAT_TOTALS" >&2
 fi
 
+# 套利监控快照。必须排在投影之后：它读的是 price_history，而那张表由投影填。
+# 生产实测约 77 秒（瓶颈是历年百分位那一步，见 SQL 里的注释）。
+# window_days=3 只重算最近三天：日更只需覆盖新落库的一两天，兜一点补采余量。
+SPREAD_MONITOR="$previous_release_dir/deploy/collector/compute-spread-monitor.sql"
+if [ -r "$SPREAD_MONITOR" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 -v window_days=3 \
+    < "$SPREAD_MONITOR"
+else
+  echo "SPREAD_MONITOR_SKIPPED missing $SPREAD_MONITOR" >&2
+fi
+
 # 投影做完了，现在才把采集的失败如实抛出去——cron 的邮件与退出码仍然看得到它，
 # 只是不再因为它而丢掉当天其余四家交易所的数据。
 exit "$COLLECTION_STATUS"

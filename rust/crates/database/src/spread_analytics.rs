@@ -1152,6 +1152,52 @@ mod tests {
     }
 
     #[test]
+    fn the_monitor_snapshot_takes_the_latest_row_per_combination() {
+        // 不能按「最新日期」一刀切：大商所的行情比郑商所晚一天到，08-11 那天郑商所
+        // 已经有数而大商所停在 08-10，一刀切会把焦煤鸡蛋生猪整片漏掉——而页面上
+        // 看不出漏了，它只是少了几行。
+        assert!(
+            MONITOR_SNAPSHOT_SQL.contains("distinct on (contract_1, contract_2)"),
+            "必须按组合去重取最新，而不是按日期一刀切：{MONITOR_SNAPSHOT_SQL}"
+        );
+        assert!(
+            MONITOR_SNAPSHOT_SQL.contains("order by contract_1, contract_2, trade_date desc"),
+            "distinct on 的排序必须与去重键一致，否则取到的不是最新那条"
+        );
+        // 到期合约的最后一条会永远留在表里，必须有个新鲜度兜底。
+        assert!(
+            MONITOR_SNAPSHOT_SQL.contains("days')::interval"),
+            "缺少过期兜底：到期合约会一直挂在当前快照里"
+        );
+        // 过滤走原始列，理由见 MEMBER_KEY 上的 RLS 教训。
+        assert!(
+            !MONITOR_SNAPSHOT_SQL.contains("regexp_replace"),
+            "监控快照的过滤条件里不许出现非 leakproof 函数"
+        );
+    }
+
+    #[test]
+    fn the_monitor_stores_positions_so_the_threshold_stays_adjustable() {
+        // 存位置不存结论：阈值留到读的时候套。存了结论就等于把阈值焊死，日后想把
+        // 10% 调成 15% 得重算全部历史，还会出现新旧阈值混在一张表里的局面。
+        let migration = include_str!("../../../migrations/202608120001_spread_monitor_daily.sql");
+        for column in [
+            "pair_position",
+            "years_position",
+            "pair_low",
+            "pair_high",
+            "years_low",
+            "years_high",
+        ] {
+            assert!(migration.contains(column), "缺少 {column}");
+        }
+        assert!(
+            !migration.contains("alert") && !migration.contains("triggered"),
+            "表里不该有触发结论列——阈值必须留到读的时候套"
+        );
+    }
+
+    #[test]
     fn member_filters_run_on_the_raw_column_not_through_a_function() {
         // RLS 教训：regexp_replace 不是 leakproof，放进过滤条件后优化器拒绝下推成
         // 索引条件，runtime 角色下 60 秒超时。过滤必须是原始列上的纯比较。
@@ -2142,4 +2188,130 @@ pub async fn instrument_price_multiplier(
     .flatten();
     tx.commit().await?;
     Ok(value)
+}
+
+/// 套利监控的一组组合在某一天的位置。
+///
+/// 数字全部用文本承载：它们要原样送到前端画轨道，一路保持精确比在边界上来回转换安全，
+/// 与席位页的持仓量同一个理由。
+#[derive(Debug, Clone)]
+pub struct SpreadMonitorRow {
+    pub trade_date: Date,
+    pub instrument_1: String,
+    pub contract_1: String,
+    pub instrument_2: String,
+    pub contract_2: String,
+    pub is_cross_variety: bool,
+    pub spread: String,
+    pub pair_days: i32,
+    pub pair_low: String,
+    pub pair_high: String,
+    pub pair_position: Option<String>,
+    pub years_days: Option<i32>,
+    pub years_low: Option<String>,
+    pub years_high: Option<String>,
+    pub years_position: Option<String>,
+}
+
+/// 监控页的当前快照：**每组组合各取自己最新的那一条**。
+///
+/// 不能写成「取最新日期的全部行」。大商所的行情比郑商所晚一天到（08-11 那天郑商所
+/// 已经有数，大商所还停在 08-10），按最新日期一刀切会把焦煤鸡蛋生猪整片漏掉，
+/// 而页面上看不出漏了——它只是少了几行。
+///
+/// `stale_days` 是兜底：合约到期后不再有新快照，它的最后一条会永远留在表里。
+/// 超过这个天数没更新的组合不再当作「当前」。
+const MONITOR_SNAPSHOT_SQL: &str = "with newest as (
+         select max(trade_date) d from spread_monitor_daily where workspace_id = $1
+     )
+     select distinct on (contract_1, contract_2)
+            trade_date, instrument_1, contract_1, instrument_2, contract_2,
+            is_cross_variety, spread::text, pair_days,
+            pair_low::text, pair_high::text, pair_position::text,
+            years_days, years_low::text, years_high::text, years_position::text
+       from spread_monitor_daily, newest
+      where workspace_id = $1
+        and trade_date > newest.d - ($2 || ' days')::interval
+      order by contract_1, contract_2, trade_date desc";
+
+pub async fn spread_monitor_snapshot(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    stale_days: i32,
+) -> Result<Vec<SpreadMonitorRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(MONITOR_SNAPSHOT_SQL)
+        .bind(workspace_id)
+        .bind(stale_days.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows.into_iter().map(monitor_row).collect())
+}
+
+/// 某一天的快照，供翻历史用。触发与否是读的时候按阈值算的，所以任何一天都能
+/// 用任何阈值重新判定——这正是当初存位置而不存结论的目的。
+pub async fn spread_monitor_on(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    trade_date: Date,
+) -> Result<Vec<SpreadMonitorRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select trade_date, instrument_1, contract_1, instrument_2, contract_2,
+                is_cross_variety, spread::text, pair_days,
+                pair_low::text, pair_high::text, pair_position::text,
+                years_days, years_low::text, years_high::text, years_position::text
+           from spread_monitor_daily
+          where workspace_id = $1 and trade_date = $2
+          order by instrument_1, contract_1, contract_2",
+    )
+    .bind(workspace_id)
+    .bind(trade_date)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows.into_iter().map(monitor_row).collect())
+}
+
+/// 有快照的交易日，最新在前。历史页的日期选择器要靠它。
+pub async fn spread_monitor_dates(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Date>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, Date>(
+        "select distinct trade_date from spread_monitor_daily
+          where workspace_id = $1 order by trade_date desc limit $2",
+    )
+    .bind(workspace_id)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
+fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
+    SpreadMonitorRow {
+        trade_date: row.get("trade_date"),
+        instrument_1: row.get("instrument_1"),
+        contract_1: row.get("contract_1"),
+        instrument_2: row.get("instrument_2"),
+        contract_2: row.get("contract_2"),
+        is_cross_variety: row.get("is_cross_variety"),
+        spread: row.get("spread"),
+        pair_days: row.get("pair_days"),
+        pair_low: row.get("pair_low"),
+        pair_high: row.get("pair_high"),
+        pair_position: row.get("pair_position"),
+        years_days: row.get("years_days"),
+        years_low: row.get("years_low"),
+        years_high: row.get("years_high"),
+        years_position: row.get("years_position"),
+    }
 }
