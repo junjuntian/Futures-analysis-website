@@ -110,6 +110,23 @@ else
   echo "SEAT_TOTALS_SKIPPED missing $SEAT_TOTALS" >&2
 fi
 
+# 掉榜前一日的持仓反推。排在投影之后（它读 seat_history）。
+#
+# 放在品种汇总**之后**是有意的：反推行被排除在汇总之外，见 compute-seat-totals.sql
+# 里的说明——一份「有时含反推、有时不含」的品种汇总会凭空造出 ΔNet 跳变，
+# 对趋势跟随比少算更糟。所以两者先后其实无关，摆这里只是让日志顺序好读。
+#
+# window_days=7 只重算最近一周：反推只依赖「今天回榜、昨天不在榜」这一对相邻日，
+# 新数据到了才需要重算，往回一周足够兜住补采。
+INFER_OFFBOARD="$previous_release_dir/deploy/collector/infer-offboard-seats.sql"
+if [ -r "$INFER_OFFBOARD" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 -v window_days=7 \
+    < "$INFER_OFFBOARD"
+else
+  echo "INFER_OFFBOARD_SKIPPED missing $INFER_OFFBOARD" >&2
+fi
+
 # 套利监控快照。必须排在投影之后：它读的是 price_history，而那张表由投影填。
 # 生产实测约 77 秒（瓶颈是历年百分位那一步，见 SQL 里的注释）。
 # window_days=3 只重算最近三天：日更只需覆盖新落库的一两天，兜一点补采余量。

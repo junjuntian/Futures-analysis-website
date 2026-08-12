@@ -43,6 +43,13 @@ select gen_random_uuid(), s.workspace_id, s.exchange, s.instrument,
        sum(s.quantity), sum(s.change), s.source
   from seat_history s
  where not s.is_variety_total
+   -- 反推出来的行（infer-offboard-seats.sql）不进品种汇总。
+   --
+   -- 它们只覆盖「掉榜前一日」那一天，某会员某合约有、别的合约没有。把它们算进
+   -- 汇总，就会得到一份**有时含反推、有时不含**的品种合计——同一个会员的净持仓
+   -- 会因为「今天恰好有一条反推行」而跳一下，凭空造出一次 ΔNet。
+   -- 对趋势跟随来说，这比稳定地少算更糟：少算是个偏置，跳变是个假信号。
+   and s.source <> 'reboard_inferred'
    and s.trade_date >= current_date - :window_days
    and not exists (
        select 1 from seat_history official
