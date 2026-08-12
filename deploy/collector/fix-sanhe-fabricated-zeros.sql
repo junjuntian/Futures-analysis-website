@@ -75,14 +75,32 @@ update seat_history s
  where s.id = f.id;
 
 -- 修不了的零持仓行删掉。缺行 = 不知道；留 0 = 断言清仓了。
+--
+-- **但不能删还没轮到的那些。** 这个脚本进了日更管线，每天跑。最新一天的零持仓行
+-- 天然还没有「下一个交易日」可用来反推，按上面的判定就是「修不了」——今天删掉，
+-- 明天他回榜、真值本来算得出来时，那一行已经不在了。
+-- 所以只删「后面确实已经有交易日、给过机会仍然推不出来」的行。
+-- 大商所尤其要紧：官方源那条路是死的，infer-offboard-seats.sql 只认 *_official，
+-- 补不上这一刀删掉的东西。
 delete from seat_history s
  where s.source = 'sanhe' and not s.is_variety_total and s.quantity = 0
-   and not exists (select 1 from fixable f where f.id = s.id);
+   and not exists (select 1 from fixable f where f.id = s.id)
+   and exists (
+       select 1 from sanhe_next n
+        where n.workspace_id = s.workspace_id and n.exchange = s.exchange
+          and n.instrument = s.instrument and n.contract = s.contract
+          and n.trade_date = s.trade_date and n.next_trading is not null
+   );
 
 commit;
 
-select '修正' as 动作, count(*) 行数 from seat_history
+-- 落地核对。剩余零持仓应当只剩两类：反推出来真值恰好为 0 的（change 已清空），
+-- 以及最新一天那些还没轮到的。数字持续增长说明上面的判定出了问题。
+select '已修正(增减已清空)' as 项, count(*) 行数 from seat_history
  where source = 'sanhe' and change is null and not is_variety_total
 union all
-select '剩余零持仓(应为 0)', count(*) from seat_history
- where source = 'sanhe' and quantity = 0 and not is_variety_total;
+select '剩余零持仓', count(*) from seat_history
+ where source = 'sanhe' and quantity = 0 and not is_variety_total
+union all
+select '其中带增减的(应为 0)', count(*) from seat_history
+ where source = 'sanhe' and quantity = 0 and not is_variety_total and change is not null;

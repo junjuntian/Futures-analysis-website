@@ -95,6 +95,20 @@ else
   echo "PROJECTION_SKIPPED missing $PROJECTION" >&2
 fi
 
+# 修掉三禾填出来的「持仓 0」。**必须排在品种汇总之前**：它会改写和删除席位行，
+# 跑在汇总之后的话，汇总里还留着按假 0 算出来的合计，要等到第二天才对得上。
+#
+# 每天都得跑，不是一次性清理：三禾的采集每天都在按同样的手法写新的假 0
+# （掉榜日填一行持仓 0、增减记 −前日持仓）。首次清理修了 2,484 行、删了 15,269 行，
+# 之后每天只处理新增的那几行，全表扫一遍也只要几秒。
+SANHE_ZEROS="$previous_release_dir/deploy/collector/fix-sanhe-fabricated-zeros.sql"
+if [ -r "$SANHE_ZEROS" ]; then
+  "${COMPOSE[@]}" exec -T postgres \
+    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$SANHE_ZEROS"
+else
+  echo "SANHE_ZEROS_SKIPPED missing $SANHE_ZEROS" >&2
+fi
+
 # 品种汇总。大商所、上期所官方不发品种合计，郑商所的合计口径也要统一，这些
 # 汇总行是 compute-seat-totals.sql 从席位行自算出来的。它一直只在回填时手工
 # 跑过——发布包里装了这个文件，却没有任何定时任务执行它，于是汇总永远停在
