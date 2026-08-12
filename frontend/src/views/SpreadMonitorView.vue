@@ -10,16 +10,16 @@ import {
   type SpreadMonitorTrack
 } from '../api'
 
-// 阈值：落在区间两端多少算触发。默认 10% 是拿真实数据定的——落在两端 20% 的有 33 组
-// （45% 的组合都在报，太吵），10% 是 19 组。放在界面上是因为松紧因人而异。
+// 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
+// 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
 const THRESHOLDS = [
-  { value: 0.05, label: '5% · 只看最极端' },
-  { value: 0.1, label: '10% · 默认' },
-  { value: 0.15, label: '15%' },
-  { value: 0.2, label: '20% · 报得多' }
+  { value: 0.03, label: '3% · 最严' },
+  { value: 0.05, label: '5% · 默认（约 25 组）' },
+  { value: 0.1, label: '10% · 报得多（约 47 组）' },
+  { value: 0.2, label: '20% · 几乎全报（约 61 组）' }
 ]
 
-const threshold = ref(0.1)
+const threshold = ref(0.05)
 const tradeDate = ref('')
 const direction = ref<'all' | 'high' | 'low'>('all')
 const varietyFilter = ref<string[]>([])
