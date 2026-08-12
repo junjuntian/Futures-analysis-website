@@ -104,6 +104,19 @@ for file in deploy/collector/*; do
   fi
 done
 
+# 教训：2026-08-12 查出服务器上的 backfill/parsers.py 是仓库版的旧副本，还在按
+# 「品种上市年」补三位郑商所代码的世纪，把 2026 年的 FG608 解析成 FG1608，与真实
+# 存在过的 2016 年合约撞进同一条序列。仓库那份早修好了，改动从来没走到机器上。
+# 现在这些脚本随发布包下发，清单是显式的——所以必须有人盯着「新增了却没列进去」。
+for file in backfill/*.py; do
+  name=$(basename "$file")
+  if grep -q "backfill/$name" .github/workflows/deploy-futures.yml; then
+    pass "backfill/$name 已装进发布包"
+  else
+    fail "backfill/$name 没装进发布包——机器上会继续跑旧副本，而且悄无声息"
+  fi
+done
+
 # 教训：2026-08-11 把 cron 从北京时间写法改成 UTC，验收脚本里断言 cron 时刻的
 # 两行没跟着改，部署走到最后一步被拦下回滚，整轮重来。验收断言的就是安装产物，
 # 两边必须一致——把 phase_4a_e2e.sh 里每个对 cron 文件的 grep 模式拿出来，

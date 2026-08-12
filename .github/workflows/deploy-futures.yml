@@ -169,6 +169,7 @@ jobs:
           install -d -m 700 \
             "${RELEASE_BUNDLE}/deploy/nginx" \
             "${RELEASE_BUNDLE}/deploy/collector" \
+            "${RELEASE_BUNDLE}/backfill" \
             "${RELEASE_BUNDLE}/migrations" \
             "${RELEASE_BUNDLE}/e2e"
           install -m 600 docker-compose.yml "${RELEASE_BUNDLE}/docker-compose.yml"
@@ -190,6 +191,20 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/compute-seat-totals.sql"
           install -m 600 deploy/collector/compute-spread-monitor.sql \
             "${RELEASE_BUNDLE}/deploy/collector/compute-spread-monitor.sql"
+          # 采集与解析的 Python 一起发。这几个此前只存在于服务器上的手工副本，与仓库版
+          # 各自演化：2026-08-12 查出服务器那份 parsers.py 还在按「品种上市年」补三位
+          # 郑商所代码的世纪，把 2026 年的 FG608 解析成 FG1608，跟真实存在过的 2016 年
+          # 合约撞进同一条序列，行情与席位各错了 96 行和 2958 行。仓库里那份早就修成
+          # 按交易日锚定，改动却从来没走到机器上——与上面 run-backfill.sh 一模一样的病。
+          # 清单显式列出，理由同迁移清单；漏列由 ops/preflight-deploy.sh 挡。
+          install -m 600 backfill/parsers.py "${RELEASE_BUNDLE}/backfill/parsers.py"
+          install -m 600 backfill/to_csv.py "${RELEASE_BUNDLE}/backfill/to_csv.py"
+          install -m 600 backfill/dce_to_csv.py "${RELEASE_BUNDLE}/backfill/dce_to_csv.py"
+          install -m 600 backfill/fetch_exchange.py "${RELEASE_BUNDLE}/backfill/fetch_exchange.py"
+          install -m 600 backfill/sanhe_seats.py "${RELEASE_BUNDLE}/backfill/sanhe_seats.py"
+          install -m 600 backfill/sanhe_survey.py "${RELEASE_BUNDLE}/backfill/sanhe_survey.py"
+          install -m 600 backfill/sanhe_to_csv.py "${RELEASE_BUNDLE}/backfill/sanhe_to_csv.py"
+          install -m 600 backfill/sina_dce_gap.py "${RELEASE_BUNDLE}/backfill/sina_dce_gap.py"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
@@ -775,6 +790,21 @@ jobs:
             /usr/local/sbin/run-futures-backfill
           install -m 700 "$RELEASE_DIR/deploy/collector/run-spread-warm.sh" \
             /usr/local/sbin/run-futures-spread-warm
+          # 解析脚本装到采集的工作目录。**有差异先备份再覆盖**：这里是单向同步，仓库
+          # 是唯一来源；但直接丢掉机器上那一版，会让「谁在机器上改过什么」无从追查，
+          # 备份留在 .superseded/ 下，出事能立刻拿来对比。
+          install -d -m 700 /opt/futures-platform/.superseded
+          superseded_dir="/opt/futures-platform/.superseded/${SOURCE_SHA}-${timestamp}"
+          for script in "$RELEASE_DIR"/backfill/*.py; do
+            name=$(basename "$script")
+            live="/opt/futures-platform/$name"
+            if [ -f "$live" ] && ! cmp -s "$script" "$live"; then
+              install -d -m 700 "$superseded_dir"
+              cp -a "$live" "$superseded_dir/$name"
+              echo "BACKFILL_SCRIPT_SUPERSEDED $name"
+            fi
+            install -m 644 "$script" "$live"
+          done
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.cron" \
             /etc/cron.d/futures-collector
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
