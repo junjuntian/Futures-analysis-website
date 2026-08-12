@@ -16,11 +16,23 @@ SINCE=$(date -d "7 days ago" +%F)   # 7 天回看窗,补节假日与偶发漏采
 TODAY=$(TZ=Asia/Shanghai date +%F)
 
 echo "[official-seats] $(date '+%F %T') 采集 $SINCE ~ $TODAY"
-# 当日文件强制重取:白天可能已下到盘中快照,fetch 对已存在文件跳过,
-# 不删的话晚间 cron 拿到的永远是盘中版。历史文件不动。
-TODAY_STAMP=$(TZ=Asia/Shanghai date +%Y%m%d)
-rm -f exchange-raw/czce/market/*"$TODAY_STAMP"* exchange-raw/czce/seats/*"$TODAY_STAMP"* \
-      exchange-raw/shfe/market/*"$TODAY_STAMP"* exchange-raw/shfe/seats/*"$TODAY_STAMP"*
+# 回看窗内的文件全部强制重取。fetch 对已存在文件跳过,而白天抓到的是盘中快照
+# (SHFE kx.dat 收盘价与结算价为空),不删就永远是那一版。
+#
+# 原来只删「今天」,而且删错了:文件名是 2026-08-12.dat,变量却按 %Y%m%d 生成
+# 20260812,glob `*20260812*` 从来没匹配上任何文件——**强制重取一直是空操作**。
+# 2026-08-11 的 SHFE 文件正是北京 13:57 盘中抓的,收盘价全空,被下面的
+# 「盘中快照不入库」过滤挡掉,当天行情于是只剩没有持仓量的 akshare 行;
+# 引擎 main_contract() 首行就 dropna(open_interest),整个 08-11 被丢弃,
+# 机构资金页的数据停在 08-10。运营者 2026-08-12 问「为什么显示 0」时一路查到这里。
+#
+# 只删当天治不了根:任何一天若晚间那趟没跑成,它的盘中版就冻结在归档里。
+# 整窗重取一次 16 个小文件,代价可以忽略,换掉的是一整类问题。
+for offset in $(seq 0 7); do
+  stamp=$(date -d "$offset days ago" +%F)
+  rm -f exchange-raw/czce/market/*"$stamp"* exchange-raw/czce/seats/*"$stamp"* \
+        exchange-raw/shfe/market/*"$stamp"* exchange-raw/shfe/seats/*"$stamp"*
+done
 python3 fetch_exchange.py czce "$SINCE" "$TODAY"
 python3 fetch_exchange.py shfe "$SINCE" "$TODAY"
 
