@@ -14,8 +14,17 @@ case "$previous_release_dir" in
   *) echo "COLLECTOR_FAIL unsafe_release_dir" >&2; exit 1 ;;
 esac
 
+# 同一把锁部署那边也要拿（见 deploy-futures.yml 里 COLLECTOR_LOCK 的说明）：
+# 迁移要 AccessExclusiveLock，和正在写 seat_history 的这一轮撞上就是死锁。
+#
+# 抢不到就跳过这一轮，但**要留下一行日志**。原来是 `flock -n 9 || exit 0`，
+# 静默退出——部署恰好压在 09:30 或 13:30 上时，那一轮采集无声无息地没了，
+# 日志里连一个字都没有。一天有两轮，漏一轮通常还能补回来，前提是看得见它漏了。
 exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
+if ! flock -n 9; then
+  echo "COLLECTION_SKIPPED 另一个作业占着 $LOCK_FILE（多半是部署），这一轮不跑" >&2
+  exit 0
+fi
 
 # docker-compose.production.yml declares every image as
 # `...:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}`. Compose

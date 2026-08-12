@@ -296,6 +296,24 @@ jobs:
           ACCEPTANCE_SHA=${11}
           RUN_LIVE_COLLECTION=${12}
           IMAGE_SOURCES=${13}
+          # 和日更管线抢同一把锁。
+          #
+          # 2026-08-12 连挂两次：迁移里的 `alter table ... owner to futures_migrator`
+          # 要 AccessExclusiveLock，撞上正在写 seat_history 的作业就死锁，部署整轮回滚。
+          # 第二次撞的是 13:30 UTC 的 run-collector.sh 本身——**而回滚反过来把采集的
+          # 连接杀了**（日志里 `terminating connection due to administrator command`），
+          # 那一轮数据也没了。两个方向都会坏事，之前没出问题只是恰好错开了 cron。
+          #
+          # run-collector.sh 早就在用这把锁（它自己是 `flock -n`，抢不到就当天不跑）。
+          # 部署这边用 -w：等一段时间而不是立刻放弃，日更整轮通常几分钟。等不到就退出，
+          # 让人换个窗口重发——总好过跑到一半死锁再回滚。
+          COLLECTOR_LOCK=/run/lock/futures-collector.lock
+          exec 8>"$COLLECTOR_LOCK"
+          if ! flock -w 900 8; then
+            echo "DEPLOY_ABORTED 等了 15 分钟仍拿不到日更锁，换个窗口重发" >&2
+            exit 1
+          fi
+
           LEGACY_ROOT=/opt/futures-platform
           RELEASES_ROOT=/opt/futures-platform-releases
           BACKUP_ROOT=/opt/futures-platform-backups
