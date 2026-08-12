@@ -48,6 +48,13 @@ jobs:
         with:
           workspaces: rust -> target
 
+      - name: Shellcheck deploy and ops scripts
+        # 这些脚本没有测试，出错都是静默的（2026-08-12 就靠人肉在生产日志里
+        # 抓到过好几处）。shellcheck 是它们唯一的门禁。runner 是自建 VPS，
+        # shellcheck 已随系统安装（apt，0.11.0）。
+        # -S warning：info 级噪音多（大量风格建议），warning 起步才值得挡构建。
+        run: shellcheck -S warning deploy/collector/*.sh ops/*.sh rust/tests/phase_*_e2e.sh
+
       - name: Rust format
         working-directory: rust
         run: cargo fmt --check

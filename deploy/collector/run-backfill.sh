@@ -34,7 +34,7 @@ CONTINUOUS=0
 # The eight varieties under backfill live on three exchanges only; GFEX and
 # CFFEX list none of them, so calling those two would spend requests on data
 # nobody asked for. Override with FUTURES_BACKFILL_EXCHANGES / _VARIETIES.
-EXCHANGES=(${FUTURES_BACKFILL_EXCHANGES:-DCE SHFE CZCE})
+read -r -a EXCHANGES <<<"${FUTURES_BACKFILL_EXCHANGES:-DCE SHFE CZCE}"
 VARIETIES=${FUTURES_BACKFILL_VARIETIES:-AP,JD,JM,FG,SA,AU,AG,LH}
 declare -A FAILURE_STREAK=()
 declare -A SOURCE_PAUSED=()
@@ -122,7 +122,7 @@ load_source_state() {
 }
 
 load_daily_count() {
-  local today=$1 state_day= state_count=0
+  local today=$1 state_day='' state_count=0
   if read -r state_day state_count <"$DAILY_STATE_FILE"; then
     if test "$state_day" = "$today" && is_uint "$state_count"; then
       printf '%s' "$state_count"
@@ -451,6 +451,11 @@ COMPOSE=(
   -f "$previous_release_dir/docker-compose.release.yml"
   --profile collector
 )
+# previous_collector_ref 来自上面 source 的 stable.env（shellcheck 看不见来源，
+# 这里的空值守卫同时就是给它的存在性证明）。
+test -n "${previous_collector_ref:-}" || {
+  echo "BACKFILL_FAIL stable.env missing previous_collector_ref" >&2; exit 1;
+}
 "${COMPOSE[@]}" config --format json | jq -e --arg image "$previous_collector_ref" '
   .services.collector.image == $image
   and (.services.collector.mem_limit | tostring) == "536870912"

@@ -168,15 +168,43 @@ pub async fn provision_collector_account(pool: &PgPool, config: &AuthConfig) -> 
     .fetch_optional(&mut *tx)
     .await?;
     let user_id = if let Some(row) = existing {
+        // 停用的账号不许在这里悄悄复活——那是管理决定，不是采集配置。
         if row
             .get::<Option<OffsetDateTime>, _>("disabled_at")
             .is_some()
-            || !verify_password(config, &credential.password, row.get("password_hash"))
-                .map_err(|_| anyhow::anyhow!("collector account verification failed"))?
         {
-            anyhow::bail!("existing collector account does not match the credential file");
+            anyhow::bail!("existing collector account is disabled");
         }
-        row.get("id")
+        let user_id: Uuid = row.get("id");
+        // 文件密码与库不一致：**把库改成文件的**，这就是轮换。
+        //
+        // 原来这里直接报错。听着稳妥，实际上把轮换堵死了：凭据文件本来就是采集器
+        // 登录用的唯一事实源（root:root 0400，只有部署流程写它），文件和库不一致时
+        // 采集器必然已经登不进去了，收敛库向文件正是修复。2026-08-12 凭据在聊天里
+        // 泄过，轮换流程就是「换掉文件 → 重跑本命令」，报错版连这条路都没有。
+        if !verify_password(config, &credential.password, row.get("password_hash"))
+            .map_err(|_| anyhow::anyhow!("collector account verification failed"))?
+        {
+            let password_hash = hash_password(config, &credential.password)
+                .map_err(|_| anyhow::anyhow!("collector password hashing failed"))?;
+            sqlx::query(
+                "update users
+                    set password_hash = $2, password_params_version = $3
+                  where id = $1",
+            )
+            .bind(user_id)
+            .bind(password_hash)
+            .bind(config.password_params_version)
+            .execute(&mut *tx)
+            .await?;
+            // 旧密码开出的会话一并作废。采集器每轮自己登录，不靠长会话，
+            // 这里清掉只影响拿旧凭据的人。
+            sqlx::query("delete from sessions where user_id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        user_id
     } else {
         let user_id = Uuid::now_v7();
         let password_hash = hash_password(config, &credential.password)
