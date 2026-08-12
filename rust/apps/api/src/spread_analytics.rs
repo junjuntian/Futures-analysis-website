@@ -487,6 +487,19 @@ async fn validate_own_selection(
 
 /// 自建价差引擎的来源标识。与三禾并存而不是取代：切换只是请求里的一个字符串，
 /// 出了问题可以立刻切回去，也便于把两边的数字摆在一起比。
+/// 席位日期选择器能列出的交易日上限。这不是分页，是防跑飞的兜底——
+/// 全库 2008 年至今也只有 4516 个交易日，6000 留了约六年的余量。
+///
+/// 原值是 400。它在会员更名合并之前不显眼（高盛期货本来就只有更名后的 55 天），
+/// 合并出 691 天之后立刻成了新的天花板：运营者仍然翻不到 2024-12 以前。
+///
+/// 生产实测（必须用 futures_runtime + RLS，超级用户测出来的数字不作数，
+/// 见 database 侧 MEMBER_KEY 上的教训）：带会员过滤 691 天 8.5 毫秒；
+/// 不带会员过滤（首次加载、还没选席位）4516 天 827 毫秒。
+/// 试过把会员那套递归跳跃扫描搬来做日期，反而更慢（1397 毫秒）——
+/// `trade_date` 没有可用的前导索引，普通 distinct 才是这里的最优解，别再搬。
+const SEAT_DATE_LIMIT: i64 = 6000;
+
 const SELF_PROVIDER_CODE: &str = "self";
 const SELF_SOURCE_CODE: &str = "own_price_history";
 const SELF_SOURCE_NAME: &str = "自建价差引擎（交易所行情）";
@@ -592,7 +605,7 @@ pub async fn query_seat_positions(
         &state.auth.pool,
         context.workspace_id(),
         member.as_deref(),
-        400,
+        SEAT_DATE_LIMIT,
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
