@@ -61,6 +61,22 @@ else
   fail "HEAD 未推送或与 origin/$BRANCH 不一致——部署会被 acceptance_sha 守卫拒绝"
 fi
 
+# 前端真编一遍。
+#
+# 教训（2026-08-12）：给建仓过程页加掉榜标记时漏了一个 </span>，vue-tsc 和 vitest
+# 都过了——它们不做模板结构检查——直到 CI 的 vite build 才报「Element is missing
+# end tag」。为一个漏掉的闭合标签白等了一轮 CI。
+# 这一步六秒，CI 那轮十几分钟；preflight 存在的意义就是把这种往返省掉。
+if [ -d frontend/node_modules ]; then
+  if (cd frontend && npx vite build >/dev/null 2>&1); then
+    pass "前端 vite build 通过"
+  else
+    fail "前端 vite build 失败——CI 会在同一步挂掉，先在本地跑 (cd frontend && npx vite build) 看报错"
+  fi
+else
+  printf '  \033[33m·\033[0m 跳过前端构建：frontend/node_modules 不在\n'
+fi
+
 step "二、迁移"
 
 # 教训（第二次失败）：部署在打包那步报 migration_missing_version_record。

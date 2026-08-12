@@ -521,6 +521,7 @@ const cumulativeTotal = computed(() => {
             <strong>{{ offBoardDays }}</strong> 天该席位掉出交易所前 20 榜，
             <strong>持仓未知</strong>——不是清仓。交易所只公布前 20 名，那些天文件里没有他这一行。
             图上以此底色标出并断开曲线；成本与累计盈亏在这几天原地保留，回榜后接着算。
+          </span>
         </p>
       </el-card>
 
