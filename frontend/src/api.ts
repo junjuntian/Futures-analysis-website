@@ -775,6 +775,8 @@ export interface SeatBuildingResponse {
   is_variety_total: boolean
   price_multiplier: string | null
   members: string[]
+  /** 该会员在该品种上历史持有过的全部合约，新月份在前。不随所选交易日变化。 */
+  contracts: string[]
   days: BuildingDay[]
 }
 

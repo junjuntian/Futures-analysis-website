@@ -686,6 +686,9 @@ pub struct SeatBuildingResponse {
     pub price_multiplier: Option<String>,
     /// 该品种有过持仓的会员，供界面选择。
     pub members: Vec<String>,
+    /// 该会员在该品种上**历史持有过的全部合约**，新月份在前。
+    /// 不随所选交易日变化：某个合约今天不在榜，不代表它的建仓过程不值得看。
+    pub contracts: Vec<String>,
     pub days: Vec<BuildingDayItem>,
 }
 
@@ -738,6 +741,21 @@ pub async fn query_seat_building(
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    // 合约列表按会员取全历史，与所选交易日无关——见 seat_member_contracts 的注释。
+    // 没选会员时留空：合约选择器本来就要先有会员才有意义。
+    let contracts = if member.is_empty() {
+        Vec::new()
+    } else {
+        database::spread_analytics::seat_member_contracts(
+            &state.auth.pool,
+            context.workspace_id(),
+            &member,
+            &instrument,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?
+    };
 
     let mut days = Vec::new();
     if !member.is_empty() {
@@ -795,6 +813,7 @@ pub async fn query_seat_building(
             contract,
             price_multiplier: multiplier,
             members,
+            contracts,
             days,
         },
         request_id,

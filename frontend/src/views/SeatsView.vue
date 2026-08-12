@@ -48,6 +48,10 @@ const loadingPositions = ref(false)
 // 建仓过程
 const buildingInstrument = ref('')
 const buildingContract = ref('')
+// 合约选择器的选项由接口给,不再从「所选交易日当天的持仓行」推导。
+// 旧写法只列得出当天还在榜的两三个合约:换个日子就少几个选项,等于把
+// 「今天在榜」误当成「存在过」——运营者选了高盛后挑不到 AU2608,就是这个。
+const buildingContracts = ref<string[]>([])
 const days = ref<BuildingDay[]>([])
 const multiplier = ref<string | null>(null)
 const loadingBuilding = ref(false)
@@ -104,6 +108,7 @@ async function loadPositions() {
 async function loadBuilding() {
   if (!member.value || !buildingInstrument.value) {
     days.value = []
+    buildingContracts.value = []
     return
   }
   loadingBuilding.value = true
@@ -115,6 +120,7 @@ async function loadBuilding() {
     )
     multiplier.value = data.price_multiplier
     days.value = data.days
+    buildingContracts.value = data.contracts
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '建仓过程读取失败')
     days.value = []
@@ -336,10 +342,6 @@ const cumulativeTotal = computed(() => {
   return last === undefined || last === null ? null : last
 })
 
-const buildingContracts = computed(() => {
-  const block = blocks.value.find((item) => item.instrument === buildingInstrument.value)
-  return block ? block.contracts.map((line) => line.contract) : []
-})
 </script>
 
 <template>

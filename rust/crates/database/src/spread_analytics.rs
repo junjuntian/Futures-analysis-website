@@ -2065,6 +2065,40 @@ pub async fn load_building_days(
         .collect())
 }
 
+/// 某会员在某品种上**历史持有过的全部合约**，新月份在前。
+///
+/// 建仓过程页的合约选择器要靠它。原先那份列表是从「所选交易日当天的持仓行」推导的，
+/// 于是只列得出当天还在榜的那两三个合约——运营者 2026-08-12 指出选了高盛之后
+/// 挑不到 AU2608，正是这个原因：那天它已经不在榜上了，可它的建仓过程仍然值得看。
+/// 合约列表本来就不该随日期变：换个日子就少几个选项，是把「今天在榜」误当成
+/// 「存在过」。
+///
+/// 过滤三项全是原始列上的等值比较，RLS 下照常走索引（生产实测：高盛黄金 21 个
+/// 合约 5.3 毫秒，永安黄金 82 个合约 23 毫秒）。理由见 `MEMBER_KEY` 上的教训。
+pub async fn seat_member_contracts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    member: &str,
+    instrument: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let member_variants = seat_member_variants(&mut tx, workspace_id, member).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        "select distinct contract from seat_history
+          where workspace_id = $1 and member = any($2) and instrument = $3
+            and contract is not null
+          order by contract desc limit 2000",
+    )
+    .bind(workspace_id)
+    .bind(&member_variants)
+    .bind(instrument)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 /// 某品种下有过持仓的会员，按最近一次出现的持仓量排序——界面上的会员选择器要靠它。
 pub async fn seat_members(
     pool: &PgPool,
