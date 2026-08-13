@@ -152,7 +152,11 @@ SEAT_CSV="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
 if test -s "$SEAT_CSV"; then
   load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
-  test "$(psql_value -c "select count(*) from seat_history where source='eastmoney_seats_v1' and trade_date=date '$COLLECTION_DATE'")" -gt 0
+  # 看 loaded_at 而不是行数,理由同上面的目录:验收日通常已经有那天的数据
+  # (补采、前一次部署、cron 都可能先写过),`count(*) > 0` 会在装载什么都没做时
+  # 照样通过。2026-08-13 那次部署就是这样过的——断言绿,但没证明这一轮写了东西。
+  # 装载脚本冲突时会把 loaded_at 推到 now(),所以这一条才真正验的是「刚写过」。
+  test "$(psql_value -c "select count(*) from seat_history where source='eastmoney_seats_v1' and trade_date=date '$COLLECTION_DATE' and loaded_at > now() - interval '10 minutes'")" -gt 0
   echo "PHASE4A_E2E_STAGE seat_rows_actually_written"
 fi
 
