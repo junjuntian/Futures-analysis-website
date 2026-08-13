@@ -1,0 +1,9 @@
+# 每日整库备份推到 ssp,远端只留最新一份。理由与恢复方法见 offsite-db-backup.sh。
+#
+# 时刻一律写 UTC(CRON_TZ 在这类机器上不生效,教训同 futures-collector.cron):
+#   15:40 UTC = 23:40 北京 —— 排在全天最后一个任务(15:00 价差预热)之后,
+#   备份里才带着当天完整的日更结果。
+#
+# 每天都跑不分工作日:周末数据不变,重传一份一样的无害;
+# 少跑的那两天若正好赶上磁盘坏,就是两天的差距。
+40 15 * * * root /usr/local/sbin/run-futures-offsite-backup >>/var/log/futures-offsite-backup.log 2>&1

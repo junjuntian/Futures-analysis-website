@@ -24,8 +24,10 @@
 ②③ 都要人去点。只 push 不触发,生产一动不动——这是最常见的"我明明改了啊"。
 
 生产机: 服务器别名 `qh`(172.238.18.206),站点 `https://shejimao.trade`。
-2026-08-13 从 `futures`(172.238.11.174)迁过来;老机保持不动作为退路,确认新机
-稳定后再退役。
+2026-08-13 从 `futures`(172.238.11.174)迁过来;**老机已于当日退役**(cron 移至
+/root/retired-cron、容器与 runner 停、已关机,实例删除在 Linode 面板)。退路改由
+异地备份承担:每日整库 dump 推到 ssp(172.104.107.155:/root/futures-db-backup/latest.dump,
+只留最新一份,先验可读再原子覆盖,脚本 `deploy/collector/offsite-db-backup.sh`)。
 
 **构建跑在 GitHub 托管 runner**,不再用自建 runner。仓库 2026-08-13 转为公开,
 托管 runner 对公开仓库免费,每个作业各拿一台全新机器——不排队、不互相干扰,
@@ -186,6 +188,7 @@ gh run view <deploy-run-id> --log-failed   # 失败时
 | 工作日 13:55 | 21:55 | `run-official-seats` 补一轮 |
 | 工作日 14:10 | 22:10 | `run-smart-money` 补一轮 |
 | 工作日 15:00 | 23:00 | `run-futures-spread-warm` —— 预热价差 |
+| 每日 15:40 | 23:40 | `run-futures-offsite-backup` —— 整库备份推 ssp,只留最新一份 |
 
 **顺序是硬要求**:引擎读的是席位表的增减量,跑在官方席位之前就会算在旧数据上。
 三套 cron 文件都在 `deploy/collector/`,随发布包下发——2026-08-13 迁新机时才发现

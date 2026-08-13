@@ -176,6 +176,10 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/run-collector.sh"
           install -m 700 deploy/collector/run-spread-warm.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-spread-warm.sh"
+          install -m 700 deploy/collector/offsite-db-backup.sh \
+            "${RELEASE_BUNDLE}/deploy/collector/offsite-db-backup.sh"
+          install -m 600 deploy/collector/futures-offsite-backup.cron \
+            "${RELEASE_BUNDLE}/deploy/collector/futures-offsite-backup.cron"
           install -m 600 deploy/collector/sina-dce-daily.py \
             "${RELEASE_BUNDLE}/deploy/collector/sina-dce-daily.py"
           install -m 600 deploy/collector/load-dce-daily.sql \
@@ -894,6 +898,10 @@ jobs:
             /usr/local/sbin/run-futures-collector
           install -m 700 "$RELEASE_DIR/deploy/collector/run-spread-warm.sh" \
             /usr/local/sbin/run-futures-spread-warm
+          install -m 700 "$RELEASE_DIR/deploy/collector/offsite-db-backup.sh" \
+            /usr/local/sbin/run-futures-offsite-backup
+          install -m 600 "$RELEASE_DIR/deploy/collector/futures-offsite-backup.cron" \
+            /etc/cron.d/futures-offsite-backup
           # 解析脚本装到采集的工作目录。**有差异先备份再覆盖**：这里是单向同步，仓库
           # 是唯一来源；但直接丢掉机器上那一版，会让「谁在机器上改过什么」无从追查，
           # 备份留在 .superseded/ 下，出事能立刻拿来对比。
