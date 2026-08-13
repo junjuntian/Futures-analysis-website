@@ -105,12 +105,9 @@ test "$(psql_value -c "select count(*) from pg_policies where tablename in ('spr
 test "$(psql_value -c "select count(*) from retail_trade_window_rule_versions where version='retail-window-default-v1' and algorithm_version='retail_window_v1' and status='active'")" = 1
 test "$(psql_value -c "select count(*) from pg_constraint where conname='spread_provider_cache_endpoint_allowed' and pg_get_constraintdef(oid) like '%all_varieties%' and pg_get_constraintdef(oid) like '%variety_contracts%' and pg_get_constraintdef(oid) like '%arbitrage_varieties%'")" = 1
 
-backfill_state_before=$(systemctl show futures-backfill-phase4b1.service \
-  -p ActiveState -p SubState -p Result --value --no-pager 2>/dev/null | tr '\n' '/' || true)
-backfill_driver_before=$(/usr/local/sbin/run-futures-backfill --status 2>/dev/null |
-  awk -F= '$1=="driver_running"{print $2}' || true)
-test "$backfill_driver_before" = no
-test "$(systemctl is-active futures-backfill-phase4b1.service 2>/dev/null || true)" = inactive
+# 这里原本断言「跑 5A 验收没惊动正在跑的回填」。回填驱动 run-backfill.sh 随导入
+# 通道一起删了(DEC-049),它的 systemd 单元在新机上从来没有过,四条断言里两条
+# 直接失败、两条恒真(systemctl 对不存在的单元一律回 inactive)。没有对象了。
 
 curl -fsS "$BASE/api-docs/openapi.json" >"$EVIDENCE_DIR/openapi.json"
 jq -e '
@@ -361,13 +358,6 @@ assert_status "$(api_json "$TOKEN_ONE" "$CSRF_ONE" DELETE \
 FAVORITE_ID=
 test "$(psql_value -c "select count(*) from audit_logs where event_type in ('spread.favorite.created','spread.favorite.deleted') and workspace_id='$WORKSPACE_ONE'")" -ge 2
 echo "PHASE5A_E2E_STAGE favorites_and_rls_passed"
-
-backfill_state_after=$(systemctl show futures-backfill-phase4b1.service \
-  -p ActiveState -p SubState -p Result --value --no-pager 2>/dev/null | tr '\n' '/' || true)
-backfill_driver_after=$(/usr/local/sbin/run-futures-backfill --status 2>/dev/null |
-  awk -F= '$1=="driver_running"{print $2}' || true)
-test "$backfill_state_after" = "$backfill_state_before"
-test "$backfill_driver_after" = "$backfill_driver_before"
 
 input_points=$(jq -r '.data.quality.input_point_count' "$query_json")
 retained_points=$(jq -r '.data.quality.retained_point_count' "$query_json")
