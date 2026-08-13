@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AuthView from './views/AuthView.vue'
 import HomeView from './views/HomeView.vue'
-import ImportCenterView from './views/ImportCenterView.vue'
 import NotFoundView from './views/NotFoundView.vue'
 import { useAuthStore } from './stores/auth'
 
@@ -17,7 +16,6 @@ export const router = createRouter({
     { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
     { path: '/seats', component: () => import('./views/SeatsView.vue') },
     { path: '/smart-money-view', component: () => import('./views/SmartMoneyView.vue') },
-    { path: '/imports', component: ImportCenterView },
     // /sessions 与 /system 已退役:登录设备收进右上角账号菜单,
     // 服务健康并进总览页页脚。老书签落到 404,不再静默重定向。
     { path: '/:pathMatch(.*)*', component: NotFoundView }
