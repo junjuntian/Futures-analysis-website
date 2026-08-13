@@ -48,6 +48,26 @@ create temp table seat_stage (
 
 \copy seat_stage from '/tmp/direct.csv' with (format csv, header true, null '')
 
+-- 装进来的必须就是要装的那一天。
+--
+-- 2026-08-13:采集器采回 08-13 的 5,940 行,这里却装了 /tmp/direct.csv 上遗留的
+-- 08-12 那份(调用方把文件 cp 到了另一个名字),把昨天的数据又 upsert 一遍。
+-- 全程零报错,库里一行 08-13 都没有。行数、退出码都正常——唯一能看出不对的,
+-- 是「装进去的是哪一天」,而当时没有任何一步在看它。
+--
+-- `\copy` 不插值,但普通 SQL 里的 :'expect_date' 是插值的。
+do $$
+declare staged date;
+begin
+    select max(trade_date) into staged from seat_stage;
+    if staged is null then
+        raise exception '席位 CSV 是空的:一行数据都没有';
+    end if;
+    if staged <> date :'expect_date' then
+        raise exception '装错文件了:CSV 里最新交易日是 %,要装的是 %', staged, date :'expect_date';
+    end if;
+end $$;
+
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
     variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source

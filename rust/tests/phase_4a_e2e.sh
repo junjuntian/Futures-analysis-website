@@ -150,7 +150,7 @@ fi
 # 走的那条路,要么什么都没验。preflight 有一条守卫盯着两边不漂移。
 SEAT_CSV="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
 if test -s "$SEAT_CSV"; then
-  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
+  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1 -v expect_date=$COLLECTION_DATE" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
   # 看 loaded_at 而不是行数,理由同上面的目录:验收日通常已经有那天的数据
   # (补采、前一次部署、cron 都可能先写过),`count(*) > 0` 会在装载什么都没做时
@@ -166,7 +166,7 @@ fi
 # 写重的话席位会凭空翻倍,而图上看不出来——线还是连续的。
 seats_after_first=$(psql_value -c "select count(*) from seat_history")
 if test -s "$SEAT_CSV"; then
-  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
+  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1 -v expect_date=$COLLECTION_DATE" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
 fi
 test "$(psql_value -c "select count(*) from seat_history")" = "$seats_after_first"

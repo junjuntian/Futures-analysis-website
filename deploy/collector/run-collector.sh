@@ -93,10 +93,13 @@ if [ -r "$SEATS_LOAD" ]; then
     seat_csv="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
     if [ -s "$seat_csv" ]; then
       postgres_id=$("${COMPOSE[@]}" ps -q postgres)
-      docker cp "$seat_csv" "$postgres_id":/tmp/seats_direct.csv
+      # 路径必须是 /tmp/direct.csv:装载脚本里的 `\copy` 是客户端元命令,
+      # 不做变量插值,写死读这个名字。传 -v csv_path 它根本不看——2026-08-13
+      # 就是这么把昨天的残留文件当成今天的数据装了一遍。
+      docker cp "$seat_csv" "$postgres_id":/tmp/direct.csv
       "${COMPOSE[@]}" exec -T postgres \
         psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
-        -v csv_path=/tmp/seats_direct.csv -v source_code=eastmoney_seats_v1 < "$SEATS_LOAD"
+        -v expect_date="$COLLECTION_DATE" -v source_code=eastmoney_seats_v1 < "$SEATS_LOAD"
     else
       # 采集器成功但没写出文件 = 那天没有数据(节假日),不是错误。
       echo "DCE_SEATS_EMPTY $COLLECTION_DATE 没有席位数据" >&2
