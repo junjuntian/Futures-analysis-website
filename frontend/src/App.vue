@@ -90,7 +90,6 @@ function handleCommand(command: string) {
           <span class="nav-emoji">💰</span>
           <span>机构资金</span>
         </el-menu-item>
-        <!-- 导入中心排在最后：手工补数用的，不是每天点的。 -->
       </el-menu>
     </el-aside>
     <el-container>
