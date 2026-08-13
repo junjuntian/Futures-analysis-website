@@ -4,8 +4,8 @@ import argparse
 import logging
 from datetime import date
 
-from futures_collector.errors import safe_error_code
 from futures_collector.csv_sink import CsvSink
+from futures_collector.errors import safe_error_code
 from futures_collector.runner import CollectionRunner
 from futures_collector.sources import DEFAULT_EXCHANGES, SOURCES, AkshareAdapter
 from futures_collector.trading_calendar import latest_trading_date

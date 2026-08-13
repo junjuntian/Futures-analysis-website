@@ -18,8 +18,16 @@ def test_startup_failure_logs_only_exception_type(monkeypatch, caplog, tmp_path)
 
     with caplog.at_level(logging.ERROR):
         result = cli.main(
-            ["--date", "2026-07-31", "--exchange", "DCE", "--dataset", "market",
-             "--emit-csv", str(tmp_path)]
+            [
+                "--date",
+                "2026-07-31",
+                "--exchange",
+                "DCE",
+                "--dataset",
+                "market",
+                "--emit-csv",
+                str(tmp_path),
+            ]
         )
 
     assert result == 1

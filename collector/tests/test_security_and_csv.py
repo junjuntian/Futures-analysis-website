@@ -1,16 +1,13 @@
 import csv
 import io
 import socket
-from datetime import date
 
-import httpx
 import pytest
 import requests
 
 from futures_collector.csv_sink import render_csv
 from futures_collector.sources import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
-    SOURCES,
     OutboundPolicyError,
     official_requests_only,
 )
