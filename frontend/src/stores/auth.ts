@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
+import { authErrorText } from '../authErrors'
 import {
+  ApiError,
   getJson,
   sendJson,
   type ApiEnvelope,
@@ -49,7 +51,17 @@ export const useAuthStore = defineStore('auth', {
           body: JSON.stringify({ username, password })
         })
         if (!response.ok) {
-          throw new Error(`request failed: ${response.status}`)
+          // 读返回体再抛。原来这里直接抛「request failed: 400」,把后端说明问题的
+          // code 整个丢掉——2026-08-13 新站建号时密码差几位,界面只有一个 400,
+          // 运营者根本看不出是密码、用户名还是 token 的问题。
+          let code: string | undefined
+          try {
+            const body = (await response.json()) as { data?: { code?: string } }
+            code = body?.data?.code
+          } catch {
+            code = undefined
+          }
+          throw new Error(authErrorText(code, response.status))
         }
         const envelope = (await response.json()) as ApiEnvelope<MeResponse>
         this.me = envelope.data
@@ -74,7 +86,13 @@ export const useAuthStore = defineStore('auth', {
         this.workspace = envelope.data.workspace
         await this.loadCsrf()
       } catch (error) {
-        this.error = error instanceof Error ? error.message : 'unknown error'
+        // sendJson 抛的是 ApiError,带着后端的 code——同样翻成人话。
+        this.error =
+          error instanceof ApiError
+            ? authErrorText(error.code, error.status)
+            : error instanceof Error
+              ? error.message
+              : 'unknown error'
         throw error
       } finally {
         this.loading = false
