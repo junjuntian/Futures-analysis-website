@@ -55,16 +55,24 @@ create temp table seat_stage (
 -- 全程零报错,库里一行 08-13 都没有。行数、退出码都正常——唯一能看出不对的,
 -- 是「装进去的是哪一天」,而当时没有任何一步在看它。
 --
--- `\copy` 不插值,但普通 SQL 里的 :'expect_date' 是插值的。
+-- psql 的变量插值**不进入美元引用块**:写在 $$ ... $$ 里的 :'expect_date' 会被
+-- 当成字面量,报 `syntax error at or near ":"`。2026-08-13 我加这道守卫时就是这么
+-- 写的,部署当场失败并整轮回滚——加了守卫却没跑过它,和它要防的问题同一类。
+--
+-- 所以先用一条普通 SQL 把值放进会话变量(这里插值是生效的),块里再读出来。
+select set_config('futures.expect_date', :'expect_date', false);
+
 do $$
-declare staged date;
+declare
+    staged date;
+    expected date := current_setting('futures.expect_date')::date;
 begin
     select max(trade_date) into staged from seat_stage;
     if staged is null then
         raise exception '席位 CSV 是空的:一行数据都没有';
     end if;
-    if staged <> date :'expect_date' then
-        raise exception '装错文件了:CSV 里最新交易日是 %,要装的是 %', staged, date :'expect_date';
+    if staged <> expected then
+        raise exception '装错文件了:CSV 里最新交易日是 %,要装的是 %', staged, expected;
     end if;
 end $$;
 
