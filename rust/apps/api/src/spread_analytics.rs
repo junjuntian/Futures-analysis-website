@@ -831,6 +831,77 @@ pub async fn query_seat_building(
     .into_response())
 }
 
+/// 一个交易日的到齐情况。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DataHealthDay {
+    pub trade_date: String,
+    pub exchanges: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DataHealthResponse {
+    /// 近期出现过的交易所全集，按代码排序。界面拿它当「该有几家」的基准——
+    /// 从数据里推，不写死名单。
+    pub expected_exchanges: Vec<String>,
+    /// 最近若干个交易日的席位数据，最新的在前。
+    pub seats: Vec<DataHealthDay>,
+    /// 同上，行情数据。
+    pub prices: Vec<DataHealthDay>,
+}
+
+fn to_health_days(rows: Vec<database::spread_analytics::DataFreshnessDay>) -> Vec<DataHealthDay> {
+    rows.into_iter()
+        .map(|row| DataHealthDay {
+            trade_date: row.trade_date.to_string(),
+            exchanges: row
+                .exchanges
+                .split(',')
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect(),
+        })
+        .collect()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/overview/data-health",
+    security(("session_cookie" = [])),
+    responses((status = 200, body = DataHealthResponse), (status = 401), (status = 500))
+)]
+pub async fn query_data_health(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+
+    let (seats, prices) =
+        database::spread_analytics::data_freshness(&state.auth.pool, context.workspace_id())
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let seats = to_health_days(seats);
+    let prices = to_health_days(prices);
+    let mut expected: Vec<String> = seats
+        .iter()
+        .chain(prices.iter())
+        .flat_map(|day| day.exchanges.iter().cloned())
+        .collect();
+    expected.sort();
+    expected.dedup();
+
+    Ok(Json(ApiResponse::new(
+        DataHealthResponse {
+            expected_exchanges: expected,
+            seats,
+            prices,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
 fn parse_decimal(value: &str) -> Decimal {
     value.parse().unwrap_or(Decimal::ZERO)
 }

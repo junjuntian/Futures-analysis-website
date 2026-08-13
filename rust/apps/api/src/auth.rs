@@ -1031,6 +1031,119 @@ pub async fn sessions(
     Ok(Json(ApiResponse::new(sessions, Uuid::now_v7())).into_response())
 }
 
+/// 改密码的请求体。旧密码是必须的：会话被偷时，攻击者手里有 cookie 却没有旧密码，
+/// 不该能把账号锁走。
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/password",
+    request_body = ChangePasswordRequest,
+    params(
+        ("x-csrf-token" = String, Header, description = "Session-bound CSRF token from /api/v1/auth/csrf"),
+        ("Origin" = String, Header, description = "Expected public origin for state-changing browser requests")
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200),
+        (status = 400, body = ErrorBody),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody)
+    )
+)]
+pub async fn change_password(
+    State(state): State<Arc<AuthState>>,
+    headers: HeaderMap,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<Response, AuthError> {
+    ensure_allowed_origin(&state.config, &headers)?;
+    ensure_csrf(&state, &headers).await?;
+    let context = current_context(&state, &headers).await?;
+    let request_id = Uuid::now_v7();
+
+    validate_password(&payload.new_password)?;
+    if payload.new_password == payload.current_password {
+        return Err(AuthError::BadRequest("password_unchanged"));
+    }
+
+    let mut tx = state.pool.begin().await.map_err(|_| AuthError::Internal)?;
+    // for update：同一账号并发改两次密码时，后一次必须看到前一次的结果，
+    // 否则两边都拿旧哈希校验通过，最后写入的那次静默覆盖另一次。
+    let row = sqlx::query("select password_hash from users where id = $1 for update")
+        .bind(context.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AuthError::Internal)?
+        .ok_or(AuthError::Internal)?;
+
+    if !verify_password(&state.config, &payload.current_password, row.get("password_hash"))
+        .map_err(|_| AuthError::Internal)?
+    {
+        // 审计要记下失败：连续的失败尝试是「会话被人拿走了」的最早信号。
+        set_workspace(&mut tx, context.workspace_id).await?;
+        insert_audit(
+            &mut tx,
+            context.workspace_id,
+            Some(context.user_id),
+            "auth.password_changed",
+            "denied",
+            request_id,
+        )
+        .await?;
+        tx.commit().await.map_err(|_| AuthError::Internal)?;
+        return Err(AuthError::Forbidden("current_password_invalid"));
+    }
+
+    let password_hash = hash_password(&state.config, &payload.new_password)?;
+    sqlx::query(
+        "update users set password_hash = $2, password_params_version = $3, updated_at = now()
+          where id = $1",
+    )
+    .bind(context.user_id)
+    .bind(password_hash)
+    .bind(state.config.password_params_version)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AuthError::Internal)?;
+
+    // 别的设备上的会话全部作废，当前这台留着——改完密码不该把自己也踢下线。
+    // 是 revoke 不是 delete：futures_runtime 对 sessions 只有 select/insert/update
+    // （会话史是审计素材），写 delete 会在生产上撞 permission denied。
+    let revoked = sqlx::query(
+        "update sessions
+            set revoked_at = now(), revoke_reason = 'password_changed'
+          where user_id = $1 and id <> $2 and revoked_at is null",
+    )
+    .bind(context.user_id)
+    .bind(context.session_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| AuthError::Internal)?
+    .rows_affected();
+
+    set_workspace(&mut tx, context.workspace_id).await?;
+    insert_audit(
+        &mut tx,
+        context.workspace_id,
+        Some(context.user_id),
+        "auth.password_changed",
+        "success",
+        request_id,
+    )
+    .await?;
+    tx.commit().await.map_err(|_| AuthError::Internal)?;
+
+    Ok(Json(ApiResponse::new(
+        serde_json::json!({"ok": true, "revoked_sessions": revoked}),
+        request_id,
+    ))
+    .into_response())
+}
+
 #[utoipa::path(
     delete,
     path = "/api/v1/sessions/{session_id}",

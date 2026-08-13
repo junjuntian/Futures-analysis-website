@@ -821,6 +821,23 @@ export interface SpreadMonitorResponse {
   items: SpreadMonitorItem[]
 }
 
+/** 某个交易日各交易所的数据到齐情况。 */
+export interface DataHealthDay {
+  trade_date: string
+  exchanges: string[]
+}
+
+export interface DataHealthResponse {
+  /** 近期出现过的交易所全集,界面拿它当「该有几家」的基准(不写死名单)。 */
+  expected_exchanges: string[]
+  seats: DataHealthDay[]
+  prices: DataHealthDay[]
+}
+
+export function getDataHealth(): Promise<ApiEnvelope<DataHealthResponse>> {
+  return getJson('/api/v1/overview/data-health')
+}
+
 export function getSpreadMonitor(
   threshold?: number,
   tradeDate?: string

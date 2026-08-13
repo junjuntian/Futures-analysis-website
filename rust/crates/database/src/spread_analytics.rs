@@ -1270,6 +1270,21 @@ mod tests {
     }
 
     #[test]
+    fn the_freshness_queries_stay_inside_a_bounded_window() {
+        // 没有窗口就是全表 group by：runtime 角色下实测 4.5 秒，首页等不起。
+        // 这条锁住「限定日期范围」本身，改 SQL 时不至于顺手把它删了。
+        for sql in [SEAT_FRESHNESS_SQL, PRICE_FRESHNESS_SQL] {
+            assert!(
+                sql.contains("trade_date >= current_date -"),
+                "新鲜度查询必须限定回看窗：{sql}"
+            );
+            assert!(sql.contains("limit $3"), "结果条数也要有上限：{sql}");
+        }
+        // 席位表混着品种汇总行，不排掉就会把「有汇总没逐合约」误报成数据到齐。
+        assert!(SEAT_FRESHNESS_SQL.contains("not is_variety_total"));
+    }
+
+    #[test]
     fn a_day_the_seat_is_off_the_board_stays_null_not_zero() {
         // 交易所只发前二十名。某席位掉出榜单的那天，官方文件里没有他这一行——
         // 那是「不知道」，不是「零」。原来这里 coalesce 成 0，错误一路传下去：
@@ -2106,6 +2121,72 @@ fn building_days_sql() -> String {
         member_key = member_key_sql(),
         source_rank = SEAT_SOURCE_RANK,
     )
+}
+
+/// 某个交易日各交易所的数据到齐情况。
+#[derive(Debug, Clone)]
+pub struct DataFreshnessDay {
+    pub trade_date: Date,
+    /// 那天有数据的交易所，逗号分隔、已排序。
+    pub exchanges: String,
+}
+
+/// 回看窗。10 个交易日通常是 14 个自然日，撞上春节可能拉到 4 周——45 天留够余量。
+/// 窗口也是性能约束：不加它就是全表 group by，runtime 角色下实测 4.5 秒，
+/// 一个首页等不起；限到 45 天走索引倒扫，149 毫秒。
+const FRESHNESS_LOOKBACK_DAYS: i32 = 45;
+const FRESHNESS_DAYS: i64 = 10;
+
+const SEAT_FRESHNESS_SQL: &str = "
+    select trade_date, string_agg(distinct exchange, ',' order by exchange) as exchanges
+      from seat_history
+     where workspace_id = $1 and not is_variety_total
+       and trade_date >= current_date - $2::int
+     group by trade_date
+     order by trade_date desc
+     limit $3";
+
+const PRICE_FRESHNESS_SQL: &str = "
+    select trade_date, string_agg(distinct exchange, ',' order by exchange) as exchanges
+      from price_history
+     where workspace_id = $1
+       and trade_date >= current_date - $2::int
+     group by trade_date
+     order by trade_date desc
+     limit $3";
+
+/// 最近若干个交易日，席位与行情各自到了哪些交易所。
+///
+/// 首页用它回答「数据到齐了吗」。**只报事实，不判定「正常」**：哪几个所该有数据
+/// 由界面按近期出现过的所来推，而不是在这里写死一份名单——写死的名单会在
+/// 交易所增减或某家长期停采时变成一个没人记得改的谎。
+pub async fn data_freshness(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(Vec<DataFreshnessDay>, Vec<DataFreshnessDay>), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let mut out = Vec::with_capacity(2);
+    for sql in [SEAT_FRESHNESS_SQL, PRICE_FRESHNESS_SQL] {
+        let rows = sqlx::query(sql)
+            .bind(workspace_id)
+            .bind(FRESHNESS_LOOKBACK_DAYS)
+            .bind(FRESHNESS_DAYS)
+            .fetch_all(&mut *tx)
+            .await?;
+        out.push(
+            rows.into_iter()
+                .map(|row| DataFreshnessDay {
+                    trade_date: row.get("trade_date"),
+                    exchanges: row.get::<Option<String>, _>("exchanges").unwrap_or_default(),
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    tx.commit().await?;
+    let prices = out.pop().unwrap_or_default();
+    let seats = out.pop().unwrap_or_default();
+    Ok((seats, prices))
 }
 
 /// 建仓过程一天的原始素材：K 线、该席位净持仓、当日结算价。

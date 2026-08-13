@@ -100,6 +100,18 @@ export const useAuthStore = defineStore('auth', {
       )
       await this.loadSessions()
     },
+    /** 改密码。旧密码由后端校验;成功后别的设备上的会话全部作废,当前这台留着。 */
+    async changePassword(currentPassword: string, newPassword: string) {
+      if (!this.csrfToken) {
+        await this.loadCsrf()
+      }
+      const envelope = await sendJson<ApiEnvelope<{ ok: boolean; revoked_sessions: number }>>(
+        '/api/v1/auth/password',
+        { current_password: currentPassword, new_password: newPassword },
+        this.csrfToken ?? undefined
+      )
+      return envelope.data.revoked_sessions
+    },
     async logout() {
       if (!this.csrfToken) {
         await this.loadCsrf()

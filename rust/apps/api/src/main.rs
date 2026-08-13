@@ -36,6 +36,7 @@ use uuid::Uuid;
         auth::me,
         auth::csrf,
         auth::workspace,
+        auth::change_password,
         auth::sessions,
         auth::revoke_session,
         imports::upload,
@@ -67,6 +68,7 @@ use uuid::Uuid;
         spread_analytics::query_seat_positions,
         spread_analytics::query_seat_building,
         spread_analytics::query_spread_monitor,
+        spread_analytics::query_data_health,
         spread_analytics::list_favorites,
         spread_analytics::create_favorite,
         spread_analytics::delete_favorite
@@ -80,6 +82,7 @@ use uuid::Uuid;
         auth::WorkspaceSummary,
         auth::MeResponse,
         auth::CsrfResponse,
+        auth::ChangePasswordRequest,
         auth::SessionSummary,
         auth::SessionsQuery,
         auth::ErrorBody,
@@ -201,6 +204,8 @@ use uuid::Uuid;
         ,spread_analytics::SeatPositionItem
         ,spread_analytics::SeatBuildingResponse
         ,spread_analytics::BuildingDayItem
+        ,spread_analytics::DataHealthDay
+        ,spread_analytics::DataHealthResponse
         ,spread_analytics::SpreadMonitorResponse
         ,spread_analytics::SpreadMonitorItem
         ,spread_analytics::SpreadMonitorTrack
@@ -339,6 +344,7 @@ fn router(
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/auth/me", get(auth::me))
         .route("/api/v1/auth/csrf", get(auth::csrf))
+        .route("/api/v1/auth/password", post(auth::change_password))
         .route("/api/v1/workspace", get(auth::workspace))
         .route("/api/v1/sessions", get(auth::sessions))
         .route(
@@ -446,6 +452,10 @@ fn router(
         .route(
             "/api/v1/spread-analytics/monitor",
             get(spread_analytics::query_spread_monitor),
+        )
+        .route(
+            "/api/v1/overview/data-health",
+            get(spread_analytics::query_data_health),
         )
         .route(
             "/api/v1/spread-analytics/favorites",
@@ -788,6 +798,33 @@ mod tests {
             assert!(operation["responses"]["401"].is_object());
             assert!(operation["responses"]["403"].is_object());
         }
+
+        // 首页的数据健康端点。它只读、没有 CSRF 分支，所以不断言 403；
+        // 但「必须登录」这条与上面同等刚性——一个不需要登录就能读的端点，
+        // 会把这个 workspace 有哪些交易所、数据到哪天全部说出去。
+        for (path, method) in [("/api/v1/overview/data-health", "get")] {
+            let operation = &paths[path][method];
+            assert_eq!(
+                operation["security"][0]["session_cookie"],
+                serde_json::json!([])
+            );
+            assert!(operation["responses"]["401"].is_object());
+        }
+
+        // 改密码：登录 + CSRF + Origin 三道都要在契约里写明。
+        let password = &paths["/api/v1/auth/password"]["post"];
+        assert_eq!(
+            password["security"][0]["session_cookie"],
+            serde_json::json!([])
+        );
+        let parameters = password["parameters"].as_array().expect("parameters");
+        for header in ["x-csrf-token", "Origin"] {
+            assert!(
+                parameters.iter().any(|parameter| parameter["name"] == header),
+                "改密码必须声明 {header}"
+            );
+        }
+        assert!(password["responses"]["403"].is_object());
         assert!(!paths.keys().any(|path| path.contains("broker")));
         assert!(!paths.keys().any(|path| path.contains("backtest")));
         // monitor 曾经也在这份「还不该存在」的名单里——那是 Phase 5A 时期的守卫，
