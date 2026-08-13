@@ -97,6 +97,26 @@ else
   printf '  \033[33m·\033[0m 跳过前端构建：frontend/node_modules 不在\n'
 fi
 
+# 自建 runner 的 workflow 绝不能被 fork 触发。
+#
+# 仓库 2026-08-13 转为公开,而自建 runner 就是生产服务器本身(runner 用户在
+# docker 组里,等同 root)。任何 pull_request / pull_request_target 触发,都意味着
+# 陌生人 fork 之后提个 PR 就能在生产机上跑他写的代码——读数据库、读
+# /etc/futures-platform/secrets、读部署 SSH 私钥。当天封堵时核查过:窗口期内
+# 没有 PR、没有外部触发的运行,没被利用。
+#
+# 这条与网站上不上 TLS 无关:TLS 管的是浏览器到服务器那段,这条路是从 GitHub
+# 直接进服务器的。守住它的唯一办法就是让触发条件里永远没有那两个词。
+for wf in .github/workflows/*.yml; do
+  grep -q "self-hosted" "$wf" || continue
+  triggers=$(sed -n '/^on:/,/^[a-z]/p' "$wf")
+  if printf '%s' "$triggers" | grep -qE "^\s*pull_request(_target)?:"; then
+    fail "$(basename "$wf") 在自建 runner 上接受 fork 触发——公开仓库下等于把生产服务器交出去"
+  else
+    pass "$(basename "$wf") 未接 fork 触发"
+  fi
+done
+
 step "二、迁移"
 
 # 教训（第二次失败）：部署在打包那步报 migration_missing_version_record。
