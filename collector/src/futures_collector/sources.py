@@ -117,6 +117,19 @@ SOURCES: dict[str, ExchangeSource] = {
     ),
 }
 
+# 默认采集的交易所。
+#
+# 八个品种全部落在这三家:上期所(AU/AG)、郑商所(AP/FG/SA)、大商所(JD/JM/LH)。
+# 中金所与广期所一个都没有——2026-08-13 查生产:它们在 canonical 表里累计
+# 1590 行,而在页面读的宽表里是 **0 行**,采回来当场就被品种范围过滤掉了。
+# 三个月里它们只贡献了 99,044 行导入中间产物(占全部的 13%),没有产生任何
+# 可用数据。
+#
+# 保留在 SOURCES 里而不是删掉:`--exchange GFEX` 仍然可用。将来真要做那两家的
+# 品种时,把它加回这个集合即可,不用重新写采集器。
+DEFAULT_EXCHANGES: tuple[str, ...] = ("DCE", "SHFE", "CZCE")
+
+
 # Eastmoney publishes the same member-level 龙虎榜 the exchanges do, but as one
 # report covering every market, refreshed earlier than the exchange files. It is
 # a seats-only source: `RPT_FUTU_DAILYPOSITION` carries no settlement price and

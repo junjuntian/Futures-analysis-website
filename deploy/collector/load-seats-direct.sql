@@ -1,0 +1,93 @@
+-- 把采集器写出的席位 CSV 直接装进 seat_history。
+--
+-- 为什么不走导入通道
+-- ------------------
+-- 通道(上传→暂存→逐行校验→冲突检测→确认→血缘→canonical→投影→宽表)是为
+-- 「人工上传文件、需要预览和回滚」建的。运营者 2026-08-13 说明那个入口服务的
+-- AI 分析功能早已取消,他从没手工导过数据——而每天的自动采集一直被迫走这条
+-- 七层流水线。生产实测:席位一项就占了 665,940 行导入中间产物(全部的 88%),
+-- 这些暂存行、变更记录、血缘加起来和最终业务数据一样大,且每天都在长。
+--
+-- 采集器的数据不需要那套:格式是它自己规范化的、来源是白名单里的公开接口、
+-- 错了明天重采一遍就有。它需要的只是「把这批行写进宽表」。
+--
+-- 这条路不是新发明:上期所与郑商所的席位早就这么灌了(engine/run-official-seats.sh),
+-- 大商所行情也是(load-dce-daily.sql)。这里补上的是最后一块——大商所席位。
+--
+-- 幂等:按 seat_history 的业务身份 upsert,重复跑只刷新同一批行。
+
+\set ON_ERROR_STOP on
+\if :{?csv_path}
+\else
+\set csv_path '/tmp/load/seats_direct.csv'
+\endif
+
+begin;
+
+-- 列顺序必须与 collector 的 SEAT_FIELDS 逐一对应(normalize.py)。
+-- 错位不会报错,只会把持仓量灌进名次列——而错位的数据看起来完全正常。
+create temp table seat_stage (
+    exchange_code text,
+    contract_code text,
+    trade_date date,
+    seat_name text,
+    rank_type text,
+    rank numeric,
+    volume numeric,
+    long_position numeric,
+    short_position numeric,
+    source_record_ref text
+);
+
+\copy seat_stage from :'csv_path' with (format csv, header true, null '')
+
+insert into seat_history (
+    id, workspace_id, exchange, instrument, contract, is_variety_total,
+    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source
+)
+select
+    gen_random_uuid(),
+    w.id,
+    s.exchange_code,
+    -- 品种从合约代码取:字母前缀就是品种,与宽表其余来路的写法一致。
+    upper(regexp_replace(s.contract_code, '[0-9]+$', '')),
+    upper(s.contract_code),
+    false,
+    false,
+    s.trade_date,
+    s.rank_type,
+    -- 名次可以没有(有些源不给),但不能编。
+    nullif(s.rank, 0)::int,
+    trim(s.seat_name),
+    -- 一行只有一个榜有值,rank_type 决定是哪一列。
+    coalesce(s.volume, s.long_position, s.short_position),
+    -- change 留空。交易所公布的「增减」是相对该会员前一日的**真实全量仓**算的,
+    -- 而这个源不给这一列;自己拿前后两天相减凑出来的数,在会员进出前二十那天
+    -- 必然与交易所公布的对不上,那就成了一个看起来像官方数字的自造数。
+    -- 掉榜反推(infer-offboard-seats.sql)专门处理这件事,别在这里抢它的活。
+    null,
+    :'source_code'
+  from seat_stage s
+  cross join (select id from workspaces order by created_at limit 1) w
+ where s.contract_code is not null
+   and s.trade_date is not null
+   and length(trim(coalesce(s.seat_name, ''))) > 0
+   and coalesce(s.volume, s.long_position, s.short_position) is not null
+   -- 只装八品种。采集器可能带回整个交易所的榜,全灌进来会让席位页的品种
+   -- 下拉冒出一堆只有几天历史的品种,点进去是空图——空图比没有这个选项更糟,
+   -- 它看起来像是数据坏了。
+   and upper(regexp_replace(s.contract_code, '[0-9]+$', ''))
+       in ('AU','AG','JD','LH','JM','AP','FG','SA')
+   -- 合约代码必须是四位月份的规范形状,否则不属于这张表。
+   and upper(s.contract_code) ~ '^[A-Z]{1,2}[0-9]{4}$'
+on conflict (workspace_id, trade_date, exchange, instrument, contract,
+             is_variety_total, rank_type, member, source) do update set
+    rank = excluded.rank,
+    quantity = excluded.quantity,
+    loaded_at = now();
+
+commit;
+
+select 'seat_history 直灌' as 来路, :'source_code' as 源,
+       max(trade_date) as 最新交易日, count(*) as 该源总行数
+  from seat_history where source = :'source_code';

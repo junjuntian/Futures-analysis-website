@@ -64,7 +64,60 @@ fi
 #
 # 一部分交易所失败不该让另外四家的数据也进不了库。状态记下来，最后如实退出。
 COLLECTION_STATUS=0
-"${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE" || COLLECTION_STATUS=$?
+
+# 席位:写 CSV 直灌宽表,不经导入通道。
+#
+# 2026-08-13 查生产后重新划的分工。此前每天的采集都走「上传→暂存→逐行校验→
+# 冲突检测→确认→血缘→canonical→投影→宽表」七层,而那套是为「人工上传文件
+# 需要预览和回滚」建的——运营者说明那个入口服务的 AI 分析功能早已取消,他从没
+# 手工导过数据。代价是中间产物(暂存行、变更记录、血缘)和最终业务数据一样大,
+# 光席位一项就占了 88%。
+#
+# 而三家交易所里,**只有大商所席位还真正需要采集器**:
+#   上期所 / 郑商所 席位 —— run-official-seats.sh 早已直灌,且带增减量
+#                          (走通道的 akshare 那份最新日一行都没进来,纯冗余)
+#   大商所 行情         —— 新浪直灌(load-dce-daily.sql)
+#   上期所 / 郑商所 行情 —— run-official-seats.sh 直灌,带持仓量
+#                          (通道那份持仓量为 0,套利监控靠它筛流动性)
+#
+# 所以这里只采大商所席位,并直接落 CSV。品种目录与交易日历暂时仍走通道
+# (它们的表有 source_record_id 外键绑着 imported_records,直灌要先改 schema),
+# 那部分只占中间产物的 8%,单独一批处理。
+CSV_DIR=/opt/futures-platform/load/collector
+install -d -m 700 "$CSV_DIR"
+SEATS_LOAD="$previous_release_dir/deploy/collector/load-seats-direct.sql"
+if [ -r "$SEATS_LOAD" ]; then
+  if "${COMPOSE[@]}" run --rm --no-deps \
+       -v "$CSV_DIR":/tmp/emit \
+       collector --date "$COLLECTION_DATE" --exchange DCE --dataset seats --emit-csv /tmp/emit; then
+    seat_csv="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
+    if [ -s "$seat_csv" ]; then
+      postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+      docker cp "$seat_csv" "$postgres_id":/tmp/seats_direct.csv
+      "${COMPOSE[@]}" exec -T postgres \
+        psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
+        -v csv_path=/tmp/seats_direct.csv -v source_code=eastmoney_seats_v1 < "$SEATS_LOAD"
+    else
+      # 采集器成功但没写出文件 = 那天没有数据(节假日),不是错误。
+      echo "DCE_SEATS_EMPTY $COLLECTION_DATE 没有席位数据" >&2
+    fi
+  else
+    COLLECTION_STATUS=1
+    echo "DCE_SEATS_FAILED 大商所席位今天没采到，日更其余步骤继续" >&2
+  fi
+else
+  echo "SEATS_DIRECT_SKIPPED missing $SEATS_LOAD" >&2
+fi
+
+# 品种目录与交易日历仍走导入通道(见上面的说明)。行情与席位已全部改走直灌,
+# 所以这里不再采 market/seats——采了也是冗余,还要在通道里堆一遍中间产物。
+#
+# 采集失败也要往下走，但失败状态留到最后再退出。
+# 一部分数据集失败不该让其余步骤也进不了库。状态记下来，最后如实退出。
+for dataset in catalog calendar; do
+  "${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE" --dataset "$dataset" ||
+    COLLECTION_STATUS=$?
+done
 if [ "$COLLECTION_STATUS" -ne 0 ]; then
   echo "COLLECTION_PARTIAL exit=$COLLECTION_STATUS 继续做投影，最后仍以此状态退出" >&2
 fi

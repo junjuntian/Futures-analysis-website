@@ -6,8 +6,9 @@ from datetime import date
 
 from futures_collector.api import PlatformClient, safe_error_code
 from futures_collector.config import load_credentials
+from futures_collector.csv_sink import CsvSink
 from futures_collector.runner import CollectionRunner
-from futures_collector.sources import SOURCES, AkshareAdapter
+from futures_collector.sources import DEFAULT_EXCHANGES, SOURCES, AkshareAdapter
 from futures_collector.trading_calendar import latest_trading_date
 
 
@@ -56,6 +57,19 @@ def parser() -> argparse.ArgumentParser:
         choices=[*SOURCES],
         help="Acceptance-only source-isolation fault; records failure without network access",
     )
+    value.add_argument(
+        "--emit-csv",
+        metavar="DIR",
+        help=(
+            "Write each dataset to a CSV in DIR instead of submitting it through "
+            "the audited import channel. The loader SQL then copies those files "
+            "straight into the wide tables the pages read. Set for every scheduled "
+            "run: the import channel exists for files a person uploads and needs to "
+            "preview, and the operator confirmed on 2026-08-13 that nothing does "
+            "that any more -- meanwhile its intermediates had grown as large as the "
+            "business data itself."
+        ),
+    )
     return value
 
 
@@ -85,7 +99,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         return 0
-    exchanges = list(SOURCES) if args.exchange == "all" else [args.exchange]
+    # `all` 指的是「默认要采的那些」,不是「代码里定义过的全部」——见
+    # sources.DEFAULT_EXCHANGES 的说明。显式指定某一家时仍可采任意一家。
+    exchanges = list(DEFAULT_EXCHANGES) if args.exchange == "all" else [args.exchange]
     varieties = parse_varieties(args.variety)
     datasets = (
         ["catalog", "calendar", "market", "seats"] if args.dataset == "all" else [args.dataset]
@@ -109,9 +125,15 @@ def main(argv: list[str] | None = None) -> int:
         if not dates:
             log.error("collector_start_failed error=no_trading_dates_in_range")
             return 1
-        credentials = load_credentials()
+        # CSV 出口不需要平台账号:它不登录、不发请求,只写文件。
+        # 凭据只在走导入通道时才读,否则新机器上没配账号就跑不了采集。
+        sink = (
+            CsvSink(args.emit_csv)
+            if args.emit_csv
+            else PlatformClient(load_credentials())
+        )
         failures = 0
-        with PlatformClient(credentials) as platform:
+        with sink as platform:
             runner = CollectionRunner(adapter, platform)
             for index, day in enumerate(dates, start=1):
                 day_failures = runner.run(

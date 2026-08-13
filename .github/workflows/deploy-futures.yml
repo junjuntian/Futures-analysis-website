@@ -190,6 +190,8 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/sina-dce-daily.py"
           install -m 600 deploy/collector/load-dce-daily.sql \
             "${RELEASE_BUNDLE}/deploy/collector/load-dce-daily.sql"
+          install -m 600 deploy/collector/load-seats-direct.sql \
+            "${RELEASE_BUNDLE}/deploy/collector/load-seats-direct.sql"
           install -m 600 deploy/collector/compute-seat-totals.sql \
             "${RELEASE_BUNDLE}/deploy/collector/compute-seat-totals.sql"
           install -m 600 deploy/collector/compute-spread-monitor.sql \
