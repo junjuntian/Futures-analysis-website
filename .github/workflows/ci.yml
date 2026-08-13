@@ -1,7 +1,19 @@
 name: CI
 
 on:
-  pull_request:
+  # **不接 pull_request。**
+  #
+  # 这个仓库 2026-08-13 转为公开,而 CI 跑在自建 runner 上,那台 runner 就是
+  # 生产服务器本身(runner 用户在 docker 组里,等同 root)。公开仓库一旦接受
+  # pull_request 触发,任何人 fork 之后提一个 PR,PR 里的 workflow 就会在生产
+  # 服务器上执行他写的任意代码——能读数据库、读 /etc/futures-platform/secrets、
+  # 读部署用的 SSH 私钥。GitHub 官方对此的建议是「self-hosted runner 只用于
+  # 私有仓库」。
+  #
+  # 运营者是唯一贡献者,走的是直接推分支,没有 PR 流程,所以去掉它零损失。
+  # 将来若真要接外部 PR:要么把这些作业迁到 GitHub 托管 runner(公开仓库免费
+  # 且不限分钟数),要么加 head.repo.full_name == github.repository 的判断把
+  # fork 挡在外面——但别忘了 runner 上还有生产数据这件事。
   push:
     branches:
       - main
