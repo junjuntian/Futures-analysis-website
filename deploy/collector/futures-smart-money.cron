@@ -1,0 +1,13 @@
+# 机构资金信号引擎(黄金 AU / 白银 AG)。
+#
+# 时刻一律写 UTC,理由同 futures-official-seats.cron:CRON_TZ 在这类机器上不生效。
+#   10:10 UTC = 18:10 北京
+#   14:10 UTC = 22:10 北京
+#
+# 必须跑在官方席位增量(09:55 / 13:55 UTC)之后:引擎读 seat_history 的增减量,
+# 那一步没跑完就开算,信号会落在旧数据上。
+#
+# 引擎是无状态全量重放——每次从 2015 年重算,漏跑一轮下次自动补回,所以这里
+# 不需要补偿机制,只需要顺序对。
+10 10 * * 1-5 root /usr/local/sbin/run-smart-money >>/var/log/futures-smart-money.log 2>&1
+10 14 * * 1-5 root /usr/local/sbin/run-smart-money >>/var/log/futures-smart-money.log 2>&1

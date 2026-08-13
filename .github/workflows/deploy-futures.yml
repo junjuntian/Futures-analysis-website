@@ -221,6 +221,10 @@ jobs:
           install -m 600 backfill/load_sanhe_seats.sql "${RELEASE_BUNDLE}/backfill/load_sanhe_seats.sql"
           install -m 600 deploy/collector/futures-collector.cron \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.cron"
+          install -m 600 deploy/collector/futures-official-seats.cron \
+            "${RELEASE_BUNDLE}/deploy/collector/futures-official-seats.cron"
+          install -m 600 deploy/collector/futures-smart-money.cron \
+            "${RELEASE_BUNDLE}/deploy/collector/futures-smart-money.cron"
           install -m 600 deploy/collector/futures-collector.logrotate \
             "${RELEASE_BUNDLE}/deploy/collector/futures-collector.logrotate"
           install -m 600 \
@@ -924,6 +928,13 @@ jobs:
           done
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.cron" \
             /etc/cron.d/futures-collector
+          # 这两套此前只存在于服务器上、靠手工安装。2026-08-13 迁新机时才发现
+          # 「换机器要记得重装」没有任何东西保证——引擎那套一旦漏装,ΔNet 全为 0
+          # 而页面照常显示,不会报错。随发布包下发之后,新机器起来就是全的。
+          install -m 600 "$RELEASE_DIR/deploy/collector/futures-official-seats.cron" \
+            /etc/cron.d/futures-official-seats
+          install -m 600 "$RELEASE_DIR/deploy/collector/futures-smart-money.cron" \
+            /etc/cron.d/futures-smart-money
           install -m 600 "$RELEASE_DIR/deploy/collector/futures-collector.logrotate" \
             /etc/logrotate.d/futures-collector
           # engine 从此随发布链走。它此前完全不在发布单元里：仓库改了 wrapper 或

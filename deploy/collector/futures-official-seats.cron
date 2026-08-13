@@ -1,0 +1,21 @@
+# 官方席位增量采集(上期所 + 郑商所,带增减量)。
+#
+# 为什么单独一套:collector 的席位数据集不含「增减量」字段,而机构资金引擎的
+# ΔNet 全靠它——没有 change,信号整体归零。这一套走 fetch_exchange + to_csv
+# 直接取交易所逐日文件,官方行入库后删同日的 akshare 冗余席位行。
+#
+# 时刻一律写 UTC。CRON_TZ 在这类机器上不生效——2026-08-10 实证:采集 cron 写
+# CRON_TZ=Asia/Shanghai + "30 21",journalctl 显示它在 21:30 UTC 触发,也就是
+# 北京次日凌晨 05:30。本文件若配 CRON_TZ 会同样漂移八小时。
+#
+# 顺序是硬要求(北京时间对照):
+#   09:30 UTC = 17:30 北京  collector 采集
+#   09:55 UTC = 17:55 北京  官方席位增量(本文件)
+#   10:10 UTC = 18:10 北京  机构资金引擎
+# 引擎读的是席位表,跑在本文件之前就会算在旧数据上。
+#
+# 这套 cron 与 futures-smart-money.cron 长期只存在于服务器上、靠手工安装,
+# 2026-08-13 迁新机时才发现「换机器要记得重装」这件事没有任何东西保证。
+# 现在随发布包下发。
+55 9 * * 1-5 root /usr/local/sbin/run-official-seats >>/var/log/futures-official-seats.log 2>&1
+55 13 * * 1-5 root /usr/local/sbin/run-official-seats >>/var/log/futures-official-seats.log 2>&1
