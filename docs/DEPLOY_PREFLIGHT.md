@@ -16,10 +16,10 @@
 | 会进构建产物的路径无未提交改动、HEAD 已推送且等于 `origin/分支` | 建完镜像又推了文档提交，部署被 `acceptance_sha` 守卫拒绝 |
 | 每条迁移写了 `schema_versions`、版本号与文件名一致、带 `begin;` | 部署在打包步报 `migration_missing_version_record` |
 | 每条迁移列进了 `deploy-futures.yml` 的显式清单 | 漏列 = 代码上线而 schema 没到（leg-order 那次每个查询回 500） |
-| `deploy/collector/` 下每个文件都装进了发布包 | `project-history.sql` 没装进去，线上只打一行 `PROJECTION_SKIPPED` 然后每天安静地不投影 |
+| `deploy/collector/` 下每个文件都装进了发布包 | `project-history.sql` 没装进去，线上只打一行 `PROJECTION_SKIPPED` 然后每天安静地不投影（那个脚本本身已随 `DEC-049` 删除，门禁守的是规则不是文件） |
 | CI 在该提交上通过 | — |
-| 四个镜像都发布了 | 重启 runner 杀掉了正在跑的 `Publish api`，整体仍显示 success，但少一个镜像 |
-| runner 在线且空闲 | 同上：重启 runner 会杀掉它正在跑的作业 |
+| 三个镜像都发布了（api / frontend / collector） | 重启自建 runner 杀掉了正在跑的 `Publish api`，整体仍显示 success，但少一个镜像。2026-08-13 搬到托管 runner 后没有这个成因了，检查留着——`fail-fast: false` 意味着少一个作业整体照样是绿的 |
+| 验收与生产写的是同一个来源标签、同一套 CSV 文件名约定 | 验收写着退役的来源，live 采集断言在一个没人写过的来源上，失败还要整库回滚 |
 
 只拦 `rust/`、`frontend/`、`collector/`、`deploy/`、`.github/` 和 `docker-compose*`
 这些会进构建产物的路径。`research/` 是运营者另一个会话在做的席位因子预测模型，
@@ -28,6 +28,33 @@
 ---
 
 ## 二、脚本查不了，必须自己过
+
+### 删表之后，通读一遍日更链路
+
+2026-08-13 删掉导入通道的 27 张表之后，日更链路里还有三处在读已删的表，而且都带
+`ON_ERROR_STOP=1`——不是降级，是整步失败：
+
+- `engine/run-official-seats.sh` 取 workspace 用 `select ... from market_prices`
+- `deploy/collector/load-dce-daily.sql` 同一个判据
+- `deploy/collector/project-history.sql` 整个脚本就是从那两张中转表投影到宽表的桥
+
+三处都不在 Rust 代码里，所以 `cargo clippy` 和全部单元测试都是绿的；三处都不在
+部署的验收路径上（e2e 不跑 `run-official-seats`），所以部署也会绿。**第二天早上
+17:30 那一轮才会真实失败，而且失败得不显眼。**
+
+所以：任何一次 `drop table` 之后，别只信编译器和测试。把那几张表的名字在
+`deploy/`、`engine/`、`backfill/`、`ops/` 下全文搜一遍——那些地方是 SQL 和 shell，
+没有任何静态检查会替你发现。
+
+### 守卫自己不能静默死掉
+
+同一天还发现 preflight 里一条守卫用 `$(grep -o '...')` 取值，被比对的变量在重写
+验收脚本时没了，`grep` 返回 1，`set -e` 把**整个 preflight 静默掐断**——退出码 1、
+一行说明都没有，看起来就像跑完了。
+
+写守卫时：取值一律 `|| true`，判空另写一条 `fail`。一个查不到东西就闭嘴的门禁，
+比没有门禁更糟——它还占着「已经检查过了」的位置。
+
 
 ### 1. 从建镜像到部署完成，不要推任何提交
 

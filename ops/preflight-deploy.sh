@@ -128,6 +128,39 @@ for wf in .github/workflows/*.yml; do
   fi
 done
 
+# compose 的卷引用两个方向都要对得上。CI 有 `docker compose config`，但本机通常
+# 没有 docker，而这条用 YAML 解析就能查——不必等 CI 跑十几分钟才知道。
+# 教训：删 worker 时把 object_storage_data 卷一起删了，api 那边还挂着，
+# CI 报 `service "api" refers to undefined volume` 整个红。
+compose_problems=$(python - <<'PY' 2>&1 || true
+import io, yaml
+class L(yaml.SafeLoader):
+    pass
+L.add_multi_constructor("!", lambda loader, suffix, node: None)
+for path in ["docker-compose.yml", "docker-compose.production.yml"]:
+    doc = yaml.load(io.open(path, encoding="utf-8"), Loader=L) or {}
+    declared = set((doc.get("volumes") or {}).keys())
+    used = set()
+    for name, svc in (doc.get("services") or {}).items():
+        for mount in (svc or {}).get("volumes") or []:
+            if not isinstance(mount, str):
+                continue
+            source = mount.split(":", 1)[0]
+            if source[:1] in "/.$" or not source:
+                continue
+            used.add(source)
+            if source not in declared:
+                print(f"{path}: 服务 {name} 挂了未声明的卷 {source}")
+    for name in declared - used:
+        print(f"{path}: 卷 {name} 声明了但没有服务在用")
+PY
+)
+if [ -z "$compose_problems" ]; then
+  pass "compose 的卷引用两个方向都对得上"
+else
+  fail "compose 卷引用有问题：$compose_problems"
+fi
+
 step "二、迁移"
 
 # 教训（第二次失败）：部署在打包那步报 migration_missing_version_record。

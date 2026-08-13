@@ -41,7 +41,6 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - ${FUTURES_SECRETS_HOST_DIR:-/etc/futures-platform/secrets}:/run/secrets:ro
-      - object_storage_data:/var/lib/futures-platform/objects
     depends_on:
       postgres:
         condition: service_healthy
