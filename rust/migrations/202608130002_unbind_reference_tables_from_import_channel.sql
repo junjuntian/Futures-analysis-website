@@ -64,6 +64,19 @@ alter table trading_calendar_days
     alter column source_import_batch_id drop not null,
     alter column source_row_number drop not null;
 
+-- 日历版本的业务唯一键里带着 source_id(来源目录),而直灌把那一列留空——
+-- 于是「同一交易所同一版本」在唯一性上不再唯一,upsert 也找不到可用的冲突目标
+-- (2026-08-13 试跑实测报 no unique or exclusion constraint matching)。
+--
+-- 来源目录本就是导入通道的概念:同一份交易所日历,不该因为「从哪个连接器进来的」
+-- 而在库里存成两份。改成 (workspace_id, exchange_id, version),这也是这张表
+-- 本来该有的业务身份。
+alter table trading_calendar_versions
+    drop constraint if exists trading_calendar_versions_business_identity;
+alter table trading_calendar_versions
+    add constraint trading_calendar_versions_business_identity
+    unique (workspace_id, exchange_id, version);
+
 insert into schema_versions (version, description)
 values ('202608130002', '参考数据表与导入通道解绑:去掉血缘/批次/来源目录的外键与非空,为直灌铺路')
 on conflict (version) do nothing;

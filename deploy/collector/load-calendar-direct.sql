@@ -10,11 +10,18 @@
 -- 幂等:版本按 (workspace, 交易所, 版本号) upsert,日期按 (workspace, 版本, 交易日)
 -- upsert。同一天重复跑结果一致。
 
+-- **路径写死,不用 psql 变量。**
+--
+-- `\copy` 是客户端元命令,不做变量插值:写 `\copy t from :'csv_path'` 时它把
+-- `:'csv_path'` 当成字面文件名,报 `:: No such file or directory`——**而且这个错
+-- 不会中断执行**,psql 继续往下跑,最后 commit 一个什么都没装的空事务。
+-- 2026-08-13 首次试跑正是如此:五个 CSV 全部「装载成功」,库里一行没多,
+-- 前后计数完全一样才发现。普通 SQL 里 `:'var'` 能用、元命令里不能,
+-- 这个差别不看输出根本不知道。
+--
+-- 所以路径固定,由调用方把 CSV 拷到这里(run-collector.sh 里的 docker cp)。
+
 \set ON_ERROR_STOP on
-\if :{?csv_path}
-\else
-\set csv_path '/tmp/calendar_direct.csv'
-\endif
 
 begin;
 
@@ -30,7 +37,7 @@ create temp table calendar_stage (
     source_record_ref text
 );
 
-\copy calendar_stage from :'csv_path' with (format csv, header true, null '')
+\copy calendar_stage from '/tmp/direct.csv' with (format csv, header true, null '')
 
 create temp table ws as select id from workspaces order by created_at limit 1;
 
