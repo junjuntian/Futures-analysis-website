@@ -12,12 +12,6 @@ services:
     environment:
       APP_ENV: production
 
-  worker:
-    image: ${GHCR_IMAGE_PREFIX:-ghcr.io/junjuntian/futures-analysis-website}-worker:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}
-    build: !reset null
-    environment:
-      APP_ENV: production
-
   collector:
     image: ${GHCR_IMAGE_PREFIX:-ghcr.io/junjuntian/futures-analysis-website}-collector:${IMAGE_TAG:?set IMAGE_TAG to an immutable sha-* tag}
     build: !reset null

@@ -1,7 +1,5 @@
-## api 与 worker 共用一个构建：两者本就是同一个 workspace，原来各有一个 Dockerfile，
-## 每次发版把 domain/application/infrastructure/database 整个编译两遍——在这台
-## 4G 内存、限双核编译的 runner 上一遍约 7 分钟。合并后 workspace 只编一次，
-## worker 那个作业几乎全程命中缓存。构建工作流按 target 分别取 api / worker 两个最终段。
+## api 镜像的构建。原来 api 与 worker 共用这一份(同一个 workspace 编一次,
+## 第二个 target 全程命中缓存)。worker 已随导入通道摘除,这里只剩 api。
 
 FROM rust:1.96.0-bookworm AS chef
 RUN cargo install cargo-chef --version 0.1.77 --locked
@@ -19,7 +17,7 @@ COPY --from=planner /app/rust/recipe.json recipe.json
 # recompiles every crate.
 RUN cargo chef cook --release --jobs 2 --recipe-path recipe.json
 COPY rust .
-RUN GIT_SHA="${GIT_SHA}" cargo build --release --jobs 2 -p api -p worker
+RUN GIT_SHA="${GIT_SHA}" cargo build --release --jobs 2 -p api
 
 FROM debian:13.2-slim AS api
 ARG GIT_SHA=local
@@ -29,9 +27,3 @@ COPY --from=builder /app/rust/target/release/api /app/api
 EXPOSE 8080
 CMD ["/app/api"]
 
-FROM debian:13.2-slim AS worker
-ARG GIT_SHA=local
-LABEL org.opencontainers.image.revision="${GIT_SHA}"
-WORKDIR /app
-COPY --from=builder /app/rust/target/release/worker /app/worker
-CMD ["/app/worker"]

@@ -33,11 +33,6 @@ jobs:
             target: api
             cache: rust
             paths: rust/
-          - image: worker
-            dockerfile: rust/Dockerfile.services
-            target: worker
-            cache: rust
-            paths: rust/
           - image: frontend
             dockerfile: frontend/Dockerfile
             target: ""
@@ -145,7 +140,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             GIT_SHA=${{ github.sha }}
-          # api 与 worker 共用 rust 缓存域：同一个 workspace 编一次，第二个作业命中缓存。
+          # rust 缓存域：api 镜像独占（worker 已随导入通道摘除）。
           cache-from: type=gha,scope=publish-${{ matrix.cache }}
           cache-to: type=gha,mode=max,scope=publish-${{ matrix.cache }}
 

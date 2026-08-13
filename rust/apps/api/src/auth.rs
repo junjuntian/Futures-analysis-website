@@ -473,20 +473,12 @@ impl Permission {
 }
 
 impl AuthContext {
-    pub(crate) fn session_id(&self) -> Uuid {
-        self.session_id
-    }
-
     pub(crate) fn user_id(&self) -> Uuid {
         self.user_id
     }
 
     pub(crate) fn workspace_id(&self) -> Uuid {
         self.workspace_id
-    }
-
-    pub(crate) fn is_collector_account(&self) -> bool {
-        self.username == COLLECTOR_ACCOUNT_USERNAME && self.roles == ["analyst"]
     }
 
     pub(crate) fn require_permission(&self, permission: Permission) -> Result<(), AuthError> {
@@ -1622,24 +1614,6 @@ mod tests {
                 .iter()
                 .all(|permission| !permission.starts_with("import."))
         );
-    }
-
-    #[test]
-    fn automatic_collection_identity_is_exact_not_role_only() {
-        let mut context = AuthContext {
-            session_id: Uuid::now_v7(),
-            user_id: Uuid::now_v7(),
-            username: COLLECTOR_ACCOUNT_USERNAME.to_string(),
-            workspace_id: Uuid::now_v7(),
-            workspace_name: "test".to_string(),
-            roles: vec!["analyst".to_string()],
-        };
-        assert!(context.is_collector_account());
-        context.username = "ordinary-analyst".to_string();
-        assert!(!context.is_collector_account());
-        context.username = COLLECTOR_ACCOUNT_USERNAME.to_string();
-        context.roles.push("admin".to_string());
-        assert!(!context.is_collector_account());
     }
 
     #[test]

@@ -247,7 +247,7 @@ else
   done <<EOF_SOURCES
 $(printf '%s\n' "$build_log" | grep -oE "image-built-from [a-z]+ [0-9a-f]{40}" | sort -u)
 EOF_SOURCES
-  for image in api worker frontend collector; do
+  for image in api frontend collector; do
     if printf '%s\n' "$digests" | grep -q -- "-$image:sha-$SHA@"; then
       pass "$image 镜像已发布"
     else
@@ -313,7 +313,6 @@ gh workflow run deploy-futures.yml --ref $BRANCH \\
   -f git_sha=$SHA \\
   -f acceptance_sha=$SHA \\
   -f api_digest=$(digest_of api) \\
-  -f worker_digest=$(digest_of worker) \\
   -f frontend_digest=$(digest_of frontend) \\
   -f collector_digest=$(digest_of collector) \\
   -f collection_date=$collection_date \\

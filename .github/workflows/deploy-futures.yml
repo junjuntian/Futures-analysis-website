@@ -15,10 +15,6 @@ on:
         description: Immutable API sha256 digest
         required: true
         type: string
-      worker_digest:
-        description: Immutable Worker sha256 digest
-        required: true
-        type: string
       frontend_digest:
         description: Immutable Frontend sha256 digest
         required: true
@@ -42,7 +38,7 @@ on:
         default: true
         type: boolean
       image_sources:
-        description: Per-image build-source shas (api=<sha>,worker=<sha>,...) when the build reused images from an earlier commit. Filled by ops/preflight-deploy.sh; empty means every image was built at git_sha. Each entry is verified byte-identical to git_sha over that image's input paths before anything runs.
+        description: Per-image build-source shas (api=<sha>,frontend=<sha>,...) when the build reused images from an earlier commit. Filled by ops/preflight-deploy.sh; empty means every image was built at git_sha. Each entry is verified byte-identical to git_sha over that image's input paths before anything runs.
         required: false
         default: ''
         type: string
@@ -86,7 +82,6 @@ jobs:
           [[ "${{ inputs.git_sha }}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${{ inputs.acceptance_sha }}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${{ inputs.api_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "${{ inputs.worker_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.frontend_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.collector_digest }}" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "${{ inputs.collection_date }}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
@@ -133,7 +128,6 @@ jobs:
           if test -n "$image_sources"; then
             declare -A image_paths=(
               [api]='rust/ .github/workflows/container-images.yml'
-              [worker]='rust/ .github/workflows/container-images.yml'
               [frontend]='frontend/ package.json pnpm-lock.yaml pnpm-workspace.yaml .github/workflows/container-images.yml'
               [collector]='collector/ .github/workflows/container-images.yml'
             )
@@ -260,6 +254,7 @@ jobs:
             rust/migrations/202608120001_spread_monitor_daily.sql \
             rust/migrations/202608130001_seat_history_data_health_index.sql \
             rust/migrations/202608130002_unbind_reference_tables_from_import_channel.sql \
+            rust/migrations/202608130003_drop_import_channel.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline
@@ -305,17 +300,16 @@ jobs:
 
           SOURCE_SHA=$1
           API_DIGEST=$2
-          WORKER_DIGEST=$3
-          FRONTEND_DIGEST=$4
-          COLLECTOR_DIGEST=$5
-          GHCR_USER=$6
-          RUN_URL=$7
-          RELEASE_DIR=$8
-          COLLECTION_DATE=$9
-          PROVISION_COLLECTOR=${10}
-          ACCEPTANCE_SHA=${11}
-          RUN_LIVE_COLLECTION=${12}
-          IMAGE_SOURCES=${13}
+          FRONTEND_DIGEST=$3
+          COLLECTOR_DIGEST=$4
+          GHCR_USER=$5
+          RUN_URL=$6
+          RELEASE_DIR=$7
+          COLLECTION_DATE=$8
+          PROVISION_COLLECTOR=$9
+          ACCEPTANCE_SHA=${10}
+          RUN_LIVE_COLLECTION=${11}
+          IMAGE_SOURCES=${12}
           # 和日更管线抢同一把锁。
           #
           # 2026-08-12 连挂两次：迁移里的 `alter table ... owner to futures_migrator`
@@ -340,11 +334,9 @@ jobs:
           STATE_ROOT=/var/lib/futures-platform/deployments
           EVIDENCE_ROOT=/var/lib/futures-platform/deployment-evidence
           API_IMAGE=ghcr.io/junjuntian/futures-analysis-website-api
-          WORKER_IMAGE=ghcr.io/junjuntian/futures-analysis-website-worker
           FRONTEND_IMAGE=ghcr.io/junjuntian/futures-analysis-website-frontend
           COLLECTOR_IMAGE=ghcr.io/junjuntian/futures-analysis-website-collector
           API_REF="${API_IMAGE}@${API_DIGEST}"
-          WORKER_REF="${WORKER_IMAGE}@${WORKER_DIGEST}"
           FRONTEND_REF="${FRONTEND_IMAGE}@${FRONTEND_DIGEST}"
           COLLECTOR_REF="${COLLECTOR_IMAGE}@${COLLECTOR_DIGEST}"
           export IMAGE_TAG="sha-${SOURCE_SHA}"
@@ -369,7 +361,6 @@ jobs:
           # image_sources 覆盖。runner 侧已核验每个来源与本次 sha 在该镜像的
           # 输入路径上逐字节一致，这里只负责「镜像确实是那个来源建出来的」。
           API_SOURCE_SHA="$SOURCE_SHA"
-          WORKER_SOURCE_SHA="$SOURCE_SHA"
           FRONTEND_SOURCE_SHA="$SOURCE_SHA"
           COLLECTOR_SOURCE_SHA="$SOURCE_SHA"
           if [ -n "$IMAGE_SOURCES" ]; then
@@ -377,17 +368,16 @@ jobs:
             for image_source_pair in "${image_source_pairs[@]}"; do
               case "${image_source_pair%%=*}" in
                 api) API_SOURCE_SHA="${image_source_pair#*=}" ;;
-                worker) WORKER_SOURCE_SHA="${image_source_pair#*=}" ;;
                 frontend) FRONTEND_SOURCE_SHA="${image_source_pair#*=}" ;;
                 collector) COLLECTOR_SOURCE_SHA="${image_source_pair#*=}" ;;
                 *) echo "DEPLOY_FAIL unknown_image_source" >&2; exit 1 ;;
               esac
             done
           fi
-          for image_source_sha in "$API_SOURCE_SHA" "$WORKER_SOURCE_SHA"                                   "$FRONTEND_SOURCE_SHA" "$COLLECTOR_SOURCE_SHA"; do
+          for image_source_sha in "$API_SOURCE_SHA" "$FRONTEND_SOURCE_SHA" "$COLLECTOR_SOURCE_SHA"; do
             [[ "$image_source_sha" =~ ^[0-9a-f]{40}$ ]]
           done
-          for digest in "$API_DIGEST" "$WORKER_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
+          for digest in "$API_DIGEST" "$FRONTEND_DIGEST" "$COLLECTOR_DIGEST"; do
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           done
           [[ "$GHCR_USER" =~ ^[A-Za-z0-9-]+$ ]]
@@ -477,7 +467,7 @@ jobs:
                 -f "$RELEASE_DIR/docker-compose.yml" \
                 -f "$RELEASE_DIR/docker-compose.production.yml" \
                 -f "$RELEASE_DIR/docker-compose.release.yml" \
-                logs --no-color --tail 200 api worker \
+                logs --no-color --tail 200 api \
                 >"$RELEASE_DIR/failure-service-logs.txt" 2>&1
               chmod 600 "$RELEASE_DIR/failure-compose-ps.txt" \
                 "$RELEASE_DIR/failure-service-logs.txt"
@@ -487,7 +477,7 @@ jobs:
                 -f "$RELEASE_DIR/docker-compose.yml" \
                 -f "$RELEASE_DIR/docker-compose.production.yml" \
                 -f "$RELEASE_DIR/docker-compose.release.yml" \
-                stop api worker frontend nginx >/dev/null 2>&1
+                stop api frontend nginx >/dev/null 2>&1
               docker compose -f "$RELEASE_DIR/docker-compose.yml" \
                 exec -T postgres psql -X -U futures_app -d futures_platform \
                 -Atq -c "select pg_terminate_backend(pid) from pg_stat_activity where datname='futures_platform' and pid <> pg_backend_pid()" \
@@ -565,7 +555,7 @@ jobs:
               if test -f "$PREVIOUS_RUNTIME"; then
                 # shellcheck disable=SC1090
                 . "$PREVIOUS_RUNTIME"
-                for spec in "api:$previous_api_id" "worker:$previous_worker_id" "frontend:$previous_frontend_id"; do
+                for spec in "api:$previous_api_id" "frontend:$previous_frontend_id"; do
                   service=${spec%%:*}
                   expected=${spec#*:}
                   cid=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" \
@@ -621,16 +611,15 @@ jobs:
           fi
 
           pull_exact "$API_IMAGE" "$API_DIGEST"
-          pull_exact "$WORKER_IMAGE" "$WORKER_DIGEST"
           pull_exact "$FRONTEND_IMAGE" "$FRONTEND_DIGEST"
           pull_exact "$COLLECTOR_IMAGE" "$COLLECTOR_DIGEST"
-          for spec in "$API_REF=$API_SOURCE_SHA" "$WORKER_REF=$WORKER_SOURCE_SHA"                       "$FRONTEND_REF=$FRONTEND_SOURCE_SHA" "$COLLECTOR_REF=$COLLECTOR_SOURCE_SHA"; do
+          for spec in "$API_REF=$API_SOURCE_SHA" "$FRONTEND_REF=$FRONTEND_SOURCE_SHA" "$COLLECTOR_REF=$COLLECTOR_SOURCE_SHA"; do
             test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${spec%%=*}")" = "${spec#*=}"
           done
 
           PREVIOUS_RUNTIME="$STATE_ROOT/previous-runtime-${SOURCE_SHA}-${GITHUB_RUN_ID:-manual}.env"
           {
-            for service in api worker frontend; do
+            for service in api frontend; do
               cid=$(docker compose -f "$LEGACY_ROOT/docker-compose.yml" --profile dev ps -q "$service" | head -n1)
               test -n "$cid"
               image_id=$(docker inspect --format '{{.Image}}' "$cid")
@@ -645,7 +634,7 @@ jobs:
             chmod 600 "$PREVIOUS_STABLE"
             # shellcheck disable=SC1090
             . "$PREVIOUS_STABLE"
-            for ref in "$previous_api_ref" "$previous_worker_ref" "$previous_frontend_ref"; do
+            for ref in "$previous_api_ref" "$previous_frontend_ref"; do
               docker image inspect "$ref" >/dev/null
             done
             if test -n "${previous_collector_ref:-}"; then
@@ -658,10 +647,6 @@ jobs:
           services:
             api:
               image: ${API_REF}
-              environment:
-                APP_ENV: acceptance
-            worker:
-              image: ${WORKER_REF}
               environment:
                 APP_ENV: acceptance
             collector:
@@ -870,7 +855,7 @@ jobs:
           test "$VERSION_VERIFIED" -eq 1
           echo "DEPLOY_STAGE version_verified"
 
-          for spec in "api:$API_REF" "worker:$WORKER_REF" "frontend:$FRONTEND_REF"; do
+          for spec in "api:$API_REF" "frontend:$FRONTEND_REF"; do
             service=${spec%%:*}
             ref=${spec#*:}
             expected=$(docker image inspect --format '{{.Id}}' "$ref")
@@ -1025,7 +1010,6 @@ jobs:
             echo "backup_path=$BACKUP_PATH"
             echo "backup_sha256=$BACKUP_SHA256"
             echo "api_ref=$API_REF"
-            echo "worker_ref=$WORKER_REF"
             echo "frontend_ref=$FRONTEND_REF"
             echo "collector_ref=$COLLECTOR_REF"
             echo "migrations=$(printf '%s' "$bundled_versions" | paste -sd, -)"
@@ -1056,7 +1040,6 @@ jobs:
           {
             printf 'previous_git_sha=%q\n' "$SOURCE_SHA"
             printf 'previous_api_ref=%q\n' "$API_REF"
-            printf 'previous_worker_ref=%q\n' "$WORKER_REF"
             printf 'previous_frontend_ref=%q\n' "$FRONTEND_REF"
             printf 'previous_collector_ref=%q\n' "$COLLECTOR_REF"
             printf 'previous_release_dir=%q\n' "$RELEASE_DIR"
@@ -1103,8 +1086,8 @@ jobs:
               (
                 # shellcheck disable=SC1090
                 . "$state"
-                for ref in "${previous_api_ref:-}" "${previous_worker_ref:-}" \
-                           "${previous_frontend_ref:-}" "${previous_collector_ref:-}"; do
+                for ref in "${previous_api_ref:-}" "${previous_frontend_ref:-}" \
+                           "${previous_collector_ref:-}"; do
                   test -n "$ref" || continue
                   docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
                 done
@@ -1181,7 +1164,7 @@ jobs:
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           printf '%s' "${GHCR_TOKEN}" |
             ssh "${SSH_OPTIONS[@]}" "${SSH_TARGET}" \
-              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.worker_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}' '${{ inputs.run_live_collection }}' '${{ inputs.image_sources }}'"
+              "GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash '${REMOTE_RELEASE}/deploy-futures-remote.sh' '${{ inputs.git_sha }}' '${{ inputs.api_digest }}' '${{ inputs.frontend_digest }}' '${{ inputs.collector_digest }}' '${GITHUB_ACTOR}' '${RUN_URL}' '${REMOTE_RELEASE}' '${{ inputs.collection_date }}' '${{ inputs.provision_collector }}' '${{ inputs.acceptance_sha }}' '${{ inputs.run_live_collection }}' '${{ inputs.image_sources }}'"
           unset GHCR_TOKEN
 
       - name: Verify temporary registry authentication was removed
