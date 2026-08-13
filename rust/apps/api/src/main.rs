@@ -820,7 +820,9 @@ mod tests {
         let parameters = password["parameters"].as_array().expect("parameters");
         for header in ["x-csrf-token", "Origin"] {
             assert!(
-                parameters.iter().any(|parameter| parameter["name"] == header),
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == header),
                 "改密码必须声明 {header}"
             );
         }

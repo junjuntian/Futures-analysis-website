@@ -1080,8 +1080,12 @@ pub async fn change_password(
         .map_err(|_| AuthError::Internal)?
         .ok_or(AuthError::Internal)?;
 
-    if !verify_password(&state.config, &payload.current_password, row.get("password_hash"))
-        .map_err(|_| AuthError::Internal)?
+    if !verify_password(
+        &state.config,
+        &payload.current_password,
+        row.get("password_hash"),
+    )
+    .map_err(|_| AuthError::Internal)?
     {
         // 审计要记下失败：连续的失败尝试是「会话被人拿走了」的最早信号。
         set_workspace(&mut tx, context.workspace_id).await?;

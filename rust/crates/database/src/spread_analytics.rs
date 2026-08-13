@@ -2178,7 +2178,9 @@ pub async fn data_freshness(
             rows.into_iter()
                 .map(|row| DataFreshnessDay {
                     trade_date: row.get("trade_date"),
-                    exchanges: row.get::<Option<String>, _>("exchanges").unwrap_or_default(),
+                    exchanges: row
+                        .get::<Option<String>, _>("exchanges")
+                        .unwrap_or_default(),
                 })
                 .collect::<Vec<_>>(),
         );

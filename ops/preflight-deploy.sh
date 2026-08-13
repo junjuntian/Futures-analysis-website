@@ -69,6 +69,14 @@ fi
 # 都过了——它们不做模板结构检查——直到 CI 的 vite build 才报「Element is missing
 # end tag」。为一个漏掉的闭合标签白等了一轮 CI。
 # 这一步六秒，CI 那轮十几分钟；preflight 存在的意义就是把这种往返省掉。
+# Rust 格式。CI 第一步就跑 cargo fmt --check,本地一秒钟的事,却害过一整轮 CI
+# (2026-08-13:改密码端点提交,唯一的问题是两处换行)。
+if (cd rust && cargo fmt --check >/dev/null 2>&1); then
+  pass "cargo fmt 格式一致"
+else
+  fail "cargo fmt --check 不过——在 rust/ 下跑一次 cargo fmt 即可"
+fi
+
 if [ -d frontend/node_modules ]; then
   if (cd frontend && npx vite build >/dev/null 2>&1); then
     pass "前端 vite build 通过"
