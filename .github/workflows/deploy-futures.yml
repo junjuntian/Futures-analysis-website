@@ -58,7 +58,10 @@ concurrency:
 jobs:
   deploy:
     name: Deploy and accept production candidate
-    runs-on: [self-hosted, futures-vps]
+    # 托管 runner。这个作业本来就不在生产机上干活——它把发布包 scp 过去、
+    # 再 ssh 执行远程脚本,所以换成托管机器只是换了发起端。
+    # 前提(已核实):生产的 SSH 对公网开放,FUTURES_SSH_* 三个 secret 已配好。
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     environment: production
     env:

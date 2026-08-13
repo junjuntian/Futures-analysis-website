@@ -17,11 +17,13 @@ permissions:
 jobs:
   publish:
     name: Publish ${{ matrix.image }}
-    runs-on: [self-hosted, futures-vps]
+    # 托管 runner。缓存用的是 type=gha(存在 GitHub 那边),搬机器不丢缓存。
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 1
+      # 托管 runner 各作业各占一台机器,不再需要串行避让内存。
+      max-parallel: 4
       matrix:
         include:
           # paths 是该镜像的全部输入。复用判定按它 diff，deploy 侧核验「复用的镜像

@@ -24,7 +24,11 @@ permissions:
 
 jobs:
   validate:
-    runs-on: [self-hosted, futures-vps]
+    # GitHub 托管 runner。公开仓库不限分钟数,而且每次是全新机器——
+    # 自建 runner 那些慢性病(匿名卷堆积、磁盘与生产共享、fork PR 能碰到生产)
+    # 一次性消失。缓存不受影响:Rust 走 Swatinem/rust-cache、镜像走 type=gha,
+    # 两者都存在 GitHub 那边,与 runner 在哪无关。
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
       postgres:
@@ -41,10 +45,8 @@ jobs:
           --memory 384m
           --memory-swap 384m
     env:
-      CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
       DATABASE_URL: postgres://postgres:phase4a-ci-postgres-20260805@localhost:5432/postgres
-      NODE_OPTIONS: --max-old-space-size=768
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -62,8 +64,8 @@ jobs:
 
       - name: Shellcheck deploy and ops scripts
         # 这些脚本没有测试，出错都是静默的（2026-08-12 就靠人肉在生产日志里
-        # 抓到过好几处）。shellcheck 是它们唯一的门禁。runner 是自建 VPS，
-        # shellcheck 已随系统安装（apt，0.11.0）。
+        # 抓到过好几处）。shellcheck 是它们唯一的门禁。
+        # ubuntu-latest 镜像预装 shellcheck，不必自己装。
         # -S warning：info 级噪音多（大量风格建议），warning 起步才值得挡构建。
         run: shellcheck -S warning deploy/collector/*.sh ops/*.sh rust/tests/phase_*_e2e.sh
 
@@ -147,19 +149,3 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose -f docker-compose.yml -f docker-compose.production.yml config --quiet
-
-      # 收掉服务容器留下的匿名卷。
-      #
-      # 上面的 `services: postgres` 每跑一次就在 runner 上留一个 67MB 的匿名卷:
-      # 作业结束删容器,卷不删。GitHub 托管 runner 每次是全新机器所以看不见这事,
-      # 自建 runner 会一直堆——2026-08-13 查生产磁盘,155 个这样的卷占了 9.6GB,
-      # 而 runner 和生产是同一块盘。
-      #
-      # 只删「匿名且没有容器在用」的。命名卷(postgres_data / object_storage_data
-      # 里是生产数据)不带 anonymous 标签,不在过滤范围内——这一点在生产上验证过
-      # 才敢往 CI 里放。always():作业失败时更要清,否则失败的那几轮堆得最快。
-      - name: Reclaim anonymous service volumes
-        if: always()
-        run: |
-          docker volume ls -q --filter label=com.docker.volume.anonymous --filter dangling=true |
-            xargs -r docker volume rm >/dev/null || true

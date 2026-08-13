@@ -107,13 +107,24 @@ fi
 #
 # 这条与网站上不上 TLS 无关:TLS 管的是浏览器到服务器那段,这条路是从 GitHub
 # 直接进服务器的。守住它的唯一办法就是让触发条件里永远没有那两个词。
+# 2026-08-13 起全部作业跑在 GitHub 托管 runner 上。这道检查守的是「别搬回去」:
+# 自建 runner 就是生产服务器本身,一旦它再出现,fork PR 就又能碰到生产数据。
+# 真要搬回自建,先把 pull_request 触发的风险想清楚,再把这条一起改掉。
+self_hosted=$(grep -ln "runs-on:.*self-hosted" .github/workflows/*.yml || true)
+if [ -z "$self_hosted" ]; then
+  pass "全部作业跑在托管 runner 上(公开仓库不限分钟数)"
+else
+  fail "这些 workflow 又回到自建 runner:$(printf '%s' "$self_hosted" | tr '
+' ' ')——那台机器是生产服务器"
+fi
+
+# 有自建 runner 时,fork 触发等于把生产交出去;现在没有了,但这条留着,
+# 因为搬回去的那天多半没人想起来重新加。
 for wf in .github/workflows/*.yml; do
-  grep -q "self-hosted" "$wf" || continue
+  grep -q "runs-on:.*self-hosted" "$wf" || continue
   triggers=$(sed -n '/^on:/,/^[a-z]/p' "$wf")
-  if printf '%s' "$triggers" | grep -qE "^\s*pull_request(_target)?:"; then
+  if printf '%s' "$triggers" | grep -qE "^[[:space:]]*pull_request(_target)?:"; then
     fail "$(basename "$wf") 在自建 runner 上接受 fork 触发——公开仓库下等于把生产服务器交出去"
-  else
-    pass "$(basename "$wf") 未接 fork 触发"
   fi
 done
 
