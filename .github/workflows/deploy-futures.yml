@@ -1043,6 +1043,63 @@ jobs:
           } >"$stable_tmp"
           chmod 600 "$stable_tmp"
           mv "$stable_tmp" "$STATE_ROOT/stable.env"
+          # 保留策略。**放在 stable 提交之后**：这里已经没有会失败的步骤，而且
+          # 要保留哪两轮是由刚写好的 stable.env / stable.previous.env 定义的。
+          #
+          # 为什么需要它：每轮部署拍一个全库快照、拉四个镜像，从来没有人删。
+          # 2026-08-13 查生产磁盘：119 个备份 13GB、318 个镜像 7.8GB，55GB 里
+          # 有 21GB 是这么堆出来的。清理本身不难，难的是没人会想起来做。
+          #
+          # 留两轮不留一轮：回滚要用本轮拍的备份，而 stable.previous.env 记着
+          # 上一轮的路径——只留一份会让那条记录指向不存在的文件。
+          #
+          # 失败一律不阻断部署（|| true）：磁盘没清干净是运维问题，把一次已经
+          # 验收通过的发布判失败并回滚，是拿真问题换假问题。
+          {
+            retain=$(mktemp)
+            for state in "$STATE_ROOT/stable.env" "$STATE_ROOT/stable.previous.env"; do
+              test -f "$state" || continue
+              (
+                # shellcheck disable=SC1090
+                . "$state"
+                printf '%s\n' "${previous_backup_path:-}"
+              ) >>"$retain"
+            done
+            grep -v '^$' "$retain" | sort -u >"${retain}.f" && mv "${retain}.f" "$retain"
+            if test -s "$retain"; then
+              find "$BACKUP_ROOT" -maxdepth 1 -name 'database-before-*.dump' -type f |
+                grep -vxFf "$retain" |
+                xargs -r rm -f
+            fi
+            rm -f "$retain"
+
+            # 镜像：只留这两轮引用到的，加上没有仓库名的基础镜像（postgres/nginx）。
+            # 按 image id 比对而不是标签——这些镜像是按 digest 拉的，本来就没有标签。
+            keep_images=$(mktemp)
+            for state in "$STATE_ROOT/stable.env" "$STATE_ROOT/stable.previous.env"; do
+              test -f "$state" || continue
+              (
+                # shellcheck disable=SC1090
+                . "$state"
+                for ref in "${previous_api_ref:-}" "${previous_worker_ref:-}" \
+                           "${previous_frontend_ref:-}" "${previous_collector_ref:-}"; do
+                  test -n "$ref" || continue
+                  docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
+                done
+              ) >>"$keep_images"
+            done
+            docker images --no-trunc --format '{{.ID}} {{.Repository}}' |
+              awk '$2 !~ /futures-analysis-website/ {print $1}' >>"$keep_images"
+            sort -u "$keep_images" -o "$keep_images"
+            if test -s "$keep_images"; then
+              docker images --no-trunc --format '{{.ID}}' | sort -u |
+                grep -vxFf "$keep_images" |
+                xargs -r docker rmi >/dev/null 2>&1 || true
+            fi
+            rm -f "$keep_images"
+            echo "RETENTION_APPLIED backups=$(find "$BACKUP_ROOT" -maxdepth 1 -name '*.dump' | wc -l) images=$(docker images -q | sort -u | wc -l) disk=$(df -h / | awk 'NR==2 {print $5}')"
+          } || true
+
           SUCCESS=1
           echo "DEPLOYMENT_PASS"
           cat "$REPORT"
