@@ -80,12 +80,15 @@ class Platform:
 
 
 def test_whole_exchange_responses_are_narrowed_after_normalization() -> None:
+    # Runs through _collect directly: live DCE market is skipped at the
+    # dataset loop since 2026-08-13, but the narrowing itself still guards
+    # history mode and any future live source.
     adapter = RecordingAdapter()
-    platform = Platform()
-    runner = CollectionRunner(adapter, platform, retry_delay_seconds=0)
-    runner.run(date(2026, 8, 7), ["DCE"], ["market"], varieties=frozenset({"JM"}))
+    runner = CollectionRunner(adapter, Platform(), retry_delay_seconds=0)
+    runner._varieties = frozenset({"JM"})
+    rows = runner._collect(SOURCES["DCE"], date(2026, 8, 7), "market", datetime.now(UTC))
     # Only the JM row survives; the RB row belongs to a variety we did not ask for.
-    assert platform.submitted == [("DCE", "daily_market_prices_v1", 1)]
+    assert len(rows) == 1
 
 
 def test_the_narrowing_reaches_the_per_contract_crawl() -> None:

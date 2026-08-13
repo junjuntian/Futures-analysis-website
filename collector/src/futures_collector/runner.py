@@ -93,6 +93,26 @@ class CollectionRunner:
         failures = 0
         for dataset in datasets:
             dataset_type = _dataset_type(dataset)
+            # DCE prices and calendar are not collected live (operator decision
+            # 2026-08-13). Both need push2his, and that endpoint has never once
+            # answered from the production VPS — the log has zero successful DCE
+            # market batches, only three-attempt retry walls burning minutes on
+            # every cron run and every live acceptance pass. DCE daily prices
+            # come from the Sina loader outside this collector; the catalog
+            # (push2delay) and seats (datacenter-web) endpoints do answer and
+            # stay collected. History mode is untouched: the annual files never
+            # open a socket.
+            if source.source_code == EASTMONEY_DCE_SOURCE_CODE and dataset in (
+                "market",
+                "calendar",
+            ):
+                LOG.info(
+                    "dataset_skipped_dead_endpoint exchange=%s dataset=%s "
+                    "reason=push2his_unreachable_from_vps",
+                    source.code,
+                    dataset_type,
+                )
+                continue
             # DCE's quote source carries prices, not rankings, so for seats the
             # seat report is the primary rather than a fallback. Going through
             # the fallback path would first record a failed attempt that was

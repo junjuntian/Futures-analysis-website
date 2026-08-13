@@ -355,13 +355,18 @@ test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade
 echo "PHASE4A_E2E_REPLAY market_before=$market_before market_after=$market_after market_new=$((market_after-market_before)) seat_before=$seats_before seat_after=$seats_after seat_new=$((seats_after-seats_before))"
 
 fault_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# 注入对象换成郑商所:DCE 的行情自 2026-08-13 起整个跳过(push2his 从 VPS
+# 不可达,行情由新浪补),对它注入失败只会得到一次「什么都没发生的成功」,
+# 反而触发下面的 injected_failure_returned_success。换一个真的会采的所,
+# 这段验证的仍是同一件事:失败被如实记录、其余所不受连累。
 if run_collector_with_peak "$EVIDENCE_DIR/fault-run.log" \
-  --dataset market --inject-failure-exchange DCE; then
+  --dataset market --inject-failure-exchange CZCE; then
   echo "PHASE4A_E2E_FAIL injected_failure_returned_success" >&2
   exit 1
 fi
-test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='$DCE_MARKET_SOURCE' and job.dataset_type='daily_market_prices_v1' and job.status='failed' and job.started_at >= timestamptz '$fault_started'")" -ge 1
-test "$(psql_value -c "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and job.dataset_type='daily_market_prices_v1' and job.status='succeeded' and job.started_at >= timestamptz '$fault_started'")" = "$expected_official_sources"
+test "$(psql_value -c "select count(*) from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and source.code='akshare_czce_official' and job.dataset_type='daily_market_prices_v1' and job.status='failed' and job.started_at >= timestamptz '$fault_started'")" -ge 1
+# 被注入的郑商所不在成功名单里,其余三所官方必须都在——隔离的意义正在于此。
+test "$(psql_value -c "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from extraction_jobs job join data_sources source on source.workspace_id=job.workspace_id and source.id=job.data_source_id where job.workspace_id='$workspace_id' and job.dataset_type='daily_market_prices_v1' and job.status='succeeded' and job.started_at >= timestamptz '$fault_started'")" = "akshare_cffex_official,akshare_gfex_official,akshare_shfe_official"
 test "$(psql_value -c "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")" = "$market_before"
 
 echo "PHASE4A_E2E_STAGE authorization_matrix_started"
