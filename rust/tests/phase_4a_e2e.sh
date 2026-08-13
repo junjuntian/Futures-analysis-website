@@ -221,7 +221,21 @@ run_collector_with_peak() {
 
 echo "PHASE4A_E2E_STAGE first_run_started"
 first_run_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-run_collector_with_peak "$EVIDENCE_DIR/first-run.log"
+# collector 对失败的数据集以非零退出——那是给 cron 的忠实汇报。验收这里要
+# 分辨失败属于谁：**只有 DCE 的失败可以放行**（DEC-047：push2his 从生产 VPS
+# 一直不可达，DCE 行情由新浪日更在 collector 之外补），四所官方任何失败都
+# 阻断。2026-08-12 的 live 部署死在这一行的裸调用上：DCE 一如既往地连不上，
+# set -e 直接判死整场验收，连后面的断言都没走到。
+first_run_status=0
+run_collector_with_peak "$EVIDENCE_DIR/first-run.log" || first_run_status=$?
+if test "$first_run_status" -ne 0; then
+  if grep -E 'ERROR (dataset_failed|exchange_failed|batch_failed|dataset_submit_failed)' \
+       "$EVIDENCE_DIR/first-run.log" | grep -vq 'exchange=DCE'; then
+    echo "PHASE4A_E2E_FAIL live_collection_failed_beyond_dce status=$first_run_status" >&2
+    exit 1
+  fi
+  echo "PHASE4A_E2E_WARN dce_only_failures_tolerated status=$first_run_status"
+fi
 echo "PHASE4A_E2E_STAGE first_run_completed"
 
 workspace_id=$(psql_value -c \
@@ -258,20 +272,39 @@ for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 sea
   actual_official_sources=$(psql_value -c \
     "select coalesce(string_agg(distinct source.code, ',' order by source.code), '') from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('akshare_cffex_official','akshare_czce_official','akshare_gfex_official','akshare_shfe_official')")
   test "$actual_official_sources" = "$expected_official_sources"
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE')")" = 1
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started'")" = 5
+  dce_count=$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE')")
+  all_count=$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started'")
+  case "$dataset" in
+    futures_catalog_v1 | seat_positions_v1)
+      # 目录走 push2delay、席位走 datacenter-web，这两个东财端点从 VPS 可达，
+      # 必须成功。
+      test "$dce_count" = 1
+      test "$all_count" = 5
+      ;;
+    *)
+      # 行情与日历走 push2his——**该端点从生产 VPS 一直不可达**（2026-08-13
+      # 白天实测 SSL EOF，日志里 DCE 行情批次一次成功记录都没有），DCE 行情
+      # 实际由 collector 之外的新浪日更补，不产生 import_batches。DEC-047 已
+      # 裁定 DCE 失败非阻断；要求这里恒等于 1 就是要求一件从未发生过的事，
+      # 2026-08-12 的 live 部署正是死在这。四所官方仍然刚性（上面已断言）。
+      test "$dce_count" -le 1
+      test "$all_count" -ge 4
+      ;;
+  esac
 done
 
 test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='$DCE_MARKET_SOURCE' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='eastmoney_dce_quote_v1'")" = 1
 test "$(psql_value -c "select count(*) from data_sources where workspace_id='$workspace_id' and code='$DCE_SEATS_SOURCE' and source_type='aggregator_public' and authorization_status='whitelisted_exception' and connector_code='eastmoney_seats_v1'")" = 1
-for dataset in futures_catalog_v1 trading_calendar_v1 daily_market_prices_v1 seat_positions_v1; do
-  test "$(psql_value -c "select count(distinct source.code) from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='$dataset' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE')")" = 1
-done
+# （原来这里还有一个与上面逐字重复的 DCE 断言循环，独立审查指出后合并进上面
+#  按 dataset 区分的那一个。）
 dce_market_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='daily_market_prices_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE') order by batch.created_at desc limit 1")
 dce_seat_source=$(psql_value -c "select source.code from import_batches batch join data_sources source on source.workspace_id=batch.workspace_id and source.id=batch.data_source_id where batch.workspace_id='$workspace_id' and batch.collection_date=date '$COLLECTION_DATE' and batch.dataset_type='seat_positions_v1' and batch.status='succeeded' and batch.created_at>=timestamptz '$first_run_started' and source.code in ('$DCE_MARKET_SOURCE','$DCE_SEATS_SOURCE') order by batch.created_at desc limit 1")
-case "$dce_market_source:$dce_seat_source" in
-  "$DCE_MARKET_SOURCE:$DCE_SEATS_SOURCE") ;;
-  *) echo "PHASE4A_E2E_FAIL inconsistent_dce_source" >&2; exit 1 ;;
+# 席位批次必须来自东财席位源；行情批次存在时必须来自东财行情源，
+# 不存在（push2his 不可达）也合法——那天的 DCE 行情由新浪日更补。
+test "$dce_seat_source" = "$DCE_SEATS_SOURCE"
+case "$dce_market_source" in
+  "" | "$DCE_MARKET_SOURCE") ;;
+  *) echo "PHASE4A_E2E_FAIL unexpected_dce_market_source=$dce_market_source" >&2; exit 1 ;;
 esac
 
 market_before=$(psql_value -c \
@@ -286,14 +319,26 @@ test "$market_before" -gt 0
 test "$seats_before" -gt 0
 test "$(psql_value -c "select count(*) from exchanges where workspace_id='$workspace_id'")" -ge 5
 test "$(psql_value -c "select count(*) from contracts where workspace_id='$workspace_id'")" -gt 0
-test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id join contracts contract on contract.workspace_id=price.workspace_id and contract.id=price.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_market_source'")" -gt 0
+if test -n "$dce_market_source"; then
+  test "$(psql_value -c "select count(*) from market_prices price join data_sources source on source.workspace_id=price.workspace_id and source.id=price.source_id join contracts contract on contract.workspace_id=price.workspace_id and contract.id=price.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where price.workspace_id='$workspace_id' and price.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_market_source'")" -gt 0
+fi
 test "$(psql_value -c "select count(*) from seat_positions position join data_sources source on source.workspace_id=position.workspace_id and source.id=position.source_id join contracts contract on contract.workspace_id=position.workspace_id and contract.id=position.contract_id join instruments instrument on instrument.workspace_id=contract.workspace_id and instrument.id=contract.instrument_id join exchanges exchange on exchange.workspace_id=instrument.workspace_id and exchange.id=instrument.exchange_id where position.workspace_id='$workspace_id' and position.trade_date=date '$COLLECTION_DATE' and exchange.code='DCE' and source.code='$dce_seat_source'")" -gt 0
 
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,contract_id,trade_date,session_type,granularity,revision_no,count(*) from market_prices where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 test "$(psql_value -c "select count(*) from (select workspace_id,source_id,trade_date,contract_id,seat_id,rank_type,rank,count(*) from seat_positions where workspace_id='$workspace_id' group by 1,2,3,4,5,6,7 having count(*)>1) duplicate")" = 0
 
 echo "PHASE4A_E2E_STAGE replay_run_started"
-run_collector_with_peak "$EVIDENCE_DIR/replay-run.log"
+# 与 first run 同一条 DCE 豁免，理由见上。
+replay_run_status=0
+run_collector_with_peak "$EVIDENCE_DIR/replay-run.log" || replay_run_status=$?
+if test "$replay_run_status" -ne 0; then
+  if grep -E 'ERROR (dataset_failed|exchange_failed|batch_failed|dataset_submit_failed)' \
+       "$EVIDENCE_DIR/replay-run.log" | grep -vq 'exchange=DCE'; then
+    echo "PHASE4A_E2E_FAIL replay_failed_beyond_dce status=$replay_run_status" >&2
+    exit 1
+  fi
+  echo "PHASE4A_E2E_WARN replay_dce_only_failures_tolerated status=$replay_run_status"
+fi
 echo "PHASE4A_E2E_STAGE replay_run_completed"
 market_after=$(psql_value -c \
   "select count(*) from market_prices where workspace_id='$workspace_id' and trade_date=date '$COLLECTION_DATE'")
