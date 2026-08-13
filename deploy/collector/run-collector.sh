@@ -109,14 +109,47 @@ else
   echo "SEATS_DIRECT_SKIPPED missing $SEATS_LOAD" >&2
 fi
 
-# 品种目录与交易日历仍走导入通道(见上面的说明)。行情与席位已全部改走直灌,
-# 所以这里不再采 market/seats——采了也是冗余,还要在通道里堆一遍中间产物。
+# 品种目录与交易日历也走直灌。
 #
-# 采集失败也要往下走，但失败状态留到最后再退出。
-# 一部分数据集失败不该让其余步骤也进不了库。状态记下来，最后如实退出。
-for dataset in catalog calendar; do
-  "${COMPOSE[@]}" run --rm --no-deps collector --date "$COLLECTION_DATE" --dataset "$dataset" ||
-    COLLECTION_STATUS=$?
+# 这两样此前是导入通道最后的输入。它们的表(exchanges/instruments/contracts/
+# trading_calendar_*)原本带着 not null 外键指向 imported_records、import_batches、
+# data_sources——想写一行就得先在通道里造一整套血缘,迁移 202608130002 解开了。
+#
+# 目录里装的是页面天天读的东西:品种中文名、合约与交割月、**点值**。点值算错
+# 鸡蛋盈亏就差一倍,所以装载 SQL 里明确不覆盖 price_multiplier(采集器给的
+# contract_multiplier 是交易单位 5,点值是 10,两回事)。
+# 日历给自由价差的散户可交易窗口用,缺了会退回一个粗略的近似算法。
+#
+# 至此日更完全不经导入通道。
+#
+# 采集失败也要往下走:一部分数据集失败不该让其余步骤进不了库。状态记下来,
+# 最后如实退出。
+for pair in "catalog:futures_catalog_v1:load-catalog-direct.sql" \
+            "calendar:trading_calendar_v1:load-calendar-direct.sql"; do
+  dataset=${pair%%:*}; rest=${pair#*:}
+  dataset_type=${rest%%:*}; loader=${rest#*:}
+  loader_path="$previous_release_dir/deploy/collector/$loader"
+  if [ ! -r "$loader_path" ]; then
+    echo "${dataset^^}_DIRECT_SKIPPED missing $loader_path" >&2
+    continue
+  fi
+  if ! "${COMPOSE[@]}" run --rm --no-deps \
+         -v "$CSV_DIR":/tmp/emit \
+         collector --date "$COLLECTION_DATE" --dataset "$dataset" --emit-csv /tmp/emit; then
+    COLLECTION_STATUS=1
+    echo "${dataset^^}_FAILED 今天没采到，日更其余步骤继续" >&2
+    continue
+  fi
+  # 一个交易所一个文件。逐个装载:一家的数据坏掉不该让另外两家也进不了库。
+  for csv in "$CSV_DIR"/*-"$dataset_type"-"$COLLECTION_DATE".csv; do
+    [ -s "$csv" ] || continue
+    postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+    docker cp "$csv" "$postgres_id":/tmp/direct.csv
+    "${COMPOSE[@]}" exec -T postgres \
+      psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
+      -v csv_path=/tmp/direct.csv < "$loader_path" ||
+      { COLLECTION_STATUS=1; echo "${dataset^^}_LOAD_FAILED $(basename "$csv")" >&2; }
+  done
 done
 if [ "$COLLECTION_STATUS" -ne 0 ]; then
   echo "COLLECTION_PARTIAL exit=$COLLECTION_STATUS 继续做投影，最后仍以此状态退出" >&2
