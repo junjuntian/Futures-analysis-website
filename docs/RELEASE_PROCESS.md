@@ -127,7 +127,7 @@ gh run view <deploy-run-id> --log-failed   # 失败时
 
 | 镜像 | 输入路径 |
 | --- | --- |
-| api / worker | `rust/` |
+| api | `rust/` |
 | frontend | `frontend/` |
 | collector | `collector/` |
 

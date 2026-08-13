@@ -32,7 +32,6 @@ http://localhost:8088
 `linux/amd64` 镜像。镜像名固定为小写：
 
 - `ghcr.io/junjuntian/futures-analysis-website-api`
-- `ghcr.io/junjuntian/futures-analysis-website-worker`
 - `ghcr.io/junjuntian/futures-analysis-website-frontend`
 - `ghcr.io/junjuntian/futures-analysis-website-collector`
 

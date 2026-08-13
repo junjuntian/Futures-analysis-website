@@ -83,7 +83,7 @@ Actions 或 Codex Cloud 的通过结果不能替代 VPS 上的真实数据库迁
 ## GHCR 接入状态
 
 - 镜像前缀：`ghcr.io/junjuntian/futures-analysis-website`
-- API、Worker、前端分别使用 `-api`、`-worker`、`-frontend` 后缀。
+- API、前端分别使用 `-api`、`-frontend` 后缀。
 - 部署引用必须使用 `sha-<完整 Git SHA>` 或 `sha256:<digest>`，不得只使用
   `latest`；每次发布记录三个镜像的完整 digest 和对应 Git SHA。
 - 当前尚未向 `futures` VPS 提供 GHCR 拉取凭据，也未切换到镜像拉取部署模式。
