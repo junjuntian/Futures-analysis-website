@@ -198,16 +198,30 @@ else
   fail "phase_4a_e2e.sh 不再整文件比对 cron——逐条断言会重蹈时刻漂移与漏行"
 fi
 
-# 验收脚本手抄的 DCE 来源必须与 collector 的常量逐字一致。上一版验收还写着
-# 退役的 akshare 来源，打开 live 采集必失败并整库回滚——H06 的教训。
-collector_market=$(grep -o 'EASTMONEY_DCE_SOURCE_CODE = "[^"]*"' collector/src/futures_collector/sources.py | cut -d'"' -f2)
-collector_seats=$(grep -o 'EASTMONEY_SEATS_SOURCE_CODE = "[^"]*"' collector/src/futures_collector/sources.py | cut -d'"' -f2)
-e2e_market=$(grep -o '^DCE_MARKET_SOURCE=.*' rust/tests/phase_4a_e2e.sh | cut -d= -f2)
-e2e_seats=$(grep -o '^DCE_SEATS_SOURCE=.*' rust/tests/phase_4a_e2e.sh | cut -d= -f2)
-if [ -n "$collector_market" ] && [ "$collector_market" = "$e2e_market" ] && [ "$collector_seats" = "$e2e_seats" ]; then
-  pass "验收的 DCE 来源与 collector 常量一致（$collector_market / $collector_seats）"
+# 验收写库用的来源标签必须与生产逐字一致。上一版验收写着退役的 akshare 来源，
+# 打开 live 采集必失败并整库回滚——H06 的教训。
+#
+# 比的对象 2026-08-13 随直灌改了：现在决定库里 source 列的是装载脚本的
+# -v source_code，不再是 collector 里的常量（那个常量只用来拼 CSV 文件名）。
+# 两边都用 `|| true` 兜住：守卫查不到东西时必须说话，不能让 set -e 把整个
+# preflight 静默掐掉——那样操作者只看到流程突然消失，还以为跑完了。
+prod_seats=$(grep -o 'source_code=[a-z0-9_]*' deploy/collector/run-collector.sh | cut -d= -f2 | sort -u || true)
+e2e_seats=$(grep -o 'source_code=[a-z0-9_]*' rust/tests/phase_4a_e2e.sh | cut -d= -f2 | sort -u || true)
+if [ -n "$prod_seats" ] && [ "$prod_seats" = "$e2e_seats" ]; then
+  pass "验收与生产写的是同一个来源标签（$prod_seats）"
 else
-  fail "DCE 来源漂移：collector=($collector_market,$collector_seats) e2e=($e2e_market,$e2e_seats)"
+  fail "来源标签漂移：生产=($prod_seats) 验收=($e2e_seats)——验收会断言在一个没人写过的来源上"
+fi
+
+# 验收装载 CSV 用的文件名约定也必须与生产一致：采集器按 <来源>-<数据集>-<日期>.csv
+# 命名，生产与验收各自手写这个模式，写歪了就是「采集成功、装载找不到文件」，
+# 而两边都不报错。
+prod_csv=$(grep -oF 'DCE-seat_positions_v1-$COLLECTION_DATE.csv' deploy/collector/run-collector.sh | head -1 || true)
+e2e_csv=$(grep -oF 'DCE-seat_positions_v1-$COLLECTION_DATE.csv' rust/tests/phase_4a_e2e.sh | head -1 || true)
+if [ -n "$prod_csv" ] && [ -n "$e2e_csv" ]; then
+  pass "验收与生产的席位 CSV 文件名约定一致"
+else
+  fail "席位 CSV 文件名约定对不上：生产=($prod_csv) 验收=($e2e_csv)"
 fi
 
 step "四、CI 与镜像"

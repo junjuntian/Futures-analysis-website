@@ -146,24 +146,25 @@ if [ "$loaded_any" = 1 ]; then
   echo "PHASE4A_E2E_STAGE catalog_rows_actually_written"
 fi
 
-for csv in "$CSV_DIR"/DCE-seat_positions_v1-"$COLLECTION_DATE".csv; do
-  test -s "$csv" || continue
-  load_one "$csv" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
+# 文件名与来源标签都必须与 run-collector.sh 逐字一致:验收要么验的是生产真正
+# 走的那条路,要么什么都没验。preflight 有一条守卫盯着两边不漂移。
+SEAT_CSV="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
+if test -s "$SEAT_CSV"; then
+  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
   test "$(psql_value -c "select count(*) from seat_history where source='eastmoney_seats_v1' and trade_date=date '$COLLECTION_DATE'")" -gt 0
   echo "PHASE4A_E2E_STAGE seat_rows_actually_written"
-done
+fi
 
 # ---- 幂等 ----
 #
 # 同一份 CSV 再装一遍,行数必须一模一样。日更每天两轮、补采还会重跑,
 # 写重的话席位会凭空翻倍,而图上看不出来——线还是连续的。
 seats_after_first=$(psql_value -c "select count(*) from seat_history")
-for csv in "$CSV_DIR"/DCE-seat_positions_v1-"$COLLECTION_DATE".csv; do
-  test -s "$csv" || continue
-  load_one "$csv" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
+if test -s "$SEAT_CSV"; then
+  load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
-done
+fi
 test "$(psql_value -c "select count(*) from seat_history")" = "$seats_after_first"
 echo "PHASE4A_E2E_STAGE idempotent"
 
