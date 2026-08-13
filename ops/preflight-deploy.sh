@@ -261,15 +261,9 @@ digest_of() {
   printf '%s\n' "$digests" | grep -- "-$1:sha-$SHA@" | sed 's/.*@//' | head -1
 }
 
-step "五、自建 runner"
-
-runner=$(gh api "repos/$REPO/actions/runners" \
-  --jq '.runners[] | "\(.status) busy=\(.busy)"' 2>/dev/null | head -1 || echo "unknown")
-case "$runner" in
-  "online busy=false") pass "runner 在线且空闲" ;;
-  "online busy=true")  fail "runner 正在跑别的作业——此刻重启它会把那个作业杀掉" ;;
-  *)                   fail "runner 状态异常：$runner" ;;
-esac
+# 原来这里检查自建 runner 在线且空闲——那时它只有一台,被别的作业占着就得等,
+# 重启它还会杀掉正在跑的作业。2026-08-13 全部搬到托管 runner 之后没有这个约束:
+# 每个作业各拿一台全新机器,不排队也不互相干扰。这一节整体退役。
 
 if [ "$failures" -gt 0 ]; then
   printf '\n\033[31m%d 项未通过，先修好再部署。\033[0m\n' "$failures"
