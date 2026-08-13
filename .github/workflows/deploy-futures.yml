@@ -174,12 +174,8 @@ jobs:
           install -m 600 deploy/nginx/nginx.conf "${RELEASE_BUNDLE}/deploy/nginx/nginx.conf"
           install -m 700 deploy/collector/run-collector.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-collector.sh"
-          install -m 700 deploy/collector/run-backfill.sh \
-            "${RELEASE_BUNDLE}/deploy/collector/run-backfill.sh"
           install -m 700 deploy/collector/run-spread-warm.sh \
             "${RELEASE_BUNDLE}/deploy/collector/run-spread-warm.sh"
-          install -m 600 deploy/collector/project-history.sql \
-            "${RELEASE_BUNDLE}/deploy/collector/project-history.sql"
           install -m 600 deploy/collector/sina-dce-daily.py \
             "${RELEASE_BUNDLE}/deploy/collector/sina-dce-daily.py"
           install -m 600 deploy/collector/load-dce-daily.sql \
@@ -204,7 +200,7 @@ jobs:
           # 各自演化：2026-08-12 查出服务器那份 parsers.py 还在按「品种上市年」补三位
           # 郑商所代码的世纪，把 2026 年的 FG608 解析成 FG1608，跟真实存在过的 2016 年
           # 合约撞进同一条序列，行情与席位各错了 96 行和 2958 行。仓库里那份早就修成
-          # 按交易日锚定，改动却从来没走到机器上——与上面 run-backfill.sh 一模一样的病。
+          # 按交易日锚定，改动却从来没走到机器上——同样的病 run-backfill.sh 也犯过。
           # 清单显式列出，理由同迁移清单；漏列由 ops/preflight-deploy.sh 挡。
           install -m 600 backfill/parsers.py "${RELEASE_BUNDLE}/backfill/parsers.py"
           install -m 600 backfill/to_csv.py "${RELEASE_BUNDLE}/backfill/to_csv.py"
@@ -896,12 +892,6 @@ jobs:
 
           install -m 700 "$RELEASE_DIR/deploy/collector/run-collector.sh" \
             /usr/local/sbin/run-futures-collector
-          # The backfill driver was installed by hand once and never shipped by
-          # a release, so every repository change to it silently stopped at the
-          # bundle. It is installed here for the same reason the collector
-          # wrapper is: the box must run the reviewed copy, not a snapshot.
-          install -m 700 "$RELEASE_DIR/deploy/collector/run-backfill.sh" \
-            /usr/local/sbin/run-futures-backfill
           install -m 700 "$RELEASE_DIR/deploy/collector/run-spread-warm.sh" \
             /usr/local/sbin/run-futures-spread-warm
           # 解析脚本装到采集的工作目录。**有差异先备份再覆盖**：这里是单向同步，仓库

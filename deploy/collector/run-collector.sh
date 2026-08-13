@@ -180,15 +180,9 @@ else
   echo "DCE_DAILY_SKIPPED missing $DCE_SCRIPT" >&2
 fi
 
-PROJECTION="$previous_release_dir/deploy/collector/project-history.sql"
-if [ -r "$PROJECTION" ]; then
-  "${COMPOSE[@]}" exec -T postgres \
-    psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$PROJECTION"
-else
-  # 老版本发布目录里没有这个文件。不当致命错误：采集本身已经成功了，
-  # 报一声让日志里留下痕迹就够了。
-  echo "PROJECTION_SKIPPED missing $PROJECTION" >&2
-fi
+# 这里原本有一步「投影」：把 market_prices / seat_positions（导入通道的中转表）
+# 搬进 price_history / seat_history（页面读的宽表）。上面几步现在直接写宽表，
+# 中转表也已随 DEC-049 删除，这座桥两岸都没了。
 
 # 修掉三禾填出来的「持仓 0」。**必须排在品种汇总之前**：它会改写和删除席位行，
 # 跑在汇总之后的话，汇总里还留着按假 0 算出来的合计，要等到第二天才对得上。

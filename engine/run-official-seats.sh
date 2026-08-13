@@ -52,6 +52,12 @@ for f in price_czce price_shfe seat_czce seat_shfe; do
   docker cp "load/$f.csv" "$PG:/tmp/$f.csv"
 done
 docker exec -i "$PG" psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 <<'EOF'
+-- workspace 的判据从 market_prices 换成 price_history(2026-08-13,DEC-049)。
+-- 判据是「哪个空间真有行情」,不是「唯一的空间」——后者挡不住事故:回填脚本当初
+-- 按 UUID 最小挑,挑中一个 Phase 3C 的 E2E 测试空间,十三年数据躺在运营者看不见
+-- 的地方;另一次一份 CSV 被复制成 31 份,3639 行灌出 112809 行。
+-- market_prices 是导入通道的中转表,已删;同一个信号现在在 price_history,
+-- 那正是直灌写入的目标表。
 create temp table p_stage (like price_history);
 alter table p_stage drop column id, drop column workspace_id, drop column loaded_at;
 \copy p_stage from '/tmp/price_czce.csv' with (format csv, header true, null '')
@@ -59,7 +65,7 @@ alter table p_stage drop column id, drop column workspace_id, drop column loaded
 insert into price_history (id, workspace_id, exchange, instrument, contract, trade_date,
   open_price, high_price, low_price, close_price, settlement_price, prev_settlement_price,
   volume, volume_basis, turnover, open_interest, open_interest_change, source)
-select gen_random_uuid(), (select workspace_id from market_prices group by 1 order by count(*) desc limit 1), s.*
+select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*
   from p_stage s
  -- 盘中快照(SHFE kx.dat 白天就能取到,收盘/结算为空)不入库;
  -- 收盘后的完整文件会在晚间 cron 覆盖原始文件并正常入库。
@@ -77,7 +83,7 @@ alter table s_stage drop column id, drop column workspace_id, drop column loaded
 \copy s_stage from '/tmp/seat_shfe.csv' with (format csv, header true, null '')
 insert into seat_history (id, workspace_id, exchange, instrument, contract, is_variety_total,
   variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source)
-select gen_random_uuid(), (select workspace_id from market_prices group by 1 order by count(*) desc limit 1), s.*
+select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*
   from (select distinct on (trade_date, exchange, instrument, contract, is_variety_total,
                             rank_type, member, source) *
           from s_stage) s

@@ -4,7 +4,8 @@ import logging
 import time
 from datetime import UTC, date, datetime
 
-from futures_collector.api import PlatformClient, safe_error_code
+from futures_collector.csv_sink import CsvSink
+from futures_collector.errors import safe_error_code
 from futures_collector.normalize import (
     filter_rows_by_variety,
     normalize_calendar,
@@ -40,7 +41,7 @@ class CollectionRunner:
     def __init__(
         self,
         adapter: AkshareAdapter,
-        platform: PlatformClient,
+        platform: CsvSink,
         *,
         retry_delay_seconds: float = 1.0,
     ) -> None:

@@ -46,7 +46,7 @@ class CsvWriteResult:
     skipped: int
 
 
-def _render(dataset_type: str, rows: list[dict[str, str]]) -> str:
+def render_csv(dataset_type: str, rows: list[dict[str, str]]) -> str:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=DATASET_FIELDS[dataset_type], extrasaction="raise")
     writer.writeheader()
@@ -87,7 +87,7 @@ class CsvSink:
         # 先写临时文件再原子改名:装载脚本可能与采集并行(不同数据集),
         # 半截的 CSV 被读到会灌进残缺的一天。
         staging = target.with_suffix(".csv.partial")
-        staging.write_text(_render(dataset_type, rows), encoding="utf-8")
+        staging.write_text(render_csv(dataset_type, rows), encoding="utf-8")
         staging.replace(target)
         # 上一轮如果失败过,这次成功要把失败标记清掉,否则装载脚本会一直跳过它。
         failed_marker = target.with_suffix(".csv.failed")

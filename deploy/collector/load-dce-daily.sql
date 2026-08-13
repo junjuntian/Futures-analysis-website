@@ -1,7 +1,6 @@
 -- 把新浪采到的大商所日行情装进 price_history。
 --
--- 与 project-history.sql 分开是因为来路不同：那条是从 market_prices 投影（走审计导入
--- 通道采到的），这条是直接从新浪取的。两条都写 price_history，靠 source 分得清。
+-- 大商所行情走新浪，与其余交易所的官方文件分属两条来路，所以单独一个装载脚本。
 --
 -- 幂等：按 (workspace_id, contract, trade_date, source) upsert，重复跑只刷新同一批行。
 
@@ -38,11 +37,13 @@ select gen_random_uuid(), s.workspace_id, d.exchange, d.instrument, d.contract, 
    -- product_instrument_scope 每个 workspace 都有一份（迁移是逐 workspace 播的），
    -- 不加这个条件，一份 CSV 会被复制成 31 份——生产上真发生过，3639 行灌出 112809 行。
    --
-   -- 判据用「有没有 market_prices」而不是别的：每日采集是以运营者的账号登录写进去的，
-   -- 所以有行情的那个空间必然是他在用的。回填脚本当初用「UUID 最小的 workspace」，
+   -- 判据用「有没有行情」而不是别的：回填脚本当初用「UUID 最小的 workspace」，
    -- 挑中的是一个 Phase 3C 的 E2E 测试空间，十三年的数据因此躺在运营者看不见的地方。
+   --
+   -- 原来看的是 market_prices（导入通道的中转表）。那张表 2026-08-13 随通道删除
+   -- （DEC-049），判据改看 price_history —— 直灌写入的目标表，同一个信号。
    and exists (
-       select 1 from market_prices m where m.workspace_id = s.workspace_id
+       select 1 from price_history m where m.workspace_id = s.workspace_id
    )
 on conflict (workspace_id, contract, trade_date, source) do update set
     open_price = excluded.open_price,

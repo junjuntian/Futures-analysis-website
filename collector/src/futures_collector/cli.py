@@ -4,8 +4,7 @@ import argparse
 import logging
 from datetime import date
 
-from futures_collector.api import PlatformClient, safe_error_code
-from futures_collector.config import load_credentials
+from futures_collector.errors import safe_error_code
 from futures_collector.csv_sink import CsvSink
 from futures_collector.runner import CollectionRunner
 from futures_collector.sources import DEFAULT_EXCHANGES, SOURCES, AkshareAdapter
@@ -61,13 +60,12 @@ def parser() -> argparse.ArgumentParser:
         "--emit-csv",
         metavar="DIR",
         help=(
-            "Write each dataset to a CSV in DIR instead of submitting it through "
-            "the audited import channel. The loader SQL then copies those files "
-            "straight into the wide tables the pages read. Set for every scheduled "
-            "run: the import channel exists for files a person uploads and needs to "
-            "preview, and the operator confirmed on 2026-08-13 that nothing does "
-            "that any more -- meanwhile its intermediates had grown as large as the "
-            "business data itself."
+            "Write each dataset to a CSV in DIR. This is the only output: the "
+            "loader SQL then copies those files straight into the wide tables the "
+            "pages read. It used to be optional, with the default going through the "
+            "audited import channel -- that channel was removed on 2026-08-13 "
+            "(DEC-049), so leaving the flag off would now POST to endpoints that "
+            "return 404."
         ),
     )
     return value
@@ -99,6 +97,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         return 0
+    log_ = logging.getLogger("futures_collector")
+    if not args.emit_csv:
+        # 不能用 argparse 的 required:那会把 --resolve-date 一起挡掉,而那条路
+        # 只查交易日历、不产出任何数据。
+        log_.error("collector_start_failed error=emit_csv_is_required")
+        return 1
     # `all` 指的是「默认要采的那些」,不是「代码里定义过的全部」——见
     # sources.DEFAULT_EXCHANGES 的说明。显式指定某一家时仍可采任意一家。
     exchanges = list(DEFAULT_EXCHANGES) if args.exchange == "all" else [args.exchange]
@@ -106,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     datasets = (
         ["catalog", "calendar", "market", "seats"] if args.dataset == "all" else [args.dataset]
     )
-    log = logging.getLogger("futures_collector")
+    log = log_
     if args.through is not None and not args.dce_history:
         # A range against a live source would hammer an exchange with no pacing
         # between dates. `run-backfill.sh` is what paces those.
@@ -125,13 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         if not dates:
             log.error("collector_start_failed error=no_trading_dates_in_range")
             return 1
-        # CSV 出口不需要平台账号:它不登录、不发请求,只写文件。
-        # 凭据只在走导入通道时才读,否则新机器上没配账号就跑不了采集。
-        sink = (
-            CsvSink(args.emit_csv)
-            if args.emit_csv
-            else PlatformClient(load_credentials())
-        )
+        sink = CsvSink(args.emit_csv)
         failures = 0
         with sink as platform:
             runner = CollectionRunner(adapter, platform)

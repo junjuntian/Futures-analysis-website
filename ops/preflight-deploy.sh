@@ -158,6 +158,8 @@ step "三、发布包内容"
 
 # 教训：project-history.sql 加了却没装进发布包，run-collector.sh 找不到它，
 # 只会打一行 PROJECTION_SKIPPED，然后每天安静地不投影。
+# 那个脚本本身已随 DEC-049 删除，但这条门禁留着——它守的是「deploy/collector/ 下
+# 每个文件都得装进发布包」，与具体是哪个文件无关。
 for file in deploy/collector/*; do
   # 只看文件。跑过 pytest 之后这里会多出一个 __pycache__ 目录，它不是要发布的东西，
   # 报成「没装进发布包」是误报——门禁误报多了就会被无视，跟没有一样。
