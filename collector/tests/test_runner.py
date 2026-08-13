@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pandas as pd
 
 from futures_collector.runner import CollectionRunner
-from futures_collector.sources import DatasetCompletenessError
 
 
 class FakeAdapter:
