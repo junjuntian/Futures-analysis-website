@@ -77,6 +77,16 @@ else
   fail "cargo fmt --check 不过——在 rust/ 下跑一次 cargo fmt 即可"
 fi
 
+# clippy，**命令必须与 CI 逐字一致**（含 -- -D warnings）。
+# 教训（2026-08-13）：本地跑的是不带 -D warnings 的 clippy，一条
+# single_element_loop 在本地只是提示、在 CI 是编译失败——「我本地跑过了」
+# 与「CI 会过」是两件事，除非两边跑的是同一条命令。
+if (cd rust && cargo clippy --workspace --all-targets -- -D warnings >/dev/null 2>&1); then
+  pass "cargo clippy 无警告"
+else
+  fail "cargo clippy 有警告——CI 用 -D warnings 会判失败，本地跑 (cd rust && cargo clippy --workspace --all-targets -- -D warnings) 看详情"
+fi
+
 if [ -d frontend/node_modules ]; then
   if (cd frontend && npx vite build >/dev/null 2>&1); then
     pass "前端 vite build 通过"

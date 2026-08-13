@@ -802,14 +802,12 @@ mod tests {
         // 首页的数据健康端点。它只读、没有 CSRF 分支，所以不断言 403；
         // 但「必须登录」这条与上面同等刚性——一个不需要登录就能读的端点，
         // 会把这个 workspace 有哪些交易所、数据到哪天全部说出去。
-        for (path, method) in [("/api/v1/overview/data-health", "get")] {
-            let operation = &paths[path][method];
-            assert_eq!(
-                operation["security"][0]["session_cookie"],
-                serde_json::json!([])
-            );
-            assert!(operation["responses"]["401"].is_object());
-        }
+        let data_health = &paths["/api/v1/overview/data-health"]["get"];
+        assert_eq!(
+            data_health["security"][0]["session_cookie"],
+            serde_json::json!([])
+        );
+        assert!(data_health["responses"]["401"].is_object());
 
         // 改密码：登录 + CSRF + Origin 三道都要在契约里写明。
         let password = &paths["/api/v1/auth/password"]["post"];
