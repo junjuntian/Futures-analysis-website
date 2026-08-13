@@ -135,3 +135,19 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose -f docker-compose.yml -f docker-compose.production.yml config --quiet
+
+      # 收掉服务容器留下的匿名卷。
+      #
+      # 上面的 `services: postgres` 每跑一次就在 runner 上留一个 67MB 的匿名卷:
+      # 作业结束删容器,卷不删。GitHub 托管 runner 每次是全新机器所以看不见这事,
+      # 自建 runner 会一直堆——2026-08-13 查生产磁盘,155 个这样的卷占了 9.6GB,
+      # 而 runner 和生产是同一块盘。
+      #
+      # 只删「匿名且没有容器在用」的。命名卷(postgres_data / object_storage_data
+      # 里是生产数据)不带 anonymous 标签,不在过滤范围内——这一点在生产上验证过
+      # 才敢往 CI 里放。always():作业失败时更要清,否则失败的那几轮堆得最快。
+      - name: Reclaim anonymous service volumes
+        if: always()
+        run: |
+          docker volume ls -q --filter label=com.docker.volume.anonymous --filter dangling=true |
+            xargs -r docker volume rm >/dev/null || true
