@@ -145,10 +145,10 @@ onMounted(async () => {
   <div class="page smart-money">
     <h1>机构资金</h1>
     <p v-if="data" class="sub">
-      跟随金银双强八席位资金动向,每日收盘后自动计算。数据日期 <b>{{ data.data_date }}</b> ·
+      跟随金银双强七席位资金动向,每日收盘后自动计算。数据日期 <b>{{ data.data_date }}</b> ·
       计算于 {{ data.generated_at }}
     </p>
-    <p v-else class="sub">跟随金银双强八席位资金动向,每日收盘后自动计算。</p>
+    <p v-else class="sub">跟随金银双强七席位资金动向,每日收盘后自动计算。</p>
 
     <div v-if="error" class="err">{{ error }}</div>
     <div v-else-if="!data" class="loading">正在读取信号数据…</div>
@@ -307,7 +307,7 @@ onMounted(async () => {
               </div>
               <div class="item">
                 <div class="name">
-                  <span>③ 八席位净仓 &lt;60 分位</span>
+                  <span>③ 七席位净仓 &lt;60 分位</span>
                   <span :class="data.markets[key].conditions.netq.pass ? 'green' : 'red'">
                     {{ data.markets[key].conditions.netq.value }} 分位
                     {{ data.markets[key].conditions.netq.pass ? '✓' : '✗' }}
@@ -322,7 +322,7 @@ onMounted(async () => {
         </div>
 
         <div class="section">
-          <h2>八席位近期动态</h2>
+          <h2>七席位近期动态</h2>
           <div class="desc">最近三周的有效增多事件(权重为当年生效值)。</div>
           <div class="scroll-x">
             <table>

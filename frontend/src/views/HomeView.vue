@@ -202,7 +202,7 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
           </template>
           <template v-else>
             <div class="ov-big ov-idle">空仓</div>
-            <p class="ov-sub">等待八席位共振进场信号</p>
+            <p class="ov-sub">等待七席位共振进场信号</p>
           </template>
           <el-alert
             v-if="market.alert"

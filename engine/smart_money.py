@@ -8,15 +8,15 @@
 - T+1 时序:席位数据 15:00 后可得,信号在收盘后产生,买卖执行均为次日开盘。
 
 规则(2026-08-11 运营者拍板定稿):
-  信号组 = 金银双强八家;权重逐年扩窗 t 值(截至上年 12-01 已实现 fwd20),clip[0,5],N<30 记 0
+  信号组 = 金银双强七家;权重逐年扩窗 t 值(截至上年 12-01 已实现 fwd20),clip[0,5],N<30 记 0
   事件   = 净多增加 且 多头腿主导 且 |ΔNet/OI| ≥ 该席位近 250 上榜日 80 分位(shift1)
   分数   = Σ 权重 × 近 5 日最强事件强度(强度 = |flow|/阈值,封顶 3)
   门槛   = 1.2 × 当年组内最大权重(黄金 2026=6.0,白银自动校准)
-  买点   = 分数 ≥ 门槛 且 距 60 日最低收盘 <12% 且 八家合计净多 < 250 日 60 分位
+  买点   = 分数 ≥ 门槛 且 距 60 日最低收盘 <12% 且 七家合计净多 < 250 日 60 分位
            (国泰君安/东证的事件仅在距低点 <5% 时计分)
   进场   = 触发席位加权建仓成本 ±5 元区间,信号后 10 个交易日内触及则成交,
            否则放弃;成本不可得时走次日开盘市价
-  卖点   = 八家连续 10 个交易日无有效事件(收盘确认,次日开盘卖)/ 进场价 -4% 盘中止损
+  卖点   = 七家连续 10 个交易日无有效事件(收盘确认,次日开盘卖)/ 进场价 -4% 盘中止损
 """
 from __future__ import annotations
 
@@ -33,11 +33,29 @@ import pandas as pd
 # ---------------------------------------------------------------- 规则参数
 
 RULES = {
-    "group8": ["中财期货", "中信期货", "海通期货", "国泰君安",
-               "高盛期货", "东证期货", "华泰期货", "国投期货"],
-    # 与 Rust 端 MEMBER_ALIASES(spread_analytics.rs)保持同集——那边多出的两条
-    # 这里曾缺失:来源真会写「国投安信期货」(全库 3.4 万行),不归一则该机构整段
-    # 历史被静默排除在 group8 之外,权重和事件分数全丢。
+    # 信号组。2026-08-14 由运营者拍板移除国投期货,七家。
+     #
+     # 移除理由(运营者判断,非回测结论):国投的事件模式是浮盈加仓——在趋势
+     # 中后段反复加多。这类席位会不断重置离场倒计时,把持仓按在趋势里;运营者
+     # 认为该风格在回调中会亏得很厉害,不接受它进入信号源。2026-03-25 那笔
+     # AU 是触发讨论的实例:4 月中旬倒计时已数到 8/10,国投 4-21/23/29 三次
+     # 加多连续重置,最终 5-25 才以 +1.47% 离场,而 4-23 离场本可 +7.27%。
+     #
+     # 已知代价,如实记录,不粉饰:
+     #   - 全样本(2015-2026)累计 +326.7% → +281.0%,少 45.7 个百分点
+     #   - 2019-2026 少 51.1 个百分点;主要损失在 AU-2025(-20.2)、
+     #     AG-2026(-13.4)、AG-2022(-12.0)、AG-2025(-11.8)
+     #   - 市况检验并不支持"国投只在牛市管用":AG 非牛市 2.86% > 牛市 2.04%,
+     #     AU 两种市况都最弱(1.25/0.10,与它 2.93 的垫底权重一致)。
+     #     真正牛市专属的是东证在 AG(牛 3.95% / 非牛 -0.35%),运营者决定保留。
+     #
+     # 这是一次基于交易哲学的人工干预,不是数据优化。若日后要回退,把
+     # "国投期货" 加回本列表即可,权重与门槛都会自动重算。
+     "group": ["中财期货", "中信期货", "海通期货", "国泰君安",
+               "高盛期货", "东证期货", "华泰期货"],
+    # 与 Rust 端 MEMBER_ALIASES(spread_analytics.rs)保持同集。国投两条保留:
+    # 它虽已不在信号组内,但来源真会写「国投安信期货」(全库 3.4 万行),归一化
+    # 是数据卫生,与是否采信它无关——留着,免得日后要回退时又踩一次同名分裂。
     "alias": {"浙江永安": "永安期货", "乾坤期货": "高盛期货",
               "上海东证": "东证期货", "国投安信": "国投期货",
               "国投安信期货": "国投期货", "申银万国": "申万期货"},
@@ -133,7 +151,7 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
     # 反推行(reboard_inferred)不进任何汇总——与 compute-seat-totals.sql 同一条
     # 口径,理由也相同:它只覆盖「掉榜前一日」那一天、某会员某合约有别的合约没有,
     # 混进 member_day 的求和就是一份「有时含反推、有时不含」的净仓序列,会凭空
-    # 造出 ΔNet 跳变(实测 AG 八席位 2023-04-18 净仓差 -11,454 手)。
+    # 造出 ΔNet 跳变(实测 AG 席位 2023-04-18 净仓差 -11,454 手)。
     # 对趋势跟随,跳变是假信号,比稳定少算更糟。
     seat = seat[seat["source"].astype(str) != "reboard_inferred"]
     col = seat["is_variety_total"]
@@ -272,7 +290,7 @@ def yearly_weights(ev: pd.DataFrame, cont: pd.DataFrame, years) -> dict:
     for y in years:
         cutoff = pd.Timestamp(f"{y - 1}-12-01")
         row = {}
-        for m in RULES["group8"]:
+        for m in RULES["group"]:
             dr = fwd.reindex(ev[(ev["member"] == m) & (ev["trade_date"] < cutoff)]["trade_date"]).dropna()
             if len(dr) < RULES["weight_min_n"] or dr.std(ddof=1) == 0:
                 row[m] = 0.0
@@ -331,9 +349,9 @@ class MarketEngine:
         self.cont = continuous(price, self.mc)
         self.md = member_day(seat)
         self.dates = self.cont.index
-        self.group = RULES["group8"]
+        self.group = RULES["group"]
 
-        # 分合约多头榜明细(仅八席位)与每日各合约多头榜门槛(第20名持仓量)。
+        # 分合约多头榜明细(仅信号组席位)与每日各合约多头榜门槛(第20名持仓量)。
         # 用途:龙虎榜是前20截断数据,"榜上无名"≠清仓(2026-08-12 实证:高盛
         # 2025-08-20 掉榜实持 1830 手、2026-07-29 掉榜实持 1691 手,与三禾反推
         # 一致)。门槛用于给掉榜席位的减仓幅度定下界;回榜日 change 可反推
@@ -382,7 +400,7 @@ class MarketEngine:
         return self.ev_eff[(self.ev_eff["trade_date"] > d - w) & (self.ev_eff["trade_date"] <= d)]
 
     def quiet_streak(self) -> int:
-        """截至最新交易日,八席位连续无有效增多事件的天数(卖出倒计时用)。"""
+        """截至最新交易日,信号组连续无有效增多事件的天数(卖出倒计时用)。"""
         n = 0
         for v in self.active.to_numpy()[::-1]:
             if v:
@@ -426,7 +444,7 @@ class MarketEngine:
                      & (self.dist60 < RULES["dist_low_max"])
                      & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
         # 中继再进场(2026-08-11 运营者案例驱动,回测全期 +81%→+116%):
-        # 消退卖出后,八家再度共振(仅分数门槛)即视为同一轮趋势的延续,
+        # 消退卖出后,七家再度共振(仅分数门槛)即视为同一轮趋势的延续,
         # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
         relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
         trades, busy = [], -1
@@ -676,7 +694,7 @@ def rare_flip_alerts(eng: MarketEngine, lookback_days: int = 60) -> list[dict]:
 def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
     """主力跑路警报(运营者 2026-08-11 案例驱动,历史两次全中)。
 
-    结构 = 金银比历史极端低(<48,26 年 ~3% 分位)+ 八家近 5 日白银增空共振(>=3 家)。
+    结构 = 金银比历史极端低(<48,26 年 ~3% 分位)+ 七家近 5 日白银增空共振(>=3 家)。
     可选确认 = 任一核心席位黄金多头大额消失(前日 >=2000 手、次日榜上无名)。
     历史:2011-04(比值 31.7,金榜集体减多增空)→ 两周白银 -28%、黄金 -2%;
          2026-01(比值 46.6,中财等全员空银 + 高盛清金多)→ 银 -30.6%、金 -12%。
@@ -696,7 +714,7 @@ def flee_alert(au: MarketEngine, ag: MarketEngine, ratio: dict) -> dict | None:
     # 实例:高盛 2025-08-20 无名实持 1830 手、2026-07-29 无名实持 1691 手)。
     vanished = []
     au_dates = au.dates
-    for m in RULES["group8"]:
+    for m in RULES["group"]:
         rows = au.seat_long[au.seat_long["member"] == m]
         if rows.empty:
             continue
@@ -910,10 +928,10 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                 "level": "danger" if due else "warn", "market": key,
                 "date": str(data_date.date()),
                 "text": (
-                    (f"{eng.meta['name']} 多单 — 卖出条件已满足:八席位连续 "
+                    (f"{eng.meta['name']} 多单 — 卖出条件已满足:七席位连续 "
                      f"{snap_pos['fade_days']} 日无增多事件,**下一交易日开盘卖出**")
                     if due else
-                    (f"{eng.meta['name']} 多单持有中 — 八席位已连续 "
+                    (f"{eng.meta['name']} 多单持有中 — 七席位已连续 "
                      f"{snap_pos['fade_days']}/{RULES['fade_days']} 日无增多事件"
                      f"(满 {RULES['fade_days']} 日后次日开盘卖出);"
                      f"硬止损 {snap_pos['stop_px']} 盘中有效")),
@@ -977,9 +995,9 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "alert_history": historical_alerts(au, ag, ratio_s),
         "stats": stats,
         "rules": {
-            "group": RULES["group8"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 八席位净仓<60分位 → 机构成本±5元区间挂单(10日有效)",
-            "sell": f"八席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
+            "group": RULES["group"],
+            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效)",
+            "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
             "cond_seats": RULES["cond_seats"],
         },
     }
