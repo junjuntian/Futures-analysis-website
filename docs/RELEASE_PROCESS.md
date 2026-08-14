@@ -24,10 +24,17 @@
 ②③ 都要人去点。只 push 不触发,生产一动不动——这是最常见的"我明明改了啊"。
 
 生产机: 服务器别名 `qh`(172.238.18.206),站点 `https://shejimao.trade`。
-2026-08-13 从 `futures`(172.238.11.174)迁过来;**老机已于当日退役**(cron 移至
-/root/retired-cron、容器与 runner 停、已关机,实例删除在 Linode 面板)。退路改由
-异地备份承担:每日整库 dump 推到 ssp(172.104.107.155:/root/futures-db-backup/latest.dump,
-只留最新一份,先验可读再原子覆盖,脚本 `deploy/collector/offsite-db-backup.sh`)。
+2026-08-13 从 `futures`(172.238.11.174)迁过来;**老机已退役,实例于 2026-08-15
+由运营者在 Linode 面板删除**(此前已停容器与 runner、cron 移至 /root/retired-cron、
+关机)。
+
+**因此现在没有可切换的热备机器**——出事只有两条退路,别指望第三条:
+
+1. **异地备份**:每日整库 dump 推到 ssp(172.104.107.155:/root/futures-db-backup/latest.dump,
+   只留最新一份,先 `pg_restore --list` 验可读再原子覆盖,脚本
+   `deploy/collector/offsite-db-backup.sh`,cron 每日 15:40 UTC)。
+   首次自动执行 2026-08-14T15:40Z 成功,234,407,468 字节。
+2. **部署链回滚**:每次部署前在 qh 本机备份,失败自动拦下、线上仍是上一版。
 
 **构建跑在 GitHub 托管 runner**,不再用自建 runner。仓库 2026-08-13 转为公开,
 托管 runner 对公开仓库免费,每个作业各拿一台全新机器——不排队、不互相干扰,
