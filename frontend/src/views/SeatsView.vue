@@ -390,7 +390,9 @@ const tooltip = {
 // 底部滑钮，与价差走势图同一套。十八年的日线挤在一屏里只看得出个大概形状，
 // 想看某一段建仓就得能拉。
 const zoom = computed(() => [
-  { type: 'inside' as const },
+  // 滚轮不给 dataZoom 用：这一页四张图竖着叠，滚轮被图抢走就翻不动页面了。
+  // 缩放交给滑钮，图内按住拖动仍可平移。
+  { type: 'inside' as const, zoomOnMouseWheel: false, moveOnMouseWheel: false },
   {
     type: 'slider' as const,
     height: 26,

@@ -220,7 +220,8 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
     // 与走势图同一套滑钮。叠年图横轴是日历日，想比某一段（比如换月前后两周）
     // 各年的走势，没有滑钮只能眯着眼在一整年里找。
     dataZoom: [
-      { type: 'inside' },
+      // 滚轮留给页面。缩放交给滑钮，图内按住拖动仍可平移。
+      { type: 'inside', zoomOnMouseWheel: false, moveOnMouseWheel: false },
       {
         type: 'slider',
         height: 26,
