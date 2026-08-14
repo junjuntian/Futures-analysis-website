@@ -1270,6 +1270,48 @@ mod tests {
     }
 
     #[test]
+    fn the_volume_board_is_never_read_as_a_position() {
+        // 成交量榜与持仓榜是两张榜。某席位某天只上了成交量榜时，若不排掉这行，
+        // 它会进 seats 分组、两个 sum 双双得零，被成本引擎读成「平仓」：成本清零、
+        // 当日盈亏算出一次假的巨额了结。生产实测 AU/AG 共 166,247 个席位-合约-日
+        // 属于这种情形（中信建投 AU2608 2026-08-05）。
+        for query in [building_days_sql(), variety_building_sql()] {
+            assert!(
+                query.contains("rank_type in ('long', 'short')"),
+                "取数必须只认多空两张榜：{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_variety_total_adds_up_the_contract_rows() {
+        // 品种汇总要按合约相加，不能拿交易所的品种汇总榜那一行——那行只有一个
+        // 总手数，推不出成本，更分不出净多的合约与净空的合约两腿。
+        let query = variety_building_sql();
+        assert!(
+            query.contains("not is_variety_total"),
+            "品种汇总必须从逐合约行卷出来：{query}"
+        );
+        assert!(
+            query.contains("group by contract, trade_date"),
+            "必须逐合约分组，合并留给成本引擎做：{query}"
+        );
+        // 结算价要跟着各自的合约走。少了这个连接条件，所有合约会共用同一条行情。
+        assert!(
+            query.contains("p.contract = s.contract and p.trade_date = s.trade_date"),
+            "每个合约要配自己的结算价：{query}"
+        );
+        // 去重纪律与单合约那条一致，否则同一天算两遍。
+        let dedupe = query.find("distinct on").expect("求和之前必须先按来源去重");
+        let sum = query.find("sum(case when rank_type").expect("求和还在");
+        assert!(dedupe < sum, "去重必须发生在求和之前");
+        assert!(
+            query.contains("regexp_replace(member"),
+            "汇总必须按归一后的会员"
+        );
+    }
+
+    #[test]
     fn the_freshness_queries_stay_inside_a_bounded_window() {
         // 没有窗口就是全表 group by：runtime 角色下实测 4.5 秒，首页等不起。
         // 这条锁住「限定日期范围」本身，改 SQL 时不至于顺手把它删了。
@@ -1968,6 +2010,17 @@ const SEAT_SOURCE_RANK: &str = "case
                 else 4
             end";
 
+/// 行情来源的可信度，同 [`SEAT_SOURCE_RANK`] 的道理：同一合约同一天日更源与官方
+/// 历史源各有一行（生产 AU/AG 实测 140 组），不按可信度收敛成一行，成本就取决于
+/// 行序这种没人保证的东西。
+const PRICE_SOURCE_RANK: &str = "case
+                when source like '%_official%' then 0
+                when source = 'akshare_v1' then 1
+                when source like 'eastmoney%' then 2
+                when source like 'sina%' then 3
+                else 4
+            end";
+
 /// 某品种某交易日的全部席位行。
 ///
 /// 数量用文本承载而不是浮点：这些数字后面要拿去算持仓成本，一路保持精确比在
@@ -2080,6 +2133,13 @@ fn building_days_sql() -> String {
                 -- 选了具体合约就只看逐合约行；没选就是品种汇总，
                 -- 那要把该席位在各合约上的持仓加起来，而不是混进汇总行。
                 and is_variety_total = ($4::text is null)
+                -- **成交量榜不是持仓榜。** 不排掉它，某席位某天只上了成交量榜
+                -- 的那些日子会进 seats 分组，两个 sum 双双得零，于是被读成
+                -- 「持仓 0 = 平仓」：成本清零、当日盈亏算出一次假的巨额了结。
+                -- 生产实测 AU/AG 共 166,247 个席位-合约-日属于这种情形
+                -- （实例：中信建投 AU2608 2026-08-05）。真相是那天他不在多空
+                -- 前二十，持仓未知——排掉之后这天没有 seats 行，如实报 NULL。
+                and rank_type in ('long', 'short')
               order by trade_date, contract, is_variety_total, rank_type, {member_key},
                        {source_rank}, source
          ), seats as (
@@ -2097,13 +2157,7 @@ fn building_days_sql() -> String {
                     trade_date, open_price, high_price, low_price, close_price, settlement_price
                from price_history
               where workspace_id = $1 and $4::text is not null and contract = $4
-              order by trade_date,
-                       case when source like '%_official%' then 0
-                            when source = 'akshare_v1' then 1
-                            when source like 'eastmoney%' then 2
-                            when source like 'sina%' then 3
-                            else 4 end,
-                       source
+              order by trade_date, {price_rank}, source
          )
          select coalesce(s.trade_date, p.trade_date) as trade_date,
                 p.open_price::text, p.high_price::text, p.low_price::text,
@@ -2120,7 +2174,94 @@ fn building_days_sql() -> String {
           order by 1",
         member_key = member_key_sql(),
         source_rank = SEAT_SOURCE_RANK,
+        price_rank = PRICE_SOURCE_RANK,
     )
+}
+
+/// 品种汇总的一天一合约：某席位在某个合约上的持仓，配上**那个合约自己的**结算价。
+#[derive(Debug, Clone)]
+pub struct VarietyBuildingRow {
+    pub contract: String,
+    pub trade_date: Date,
+    pub long_position: Option<String>,
+    pub short_position: Option<String>,
+    pub settlement_price: Option<String>,
+}
+
+/// 品种汇总的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
+fn variety_building_sql() -> String {
+    format!(
+        "with picked as (
+             -- 去重纪律同 building_days_sql：先按来源收敛，再求和。
+             select distinct on (trade_date, contract, rank_type, {member_key})
+                    trade_date, contract, rank_type, quantity
+               from seat_history
+              where workspace_id = $1 and instrument = $2 and member = any($3::text[])
+                and not is_variety_total and contract is not null
+                -- 成交量榜不是持仓榜，理由见 building_days_sql 里的同一条。
+                and rank_type in ('long', 'short')
+              order by trade_date, contract, rank_type, {member_key}, {source_rank}, source
+         ), seats as (
+             select contract, trade_date,
+                    sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+               from picked
+              group by contract, trade_date
+         ), prices as (
+             select distinct on (contract, trade_date)
+                    contract, trade_date, settlement_price
+               from price_history
+              where workspace_id = $1 and instrument = $2
+              order by contract, trade_date, {price_rank}, source
+         )
+         -- left join：某合约某天有持仓却没有行情（零成交），那天成本不可知，
+         -- 由成本引擎如实标注。反过来「有行情没持仓」在汇总口径下没有意义——
+         -- 那可能是这个合约还没挂牌、已经到期，或者他不在这个合约的前二十，
+         -- 三者从数据上分不开，一律当作那天他不在这个合约上。
+         select s.contract, s.trade_date,
+                s.long_position::text, s.short_position::text,
+                p.settlement_price::text
+           from seats s
+           left join prices p on p.contract = s.contract and p.trade_date = s.trade_date
+          order by s.contract, s.trade_date",
+        member_key = member_key_sql(),
+        source_rank = SEAT_SOURCE_RANK,
+        price_rank = PRICE_SOURCE_RANK,
+    )
+}
+
+/// 某席位在某品种下**每个合约**的逐日持仓与该合约结算价，按合约、交易日升序。
+///
+/// 品种汇总走这条而不是 [`load_building_days`]：成本是按合约推的，把各合约的成本
+/// 序列算完再合并，才分得出「净多的那几个合约均价多少、净空的那几个多少」。
+/// 交易所的品种汇总榜只有一个总手数，推不出成本——那条路上页面连结算价都取不到，
+/// 于是成本、当日盈亏、累计盈亏三张图全是空的（2026-08-15 运营者报的就是这个）。
+pub async fn load_variety_building_days(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    member: &str,
+) -> Result<Vec<VarietyBuildingRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let member_variants = seat_member_variants(&mut tx, workspace_id, member).await?;
+    let rows = sqlx::query(&variety_building_sql())
+        .bind(workspace_id)
+        .bind(instrument)
+        .bind(member_variants)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| VarietyBuildingRow {
+            contract: row.get("contract"),
+            trade_date: row.get("trade_date"),
+            long_position: row.get("long_position"),
+            short_position: row.get("short_position"),
+            settlement_price: row.get("settlement_price"),
+        })
+        .collect())
 }
 
 /// 某个交易日各交易所的数据到齐情况。

@@ -146,6 +146,7 @@ use uuid::Uuid;
         ,spread_analytics::SeatPositionItem
         ,spread_analytics::SeatBuildingResponse
         ,spread_analytics::BuildingDayItem
+        ,spread_analytics::VarietyLegs
         ,spread_analytics::DataHealthDay
         ,spread_analytics::DataHealthResponse
         ,spread_analytics::SpreadMonitorResponse

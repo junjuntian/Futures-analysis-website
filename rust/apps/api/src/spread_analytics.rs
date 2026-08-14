@@ -14,7 +14,7 @@ use common::ApiResponse;
 use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
-use domain::seat_cost::{DailyPosition, build_cost_series};
+use domain::seat_cost::{DailyPosition, build_cost_series, build_variety_series};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -676,6 +676,25 @@ pub struct BuildingDayItem {
     pub cumulative_pnl: String,
     pub open_pnl: Option<String>,
     pub cost_unknown_reason: Option<String>,
+    /// 品种汇总档才有：当日的多空两腿。单合约档为空。
+    pub legs: Option<VarietyLegs>,
+}
+
+/// 品种汇总当日的两腿。**这里的多空是按合约的净方向分的组**——净多的那些合约算
+/// 「多单」，净空的算「空单」，两者相减才是净持仓。与多头榜/空头榜不是一回事：
+/// 同一个合约上他既可能在多头榜也可能在空头榜，那两个数相减之后才进这里。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VarietyLegs {
+    /// 净多的那些合约，手数相加。
+    pub long_lots: String,
+    /// 上面那些合约的净持仓成本，按手数加权。
+    pub long_cost: Option<String>,
+    /// `long_cost` 实际覆盖到的手数。小于 `long_lots` 说明有合约成本不可知，
+    /// 那个均价只是已知部分的均价——界面要如实说明，不能让人当成全部持仓的成本。
+    pub long_cost_lots: String,
+    pub short_lots: String,
+    pub short_cost: Option<String>,
+    pub short_cost_lots: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -759,8 +778,19 @@ pub async fn query_seat_building(
         .map_err(|_| SpreadApiError::Internal(request_id))?
     };
 
+    // 没有点值就不算盈亏：宁可少一条曲线，也不要一条乘错倍数的曲线。
+    let factor: Decimal = multiplier
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Decimal::ZERO);
+
     let mut days = Vec::new();
-    if !member.is_empty() {
+    if member.is_empty() {
+        // 没选会员，下面两条路都没有意义。
+    } else if contract.is_none() {
+        days = variety_building_days(&state, &context, &instrument, &member, factor, request_id)
+            .await?;
+    } else {
         let raw = database::spread_analytics::load_building_days(
             &state.auth.pool,
             context.workspace_id(),
@@ -770,11 +800,6 @@ pub async fn query_seat_building(
         )
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
-        // 没有点值就不算盈亏：宁可少一条曲线，也不要一条乘错倍数的曲线。
-        let factor: Decimal = multiplier
-            .as_deref()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(Decimal::ZERO);
         let positions: Vec<_> = raw
             .iter()
             .map(|row| DailyPosition {
@@ -811,6 +836,7 @@ pub async fn query_seat_building(
                 cumulative_pnl: cost.cumulative_pnl.round_dp(2).to_string(),
                 open_pnl: cost.open_pnl.map(|value| value.round_dp(2).to_string()),
                 cost_unknown_reason: cost.cost_unknown_reason.map(str::to_string),
+                legs: None,
             })
             .collect();
     }
@@ -829,6 +855,93 @@ pub async fn query_seat_building(
         request_id,
     ))
     .into_response())
+}
+
+/// 品种汇总档的逐日序列：先把每个合约各自的成本序列算出来，再按交易日合并。
+///
+/// 为什么不走交易所的品种汇总榜：那一行只有一个总手数，推不出成本，也分不出净多的
+/// 合约与净空的合约。原来正是走的那条路，连结算价都没取（取数 SQL 里行情被
+/// `contract` 限死），于是品种汇总下成本线、当日盈亏、累计盈亏三张图全是空的。
+async fn variety_building_days(
+    state: &SpreadAnalyticsState,
+    context: &auth::AuthContext,
+    instrument: &str,
+    member: &str,
+    factor: Decimal,
+    request_id: Uuid,
+) -> Result<Vec<BuildingDayItem>, SpreadApiError> {
+    let rows = database::spread_analytics::load_variety_building_days(
+        &state.auth.pool,
+        context.workspace_id(),
+        instrument,
+        member,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    // SQL 已按 (contract, trade_date) 排序，顺序扫一遍切段即可。
+    let mut per_contract: Vec<Vec<DailyPosition>> = Vec::new();
+    let mut current: Option<String> = None;
+    for row in rows {
+        if current.as_deref() != Some(row.contract.as_str()) {
+            current = Some(row.contract.clone());
+            per_contract.push(Vec::new());
+        }
+        per_contract
+            .last_mut()
+            .expect("上面刚推过一段")
+            .push(DailyPosition {
+                trade_date: row.trade_date,
+                // 汇总口径下没有「掉榜」这一档：某合约某天没有行就不会出现在这里。
+                // 只上了一边榜（例如只进了多头前二十）沿用单合约页的口径按 0 计。
+                net_position: Some(
+                    row.long_position
+                        .as_deref()
+                        .map(parse_decimal)
+                        .unwrap_or(Decimal::ZERO)
+                        - row
+                            .short_position
+                            .as_deref()
+                            .map(parse_decimal)
+                            .unwrap_or(Decimal::ZERO),
+                ),
+                settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
+            });
+    }
+
+    Ok(build_variety_series(&per_contract, factor)
+        .into_iter()
+        .map(|day| BuildingDayItem {
+            trade_date: day.trade_date.to_string(),
+            // 品种汇总没有单一合约的 K 线：把某个合约的 K 线安在汇总上，
+            // 是把两件事画成一件。
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            close_price: None,
+            settlement_price: None,
+            // 汇总档不给多头榜/空头榜的原始手数：`legs` 里的多空是按**合约净方向**
+            // 分的组，与那两张榜不是一回事，共用字段名只会让人读错。
+            long_position: None,
+            short_position: None,
+            net_position: Some(day.net_position.to_string()),
+            // 多空混持时没有一个有意义的「净持仓成本」——净多两千手与净空一千手
+            // 不是同一笔仓位的两部分。两腿各自的均价在 `legs` 里。
+            cost: None,
+            daily_pnl: day.daily_pnl.map(|value| value.round_dp(2).to_string()),
+            cumulative_pnl: day.cumulative_pnl.round_dp(2).to_string(),
+            open_pnl: None,
+            cost_unknown_reason: None,
+            legs: Some(VarietyLegs {
+                long_lots: day.long_lots.to_string(),
+                long_cost: day.long_cost.map(|value| value.round_dp(4).to_string()),
+                long_cost_lots: day.long_cost_lots.to_string(),
+                short_lots: day.short_lots.to_string(),
+                short_cost: day.short_cost.map(|value| value.round_dp(4).to_string()),
+                short_cost_lots: day.short_cost_lots.to_string(),
+            }),
+        })
+        .collect())
 }
 
 /// 一个交易日的到齐情况。

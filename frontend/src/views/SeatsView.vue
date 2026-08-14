@@ -238,7 +238,6 @@ const fmt = (value: number) => value.toLocaleString('zh-CN')
 // —— 建仓过程的三联图 ——
 const dates = computed(() => days.value.map((day) => day.trade_date))
 const netSeries = computed(() => days.value.map((day) => num(day.net_position)))
-const costSeries = computed(() => days.value.map((day) => num(day.cost)))
 const pnlSeries = computed(() => days.value.map((day) => num(day.daily_pnl)))
 const cumulativeSeries = computed(() => days.value.map((day) => num(day.cumulative_pnl)))
 
@@ -272,7 +271,15 @@ const candles = computed(() =>
   })
 )
 const hasCandles = computed(() => candles.value.some((item) => item !== '-'))
-const gapDays = computed(() => days.value.filter((day) => day.cost === null).length)
+/** 成本不完整的天数。汇总档看的是均价覆盖了多少手，不是「有没有一个 cost 字段」。 */
+const gapDays = computed(() =>
+  days.value.filter((day) =>
+    day.legs
+      ? Number(day.legs.long_cost_lots) < Number(day.legs.long_lots)
+        || Number(day.legs.short_cost_lots) < Number(day.legs.short_lots)
+      : day.cost === null
+  ).length
+)
 
 // —— 掉榜区间 ——
 //
@@ -297,32 +304,147 @@ const offBoardMark = computed(() => ({
   data: bands.value
 }))
 
+// —— 小窗 ——
+//
+// 四张图共用同一段正文：同一天在哪张图上停住，看到的都该是同一组数。各图自己再
+// 按需要补一两行（K 线图补开高低收）。正文直接读 days[i]，不靠 ECharts 传进来的
+// series 值——K 线图上的成本线已经撤了（运营者要的是图上干净、数还在手边），
+// 靠 series 就取不到它。
+const lots = (value: number) => `${value.toLocaleString('zh-CN')} 手`
+const price = (value: number) => value.toFixed(2)
+
+/** 一行「标签 + 值」。值可着色：多单红、空单绿，国内看盘的惯例。 */
+function row(label: string, value: string, color?: string) {
+  const painted = color ? `<span style="color:${color};font-weight:600">${value}</span>` : value
+  return `<div style="display:flex;gap:12px;justify-content:space-between"><span>${label}</span>${painted}</div>`
+}
+
+/** 该腿的均价。覆盖不全时说明覆盖了多少手，不让人当成全部持仓的成本。 */
+function legCost(cost: string | null, costLots: string, allLots: string) {
+  if (cost === null) return '成本不可知'
+  const covered = Number(costLots)
+  const total = Number(allLots)
+  return covered < total ? `${price(Number(cost))}（覆盖 ${lots(covered)}）` : price(Number(cost))
+}
+
+function tooltipBody(index: number, head: string[] = []) {
+  const day = days.value[index]
+  if (!day) return ''
+  const parts = [`<div style="margin-bottom:4px"><b>${day.trade_date}</b></div>`, ...head]
+
+  if (day.legs) {
+    // 品种汇总：合约按净方向分两组。净多的那几个是「多单」，净空的是「空单」，
+    // 两者相减才是净持仓——这是运营者定的口径。
+    const long = Number(day.legs.long_lots)
+    const short = Number(day.legs.short_lots)
+    if (long > 0) {
+      parts.push(row('多单', lots(long), UP))
+      parts.push(row('　净持仓成本（推算）',
+        legCost(day.legs.long_cost, day.legs.long_cost_lots, day.legs.long_lots)))
+    }
+    if (short > 0) {
+      parts.push(row('空单', lots(short), DOWN))
+      parts.push(row('　净持仓成本（推算）',
+        legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)))
+    }
+  }
+
+  const net = num(day.net_position)
+  if (net === null) {
+    parts.push(row('净持仓', '掉出前 20 · 未知'))
+  } else {
+    parts.push(row('净持仓', lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
+      net === 0 ? undefined : net > 0 ? UP : DOWN))
+  }
+  // 单合约档的成本。汇总档已经在上面按两腿分别列过了。
+  if (!day.legs) {
+    parts.push(row('净持仓成本（推算）', day.cost === null ? '不可知' : price(Number(day.cost))))
+  }
+
+  // 「估计」二字不能省：这是由公开持仓与结算价推出来的，不是他的对账单。
+  // 当日盈亏运营者明确说不用，只留累计。
+  const cumulative = num(day.cumulative_pnl)
+  if (cumulative !== null) {
+    parts.push(row('估计累计盈利',
+      `${cumulative >= 0 ? '+' : '−'}${money(Math.abs(cumulative))}`,
+      cumulative >= 0 ? UP : DOWN))
+  }
+  return parts.join('')
+}
+
+/** ECharts 把 axis 小窗的参数传成数组；取哪一条都行，要的只是那天的下标。 */
+function axisIndex(params: unknown) {
+  const first = Array.isArray(params) ? params[0] : params
+  const index = (first as { dataIndex?: number } | undefined)?.dataIndex
+  return typeof index === 'number' ? index : null
+}
+
+const tooltip = {
+  trigger: 'axis' as const,
+  formatter: (params: unknown) => {
+    const index = axisIndex(params)
+    return index === null ? '' : tooltipBody(index)
+  }
+}
+
+// 底部滑钮，与价差走势图同一套。十八年的日线挤在一屏里只看得出个大概形状，
+// 想看某一段建仓就得能拉。
+const zoom = computed(() => [
+  { type: 'inside' as const },
+  {
+    type: 'slider' as const,
+    height: 26,
+    bottom: 8,
+    borderColor: '#e2e1dd',
+    fillerColor: 'rgba(120,150,200,0.12)',
+    handleStyle: { color: '#b9b8b4' },
+    dataBackground: {
+      lineStyle: { color: '#c9c8c4' },
+      areaStyle: { color: '#eeeeec' }
+    },
+    labelFormatter: (value: number) => dates.value[Math.round(value)] ?? ''
+  }
+])
+/** 留给滑钮的高度。忘了加就是滑钮压在横轴标签上。 */
+const GRID_BOTTOM = 62
+
 const priceOption = computed<EChartsOption>(() => ({
-  grid: { left: 60, right: 24, top: 24, bottom: 28 },
-  tooltip: { trigger: 'axis' as const },
+  grid: { left: 60, right: 24, top: 24, bottom: GRID_BOTTOM },
+  dataZoom: zoom.value,
+  // K 线图上原来还有一条成本蓝线，运营者要求撤掉：图上只留行情，成本进小窗。
+  // 数一个没少，见 tooltipBody。
+  tooltip: {
+    ...tooltip,
+    formatter: (params: unknown) => {
+      const index = axisIndex(params)
+      if (index === null) return ''
+      // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
+      const bar = candles.value[index]
+      const head = Array.isArray(bar)
+        ? [
+            row('开盘 / 收盘', `${price(bar[0])} / ${price(bar[1])}`),
+            row('最低 / 最高', `${price(bar[2])} / ${price(bar[3])}`)
+          ]
+        : [row('行情', '当日无 K 线')]
+      return tooltipBody(index, head)
+    }
+  },
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
   yAxis: { type: 'value' as const, scale: true },
   series: [
     {
       name: 'K线',
       type: 'candlestick' as const,
-      data: candles.value as unknown as CandlestickSeriesOption['data']
-    },
-    {
-      name: '净持仓成本（推算）',
-      type: 'line' as const,
-      data: costSeries.value,
-      showSymbol: false,
-      // 成本不可知的那几天必须断开，连线是画一条猜出来的线。
-      connectNulls: false,
-      lineStyle: { width: 2 },
+      data: candles.value as unknown as CandlestickSeriesOption['data'],
+      // 掉榜区间的底色原先挂在成本线上，成本线撤了就得挪过来，否则整段标注消失。
       markArea: offBoardMark.value
     }
   ]
 }))
 const netOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: 28 },
-  tooltip: { trigger: 'axis' as const },
+  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+  dataZoom: zoom.value,
+  tooltip,
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
   // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
   yAxis: { type: 'value' as const },
@@ -348,15 +470,17 @@ const netOption = computed<EChartsOption>(() => ({
   ]
 }))
 const pnlOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: 28 },
-  tooltip: { trigger: 'axis' as const },
+  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+  dataZoom: zoom.value,
+  tooltip,
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
   yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
   series: [{ name: '当日盈亏', type: 'bar' as const, data: pnlBars(pnlSeries.value) }]
 }))
 const cumulativeOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: 28 },
-  tooltip: { trigger: 'axis' as const },
+  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+  dataZoom: zoom.value,
+  tooltip,
   xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
   yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
   series: [
@@ -496,15 +620,17 @@ const cumulativeTotal = computed(() => {
           </el-select>
           <el-select
             v-model="buildingContract"
-            style="width: 190px"
-            clearable
-            placeholder="品种汇总"
+            style="width: 220px"
+            placeholder="合约汇总（全部合约）"
             :disabled="loadingBuilding"
           >
+            <!-- 汇总要有一个点得到的选项。原先只能靠清空按钮回到汇总档，
+                 那等于把一个主要视角藏在一个 × 后面。 -->
+            <el-option label="合约汇总（全部合约）" value="" />
             <el-option v-for="code in buildingContracts" :key="code" :label="code" :value="code" />
           </el-select>
           <span class="hint">
-            {{ buildingContract ? '单合约' : '品种汇总' }}
+            {{ buildingContract ? '单合约' : '合约汇总' }}
             <template v-if="multiplier">· 点值 {{ Number(multiplier) }}</template>
           </span>
         </div>
@@ -514,6 +640,15 @@ const cumulativeTotal = computed(() => {
           <template v-if="gapDays">
             其中 <strong>{{ gapDays }}</strong> 天成本不可知（掉出前 20 或当日无结算价），图上断开显示。
           </template>
+        </p>
+        <p v-if="!buildingContract" class="note">
+          合约汇总把该席位在这个品种<strong>各个合约上的持仓逐一算完再相加</strong>：净多的那些
+          合约合成「多单」、净空的合成「空单」，两者相减才是净持仓，均价各按手数加权。
+          小窗里能看到这三个数。
+          <br />
+          用的是逐合约榜而不是交易所的品种汇总榜——后者只有一个总手数，推不出成本、也分不出
+          两腿。代价是他持有、却排不进那个合约前二十的零头看不到：永安黄金 3316 个交易日实测，
+          两者完全相等 2722 天，平均差 56 手。
         </p>
         <p v-if="offBoardDays" class="note off-board">
           <span class="swatch" aria-hidden="true"></span>
@@ -528,23 +663,25 @@ const cumulativeTotal = computed(() => {
       <el-empty v-if="!loadingBuilding && !days.length" description="选一个品种，或该席位在此品种上没有持仓" />
       <template v-else>
         <el-card shadow="never">
-          <template #header><h2>行情与成本线</h2></template>
-          <SpreadChart v-if="hasCandles" :option="priceOption" :height="300" export-name="建仓过程-行情" />
+          <!-- 原来叫「行情与成本线」。成本线已按运营者要求从图上撤掉（数字进小窗），
+               标题里再留「成本线」就是说了一件图上没有的事。 -->
+          <template #header><h2>行情</h2></template>
+          <SpreadChart v-if="hasCandles" :option="priceOption" :height="320" export-name="建仓过程-行情" />
           <el-alert
             v-else
             type="info"
             :closable="false"
-            title="品种汇总没有单一合约的 K 线"
-            description="把某个合约的 K 线安在品种汇总上会把两件事画成一件。选一个具体合约即可看到 K 线。"
+            title="合约汇总没有单一合约的 K 线"
+            description="把某个合约的 K 线安在合约汇总上会把两件事画成一件。选一个具体合约即可看到 K 线。"
           />
         </el-card>
         <el-card shadow="never">
           <template #header><h2>净持仓</h2></template>
-          <SpreadChart :option="netOption" :height="260" export-name="建仓过程-净持仓" />
+          <SpreadChart :option="netOption" :height="300" export-name="建仓过程-净持仓" />
         </el-card>
         <el-card shadow="never">
           <template #header><h2>当日盈亏</h2></template>
-          <SpreadChart :option="pnlOption" :height="260" export-name="建仓过程-当日盈亏" />
+          <SpreadChart :option="pnlOption" :height="300" export-name="建仓过程-当日盈亏" />
         </el-card>
         <el-card shadow="never">
           <template #header>
@@ -556,7 +693,7 @@ const cumulativeTotal = computed(() => {
               </span>
             </h2>
           </template>
-          <SpreadChart :option="cumulativeOption" :height="260" export-name="建仓过程-累计盈亏" />
+          <SpreadChart :option="cumulativeOption" :height="300" export-name="建仓过程-累计盈亏" />
           <p class="note">
             当日盈亏的逐日累加。当日盈亏不可知的那几天（掉出前 20 或当日无结算价）按 0 计入，
             累计线不断开——断开会看起来像仓位平了。所以这是<strong>已知部分</strong>的累计。

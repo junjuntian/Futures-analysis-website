@@ -16,6 +16,8 @@
 //! 字段名用「净持仓成本（推算）」而不是「成交均价」：我们看不到成交明细，这是由公开的
 //! 持仓变化与结算价推出来的，不是真实成交价。
 
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 use serde::Serialize;
 use time::Date;
@@ -195,6 +197,121 @@ fn daily_pnl(
         }
         _ => None,
     }
+}
+
+/// 品种汇总的一天：该席位在这个品种**全部合约**上的持仓合并之后的样子。
+///
+/// 合约按当日净方向分成两组：净多的那些合约手数相加是「多单」，净空的那些是
+/// 「空单」，两者相减才是真正的净持仓。均价各按手数加权——运营者要看的正是
+/// 「净多的那几个合约均价多少、净空的那几个均价多少」。
+///
+/// **为什么逐合约算完再合并，而不是直接用交易所的「品种汇总榜」那一行**——
+/// 成本是按合约推的（每个合约有自己的结算价与建仓节奏），汇总榜只给一个总手数，
+/// 推不出成本，更分不出多空两腿。
+///
+/// 代价要说清楚：汇总榜覆盖该席位在**整个品种**上的排名，逐合约行只覆盖他进了
+/// **某个合约前二十**的部分。永安黄金 3316 个交易日实测，两者完全相等 2722 天
+/// （82%），平均差 55.6 手、最大 2120 手——差的是他确实持有、但在那个合约上排
+/// 不进前二十的零头。页面说明里写明了这一点，不当作等同。
+#[derive(Debug, Clone)]
+pub struct VarietyDay {
+    pub trade_date: Date,
+    /// 当日净多的那些合约，手数相加。
+    pub long_lots: Decimal,
+    /// 上面那些合约的净持仓成本，按手数加权。
+    pub long_cost: Option<Decimal>,
+    /// `long_cost` 实际覆盖到的手数。小于 `long_lots` 说明有合约的成本不可知
+    /// （建仓当日无结算价、或数据起点之前就持有），那这个均价只是**已知部分**
+    /// 的均价。界面据此标注，而不是让人以为它覆盖了全部持仓。
+    pub long_cost_lots: Decimal,
+    pub short_lots: Decimal,
+    pub short_cost: Option<Decimal>,
+    pub short_cost_lots: Decimal,
+    /// 净持仓 = 净多手数 − 净空手数。
+    pub net_position: Decimal,
+    /// 各合约当日盈亏之和。所有合约都不可知时为空。
+    pub daily_pnl: Option<Decimal>,
+    /// 上面那个的逐日累加。**必须在这里重算，不能把各合约的 `cumulative_pnl`
+    /// 相加**：合约到期之后就没有行了，相加会让它已实现的那部分凭空消失，
+    /// 累计线在每次移仓时往下掉一截。
+    pub cumulative_pnl: Decimal,
+}
+
+/// 把同一席位在一个品种下各个合约的持仓序列，卷成逐日的品种汇总。
+///
+/// 每个合约先各自走 [`build_cost_series`]（成本、当日盈亏的口径与单合约页
+/// 完全一致，不另起一套），再按交易日归并。入参每一项是一个合约的序列，
+/// 必须按交易日升序。
+///
+/// 只喂该合约**真正有行的那些天**：这里没有「掉榜」的概念——某合约某天没有行，
+/// 既可能是掉出该合约前二十，也可能是这个合约还没挂牌或已经到期，两者从数据上
+/// 分不开。当作缺行处理即可，那天它不贡献手数，成本与上一日结算价原地冻结。
+pub fn build_variety_series(
+    contracts: &[Vec<DailyPosition>],
+    price_multiplier: Decimal,
+) -> Vec<VarietyDay> {
+    #[derive(Default)]
+    struct Accum {
+        long_lots: Decimal,
+        long_weighted: Decimal,
+        long_cost_lots: Decimal,
+        short_lots: Decimal,
+        short_weighted: Decimal,
+        short_cost_lots: Decimal,
+        daily_pnl: Option<Decimal>,
+    }
+
+    let mut by_date: BTreeMap<Date, Accum> = BTreeMap::new();
+    for points in contracts {
+        for point in build_cost_series(points, price_multiplier) {
+            let slot = by_date.entry(point.trade_date).or_default();
+            if let Some(pnl) = point.daily_pnl {
+                slot.daily_pnl = Some(slot.daily_pnl.unwrap_or(Decimal::ZERO) + pnl);
+            }
+            // 那天这个合约的持仓不可知：不贡献手数，也不当成零。
+            let Some(net) = point.net_position else {
+                continue;
+            };
+            if net > Decimal::ZERO {
+                slot.long_lots += net;
+                // 成本不可知的合约照样计手数，但不进均价——否则要么少算手数，
+                // 要么拿一个编出来的成本去拉均价。两个数分开报最诚实。
+                if let Some(cost) = point.cost {
+                    slot.long_weighted += cost * net;
+                    slot.long_cost_lots += net;
+                }
+            } else if net < Decimal::ZERO {
+                let lots = -net;
+                slot.short_lots += lots;
+                if let Some(cost) = point.cost {
+                    slot.short_weighted += cost * lots;
+                    slot.short_cost_lots += lots;
+                }
+            }
+        }
+    }
+
+    let mut cumulative = Decimal::ZERO;
+    by_date
+        .into_iter()
+        .map(|(trade_date, slot)| {
+            cumulative += slot.daily_pnl.unwrap_or(Decimal::ZERO);
+            VarietyDay {
+                trade_date,
+                long_cost: (slot.long_cost_lots > Decimal::ZERO)
+                    .then(|| slot.long_weighted / slot.long_cost_lots),
+                short_cost: (slot.short_cost_lots > Decimal::ZERO)
+                    .then(|| slot.short_weighted / slot.short_cost_lots),
+                net_position: slot.long_lots - slot.short_lots,
+                long_lots: slot.long_lots,
+                long_cost_lots: slot.long_cost_lots,
+                short_lots: slot.short_lots,
+                short_cost_lots: slot.short_cost_lots,
+                daily_pnl: slot.daily_pnl,
+                cumulative_pnl: cumulative,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -401,5 +518,64 @@ mod tests {
             Some("position_opened_before_data")
         );
         assert_eq!(unknown[1].open_pnl, None);
+    }
+
+    #[test]
+    fn the_variety_total_splits_contracts_by_their_net_direction() {
+        // 品种汇总的「多单/空单」不是多头持仓与空头持仓，是**净多的那几个合约**
+        // 与**净空的那几个合约**两组。运营者要看的正是这两组各自的手数与均价。
+        let near = vec![
+            day(date!(2026 - 01 - 05), 100, Some(Decimal::from(900))),
+            day(date!(2026 - 01 - 06), 100, Some(Decimal::from(910))),
+        ];
+        let far = vec![day(date!(2026 - 01 - 06), 300, Some(Decimal::from(950)))];
+        let hedge = vec![day(date!(2026 - 01 - 06), -200, Some(Decimal::from(930)))];
+        let series = build_variety_series(&[near, far, hedge], Decimal::ONE);
+
+        let today = &series[1];
+        assert_eq!(today.long_lots, Decimal::from(400));
+        // 减仓不改均价，所以近月还是 900：(900×100 + 950×300) / 400 = 937.5
+        assert_eq!(
+            today.long_cost,
+            Some(Decimal::from(9375) / Decimal::from(10))
+        );
+        assert_eq!(today.short_lots, Decimal::from(200));
+        assert_eq!(today.short_cost, Some(Decimal::from(930)));
+        // 净持仓是两组相减，不是某一组。
+        assert_eq!(today.net_position, Decimal::from(200));
+    }
+
+    #[test]
+    fn an_expired_contract_keeps_its_realised_profit_in_the_running_total() {
+        // 把各合约的 cumulative_pnl 相加是错的：合约到期之后就没有行了，
+        // 它已实现的那部分会凭空消失，累计线在每次移仓时往下掉一截。
+        let expiring = vec![
+            day(date!(2026 - 01 - 05), 10, Some(Decimal::from(100))),
+            day(date!(2026 - 01 - 06), 10, Some(Decimal::from(110))), // +100
+        ];
+        let rolled_into = vec![
+            day(date!(2026 - 01 - 06), 10, Some(Decimal::from(200))),
+            day(date!(2026 - 01 - 07), 10, Some(Decimal::from(205))), // +50
+        ];
+        let series = build_variety_series(&[expiring, rolled_into], Decimal::ONE);
+
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[1].cumulative_pnl, Decimal::from(100));
+        // 01-07 老合约已经没有行了，它赚的那 100 必须还在累计里。
+        assert_eq!(series[2].daily_pnl, Some(Decimal::from(50)));
+        assert_eq!(series[2].cumulative_pnl, Decimal::from(150));
+    }
+
+    #[test]
+    fn a_leg_whose_cost_is_unknown_still_counts_its_lots() {
+        // 成本不可知的合约照样是持仓，手数必须算进去；但不能拿一个编出来的成本
+        // 去拉均价。手数与「均价覆盖了多少手」分开报，界面才说得清。
+        let known = vec![day(date!(2026 - 01 - 05), 100, Some(Decimal::from(900)))];
+        let unknown = vec![day(date!(2026 - 01 - 05), 50, None)];
+        let series = build_variety_series(&[known, unknown], Decimal::ONE);
+
+        assert_eq!(series[0].long_lots, Decimal::from(150));
+        assert_eq!(series[0].long_cost, Some(Decimal::from(900)));
+        assert_eq!(series[0].long_cost_lots, Decimal::from(100));
     }
 }

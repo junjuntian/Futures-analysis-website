@@ -215,7 +215,26 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
   })
   return {
     animation: false,
-    grid: { left: 54, right: 76, top: 74, bottom: 44 },
+    // bottom 要留够滑钮的位置，否则滑钮压在横轴标签上。
+    grid: { left: 54, right: 76, top: 74, bottom: 76 },
+    // 与走势图同一套滑钮。叠年图横轴是日历日，想比某一段（比如换月前后两周）
+    // 各年的走势，没有滑钮只能眯着眼在一整年里找。
+    dataZoom: [
+      { type: 'inside' },
+      {
+        type: 'slider',
+        height: 26,
+        bottom: 24,
+        borderColor: '#e2e1dd',
+        fillerColor: 'rgba(120,150,200,0.12)',
+        handleStyle: { color: '#b9b8b4' },
+        dataBackground: {
+          lineStyle: { color: '#c9c8c4' },
+          areaStyle: { color: '#eeeeec' }
+        },
+        labelFormatter: (value: number) => axis[Math.round(value)]?.replace('-', '/') ?? ''
+      }
+    ],
     legend: {
       top: 8,
       left: 0,

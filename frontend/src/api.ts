@@ -352,6 +352,23 @@ export interface BuildingDay {
   cumulative_pnl: string
   open_pnl: string | null
   cost_unknown_reason: string | null
+  /** 品种汇总档才有：当日的多空两腿。单合约档为 null。 */
+  legs: VarietyLegs | null
+}
+
+/**
+ * 品种汇总当日的两腿。**多空是按合约的净方向分的组**——净多的那些合约算「多单」，
+ * 净空的算「空单」，两者相减才是净持仓。与多头榜/空头榜不是一回事。
+ */
+export interface VarietyLegs {
+  long_lots: string
+  /** 净多那些合约的净持仓成本，按手数加权。 */
+  long_cost: string | null
+  /** `long_cost` 覆盖到的手数。小于 `long_lots` 说明有合约成本不可知。 */
+  long_cost_lots: string
+  short_lots: string
+  short_cost: string | null
+  short_cost_lots: string
 }
 
 export interface SeatBuildingResponse {
