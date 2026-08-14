@@ -2392,6 +2392,10 @@ pub async fn load_report_cost_rows(
                     contract, trade_date, settlement_price
                from price_history
               where workspace_id = $1 and instrument = any($2::text[]) and trade_date <= $4
+                -- 只取在手那几个合约的行情。少了这一条会把该品种全部历史行情
+                -- （AU/AG 合计 23.9 万行）拖进来做 distinct on：生产实测
+                -- RLS runtime 角色下 606 毫秒，加上之后 366 毫秒，结果一模一样。
+                and contract in (select contract from held)
               order by contract, trade_date, {price_rank}, source
          )
          select s.member_key as member, s.instrument, s.contract, s.trade_date,
