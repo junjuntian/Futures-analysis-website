@@ -310,23 +310,70 @@ def yearly_weights(ev: pd.DataFrame, cont: pd.DataFrame, years) -> dict:
     return w
 
 
-def seat_cost(md: pd.DataFrame, member: str, settle: pd.Series) -> pd.Series:
-    """多头建仓成本:增仓按结算价加权累积,减仓不改均价,翻空重置。
-    掉榜期间冻结延续(运营者 2026-08-11 拍板),用 asof 取最后可见值。"""
-    s = md[md["member"] == member].set_index("trade_date").sort_index()
-    cost, net_prev, out = np.nan, 0.0, {}
-    for d, row in s.iterrows():
-        net, dnet, px = row["net"], row["dnet"], settle.get(d, np.nan)
-        if not np.isnan(px):
-            if net > 0 and net_prev <= 0:
-                cost = px
-            elif net > 0 and dnet > 0 and not np.isnan(cost):
-                cost = (cost * (net - dnet) + px * dnet) / net
-            if net <= 0:
-                cost = np.nan
-        out[d] = cost
-        net_prev = net
-    return pd.Series(out, dtype=float)
+def seat_cost(seat: pd.DataFrame, price: pd.DataFrame, member: str) -> pd.Series:
+    """多头建仓成本:**逐合约**推算,再按各合约净多持仓加权成该席位当日成本。
+
+    单合约内:增仓按该合约当日结算价加权累积,减仓不改均价,翻空重置。
+    掉榜期间冻结延续(运营者 2026-08-11 拍板),调用方用 asof 取最后可见值。
+
+    2026-08-15 由「品种汇总」改为「逐合约」。汇总口径的缺陷是实证出来的:
+    member_day 把所有合约加总成品种级净仓,再用**主力合约**结算价计价。
+    移仓那几天(平旧约 + 开新约)在品种级只看到净仓大幅波动,而本函数的规则是
+    「加仓按结算价加权、减仓不改均价」——加仓腿把成本拉向当天价位,减仓腿
+    却不修正,反复移仓后成本被系统性推高。
+
+    实证:东证期货 2026-07-15,汇总口径推出成本 960.40,而同一时点
+    AU2610 / AU2612 逐合约成本分别是 896.67 / 902.45,都在 900 附近。
+    面板「席位持仓」页(Rust 端)用的正是逐合约算法,两处因此长期显示
+    两个不同的「机构成本」,运营者 2026-08-14 发现并要求订正。
+
+    改后全样本影响很小(累计 330.4% → 320.3%,差异几乎全部在 2024 一年),
+    但**成交率从 89.7% 升到 94.8%**、未回踩放弃从 21 笔降到 10 笔——
+    挂单价位更贴近机构真实成本,这是「算对了」的直接证据。
+    """
+    pr = price.sort_values(["contract", "trade_date"]).drop_duplicates(
+        ["contract", "trade_date"], keep="first")
+    settle = pr.set_index(["contract", "trade_date"])["settlement_price"]
+
+    sub = seat[(~seat["is_variety_total"]) & (seat["member"] == member)
+               & seat["rank_type"].isin(["long", "short"])
+               & seat["contract"].notna() & (seat["contract"] != "")]
+    if sub.empty:
+        return pd.Series(dtype=float)
+    g = sub.pivot_table(index=["contract", "trade_date"], columns="rank_type",
+                        values=["quantity", "change"], aggfunc="sum")
+
+    daily: dict = {}
+    for contract, grp in g.groupby(level=0):
+        grp = grp.droplevel(0).sort_index()
+
+        def col(kind, leg):
+            return (grp[(kind, leg)] if (kind, leg) in grp.columns
+                    else pd.Series(0.0, index=grp.index))
+
+        net = col("quantity", "long").fillna(0) - col("quantity", "short").fillna(0)
+        dnet = col("change", "long").fillna(0) - col("change", "short").fillna(0)
+        cost, net_prev = np.nan, 0.0
+        for d in grp.index:
+            px = settle.get((contract, d), np.nan)
+            n, dn = float(net.get(d, 0.0)), float(dnet.get(d, 0.0))
+            if not np.isnan(px):
+                if n > 0 and net_prev <= 0:
+                    cost = px
+                elif n > 0 and dn > 0 and not np.isnan(cost):
+                    cost = (cost * (n - dn) + px * dn) / n
+                if n <= 0:
+                    cost = np.nan
+            net_prev = n
+            if n > 0 and not np.isnan(cost):
+                daily.setdefault(d, []).append((cost, n))
+
+    out = {}
+    for d, legs in daily.items():
+        tot = sum(q for _, q in legs)
+        if tot > 0:
+            out[d] = sum(c * q for c, q in legs) / tot
+    return pd.Series(out, dtype=float).sort_index()
 
 
 # ---------------------------------------------------------------- 信号引擎
@@ -399,9 +446,9 @@ class MarketEngine:
         self.active = (strong.notna() & (wmat > 0)).any(axis=1)
         self.fade_run = self.active.rolling(RULES["fade_days"], min_periods=1).sum()
 
-        settle_main = pd.Series(
-            [self.cont["settle"].get(d, np.nan) for d in self.dates], index=self.dates)
-        self.costs = {m: seat_cost(self.md, m, settle_main) for m in self.group}
+        # 逐合约推成本(见 seat_cost 的说明):用各合约自己的结算价,
+        # 不用主力合约,避免移仓时的成本污染。
+        self.costs = {m: seat_cost(seat, price, m) for m in self.group}
 
     # -------- 触发席位与成本区间
     def trigger_seats(self, d: pd.Timestamp) -> pd.DataFrame:
