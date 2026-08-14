@@ -292,22 +292,32 @@ def forward_returns(cont: pd.DataFrame, horizon: int) -> pd.Series:
     return pd.Series(v, index=cont.index)
 
 
-def yearly_weights(ev: pd.DataFrame, cont: pd.DataFrame, years) -> dict:
-    """每年 1 月 1 日重算:截至上年 12-01 已实现事件的 fwd20 t 值,clip[0,5]。"""
+def yearly_weights(ev: pd.DataFrame, cont: pd.DataFrame, years) -> tuple[dict, dict]:
+    """每年 1 月 1 日重算:截至上年 12-01 已实现事件的 fwd20 t 值,clip[0,5]。
+
+    返回 (生效权重, 未截断原始 t)。后者只用于显示:weight_clip=5 会把
+    高盛黄金的真实 t=6.56 压成 5.00,面板上它与东证 4.73 看着「差不多」,
+    抹掉了真实差距。放开截断已实测更差(REPORT_WEIGHTSPEC_v1.md:OOS
+    -15.2,安慰剂 p=0.85),所以**计算照旧用截断值**,只把原始值一并输出。
+    """
     fwd = forward_returns(cont, RULES["weight_horizon"])
-    w = {}
+    w, raw = {}, {}
     for y in years:
         cutoff = pd.Timestamp(f"{y - 1}-12-01")
-        row = {}
+        row, row_raw = {}, {}
         for m in RULES["group"]:
             dr = fwd.reindex(ev[(ev["member"] == m) & (ev["trade_date"] < cutoff)]["trade_date"]).dropna()
             if len(dr) < RULES["weight_min_n"] or dr.std(ddof=1) == 0:
                 row[m] = 0.0
+                # 样本不足时原始 t 也记 0:此时 t 无意义,标出来只会误导
+                row_raw[m] = 0.0
             else:
                 t = dr.mean() / dr.std(ddof=1) * np.sqrt(len(dr))
                 row[m] = float(np.clip(t, 0, RULES["weight_clip"]))
+                row_raw[m] = float(max(t, 0.0))
         w[y] = row
-    return w
+        raw[y] = row_raw
+    return w, raw
 
 
 def seat_cost(seat: pd.DataFrame, price: pd.DataFrame, member: str) -> pd.Series:
@@ -421,7 +431,7 @@ class MarketEngine:
         self.ev_long = detect_events(self.md, self.cont, self.group, "long")
         self.ev_short = detect_events(self.md, self.cont, self.group, "short")
         years = range(self.dates[0].year, self.dates[-1].year + 1)
-        self.weights = yearly_weights(self.ev_long, self.cont, years)
+        self.weights, self.weights_raw = yearly_weights(self.ev_long, self.cont, years)
 
         c = self.cont["adj_close"]
         self.dist60 = c / c.rolling(RULES["dist_low_days"]).min() - 1
@@ -621,6 +631,9 @@ class MarketEngine:
                 "hold_days": int((self.dates <= last).sum() - (self.dates < holding.entry_date).sum()),
             },
             "weights": {m: round(self.weights[last.year].get(m, 0.0), 2) for m in self.group},
+            # 未截断的原始 t,仅供显示;计算一律用上面的 weights
+            "weights_raw": {m: round(self.weights_raw[last.year].get(m, 0.0), 2)
+                            for m in self.group},
             "theta": round(float(self.theta[last]), 2),
         }
 

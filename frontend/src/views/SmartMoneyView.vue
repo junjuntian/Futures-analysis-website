@@ -30,6 +30,7 @@ interface MarketState {
   prospective_cost: number | null
   position: Position | null
   weights: Record<string, number>
+  weights_raw?: Record<string, number>
   theta: number
   env_block?: string
   env_boost?: string
@@ -89,6 +90,18 @@ interface SignalsPayload {
 const data = ref<SignalsPayload | null>(null)
 const error = ref('')
 const tab = ref<'today' | 'history' | 'weights' | 'rules'>('today')
+
+// 权重显示:撞上限时补一个未截断的真实 t 值。计算不受影响,见 RULES.weight_clip。
+function weightText(mk: { weights: Record<string, number>; weights_raw?: Record<string, number> },
+                    member: string): string {
+  const w = mk?.weights?.[member]
+  if (w === undefined || w === null) return '—'
+  const raw = mk?.weights_raw?.[member]
+  if (raw !== undefined && raw !== null && raw - w > 0.005) {
+    return `${w}(实际 ${raw})`
+  }
+  return String(w)
+}
 
 const alertMeta: Record<string, [string, string]> = {
   buy: ['danger', '买入触发'],
@@ -425,6 +438,8 @@ onMounted(async () => {
         <h2>席位权重(当年生效)</h2>
         <div class="desc">
           权重 = 该席位截至上年末全部增多事件"后 20 日收益"的 t 值,截断 [0,5],样本 &lt;30 记 0。
+          撞到上限的席位会同时标出未截断的真实 t 值(如 <b>5.00(实际 6.56)</b>)——
+          计算一律用截断后的值,标注只为看清真实差距。
           每年 1 月 1 日自动重算,不手工设定。门槛 θ = 1.2 × 组内最大权重
           (黄金 {{ data.markets.AU.theta }} / 白银 {{ data.markets.AG.theta }})。
         </div>
@@ -435,8 +450,8 @@ onMounted(async () => {
           <tbody>
             <tr v-for="member in data.rules.group" :key="member">
               <td>{{ member }}</td>
-              <td>{{ data.markets.AU.weights[member] ?? '—' }}</td>
-              <td>{{ data.markets.AG.weights[member] ?? '—' }}</td>
+              <td>{{ weightText(data.markets.AU, member) }}</td>
+              <td>{{ weightText(data.markets.AG, member) }}</td>
               <td class="gray">
                 {{ data.rules.cond_seats.includes(member) ? '仅贴 60 日低点 <5% 时计分' : '全场景计分' }}
               </td>
