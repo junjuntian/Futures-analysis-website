@@ -292,6 +292,9 @@ jobs:
           install -m 600 engine/smart_money.py "${RELEASE_BUNDLE}/engine/smart_money.py"
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
           install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
+          # 成本对拍守卫:phase_5a 的 cost_parity 步骤要用它。
+          install -d -m 700 "${RELEASE_BUNDLE}/ops"
+          install -m 700 ops/cost-parity-check.py "${RELEASE_BUNDLE}/ops/cost-parity-check.py"
 
           cat >"${RELEASE_BUNDLE}/deploy-futures-remote.sh" <<'REMOTE_SCRIPT'
           #!/usr/bin/env bash

@@ -350,33 +350,59 @@ def seat_cost(seat: pd.DataFrame, price: pd.DataFrame, member: str) -> pd.Series
                & seat["contract"].notna() & (seat["contract"] != "")]
     if sub.empty:
         return pd.Series(dtype=float)
+    # 只取 long / short 两个榜。**volume(成交量榜)必须排干净**:交易所同一天
+    # 会同时公布持仓榜与成交量榜,同一席位同一合约可能两榜都在。把 volume 的
+    # 数量混进来会污染持仓与加仓量——2026-01-19 中财 AU2602 就是 long 871
+    # 与 volume 888 同日,混算后成本偏 0.03,再叠加掉榜误判就放大成 167。
     g = sub.pivot_table(index=["contract", "trade_date"], columns="rank_type",
-                        values=["quantity", "change"], aggfunc="sum")
+                        values="quantity", aggfunc="sum")
+    for leg in ("long", "short"):
+        if leg not in g.columns:
+            g[leg] = np.nan
+    g = g[["long", "short"]]
 
     daily: dict = {}
     for contract, grp in g.groupby(level=0):
         grp = grp.droplevel(0).sort_index()
+        lq, sq = grp["long"], grp["short"]
 
-        def col(kind, leg):
-            return (grp[(kind, leg)] if (kind, leg) in grp.columns
-                    else pd.Series(0.0, index=grp.index))
-
-        net = col("quantity", "long").fillna(0) - col("quantity", "short").fillna(0)
-        dnet = col("change", "long").fillna(0) - col("change", "short").fillna(0)
-        cost, net_prev = np.nan, 0.0
+        cost, prev_net = np.nan, 0.0
         for d in grp.index:
+            l, sh = lq.get(d, np.nan), sq.get(d, np.nan)
+            # 该合约当日两个榜都没有他 = 掉榜,持仓未知。**什么都不动**:
+            # cost 与 prev_net 原样保留,等有数据那天接着算。补 0 会被下面
+            # 读成平仓,清掉成本并在回榜日算出一个错的起点。
+            if np.isnan(l) and np.isnan(sh):
+                continue
+            net = (0.0 if np.isnan(l) else float(l)) - (0.0 if np.isnan(sh) else float(sh))
             px = settle.get((contract, d), np.nan)
-            n, dn = float(net.get(d, 0.0)), float(dnet.get(d, 0.0))
-            if not np.isnan(px):
-                if n > 0 and net_prev <= 0:
-                    cost = px
-                elif n > 0 and dn > 0 and not np.isnan(cost):
-                    cost = (cost * (n - dn) + px * dn) / n
-                if n <= 0:
+
+            flipped = (prev_net > 0 > net) or (prev_net < 0 < net)
+            if flipped or net == 0:
+                cost = np.nan
+            if net == 0:
+                prev_net = 0.0
+                continue
+
+            # 加仓量看**净持仓绝对值的增量**,不用交易所公布的 change:
+            # 掉榜回来、翻向、推断行无 change 时,change 与真实增量对不上。
+            prev_abs = 0.0 if flipped else abs(prev_net)
+            added = abs(net) - prev_abs
+            if added > 0:
+                if np.isnan(px):
+                    # 建仓当日没有结算价,这笔仓位的成本从此不可知。硬算会让
+                    # 后面每天的成本线都带着一个编出来的起点。
                     cost = np.nan
-            net_prev = n
-            if n > 0 and not np.isnan(cost):
-                daily.setdefault(d, []).append((cost, n))
+                elif np.isnan(cost):
+                    cost = px
+                else:
+                    cost = (cost * prev_abs + px * added) / abs(net)
+
+            prev_net = net
+            # 只产出多头成本:引擎用它定买入区间,净空的席位不该参与买点。
+            # (Rust 面板会给净空也算成本,那是展示需要——对拍守卫已跳过净空日。)
+            if net > 0 and not np.isnan(cost):
+                daily.setdefault(d, []).append((cost, net))
 
     out = {}
     for d, legs in daily.items():

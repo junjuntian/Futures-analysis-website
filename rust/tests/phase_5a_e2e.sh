@@ -369,4 +369,43 @@ printf 'PHASE5A_REAL_QUERY combination=%s-%s-%s input_points=%s retained_points=
   "$PROBE_SYMBOL" "$MONTH_ONE" "$MONTH_TWO" \
   "$input_points" "$retained_points" "$excluded_points" "$segment_count" \
   "$source_code" "$fetched_at" "$throttle_delta_ms"
+echo "PHASE5A_E2E_STAGE cost_parity"
+# 「机构成本」这一个概念在 Rust(面板建仓过程)与 Python(信号引擎买入区间)
+# 各有一份实现,2026-08-14 被发现长期不一致(东证 960.40 vs 900 附近)。
+# 两边现已对齐,这一步守住它们别再分叉——本项目已在「同一概念多处实现」上
+# 栽过两次,见 research/PITFALLS.md 第 9 条。
+#
+# 守卫自己不算成本,它直接调引擎的 seat_cost,再与 Rust 端点比。有意的差异
+# (净空、反推行之后)由守卫内部豁免,理由写在它的文件头。
+parity_dir=$(mktemp -d "$EVIDENCE_DIR/cost-parity.XXXXXX")
+pg=$("${COMPOSE[@]}" ps -q postgres)
+for inst in AU AG; do
+  low=$(printf '%s' "$inst" | tr 'AUG' 'aug')
+  price_sql="\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,prev_settlement_price,volume,volume_basis,turnover,open_interest,open_interest_change,source from price_history where instrument='$inst') to '/tmp/pp.csv' with (format csv, header true)"
+  seat_sql="\copy (select exchange,instrument,contract,is_variety_total,variety_total_is_computed,trade_date,rank_type,rank,member,quantity,change,source from seat_history where instrument='$inst') to '/tmp/ss.csv' with (format csv, header true)"
+  "${COMPOSE[@]}" exec -T postgres psql -X -U "$DB_USER" -d "$DB_NAME" -Atq     -v ON_ERROR_STOP=1 -c "$price_sql" >/dev/null
+  docker cp "$pg":/tmp/pp.csv "$parity_dir/${low}_price.csv" >/dev/null
+  "${COMPOSE[@]}" exec -T postgres psql -X -U "$DB_USER" -d "$DB_NAME" -Atq     -v ON_ERROR_STOP=1 -c "$seat_sql" >/dev/null
+  docker cp "$pg":/tmp/ss.csv "$parity_dir/${low}_seat.csv" >/dev/null
+  "${COMPOSE[@]}" exec -T postgres rm -f /tmp/pp.csv /tmp/ss.csv
+done
+cp "$RELEASE_DIR/ops/cost-parity-check.py" "$parity_dir/check.py"
+cp "$RELEASE_DIR/engine/smart_money.py" "$parity_dir/smart_money.py"
+chmod -R a+rX "$parity_dir"
+# 引擎依赖 pandas/numpy,宿主机没有,借 collector 镜像跑。
+parity_image=$(docker images --format '{{.ID}} {{.Repository}}' |
+  awk '/collector/{if(!f){print $1;f=1}}')
+test -n "$parity_image"
+docker run --rm --network host -v "$parity_dir":/work -w /work \
+  -e PYTHONIOENCODING=utf-8 --entrypoint python "$parity_image" \
+  /work/check.py --base-url "$BASE" --data-dir /work \
+  --engine /work/smart_money.py --cookie "$COOKIE_NAME=$TOKEN_ONE" \
+  >"$EVIDENCE_DIR/cost-parity.log" 2>&1 || {
+    echo "PHASE5A_E2E_FAIL cost_parity" >&2
+    tail -30 "$EVIDENCE_DIR/cost-parity.log" >&2
+    exit 1
+  }
+rm -rf "$parity_dir"
+echo "PHASE5A_E2E_STAGE cost_parity_passed"
+
 echo PHASE5A_E2E_PASS
