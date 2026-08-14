@@ -393,6 +393,95 @@ export function getSeatBuilding(
   return getJson(`/api/v1/spread-analytics/seats/building?${params.toString()}`)
 }
 
+// —— 总览页「黄金白银报告表」 ——
+//
+// 一张表两个来源：上半（压力位/支撑位）是运营者手填的盘面判断，下半（席位净持仓
+// 与筹码）从事实表现算。两半分别读写。
+
+/** 一个品种上的昨 / 今净持仓与筹码。`null` = 那天不在榜上，**不是零**。 */
+export interface ReportSeatCell {
+  previous_net: string | null
+  net: string | null
+  /** 筹码 = 净持仓成本（推算），与席位页同一个引擎算出的同一个数。合计行为 null。 */
+  cost: string | null
+}
+
+export interface ReportSeatRow {
+  label: string
+  members: string[]
+  /** 合计行（机构持仓 / 外资持仓 / 散户席位）。 */
+  is_total: boolean
+  gold: ReportSeatCell
+  silver: ReportSeatCell
+}
+
+export interface ReportSeatGroup {
+  /** `institution` / `watch` / `foreign` / `retail` */
+  group_key: string
+  members: string[]
+}
+
+/** 压力位网格的一行。`values` 依次对应三列行情。 */
+export interface ReportLevelRow {
+  key: string
+  values: string[]
+  /** `up` / `down` / `''`。「星级评分度」那一行不用。 */
+  bias?: string
+  /** 关注度星数 0~5。「星级评分度」那一行改用 `text`。 */
+  stars?: number | null
+  text?: string
+}
+
+export interface OverviewReportResponse {
+  trade_date: string
+  levels: { rows: ReportLevelRow[] } | null
+  /** `levels` 实际来自哪一天。早于 trade_date 说明是沿用上次填的。 */
+  levels_source_date: string | null
+  seat_groups: ReportSeatGroup[]
+  rows: ReportSeatRow[]
+}
+
+export function getOverviewReport(tradeDate?: string): Promise<ApiEnvelope<OverviewReportResponse>> {
+  const params = new URLSearchParams()
+  if (tradeDate) params.set('trade_date', tradeDate)
+  const query = params.toString()
+  return getJson(`/api/v1/overview/report${query ? `?${query}` : ''}`)
+}
+
+/**
+ * 这两个写端点回 204，没有响应体，所以不能走 `sendJson`——它末尾无条件
+ * `response.json()`，遇到空体会抛「Unexpected end of JSON input」，
+ * 保存明明成功了界面却报错。
+ */
+async function putNoContent(path: string, body: unknown, csrfToken: string): Promise<void> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken },
+    credentials: 'include',
+    body: JSON.stringify(body)
+  })
+  if (!response.ok) throw await parseApiError(response, `request failed: ${response.status}`)
+}
+
+export function saveOverviewReportLevels(
+  tradeDate: string,
+  rows: ReportLevelRow[],
+  csrfToken: string
+): Promise<void> {
+  return putNoContent(
+    '/api/v1/overview/report/levels',
+    { trade_date: tradeDate, cells: { rows } },
+    csrfToken
+  )
+}
+
+export function saveOverviewReportSeatGroups(
+  groups: ReportSeatGroup[],
+  csrfToken: string
+): Promise<void> {
+  return putNoContent('/api/v1/overview/report/seat-groups', { groups }, csrfToken)
+}
+
 /** 套利监控里一条口径轨。历年轨用的是百分位区间，位置可以落在 0~1 之外。 */
 export interface SpreadMonitorTrack {
   low: string

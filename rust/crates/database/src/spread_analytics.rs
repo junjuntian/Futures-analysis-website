@@ -2264,6 +2264,265 @@ pub async fn load_variety_building_days(
         .collect())
 }
 
+/// 报告表里一家席位在一个品种上的一天。
+#[derive(Debug, Clone)]
+pub struct ReportNetRow {
+    pub member: String,
+    pub instrument: String,
+    pub net_position: String,
+}
+
+/// 报告表要用的「昨 / 今净持仓」。
+///
+/// 「昨」逐品种取**该品种上一个有席位数据的交易日**，不是简单地减一天，也不是全局
+/// 统一取一个日子：上期所与郑商所到货时间不同，一刀切会把某个品种的昨仓取成前天，
+/// 而表上看不出来——只会显示成「这家昨天没动」。
+pub async fn load_report_nets(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instruments: &[String],
+    members: &[String],
+    trade_date: Date,
+) -> Result<(Vec<ReportNetRow>, Vec<ReportNetRow>), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let sql = format!(
+        "with prev as (
+             select instrument, max(trade_date) as trade_date
+               from seat_history
+              where workspace_id = $1 and instrument = any($2::text[])
+                and trade_date < $4 and not is_variety_total
+              group by instrument
+         ), picked as (
+             -- 同一条身份键多个来源只取最可信的那个，纪律同 building_days_sql。
+             select distinct on (s.instrument, {member_key}, s.contract, s.trade_date, s.rank_type)
+                    s.instrument, {member_key} as member_key, s.trade_date,
+                    s.rank_type, s.quantity
+               from seat_history s
+               left join prev p on p.instrument = s.instrument
+              where s.workspace_id = $1 and s.instrument = any($2::text[])
+                and not s.is_variety_total and s.contract is not null
+                and s.rank_type in ('long', 'short')
+                and (s.trade_date = $4 or s.trade_date = p.trade_date)
+                and {member_key} = any($3::text[])
+              order by s.instrument, {member_key}, s.contract, s.trade_date, s.rank_type,
+                       {source_rank}, s.source
+         )
+         select member_key as member, instrument, trade_date,
+                (sum(case when rank_type = 'long' then quantity else 0 end)
+                 - sum(case when rank_type = 'short' then quantity else 0 end))::text as net
+           from picked
+          group by member_key, instrument, trade_date",
+        member_key = member_key_sql(),
+        source_rank = SEAT_SOURCE_RANK,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(instruments)
+        .bind(members)
+        .bind(trade_date)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    let mut today = Vec::new();
+    let mut yesterday = Vec::new();
+    for row in rows {
+        let item = ReportNetRow {
+            member: row.get("member"),
+            instrument: row.get("instrument"),
+            net_position: row.get("net"),
+        };
+        if row.get::<Date, _>("trade_date") == trade_date {
+            today.push(item);
+        } else {
+            yesterday.push(item);
+        }
+    }
+    Ok((today, yesterday))
+}
+
+/// 报告表里「筹码」一列的取数：只捞**当日仍有持仓的那些合约**的完整历史。
+///
+/// 为什么可以只捞这些：筹码是当日各腿的加权成本，而某个合约的成本只取决于它自己
+/// 那一段历史——当日没有持仓的合约对当日的两腿没有任何贡献。所以结果与席位页
+/// 逐字相同（两边喂的都是 `build_variety_series`），代价却小得多：永安黄金全史
+/// 81 个合约 10,125 行，当日在手的只有 3 个合约。
+pub async fn load_report_cost_rows(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instruments: &[String],
+    members: &[String],
+    trade_date: Date,
+) -> Result<Vec<(String, String, VarietyBuildingRow)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let sql = format!(
+        "with held as (
+             select distinct {member_key} as member_key, instrument, contract
+               from seat_history
+              where workspace_id = $1 and instrument = any($2::text[])
+                and trade_date = $4 and not is_variety_total and contract is not null
+                and rank_type in ('long', 'short')
+                and {member_key} = any($3::text[])
+         ), picked as (
+             select distinct on (s.instrument, {member_key}, s.contract, s.trade_date, s.rank_type)
+                    s.instrument, {member_key} as member_key, s.contract, s.trade_date,
+                    s.rank_type, s.quantity
+               from seat_history s
+               join held h
+                 on h.member_key = {member_key}
+                and h.instrument = s.instrument
+                and h.contract = s.contract
+              where s.workspace_id = $1 and not s.is_variety_total
+                and s.rank_type in ('long', 'short')
+                -- 未来的行不能进来：报告要能翻回历史某一天，那天之后发生的事
+                -- 不该影响那天的成本。
+                and s.trade_date <= $4
+              order by s.instrument, {member_key}, s.contract, s.trade_date, s.rank_type,
+                       {source_rank}, s.source
+         ), seats as (
+             select instrument, member_key, contract, trade_date,
+                    sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+               from picked
+              group by instrument, member_key, contract, trade_date
+         ), prices as (
+             select distinct on (contract, trade_date)
+                    contract, trade_date, settlement_price
+               from price_history
+              where workspace_id = $1 and instrument = any($2::text[]) and trade_date <= $4
+              order by contract, trade_date, {price_rank}, source
+         )
+         select s.member_key as member, s.instrument, s.contract, s.trade_date,
+                s.long_position::text, s.short_position::text,
+                p.settlement_price::text
+           from seats s
+           left join prices p on p.contract = s.contract and p.trade_date = s.trade_date
+          order by s.member_key, s.instrument, s.contract, s.trade_date",
+        member_key = member_key_sql(),
+        source_rank = SEAT_SOURCE_RANK,
+        price_rank = PRICE_SOURCE_RANK,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(instruments)
+        .bind(members)
+        .bind(trade_date)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("member"),
+                row.get("instrument"),
+                VarietyBuildingRow {
+                    contract: row.get("contract"),
+                    trade_date: row.get("trade_date"),
+                    long_position: row.get("long_position"),
+                    short_position: row.get("short_position"),
+                    settlement_price: row.get("settlement_price"),
+                },
+            )
+        })
+        .collect())
+}
+
+/// 报告表上半部分（压力位网格）某一天的记录，连同它实际来自哪一天。
+///
+/// 那天没有记录就回落到**最近一个有记录的日子**：报告是逐日的，但压力位不是每天
+/// 都变，让运营者每天从空表重敲一遍是纯粹的重复劳动。界面据 `source_date` 标明
+/// 「这是 X 日填的，尚未确认」，不冒充当天已经填过。
+pub async fn load_report_levels(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    trade_date: Date,
+) -> Result<Option<(Date, Value)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let row = sqlx::query(
+        "select trade_date, cells from overview_report_levels
+          where workspace_id = $1 and trade_date <= $2
+          order by trade_date desc limit 1",
+    )
+    .bind(workspace_id)
+    .bind(trade_date)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row.map(|row| (row.get("trade_date"), row.get("cells"))))
+}
+
+pub async fn save_report_levels(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    trade_date: Date,
+    cells: &Value,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    sqlx::query(
+        "insert into overview_report_levels (workspace_id, trade_date, cells)
+         values ($1, $2, $3)
+         on conflict (workspace_id, trade_date)
+         do update set cells = excluded.cells, updated_at = now()",
+    )
+    .bind(workspace_id)
+    .bind(trade_date)
+    .bind(cells)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 四组席位名单。返回的是**归一后**的会员名，与席位页同一口径。
+pub async fn load_report_seat_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<(String, Vec<String>)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select group_key, members from overview_report_seat_groups
+          where workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get("group_key"), row.get("members")))
+        .collect())
+}
+
+pub async fn save_report_seat_groups(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    groups: &[(String, Vec<String>)],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    for (key, members) in groups {
+        sqlx::query(
+            "insert into overview_report_seat_groups (workspace_id, group_key, members)
+             values ($1, $2, $3)
+             on conflict (workspace_id, group_key)
+             do update set members = excluded.members, updated_at = now()",
+        )
+        .bind(workspace_id)
+        .bind(key)
+        .bind(members)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// 某个交易日各交易所的数据到齐情况。
 #[derive(Debug, Clone)]
 pub struct DataFreshnessDay {

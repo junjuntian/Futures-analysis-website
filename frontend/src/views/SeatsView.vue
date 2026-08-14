@@ -13,6 +13,7 @@ import {
   type SeatPositionRow
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
+import { lastYearStartIndex } from '../spreadCharts'
 
 // 选过的席位记在本地，刷新、关标签页、明天再来都还在，直到下次主动改选。
 // 运营者盯的通常就是那么几家机构，每次进来重选一遍是纯粹的重复劳动。
@@ -372,6 +373,45 @@ function tooltipBody(index: number, head: string[] = []) {
   return parts.join('')
 }
 
+/**
+ * 最新一天的摘要，常驻在「净持仓」标题旁边。
+ *
+ * 与小窗同源、同口径，只是不必悬停就能看到——运营者要的是「点进来一眼知道
+ * 现在什么情况」。**不含盈亏**：他明确说了盈利不用显示在这里。
+ */
+const latest = computed(() => {
+  const day = [...days.value].reverse().find((item) => item.net_position !== null)
+  if (!day) return null
+  const net = Number(day.net_position)
+  const parts: Array<{ text: string; tone?: 'up' | 'down' }> = []
+  if (day.legs) {
+    const long = Number(day.legs.long_lots)
+    const short = Number(day.legs.short_lots)
+    if (long > 0) {
+      parts.push({ text: `多单 ${lots(long)}`, tone: 'up' })
+      parts.push({
+        text: `均价 ${legCost(day.legs.long_cost, day.legs.long_cost_lots, day.legs.long_lots)}`
+      })
+    }
+    if (short > 0) {
+      parts.push({ text: `空单 ${lots(short)}`, tone: 'down' })
+      parts.push({
+        text: `均价 ${legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)}`
+      })
+    }
+  }
+  parts.push({
+    text: `净持仓 ${lots(Math.abs(net))}${net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'}`,
+    tone: net === 0 ? undefined : net > 0 ? 'up' : 'down'
+  })
+  if (!day.legs) {
+    parts.push({
+      text: `净持仓成本（推算） ${day.cost === null ? '不可知' : price(Number(day.cost))}`
+    })
+  }
+  return { date: day.trade_date, parts }
+})
+
 /** ECharts 把 axis 小窗的参数传成数组；取哪一条都行，要的只是那天的下标。 */
 function axisIndex(params: unknown) {
   const first = Array.isArray(params) ? params[0] : params
@@ -392,9 +432,18 @@ const tooltip = {
 const zoom = computed(() => [
   // 滚轮不给 dataZoom 用：这一页四张图竖着叠，滚轮被图抢走就翻不动页面了。
   // 缩放交给滑钮，图内按住拖动仍可平移。
-  { type: 'inside' as const, zoomOnMouseWheel: false, moveOnMouseWheel: false },
+  {
+    type: 'inside' as const,
+    zoomOnMouseWheel: false,
+    moveOnMouseWheel: false,
+    // 默认落在最近一年，见 lastYearStartIndex。
+    startValue: lastYearStartIndex(dates.value),
+    endValue: Math.max(dates.value.length - 1, 0)
+  },
   {
     type: 'slider' as const,
+    startValue: lastYearStartIndex(dates.value),
+    endValue: Math.max(dates.value.length - 1, 0),
     height: 26,
     bottom: 8,
     borderColor: '#e2e1dd',
@@ -678,7 +727,20 @@ const cumulativeTotal = computed(() => {
           />
         </el-card>
         <el-card shadow="never">
-          <template #header><h2>净持仓</h2></template>
+          <template #header>
+            <!-- 最新一天的数就摆在标题旁边，不必悬停去小窗里找。 -->
+            <div class="panel-head">
+              <h2>净持仓</h2>
+              <div v-if="latest" class="latest">
+                <span class="latest-date">{{ latest.date }}</span>
+                <span
+                  v-for="(part, index) in latest.parts"
+                  :key="index"
+                  :class="part.tone"
+                >{{ part.text }}</span>
+              </div>
+            </div>
+          </template>
           <SpreadChart :option="netOption" :height="300" export-name="建仓过程-净持仓" />
         </el-card>
         <el-card shadow="never">
@@ -765,6 +827,30 @@ const cumulativeTotal = computed(() => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* 最新一天的摘要，挨着「净持仓」标题。窄屏换行而不是挤成一团。 */
+.latest {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #606266;
+}
+.latest-date {
+  font-weight: 600;
+  color: #303133;
+}
+.latest .up {
+  color: #c0392b;
+  font-weight: 600;
+  margin-left: 0;
+}
+.latest .down {
+  color: #27ae60;
+  font-weight: 600;
+  margin-left: 0;
 }
 .seats h2 {
   margin: 0;

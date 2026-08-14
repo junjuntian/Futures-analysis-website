@@ -9,7 +9,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use common::{ApiResponse, AppConfig};
 use std::sync::Arc;
@@ -47,6 +47,9 @@ use uuid::Uuid;
         spread_analytics::query_seat_building,
         spread_analytics::query_spread_monitor,
         spread_analytics::query_data_health,
+        spread_analytics::query_overview_report,
+        spread_analytics::save_overview_report_levels,
+        spread_analytics::save_overview_report_seat_groups,
         spread_analytics::list_favorites,
         spread_analytics::create_favorite,
         spread_analytics::delete_favorite
@@ -147,6 +150,12 @@ use uuid::Uuid;
         ,spread_analytics::SeatBuildingResponse
         ,spread_analytics::BuildingDayItem
         ,spread_analytics::VarietyLegs
+        ,spread_analytics::OverviewReportResponse
+        ,spread_analytics::ReportSeatRow
+        ,spread_analytics::ReportSeatCell
+        ,spread_analytics::ReportSeatGroup
+        ,spread_analytics::SaveReportLevelsRequest
+        ,spread_analytics::SaveReportSeatGroupsRequest
         ,spread_analytics::DataHealthDay
         ,spread_analytics::DataHealthResponse
         ,spread_analytics::SpreadMonitorResponse
@@ -274,6 +283,18 @@ fn router(
             get(spread_analytics::query_data_health),
         )
         .route(
+            "/api/v1/overview/report",
+            get(spread_analytics::query_overview_report),
+        )
+        .route(
+            "/api/v1/overview/report/levels",
+            put(spread_analytics::save_overview_report_levels),
+        )
+        .route(
+            "/api/v1/overview/report/seat-groups",
+            put(spread_analytics::save_overview_report_seat_groups),
+        )
+        .route(
             "/api/v1/spread-analytics/favorites",
             get(spread_analytics::list_favorites).post(spread_analytics::create_favorite),
         )
@@ -380,6 +401,8 @@ mod tests {
             ("/api/v1/spread-analytics/favorites", "get"),
             ("/api/v1/spread-analytics/favorites", "post"),
             ("/api/v1/spread-analytics/favorites/{favorite_id}", "delete"),
+            ("/api/v1/overview/report/levels", "put"),
+            ("/api/v1/overview/report/seat-groups", "put"),
         ] {
             let operation = &paths[path][method];
             assert_eq!(

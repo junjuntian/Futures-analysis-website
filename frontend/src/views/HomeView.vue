@@ -7,6 +7,7 @@ import { getDataHealth, getSpreadMonitor, type DataHealthResponse, type SpreadMo
 import { dayCompleteness, rankByExtremity } from '../overview'
 import { useAuthStore } from '../stores/auth'
 import { useHealthStore } from '../stores/health'
+import GoldSilverReport from '../components/GoldSilverReport.vue'
 
 // 总览页。回答进站第一眼想知道的四件事：今天有没有该看的套利机会、持仓要不要
 // 动、数据到齐没有、日更有没有出问题。这四件事以前要点进三个页面才凑得齐。
@@ -264,6 +265,10 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
           </div>
         </el-card>
       </div>
+
+      <!-- 报告表自己取数、自己管加载失败，不并进上面那四路 allSettled——
+           它比首页那几张卡片重得多，挂了也不该让总览一起空白。 -->
+      <GoldSilverReport />
 
       <div class="ov-foot">
         <span>版本 <code>{{ health.version?.git_sha?.slice(0, 7) ?? 'local' }}</code></span>

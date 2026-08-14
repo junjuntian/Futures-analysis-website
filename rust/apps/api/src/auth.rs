@@ -456,6 +456,10 @@ pub(crate) enum Permission {
     GovernObjects,
     ReadSpreads,
     ManageSpreadFavorites,
+    /// 总览页那张报告表的手填部分（压力位网格、席位分组）。
+    /// 不挪用 ManageSpreadFavorites：那是价差收藏，与这里没有关系，
+    /// 混用会让日后想单独收紧其中一个时无从下手。
+    ManageOverviewReport,
 }
 
 impl Permission {
@@ -468,6 +472,7 @@ impl Permission {
             Self::GovernObjects => "object.govern",
             Self::ReadSpreads => "spread.read",
             Self::ManageSpreadFavorites => "spread.favorite.manage",
+            Self::ManageOverviewReport => "overview.report.manage",
         }
     }
 }
@@ -509,6 +514,7 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         Permission::GovernObjects,
         Permission::ReadSpreads,
         Permission::ManageSpreadFavorites,
+        Permission::ManageOverviewReport,
     ] {
         if roles_allow_permission(roles, permission) {
             permissions.push(permission.as_str().to_string());
@@ -538,6 +544,9 @@ fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst" | "viewer")),
         Permission::ManageSpreadFavorites => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst")),
+        Permission::ManageOverviewReport => roles
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst")),
     }

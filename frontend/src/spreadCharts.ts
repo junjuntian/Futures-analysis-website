@@ -16,6 +16,27 @@ const SEASONAL_PALETTE = [
   '#8a5cd6', '#2d9a5b'
 ]
 
+/**
+ * 最近一年的起点下标。带时间轴的图默认落在这一段。
+ *
+ * 十八年的日线挤在一屏里读不出任何东西，而运营者每次进来都得手动拉一次滑钮。
+ * 按**日历一年**往回找，不按「多少个交易日」——交易日数逐年不同（春节长短、
+ * 停市），按天数才叫一年。
+ *
+ * @param dates 升序的交易日串（`YYYY-MM-DD`）。字符串直接比大小即可，这个格式
+ *   的字典序就是时间序，不必转 Date 再比。
+ */
+export function lastYearStartIndex(dates: string[]): number {
+  if (dates.length === 0) return 0
+  // 拼 `T00:00:00` 让它按本地时区解析。少了它某些浏览器按 UTC 解析，东八区会差一天。
+  const cutoff = new Date(`${dates[dates.length - 1]}T00:00:00`)
+  cutoff.setFullYear(cutoff.getFullYear() - 1)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const key = `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}`
+  const index = dates.findIndex((date) => date >= key)
+  return index < 0 ? 0 : index
+}
+
 export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOption {
   const points = data.continuous_series.points
   // The upstream series alternates the forward and the reverse leg pair day by
@@ -58,9 +79,17 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
     animation: false,
     grid: { left: 54, right: 58, top: 28, bottom: 82 },
     dataZoom: [
-      { type: 'inside', filterMode: 'none' },
+      // 默认落在最近一年，见 lastYearStartIndex。
+      {
+        type: 'inside',
+        filterMode: 'none',
+        startValue: lastYearStartIndex(points.map((point) => point.trade_date)),
+        endValue: Math.max(points.length - 1, 0)
+      },
       {
         type: 'slider',
+        startValue: lastYearStartIndex(points.map((point) => point.trade_date)),
+        endValue: Math.max(points.length - 1, 0),
         height: 26,
         bottom: 30,
         borderColor: '#e2e1dd',

@@ -944,6 +944,454 @@ async fn variety_building_days(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// 总览页「黄金白银报告表」
+// ---------------------------------------------------------------------------
+//
+// 一张表两个来源：上半（压力位/支撑位）是运营者手填的盘面判断，平台无从计算；
+// 下半（席位净持仓与筹码）全自动，从已有事实表现算。两半分开存取，别混。
+
+/// 报告表下半部分的一行。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReportSeatRow {
+    /// 「国泰席位」「机构持仓」这种显示名。
+    pub label: String,
+    /// 这一行由哪几家席位合成。单席位行就一个。
+    pub members: Vec<String>,
+    /// 合计行（机构持仓 / 外资持仓 / 散户席位），界面要与单席位行区分开。
+    pub is_total: bool,
+    pub gold: ReportSeatCell,
+    pub silver: ReportSeatCell,
+}
+
+/// 一个品种上的昨 / 今净持仓与筹码。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReportSeatCell {
+    /// 上一个有数据的交易日的净持仓。**`None` = 那天他不在榜上，不是零。**
+    pub previous_net: Option<String>,
+    pub net: Option<String>,
+    /// 筹码 = 净持仓成本（推算），与席位页同一个引擎算出来的同一个数。
+    /// 净多按多头腿加权、净空按空头腿加权；两边都有时取手数大的那一腿。
+    pub cost: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OverviewReportResponse {
+    /// 报告的交易日，标题里那个日期。
+    pub trade_date: String,
+    /// 压力位网格。运营者没填过就是 `None`，界面显示空表让他填。
+    pub levels: Option<Value>,
+    /// `levels` 实际来自哪一天。早于 `trade_date` 说明是沿用上一次填的，
+    /// 界面要标出来——不标就等于把上周的判断冒充成今天的。
+    pub levels_source_date: Option<String>,
+    pub seat_groups: Vec<ReportSeatGroup>,
+    pub rows: Vec<ReportSeatRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportSeatGroup {
+    /// `institution` / `watch` / `foreign` / `retail`
+    pub group_key: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SaveReportLevelsRequest {
+    pub trade_date: String,
+    pub cells: Value,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SaveReportSeatGroupsRequest {
+    pub groups: Vec<ReportSeatGroup>,
+}
+
+/// 报告表只看金银两个品种——运营者明确说过其他品种是以后的事。
+const REPORT_INSTRUMENTS: [&str; 2] = ["AU", "AG"];
+/// 四组的默认名单。运营者没配过时用它，配过就以库里为准。
+/// 与他 2026-08-15 给的那张报告表逐字对应。
+const DEFAULT_SEAT_GROUPS: [(&str, &[&str]); 4] = [
+    (
+        "institution",
+        &["国泰君安", "中信期货", "东证期货", "永安期货", "海通期货"],
+    ),
+    ("watch", &["中财期货"]),
+    ("foreign", &["高盛期货"]),
+    (
+        "retail",
+        &["东方财富", "方正中期", "徽商期货", "平安期货", "中信建投"],
+    ),
+];
+
+fn parse_trade_date(value: &str, request_id: Uuid) -> Result<Date, SpreadApiError> {
+    Date::parse(value, &time::format_description::well_known::Iso8601::DATE)
+        .map_err(|_| SpreadApiError::Validation("invalid_trade_date", request_id))
+}
+
+/// 把配置的四组名单摊平成表上的行。
+///
+/// 行序与运营者那张报告表一致：机构逐行 → 其他关注逐行 → 外资逐行 →
+/// 机构持仓 → 外资持仓 → 散户席位。**散户只出合计行**，不逐行显示——
+/// 那五家是用来定义「散户」这个合计的，不是要一家家看。
+fn report_row_plan(groups: &[(String, Vec<String>)]) -> Vec<(String, Vec<String>, bool)> {
+    let pick = |key: &str| -> Vec<String> {
+        groups
+            .iter()
+            .find(|(group_key, _)| group_key == key)
+            .map(|(_, members)| members.clone())
+            .unwrap_or_default()
+    };
+    let institution = pick("institution");
+    let watch = pick("watch");
+    let foreign = pick("foreign");
+    let retail = pick("retail");
+
+    let mut plan: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for member in institution.iter().chain(&watch).chain(&foreign) {
+        // 「国泰君安」→「国泰席位」。取前两个字是运营者那张表的写法；
+        // 名字短于两个字就整名照用，别切出半个字来。
+        let short: String = member.chars().take(2).collect();
+        plan.push((format!("{short}席位"), vec![member.clone()], false));
+    }
+    if !institution.is_empty() {
+        plan.push(("机构持仓".to_string(), institution, true));
+    }
+    if !foreign.is_empty() {
+        plan.push(("外资持仓".to_string(), foreign, true));
+    }
+    if !retail.is_empty() {
+        plan.push(("散户席位".to_string(), retail, true));
+    }
+    plan
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/overview/report",
+    params(("trade_date" = Option<String>, Query)),
+    security(("session_cookie" = [])),
+    responses((status = 200, body = OverviewReportResponse), (status = 401), (status = 500))
+)]
+pub async fn query_overview_report(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let workspace = context.workspace_id();
+
+    // 没指定日子就用最新有席位数据的那天。让人自己去猜今天有没有数据是多余的。
+    let trade_date = match query.get("trade_date").map(String::as_str) {
+        Some(value) if !value.trim().is_empty() => parse_trade_date(value.trim(), request_id)?,
+        _ => database::spread_analytics::seat_trade_dates(&state.auth.pool, workspace, None, 1)
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?
+            .into_iter()
+            .next()
+            .ok_or(SpreadApiError::Internal(request_id))?,
+    };
+
+    let stored = database::spread_analytics::load_report_seat_groups(&state.auth.pool, workspace)
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let groups: Vec<(String, Vec<String>)> = if stored.is_empty() {
+        DEFAULT_SEAT_GROUPS
+            .iter()
+            .map(|(key, members)| {
+                (
+                    (*key).to_string(),
+                    members.iter().map(|name| (*name).to_string()).collect(),
+                )
+            })
+            .collect()
+    } else {
+        stored
+    };
+
+    let mut members: Vec<String> = groups
+        .iter()
+        .flat_map(|(_, list)| list.iter().cloned())
+        .collect();
+    members.sort();
+    members.dedup();
+
+    let instruments: Vec<String> = REPORT_INSTRUMENTS
+        .iter()
+        .map(|code| (*code).to_string())
+        .collect();
+
+    let (today, yesterday) = database::spread_analytics::load_report_nets(
+        &state.auth.pool,
+        workspace,
+        &instruments,
+        &members,
+        trade_date,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let cost_rows = database::spread_analytics::load_report_cost_rows(
+        &state.auth.pool,
+        workspace,
+        &instruments,
+        &members,
+        trade_date,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    // 点值只影响盈亏，报告表用不到；但传个假的会让 `build_variety_series` 输出一份
+    // 乘错倍数的盈亏，日后有人顺手读它就中招。取真的，两次查询而已。
+    let mut multipliers: std::collections::HashMap<String, Decimal> =
+        std::collections::HashMap::new();
+    for code in &instruments {
+        let value = database::spread_analytics::instrument_price_multiplier(
+            &state.auth.pool,
+            workspace,
+            code,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(Decimal::ZERO);
+        multipliers.insert(code.clone(), value);
+    }
+
+    // 按 (席位, 品种, 合约) 切段。SQL 已按这个顺序排好，顺序扫一遍即可。
+    let mut per_pair: std::collections::HashMap<(String, String), Vec<Vec<DailyPosition>>> =
+        std::collections::HashMap::new();
+    let mut current: Option<(String, String, String)> = None;
+    for (member, instrument, row) in cost_rows {
+        let key = (member.clone(), instrument.clone(), row.contract.clone());
+        let bucket = per_pair.entry((member, instrument)).or_default();
+        if current.as_ref() != Some(&key) {
+            current = Some(key);
+            bucket.push(Vec::new());
+        }
+        bucket
+            .last_mut()
+            .expect("上面刚推过一段")
+            .push(DailyPosition {
+                trade_date: row.trade_date,
+                net_position: Some(
+                    row.long_position
+                        .as_deref()
+                        .map(parse_decimal)
+                        .unwrap_or(Decimal::ZERO)
+                        - row
+                            .short_position
+                            .as_deref()
+                            .map(parse_decimal)
+                            .unwrap_or(Decimal::ZERO),
+                ),
+                settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
+            });
+    }
+
+    // 每个 (席位, 品种) 当日的筹码：净多看多头腿的加权成本，净空看空头腿的。
+    let mut costs: std::collections::HashMap<(String, String), Decimal> =
+        std::collections::HashMap::new();
+    for ((member, instrument), contracts) in per_pair {
+        let factor = multipliers
+            .get(&instrument)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        let series = build_variety_series(&contracts, factor);
+        let Some(day) = series.into_iter().find(|day| day.trade_date == trade_date) else {
+            continue;
+        };
+        let picked = if day.net_position > Decimal::ZERO {
+            day.long_cost
+        } else if day.net_position < Decimal::ZERO {
+            day.short_cost
+        } else {
+            None
+        };
+        if let Some(cost) = picked {
+            costs.insert((member, instrument), cost);
+        }
+    }
+
+    let net_of = |rows: &[database::spread_analytics::ReportNetRow],
+                  members: &[String],
+                  instrument: &str|
+     -> Option<String> {
+        let mut total = Decimal::ZERO;
+        let mut seen = false;
+        for row in rows {
+            if row.instrument == instrument && members.iter().any(|name| name == &row.member) {
+                total += parse_decimal(&row.net_position);
+                seen = true;
+            }
+        }
+        // 一家都没在榜上：报未知，不是零。合计行只要有一家在榜就给和——
+        // 那是「已知部分的合计」，与席位页累计盈亏同一条纪律。
+        seen.then(|| total.normalize().to_string())
+    };
+
+    let rows: Vec<ReportSeatRow> = report_row_plan(&groups)
+        .into_iter()
+        .map(|(label, members, is_total)| {
+            let cell = |instrument: &str| ReportSeatCell {
+                previous_net: net_of(&yesterday, &members, instrument),
+                net: net_of(&today, &members, instrument),
+                // 合计行不给筹码：把几家成本不同的仓位平均成一个数没有意义，
+                // 运营者那张表在合计行放的也是「加/减」方向而不是价。
+                cost: (!is_total)
+                    .then(|| {
+                        members.first().and_then(|member| {
+                            costs
+                                .get(&(member.clone(), instrument.to_string()))
+                                .map(|value| value.round_dp(4).to_string())
+                        })
+                    })
+                    .flatten(),
+            };
+            ReportSeatRow {
+                gold: cell("AU"),
+                silver: cell("AG"),
+                label,
+                members,
+                is_total,
+            }
+        })
+        .collect();
+
+    let levels =
+        database::spread_analytics::load_report_levels(&state.auth.pool, workspace, trade_date)
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    Ok(Json(ApiResponse::new(
+        OverviewReportResponse {
+            trade_date: trade_date.to_string(),
+            levels: levels.as_ref().map(|(_, cells)| cells.clone()),
+            levels_source_date: levels.as_ref().map(|(date, _)| date.to_string()),
+            seat_groups: groups
+                .into_iter()
+                .map(|(group_key, members)| ReportSeatGroup { group_key, members })
+                .collect(),
+            rows,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/overview/report/levels",
+    security(("session_cookie" = [])),
+    responses((status = 204), (status = 400), (status = 401), (status = 403))
+)]
+pub async fn save_overview_report_levels(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Json(request): Json<SaveReportLevelsRequest>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = write_context(
+        &state,
+        &headers,
+        Permission::ManageOverviewReport,
+        request_id,
+    )
+    .await?;
+    let trade_date = parse_trade_date(request.trade_date.trim(), request_id)?;
+    // 形状校验挡在这里，不指望数据库的 check——那条只守住「是个带 rows 的对象」。
+    // 存进去一个畸形网格，界面会渲染成一张残表，而看上去像是数据没到。
+    let rows = request
+        .cells
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or(SpreadApiError::Validation("invalid_levels", request_id))?;
+    if rows.len() > 32 {
+        return Err(SpreadApiError::Validation("invalid_levels", request_id));
+    }
+    for row in rows {
+        let key = row.get("key").and_then(Value::as_str).unwrap_or("");
+        if key.is_empty() || key.len() > 40 {
+            return Err(SpreadApiError::Validation("invalid_levels", request_id));
+        }
+        let values = row
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or(SpreadApiError::Validation("invalid_levels", request_id))?;
+        if values.len() > 8 || values.iter().any(|value| !value.is_string()) {
+            return Err(SpreadApiError::Validation("invalid_levels", request_id));
+        }
+        if values
+            .iter()
+            .any(|value| value.as_str().map(str::len).unwrap_or(0) > 40)
+        {
+            return Err(SpreadApiError::Validation("invalid_levels", request_id));
+        }
+    }
+    database::spread_analytics::save_report_levels(
+        &state.auth.pool,
+        context.workspace_id(),
+        trade_date,
+        &request.cells,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/overview/report/seat-groups",
+    security(("session_cookie" = [])),
+    responses((status = 204), (status = 400), (status = 401), (status = 403))
+)]
+pub async fn save_overview_report_seat_groups(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Json(request): Json<SaveReportSeatGroupsRequest>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = write_context(
+        &state,
+        &headers,
+        Permission::ManageOverviewReport,
+        request_id,
+    )
+    .await?;
+    let mut groups = Vec::new();
+    for group in request.groups {
+        if !DEFAULT_SEAT_GROUPS
+            .iter()
+            .any(|(key, _)| *key == group.group_key)
+        {
+            return Err(SpreadApiError::Validation("invalid_group_key", request_id));
+        }
+        // 名单是拿去当 SQL 参数比对的，不会注入；这里挡的是「一组塞进几百家」
+        // 把报告表撑成一屏滚不完的东西，以及空名字（匹配不到却在表上占一行）。
+        if group.members.len() > 20 {
+            return Err(SpreadApiError::Validation("too_many_members", request_id));
+        }
+        let mut members = Vec::new();
+        for member in group.members {
+            let name = member.trim().to_string();
+            validate_text(&name, 1, 40)
+                .map_err(|code| SpreadApiError::Validation(code, request_id))?;
+            if !members.contains(&name) {
+                members.push(name);
+            }
+        }
+        groups.push((group.group_key, members));
+    }
+    database::spread_analytics::save_report_seat_groups(
+        &state.auth.pool,
+        context.workspace_id(),
+        &groups,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// 一个交易日的到齐情况。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DataHealthDay {
