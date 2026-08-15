@@ -49,14 +49,24 @@ const DAYS = [
 const FAVORITES = [{ id: 'fav-1', name: '五大机构', members: ['中信期货', '永安期货'] }]
 
 let netPositionCalls: string[] = []
+let postedCsrf: string | null = null
 
 function stubFetch() {
   netPositionCalls = []
+  postedCsrf = null
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input.toString()
-      if (url.includes('/seats/member-favorites')) return response(FAVORITES)
+      if (url.includes('/auth/csrf')) return response({ csrf_token: 'fresh-token' })
+      if (url.includes('/seats/member-favorites')) {
+        const headers = (init?.headers ?? {}) as Record<string, string>
+        if (init?.method === 'POST') {
+          postedCsrf = headers['x-csrf-token'] ?? null
+          return response({ id: 'fav-2', name: '机构席位', members: ['中信期货'] })
+        }
+        return response(FAVORITES)
+      }
       if (url.includes('/seats/net-position')) {
         netPositionCalls.push(url)
         return response({
@@ -89,7 +99,6 @@ describe('NetPositionView', () => {
     localStorage.clear()
     const pinia = createPinia()
     setActivePinia(pinia)
-    useAuthStore().csrfToken = 'csrf-test'
     stubFetch()
   })
 
@@ -117,6 +126,29 @@ describe('NetPositionView', () => {
     const query = decodeURIComponent(netPositionCalls[netPositionCalls.length - 1])
     expect(query).toContain('members=中信期货')
     expect(query).not.toContain('中信期货,中信期货')
+    wrapper.unmount()
+  })
+
+  it('保存收藏时先取写入保护令牌，不会送出空令牌', async () => {
+    // store 里的令牌是懒加载的，刷新之后就是 null。直接 `csrfToken ?? ''` 送出去
+    // 会被后端以 403「request is not allowed」拒掉——上线当天就是这么坏的，
+    // 而当时的测试预设了令牌，所以一路绿灯。这里刻意不预设。
+    expect(useAuthStore().csrfToken).toBeNull()
+    localStorage.setItem('netPosition.instrument', 'AU')
+    localStorage.setItem('netPosition.members', '中信期货')
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const inputs = wrapper.findAllComponents({ name: 'ElInput' })
+    inputs[0].vm.$emit('update:modelValue', '机构席位')
+    await flushPromises()
+    const buttons = wrapper.findAllComponents({ name: 'ElButton' })
+    const save = buttons.find((button) => button.text().includes('收藏当前'))
+    expect(save).toBeTruthy()
+    await save!.trigger('click')
+    await flushPromises()
+
+    expect(postedCsrf).toBe('fresh-token')
     wrapper.unmount()
   })
 

@@ -142,6 +142,19 @@ watch(members, () => load(), { deep: true })
 
 // —— 收藏 ——
 
+/**
+ * 取写入保护令牌。
+ *
+ * store 里这个令牌是**懒加载**的：刚进页面或刷新之后它是 null，要先 loadCsrf()。
+ * 直接拿 `csrfToken ?? ''` 送出去，后端会以 403「request is not allowed」拒掉，
+ * 而错误信息里看不出缺的是令牌——2026-08-15 就是这么坏的。
+ */
+async function csrf() {
+  if (!auth.csrfToken) await auth.loadCsrf()
+  if (!auth.csrfToken) throw new Error('无法取得写入保护令牌')
+  return auth.csrfToken
+}
+
 async function saveFavorite() {
   const name = favoriteName.value.trim()
   if (!name) {
@@ -154,10 +167,7 @@ async function saveFavorite() {
   }
   savingFavorite.value = true
   try {
-    const { data } = await createSeatFavorite(
-      { name, members: members.value },
-      auth.csrfToken ?? ''
-    )
+    const { data } = await createSeatFavorite({ name, members: members.value }, await csrf())
     favorites.value = [data, ...favorites.value]
     favoriteName.value = ''
     ElMessage.success(`已收藏「${data.name}」`)
@@ -185,7 +195,7 @@ async function removeFavorite(favorite: SeatFavorite) {
     return // 点了取消
   }
   try {
-    await deleteSeatFavorite(favorite.id, auth.csrfToken ?? '')
+    await deleteSeatFavorite(favorite.id, await csrf())
     favorites.value = favorites.value.filter((item) => item.id !== favorite.id)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '删除失败')
@@ -436,8 +446,6 @@ const priceSeriesNote = computed(() => {
         <el-select
           v-model="members"
           multiple
-          collapse-tags
-          collapse-tags-tooltip
           filterable
           :multiple-limit="MAX_MEMBERS"
           style="min-width: 320px; flex: 1"
