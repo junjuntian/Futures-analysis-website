@@ -395,7 +395,9 @@ onMounted(async () => {
       <div v-else-if="tab === 'history'" class="section">
         <h2>历史信号</h2>
         <div class="desc">
-          共 {{ historyTotal }} 条。收益按复权价计算,已扣双边成本。成熟期统计:
+          共 {{ historyTotal }} 条,2015 年起的全部信号。收益按复权价计算,已扣双边成本。
+          <b>下面的成熟期统计是另一个口径</b>——只计 2019 年起<b>已了结</b>的交易,
+          不含持有中与未回踩放弃的,所以笔数比上面少:
           <template v-for="(stat, key) in data.stats" :key="key">
             {{ data.markets[key]?.name }} {{ stat.count }} 笔 / 胜率 {{ stat.win_rate }}% / 累计 {{ stat.total }}% ·
           </template>
