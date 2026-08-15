@@ -1,7 +1,11 @@
 # 机构资金信号引擎
 
-跟随金银双强八席位持仓变化的每日信号系统。规则来自 `research/REPORT_AU_v1.md`
-的全部回测结论,运营者 2026-08-11 逐条拍板定稿。
+跟随金银双强七席位持仓变化的每日信号系统。规则基线来自
+`research/REPORT_AU_v1.md`,其后的规则变更全部记录在 `docs/DECISIONS.md`
+(信号组七家 DEC-051 / 消退 7 日 DEC-052 / 成本逐合约 DEC-053 /
+区间条件采纳又撤销 DEC-055 / **重挫共振买点 DEC-056**)。买点现状:
+三条件区间挂单 + 重挫共振(仅黄金,伦敦金 ±10% 分轮内回撤触及 15% 后的
+共振,免起点条件次日开盘市价)。
 
 **生产地址**:`http://<VPS>:8088/smart-money/`
 
@@ -12,8 +16,9 @@
 | `smart_money.py` | 引擎。数据加载、事件检测、权重、成本、信号、告警,输出 `signals.json` |
 | `index.html` | 页面。纯静态,读同目录 `signals.json` 渲染,四个页签 |
 | `run-smart-money.sh` | 生产运行脚本:导出数据 → 容器内算 → 原子替换 `signals.json` |
-| `data/london_*.csv` | 伦敦金银现货历史(运营者提供,金银比长期基线) |
+| `data/london_*.csv` | 伦敦金银现货历史(运营者提供)。`london_xau.csv` 兼作重挫态判定基线(DEC-056),随发布包装到生产 |
 | `data/gold_silver_ratio.csv` | 金银比缓存,每次运行自动增量更新(运行时产生) |
+| `data/gold_usd.csv` | 伦敦金/COMEX 美元金价缓存(重挫态判定,运行时产生;重叠区以 london_xau 基线为准) |
 
 ## 设计要点
 
