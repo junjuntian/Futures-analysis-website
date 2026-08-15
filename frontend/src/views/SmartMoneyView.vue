@@ -28,7 +28,7 @@ interface MarketState {
   range_pos?: number | null
   /** 现价在近 250 日收盘里的分位。旧 JSON 无此字段。 */
   pct_250d?: number | null
-  conditions: { score: Condition; dist_low: Condition; netq: Condition }
+  conditions: { score: Condition; dist_low: Condition; netq: Condition; range_pos?: Condition }
   all_pass: boolean
   prospective_zone: [number, number] | null
   prospective_cost: number | null
@@ -115,7 +115,8 @@ const alertMeta: Record<string, [string, string]> = {
   sell_watch: ['warn', '卖出监控'],
   rare_flip: ['info', '稀有翻空'],
   pair_window: ['pair', '配对窗口'],
-  flee: ['danger', '主力跑路']
+  flee: ['danger', '主力跑路'],
+  high_zone: ['warn', '持仓高位提醒']
 }
 
 const latestMarks = computed(() => data.value?.history[0]?.marks ?? null)
@@ -274,9 +275,10 @@ onMounted(async () => {
               </h3>
               <div class="big gray">{{ data.markets[key].all_pass ? '待挂单' : '无持仓' }}</div>
               <div class="kv">
-                <span class="k">三条件</span>
+                <span class="k">进场条件</span>
                 <span class="v">
-                  {{ Object.values(data.markets[key].conditions).filter((c) => c.pass).length }} / 3 满足
+                  {{ Object.values(data.markets[key].conditions).filter((c) => c.pass).length }}
+                  / {{ Object.keys(data.markets[key].conditions).length }} 满足
                 </span>
               </div>
               <div class="kv">
@@ -340,7 +342,7 @@ onMounted(async () => {
         </div>
 
         <div class="section">
-          <h2>买点三条件</h2>
+          <h2>买点条件</h2>
           <div class="desc">全部满足 → 次日按机构成本区间挂单。门槛按各品种权重每年自动校准。</div>
           <template v-for="key in ['AU', 'AG']" :key="key">
             <div class="cond-title">
@@ -382,6 +384,19 @@ onMounted(async () => {
                 </div>
                 <div class="bar" :class="data.markets[key].conditions.netq.pass ? 'pass' : 'warn'">
                   <i :style="{ width: barWidth(data.markets[key].conditions.netq.value) }" />
+                </div>
+              </div>
+              <!-- 第四条只约束首进场;中继不受限,由引擎侧保证。旧 JSON 无此字段则整块不显示。 -->
+              <div v-if="data.markets[key].conditions.range_pos" class="item">
+                <div class="name">
+                  <span>④ 位于 60 日区间下 70%(仅首进场)</span>
+                  <span :class="data.markets[key].conditions.range_pos!.pass ? 'green' : 'red'">
+                    {{ data.markets[key].conditions.range_pos!.value }}%
+                    {{ data.markets[key].conditions.range_pos!.pass ? '✓' : '✗' }}
+                  </span>
+                </div>
+                <div class="bar" :class="data.markets[key].conditions.range_pos!.pass ? 'pass' : 'warn'">
+                  <i :style="{ width: barWidth(data.markets[key].conditions.range_pos!.value / 0.7) }" />
                 </div>
               </div>
             </div>

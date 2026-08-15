@@ -66,6 +66,14 @@ RULES = {
     "weight_clip": 5.0, "weight_min_n": 30, "weight_horizon": 20,
     "theta_mult": 1.2,
     "dist_low_days": 60, "dist_low_max": 0.12,
+    # 首次进场须位于 60 日高低区间的下 70%(2026-08-15 运营者拍板,回测变体 v2)。
+    # 只约束三条件首进场,**不碰中继**——贴高点的中继单是利润引擎(区间上 1/4 的
+    # 52 笔贡献 +314% 里的 +272%),连中继一起拦的变体全样本掉到 +67%。
+    # 证据如实记录,不夸大:全样本 2015-2026 +314.0%→+307.5%(略降),
+    # 2025-2026 +167.5%→+170.5%(略升),差异均在一两笔单的重定时范围内,
+    # 属于噪音级。采用它是运营者的交易哲学选择(新一轮开仓要买在相对低位),
+    # 不是数据优化。回退:删掉此键与 full_mask 里对应一行即可。
+    "entry_range_max": 0.70,
     "netq_window": 250, "netq_max": 0.60,
     "zone_half_width": 5.0, "zone_valid_days": 10,
     # fade_days:2026-08-14 由 10 改为 7,运营者拍板(理由:市场流动性强,
@@ -540,10 +548,12 @@ class MarketEngine:
         f_last = f[-1]
         fade = self.fade_run.to_numpy()
 
-        # 首次进场:三条件(分数 + 贴低点 + 机构低仓)。
+        # 首次进场:四条件(分数 + 贴低点 + 机构低仓 + 区间下 70%)。
+        # 第四条的来历与代价见 RULES["entry_range_max"] 的注释。
         full_mask = ((self.score >= self.theta) & (self.theta > 0)
                      & (self.dist60 < RULES["dist_low_max"])
-                     & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
+                     & (self.netq < RULES["netq_max"]) & (self.dates >= d0)
+                     & (self.rangepos < RULES["entry_range_max"]))
         # 中继再进场(2026-08-11 运营者案例驱动,回测全期 +81%→+116%):
         # 消退卖出后,七家再度共振(仅分数门槛)即视为同一轮趋势的延续,
         # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
@@ -641,6 +651,11 @@ class MarketEngine:
             "netq": {"value": round(float(self.netq[last]) * 100, 0),
                      "target": RULES["netq_max"] * 100,
                      "pass": bool(self.netq[last] < RULES["netq_max"])},
+            # 第四条(v2):不加进来的话界面会喊「买入触发」而回放实际不进场,
+            # 运营者会挂一笔永远不会被引擎认账的单。
+            "range_pos": {"value": round(float(self.rangepos[last]) * 100, 1),
+                          "target": RULES["entry_range_max"] * 100,
+                          "pass": bool(self.rangepos[last] < RULES["entry_range_max"])},
         }
         zone = self.cost_zone(last)
         return {
@@ -1050,6 +1065,20 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                      f"(满 {RULES['fade_days']} 日后次日开盘卖出);"
                      f"硬止损 {snap_pos['stop_px']} 盘中有效")),
             })
+            # 出场侧独立高位提醒(2026-08-15 运营者要求「出场和入场分开」):
+            # 持仓期间价格贴到 60 日区间上 1/10 就提醒,不等消退倒计时。
+            # **仅提醒,不是卖出指令**——正式离场仍只有消退与止损两条路;回测里
+            # 把「贴高点就卖」写成规则的变体全部劣于现行离场,故只到人为止。
+            rp = snap.get("range_pos")
+            if rp is not None and rp >= 0.9:
+                alerts.append({
+                    "type": "high_zone", "level": "warn", "market": key,
+                    "date": str(data_date.date()),
+                    "text": (f"{eng.meta['name']} 持仓高位提醒 — 现价处于 60 日区间 "
+                             f"{round(rp * 100)}% 高位(250 日分位 "
+                             f"{round((snap.get('pct_250d') or 0) * 100)}%),可自行斟酌逢高减仓;"
+                             f"引擎离场仍按消退({snap_pos['fade_days']}/{RULES['fade_days']})与止损执行"),
+                })
         elif snap["all_pass"]:
             z, c0 = snap["prospective_zone"], snap["prospective_cost"]
             where = (f"限价 ≤ {z[1]}(机构加权成本 {c0},参考区间 {z[0]}~{z[1]}),"
@@ -1114,7 +1143,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "stats": stats,
         "rules": {
             "group": RULES["group"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效)",
+            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 + 位于60日区间下70%(仅首进场,中继不受限) → 机构成本±5元区间挂单(10日有效)",
             "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
             "cond_seats": RULES["cond_seats"],
         },
