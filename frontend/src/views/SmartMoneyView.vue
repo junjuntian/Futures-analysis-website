@@ -471,8 +471,20 @@ onMounted(async () => {
                 <td class="wrap">{{ row.seats.map((s) => `${s.member}(${s.strength})`).join('、') || '—' }}</td>
                 <td>{{ row.zone ? `≤${fmt(row.zone[1], decimalsOf(row.market))}` : '市价' }}</td>
                 <td class="gray">{{ row.inst_cost ? fmt(row.inst_cost, decimalsOf(row.market)) : '—' }}</td>
-                <td>{{ row.entry_date ? `${row.entry_date} @ ${fmt(row.entry_px, decimalsOf(row.market))}` : '—' }}</td>
-                <td>{{ row.exit_date ? `${row.exit_date} @ ${fmt(row.exit_px, decimalsOf(row.market))}` : '—' }}</td>
+                <td>
+                  <template v-if="row.entry_date">
+                    <div class="d2">{{ row.entry_date }}</div>
+                    <div class="d2 gray">@ {{ fmt(row.entry_px, decimalsOf(row.market)) }}</div>
+                  </template>
+                  <template v-else>—</template>
+                </td>
+                <td>
+                  <template v-if="row.exit_date">
+                    <div class="d2">{{ row.exit_date }}</div>
+                    <div class="d2 gray">@ {{ fmt(row.exit_px, decimalsOf(row.market)) }}</div>
+                  </template>
+                  <template v-else>—</template>
+                </td>
                 <td>
                   <span class="pill" :class="row.result === '持有中' ? 'holding' : (row.ret_pct ?? 0) > 0 ? 'win' : 'loss'">
                     {{ row.result }}
@@ -629,9 +641,12 @@ onMounted(async () => {
 .badge.on .s { background: #f56c6c; }
 .scroll-x { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { text-align: left; color: #909399; font-weight: 500; padding: 9px 10px; border-bottom: 1px solid #ebeef5; background: #fafafa; white-space: nowrap; }
-td { padding: 9px 10px; border-bottom: 1px solid #f2f6fc; white-space: nowrap; }
-td.wrap { white-space: normal; min-width: 220px; }
+th { text-align: left; color: #909399; font-weight: 500; padding: 8px 7px; border-bottom: 1px solid #ebeef5; background: #fafafa; white-space: nowrap; }
+td { padding: 8px 7px; border-bottom: 1px solid #f2f6fc; white-space: nowrap; }
+td.wrap { white-space: normal; min-width: 150px; }
+/* 进场/出场一格两行:日期上、价格下。并排写要 170px,叠起来 90px 就够——
+   正是这两列把整张表顶出屏幕,逼出横向滚动条。 */
+.d2 { line-height: 1.35; }
 .pill { font-size: 12px; padding: 1px 8px; border-radius: 4px; background: #f4f4f5; color: #606266; }
 .pill.au { background: #fdf6ec; color: #b88230; }
 .pill.ag { background: #f4f4f5; color: #606266; }
