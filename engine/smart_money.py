@@ -1086,7 +1086,11 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "ratio": ratio,
         "alerts": alerts,
         "activity": activity[:20],
-        "history": sorted(history, key=lambda x: x["signal_date"], reverse=True)[:20],
+        # 历史信号全量写出，不再截最近 20 条：界面要翻页看完整记录，而统计口径
+        # （黄金 55 笔、白银 80 笔，自 2019 年）本来就是按全量算的——只给 20 条，
+        # 表上的数和表头的统计对不上，看的人无从核对。
+        # 体积代价很小：一条约 0.4KB，全量百来条也就几十 KB。
+        "history": sorted(history, key=lambda x: x["signal_date"], reverse=True),
         "alert_history": historical_alerts(au, ag, ratio_s),
         "stats": stats,
         "rules": {

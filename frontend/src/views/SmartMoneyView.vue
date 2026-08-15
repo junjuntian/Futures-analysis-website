@@ -114,6 +114,28 @@ const alertMeta: Record<string, [string, string]> = {
 
 const latestMarks = computed(() => data.value?.history[0]?.marks ?? null)
 
+// —— 历史信号分页 ——
+//
+// 引擎现在写全量历史（百来条），一屏铺不下。页码用 1 起，与界面上显示的一致。
+const historyPage = ref(1)
+const historyPageSize = ref(20)
+const historyTotal = computed(() => data.value?.history.length ?? 0)
+const historyRows = computed(() => {
+  const all = data.value?.history ?? []
+  const start = (historyPage.value - 1) * historyPageSize.value
+  return all.slice(start, start + historyPageSize.value)
+})
+/**
+ * 改每页条数时回到第一页。
+ *
+ * 不回的话：停在第 7 页再把每页从 10 改成 50，第 7 页早已超出总页数，表会变成空的，
+ * 看上去像数据没了。
+ */
+function changeHistorySize(size: number) {
+  historyPageSize.value = size
+  historyPage.value = 1
+}
+
 function fmt(v: number | null | undefined, decimals = 0): string {
   if (v === null || v === undefined) return '—'
   return v.toLocaleString('zh-CN', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
@@ -373,7 +395,7 @@ onMounted(async () => {
       <div v-else-if="tab === 'history'" class="section">
         <h2>历史信号</h2>
         <div class="desc">
-          最近 20 条。收益按复权价计算,已扣双边成本。成熟期统计:
+          共 {{ historyTotal }} 条。收益按复权价计算,已扣双边成本。成熟期统计:
           <template v-for="(stat, key) in data.stats" :key="key">
             {{ data.markets[key]?.name }} {{ stat.count }} 笔 / 胜率 {{ stat.win_rate }}% / 累计 {{ stat.total }}% ·
           </template>
@@ -387,7 +409,7 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, index) in data.history" :key="index">
+              <tr v-for="(row, index) in historyRows" :key="index">
                 <td><span class="pill" :class="row.market.toLowerCase()">{{ row.name }}</span></td>
                 <td>
                   {{ row.signal_date }}
@@ -408,6 +430,17 @@ onMounted(async () => {
               </tr>
             </tbody>
           </table>
+        </div>
+        <div class="pager">
+          <el-pagination
+            v-model:current-page="historyPage"
+            :page-size="historyPageSize"
+            :page-sizes="[10, 20, 30, 50]"
+            :total="historyTotal"
+            layout="total, sizes, prev, pager, next, jumper"
+            background
+            @size-change="changeHistorySize"
+          />
         </div>
 
         <h2 class="alert-history-title">警报历史</h2>
@@ -512,6 +545,8 @@ onMounted(async () => {
 .kv .k { color: #909399; white-space: nowrap; }
 .kv .v { text-align: right; }
 .section { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; padding: 20px 22px; margin-bottom: 22px; }
+/* 分页条贴着表格下沿,窄屏时允许换行——挤成一行会把跳页框推出可视区。 */
+.pager { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
 .section h2 { font-size: 16px; margin: 0 0 4px; }
 .section .desc { color: #909399; font-size: 12.5px; margin-bottom: 14px; }
 .alert { display: flex; gap: 12px; padding: 13px 16px; border-radius: 6px; margin-bottom: 10px; align-items: flex-start; }
