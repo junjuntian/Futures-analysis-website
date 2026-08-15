@@ -28,6 +28,10 @@ interface MarketState {
   range_pos?: number | null
   /** 现价在近 250 日收盘里的分位。旧 JSON 无此字段。 */
   pct_250d?: number | null
+  /** 距 250 日滚动高点的回撤深度。旧 JSON 无此字段。 */
+  dd_250?: number | null
+  /** 重挫共振(仅黄金):回撤≥15% 且共振,次日开盘市价买入。 */
+  crash_ready?: boolean
   conditions: { score: Condition; dist_low: Condition; netq: Condition; range_pos?: Condition }
   all_pass: boolean
   prospective_zone: [number, number] | null
@@ -78,6 +82,8 @@ interface SignalsPayload {
     exit_px: number | null
     result: string
     relay: boolean
+    /** 重挫共振单(仅黄金):市价执行,免起点条件。旧 JSON 无此字段。 */
+    crash?: boolean
     ret_pct: number | null
     marks: { cross_resonance: boolean; spread_legs: string[]; goldman_combo: boolean }
   }[]
@@ -247,6 +253,8 @@ onMounted(async () => {
                 <span class="v" :class="posClass(data.markets[key].range_pos)">
                   60日区间 {{ posText(data.markets[key].range_pos) }}
                   <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
+                  <span v-if="(data.markets[key].dd_250 ?? 0) >= 0.15" class="pos-high">
+                    · 距250日高点回撤 {{ posText(data.markets[key].dd_250) }}(重挫态)</span>
                 </span>
               </div>
               <div class="kv">
@@ -291,6 +299,8 @@ onMounted(async () => {
                 <span class="v" :class="posClass(data.markets[key].range_pos)">
                   60日区间 {{ posText(data.markets[key].range_pos) }}
                   <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
+                  <span v-if="(data.markets[key].dd_250 ?? 0) >= 0.15" class="pos-high">
+                    · 距250日高点回撤 {{ posText(data.markets[key].dd_250) }}(重挫态)</span>
                 </span>
               </div>
               <div v-if="data.markets[key].prospective_zone" class="kv">
@@ -462,7 +472,8 @@ onMounted(async () => {
                 <td><span class="pill" :class="row.market.toLowerCase()">{{ row.name }}</span></td>
                 <td>
                   {{ row.signal_date }}
-                  <span v-if="row.relay" class="pill relay" title="消退/止损离场后席位再共振的再进场,免贴低点与低仓条件,次日开盘市价">中继</span>
+                  <span v-if="row.crash" class="pill crash" title="重挫共振:距250日高点回撤≥15%时的共振,免起点条件,次日开盘市价买入(不挂区间)。仅黄金。">重挫</span>
+                  <span v-else-if="row.relay" class="pill relay" title="消退/止损离场后席位再共振的再进场,免贴低点与低仓条件,次日开盘市价">中继</span>
                 </td>
                 <td>{{ row.score }}</td>
                 <td :class="posClass(row.range_pos)" :title="row.range_pos === null || row.range_pos === undefined ? '' : '信号日收盘在近60日价格区间的位置,100%=贴着高点。只标注,不参与买卖判定。'">
@@ -614,6 +625,7 @@ onMounted(async () => {
 /* 区间位置分层色:高位橙、低位青,中段不上色。只为扫一眼能分层,无褒贬。 */
 .pos-high { color: #e6a23c; font-weight: 600; }
 .pos-low { color: #178a5a; font-weight: 600; }
+.pill.crash { background: #fde2e2; color: #c0392b; }
 .section h2 { font-size: 16px; margin: 0 0 4px; }
 .section .desc { color: #909399; font-size: 12.5px; margin-bottom: 14px; }
 .alert { display: flex; gap: 12px; padding: 13px 16px; border-radius: 6px; margin-bottom: 10px; align-items: flex-start; }

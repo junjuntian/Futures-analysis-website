@@ -66,14 +66,20 @@ RULES = {
     "weight_clip": 5.0, "weight_min_n": 30, "weight_horizon": 20,
     "theta_mult": 1.2,
     "dist_low_days": 60, "dist_low_max": 0.12,
-    # 首次进场须位于 60 日高低区间的下 70%(2026-08-15 运营者拍板,回测变体 v2)。
-    # 只约束三条件首进场,**不碰中继**——贴高点的中继单是利润引擎(区间上 1/4 的
-    # 52 笔贡献 +314% 里的 +272%),连中继一起拦的变体全样本掉到 +67%。
-    # 证据如实记录,不夸大:全样本 2015-2026 +314.0%→+307.5%(略降),
-    # 2025-2026 +167.5%→+170.5%(略升),差异均在一两笔单的重定时范围内,
-    # 属于噪音级。采用它是运营者的交易哲学选择(新一轮开仓要买在相对低位),
-    # 不是数据优化。回退:删掉此键与 full_mask 里对应一行即可。
-    "entry_range_max": 0.70,
+    # 重挫共振买点(2026-08-16 运营者立项,回测变体 c15zu_au)。
+    # 定义:距 250 日滚动最高点回撤 >= crash_dd 的"重挫态"里出现共振(分数过门槛),
+    # 即视为新一轮启动:免"贴低点/低仓"两个起点条件,**市价 T+1 进场,不挂
+    # 机构成本区间**——重挫后的 V 型底不给回踩机会,2026-02-02 那笔信号就是被
+    # 区间挂单杀掉的(限价 1033.25 十日未回踩,眼睁睁错过 1050→1246)。
+    # **仅黄金**:白银的重挫共振日级统计显著为负(t=-3.49,催化多为跑路警报
+    # 级别的结构性外逃),运营者的回撤统计表本身也只做了黄金。
+    # 不受跑路压制窗拦截:压制窗只拦中继(惯性接多),重挫共振是启动判定。
+    # 回测证据如实记:AU 全样本 +138.6%→+145.6%,增量几乎全部来自 2026-02-02
+    # 一笔(+7.65%),其余历史执行方式变化合计 -0.65——采纳依据是执行机制的
+    # 正确性(区间挂单在重挫 V 型底结构性失效),不是这一笔的收益。
+    # 日级底子:回撤>=15% 且共振的日子后 20 日胜率 65.6%、均值 +0.91%(t=2.95),
+    # 阈值 12% 无效(t=0.97),20% 样本太少。回退:删 crash_dd 与 crash_mask 相关行。
+    "crash_dd": 0.15, "crash_markets": ("AU",),
     "netq_window": 250, "netq_max": 0.60,
     "zone_half_width": 5.0, "zone_valid_days": 10,
     # fade_days:2026-08-14 由 10 改为 7,运营者拍板(理由:市场流动性强,
@@ -548,16 +554,22 @@ class MarketEngine:
         f_last = f[-1]
         fade = self.fade_run.to_numpy()
 
-        # 首次进场:四条件(分数 + 贴低点 + 机构低仓 + 区间下 70%)。
-        # 第四条的来历与代价见 RULES["entry_range_max"] 的注释。
+        # 首次进场:三条件(分数 + 贴低点 + 机构低仓)。
+        # (曾有第四条"区间下70%",2026-08-16 运营者撤销:回测全程只是噪音。)
         full_mask = ((self.score >= self.theta) & (self.theta > 0)
                      & (self.dist60 < RULES["dist_low_max"])
-                     & (self.netq < RULES["netq_max"]) & (self.dates >= d0)
-                     & (self.rangepos < RULES["entry_range_max"]))
+                     & (self.netq < RULES["netq_max"]) & (self.dates >= d0))
         # 中继再进场(2026-08-11 运营者案例驱动,回测全期 +81%→+116%):
         # 消退卖出后,七家再度共振(仅分数门槛)即视为同一轮趋势的延续,
         # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
         relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
+        # 重挫共振,口径与代价见 RULES["crash_dd"] 的注释。
+        _peak250 = self.cont["adj_close"].rolling(250, min_periods=60).max()
+        self.dd250 = 1 - self.cont["adj_close"] / _peak250
+        crash_mask = ((self.score >= self.theta) & (self.theta > 0)
+                      & (self.dd250 >= RULES["crash_dd"]) & (self.dates >= d0))
+        if self.instrument not in RULES["crash_markets"]:
+            crash_mask &= False
         trades, busy = [], -1
         relay_armed = False
         for d in self.dates:
@@ -570,8 +582,12 @@ class MarketEngine:
             # 三笔连续中继止损(-12.3%)全部由此切除;三条件新信号不受影响
             # (真正的新一轮启动仍可进场,如 2026-03-24 黄金)。
             suppressed = any(a <= d <= b for a, b in suppress)
-            is_relay = (not is_full) and relay_armed and bool(relay_mask[d]) and not suppressed
-            if not (is_full or is_relay):
+            # 重挫共振不看压制窗(见 RULES["crash_dd"]),且对同日的三条件信号
+            # 优先——重挫态下一律市价执行,不挂区间。
+            is_crash = bool(crash_mask[d])
+            is_relay = ((not is_full) and (not is_crash) and relay_armed
+                        and bool(relay_mask[d]) and not suppressed)
+            if not (is_full or is_relay or is_crash):
                 continue
             recent = self.trigger_seats(d)
             # 同一席位窗口内多日有事件时只保留最强的一次,避免重复列出
@@ -579,7 +595,7 @@ class MarketEngine:
                    .drop_duplicates("member"))
             seats = [{"member": r.member, "strength": round(float(r.strength), 2),
                       "hands": int(r.hands)} for r in agg.itertuples()]
-            zone = None if is_relay else self.cost_zone(d)
+            zone = None if (is_relay or is_crash) else self.cost_zone(d)
             i0 = p0r = None
             if zone:
                 for j in range(i + 1, min(i + 1 + RULES["zone_valid_days"], len(self.dates))):
@@ -602,6 +618,7 @@ class MarketEngine:
             stop_a = p0a * (1 - RULES["stop_loss"])
             t = Trade(d, self.dates[i0], float(p0r), zone, seats, float(self.score[d]),
                       is_relay=is_relay)
+            t.is_crash = is_crash
             fade_from = None
             for j in range(i0, len(self.dates)):
                 if np.isnan(lo_a[j]):
@@ -651,11 +668,6 @@ class MarketEngine:
             "netq": {"value": round(float(self.netq[last]) * 100, 0),
                      "target": RULES["netq_max"] * 100,
                      "pass": bool(self.netq[last] < RULES["netq_max"])},
-            # 第四条(v2):不加进来的话界面会喊「买入触发」而回放实际不进场,
-            # 运营者会挂一笔永远不会被引擎认账的单。
-            "range_pos": {"value": round(float(self.rangepos[last]) * 100, 1),
-                          "target": RULES["entry_range_max"] * 100,
-                          "pass": bool(self.rangepos[last] < RULES["entry_range_max"])},
         }
         zone = self.cost_zone(last)
         return {
@@ -669,6 +681,14 @@ class MarketEngine:
                           else round(float(self.rangepos[last]), 3)),
             "pct_250d": (None if np.isnan(float(self.pct250[last]))
                          else round(float(self.pct250[last]), 3)),
+            # 距 250 日滚动高点的回撤深度与重挫共振状态(见 RULES["crash_dd"])。
+            "dd_250": (None if np.isnan(float(self.dd250[last]))
+                       else round(float(self.dd250[last]), 3)),
+            "crash_ready": bool(
+                self.instrument in RULES["crash_markets"]
+                and not np.isnan(float(self.dd250[last]))
+                and float(self.dd250[last]) >= RULES["crash_dd"]
+                and float(self.score[last]) >= float(self.theta[last]) > 0),
             "conditions": conds,
             "all_pass": all(c["pass"] for c in conds.values()),
             "prospective_zone": [r(zone[0]), r(zone[1])] if zone else None,
@@ -1045,6 +1065,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                 "exit_px": round(t.exit_px, eng.meta["decimals"]) if t.exit_px else None,
                 "result": t.result,
                 "relay": t.is_relay,
+                "crash": bool(getattr(t, "is_crash", False)),
                 "ret_pct": round(t.ret_pct, 2) if t.ret_pct is not None else None,
                 "marks": marks,
             })
@@ -1079,6 +1100,16 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                              f"{round((snap.get('pct_250d') or 0) * 100)}%),可自行斟酌逢高减仓;"
                              f"引擎离场仍按消退({snap_pos['fade_days']}/{RULES['fade_days']})与止损执行"),
                 })
+        elif snap.get("crash_ready"):
+            # 重挫共振:市价执行,不挂区间(见 RULES["crash_dd"])。
+            alerts.append({
+                "type": "buy", "level": "danger", "market": key,
+                "date": str(data_date.date()),
+                "text": (f"{eng.meta['name']} 重挫共振买入触发 — 距 250 日高点回撤 "
+                         f"{round(float(snap['dd_250']) * 100)}% 且席位共振,"
+                         f"**次日开盘市价买入(不挂区间等回踩)**;止损 -4%。"
+                         f"历史上此类日子后 20 日胜率 65.6%"),
+            })
         elif snap["all_pass"]:
             z, c0 = snap["prospective_zone"], snap["prospective_cost"]
             where = (f"限价 ≤ {z[1]}(机构加权成本 {c0},参考区间 {z[0]}~{z[1]}),"
@@ -1143,7 +1174,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "stats": stats,
         "rules": {
             "group": RULES["group"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 + 位于60日区间下70%(仅首进场,中继不受限) → 机构成本±5元区间挂单(10日有效)",
+            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金:距250日高点回撤≥15%且共振)免起点条件、次日开盘市价买入",
             "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
             "cond_seats": RULES["cond_seats"],
         },
