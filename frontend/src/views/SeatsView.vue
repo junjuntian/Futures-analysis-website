@@ -16,21 +16,34 @@ import {
 import SpreadChart from '../components/SpreadChart.vue'
 import { lastYearStartIndex } from '../spreadCharts'
 
-// 选过的席位记在本地，刷新、关标签页、明天再来都还在，直到下次主动改选。
-// 运营者盯的通常就是那么几家机构，每次进来重选一遍是纯粹的重复劳动。
+// 选过的席位、品种、合约记在本地，刷新、关标签页、明天再来都还在，直到下次主动改选。
+// 运营者盯的通常就是那么几家机构的那么一两个品种，每次进来重选一遍是纯粹的重复劳动。
 // 日期不记：数据每天在长，记住某个旧日期只会让人看到过期的表还以为是最新的。
-const MEMBER_KEY = 'seats.member'
-function rememberedMember() {
+const STORE_KEYS = {
+  member: 'seats.member',
+  instrument: 'seats.instrument',
+  contract: 'seats.contract'
+} as const
+
+function remembered(key: keyof typeof STORE_KEYS) {
   try {
-    return localStorage.getItem(MEMBER_KEY) ?? ''
+    return localStorage.getItem(STORE_KEYS[key]) ?? ''
   } catch {
     // 隐私模式下 localStorage 会抛异常。记不住是小事，页面打不开是大事。
     return ''
   }
 }
 
+function remember(key: keyof typeof STORE_KEYS, value: string) {
+  try {
+    localStorage.setItem(STORE_KEYS[key], value)
+  } catch {
+    // 同上：存不住就算了，不影响用。
+  }
+}
+
 // 席位与日期由两个子页共用：先选好一次，切标签不用重选。
-const member = ref(rememberedMember())
+const member = ref(remembered('member'))
 const tradeDate = ref('')
 const members = ref<string[]>([])
 const availableDates = ref<string[]>([])
@@ -49,8 +62,8 @@ const instrumentFilter = ref<string[]>([])
 const loadingPositions = ref(false)
 
 // 建仓过程
-const buildingInstrument = ref('')
-const buildingContract = ref('')
+const buildingInstrument = ref(remembered('instrument'))
+const buildingContract = ref(remembered('contract'))
 // 合约选择器的选项由接口给,不再从「所选交易日当天的持仓行」推导。
 // 旧写法只列得出当天还在榜的两三个合约:换个日子就少几个选项,等于把
 // 「今天在榜」误当成「存在过」——运营者选了高盛后挑不到 AU2608,就是这个。
@@ -73,12 +86,14 @@ function varietyLabel(code: string) {
 }
 
 watch(member, (value) => {
-  try {
-    if (value) localStorage.setItem(MEMBER_KEY, value)
-  } catch {
-    // 同上：存不住就算了，不影响用。
-  }
+  if (value) remember('member', value)
 })
+watch(buildingInstrument, (value) => {
+  if (value) remember('instrument', value)
+})
+// 合约要连空值一起记：空就是「合约汇总」这个选择本身。只在非空时记的话，
+// 他主动切回汇总，下次进来又会被翻出上一个合约。
+watch(buildingContract, (value) => remember('contract', value))
 
 const route = useRoute()
 const router = useRouter()
@@ -127,6 +142,12 @@ async function loadBuilding() {
     days.value = data.days
     buildingContracts.value = data.contracts
     priceSeriesKind.value = data.price_series_kind
+    // 上次记住的合约可能已经到期了——期货合约会到期，这是常态不是异常。
+    // contracts 是该席位在这个品种上历史持有过的全部合约，不在里面就没有可看的
+    // 东西，退回合约汇总。留在那里只会显示一张空表，看上去像数据坏了。
+    if (buildingContract.value && !data.contracts.includes(buildingContract.value)) {
+      buildingContract.value = '' // 触发 watch 重新取一次汇总档
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '建仓过程读取失败')
     days.value = []
@@ -163,6 +184,19 @@ watch([buildingInstrument, buildingContract], () => loadBuilding())
 const instruments = computed(() =>
   [...new Set(rows.value.map((row) => row.instrument))].sort()
 )
+
+/**
+ * 建仓过程的品种选项：当天在榜的品种，外加当前已选的那个。
+ *
+ * 上次记住的品种今天可能不在榜（他那天没进前二十）。只列在榜品种的话，选择器会
+ * 显示一片空白，而下面的图明明画着那个品种的数据——看上去像选择器坏了。
+ * 建仓过程本来也不受所选交易日限制：不在榜不等于没有建仓过程可看。
+ */
+const buildingInstrumentOptions = computed(() => {
+  const list = new Set(instruments.value)
+  if (buildingInstrument.value) list.add(buildingInstrument.value)
+  return [...list].sort()
+})
 
 const num = (value: string | null) => (value === null || value === '' ? null : Number(value))
 
@@ -686,9 +720,10 @@ const cumulativeTotal = computed(() => {
             style="width: 150px"
             placeholder="选择品种"
             :disabled="loadingBuilding"
+            @change="buildingContract = ''"
           >
             <el-option
-              v-for="code in instruments"
+              v-for="code in buildingInstrumentOptions"
               :key="code"
               :label="varietyLabel(code)"
               :value="code"
