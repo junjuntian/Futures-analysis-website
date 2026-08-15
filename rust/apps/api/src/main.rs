@@ -45,6 +45,10 @@ use uuid::Uuid;
         spread_analytics::query_free_spread,
         spread_analytics::query_seat_positions,
         spread_analytics::query_seat_building,
+        spread_analytics::query_seat_net_position,
+        spread_analytics::list_seat_member_favorites,
+        spread_analytics::create_seat_member_favorite,
+        spread_analytics::delete_seat_member_favorite,
         spread_analytics::query_spread_monitor,
         spread_analytics::query_data_health,
         spread_analytics::query_overview_report,
@@ -275,6 +279,19 @@ fn router(
             get(spread_analytics::query_seat_building),
         )
         .route(
+            "/api/v1/spread-analytics/seats/net-position",
+            get(spread_analytics::query_seat_net_position),
+        )
+        .route(
+            "/api/v1/spread-analytics/seats/member-favorites",
+            get(spread_analytics::list_seat_member_favorites)
+                .post(spread_analytics::create_seat_member_favorite),
+        )
+        .route(
+            "/api/v1/spread-analytics/seats/member-favorites/{favorite_id}",
+            delete(spread_analytics::delete_seat_member_favorite),
+        )
+        .route(
             "/api/v1/spread-analytics/monitor",
             get(spread_analytics::query_spread_monitor),
         )
@@ -397,6 +414,13 @@ mod tests {
             ("/api/v1/spread-analytics/free-spread/query", "post"),
             ("/api/v1/spread-analytics/seats/positions", "get"),
             ("/api/v1/spread-analytics/seats/building", "get"),
+            ("/api/v1/spread-analytics/seats/net-position", "get"),
+            ("/api/v1/spread-analytics/seats/member-favorites", "get"),
+            ("/api/v1/spread-analytics/seats/member-favorites", "post"),
+            (
+                "/api/v1/spread-analytics/seats/member-favorites/{favorite_id}",
+                "delete",
+            ),
             ("/api/v1/spread-analytics/monitor", "get"),
             ("/api/v1/spread-analytics/favorites", "get"),
             ("/api/v1/spread-analytics/favorites", "post"),

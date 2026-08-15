@@ -2271,6 +2271,165 @@ pub struct VarietyBuildingRow {
     pub settlement_price: Option<String>,
 }
 
+/// 净持仓页的一行：某个席位在某个合约上某天的多空持仓。
+///
+/// 与建仓过程那条路的区别只在于多了 `member_key` 一维——净持仓页一次看好几家。
+/// 合计、分腿、掉榜判定都在 Rust 侧做，这里只负责如实取数。
+#[derive(Debug, Clone)]
+pub struct SeatNetPositionRow {
+    /// 归一后的会员名，与调用方传进来的写法一致。
+    pub member_key: String,
+    pub contract: String,
+    pub trade_date: Date,
+    pub long_position: String,
+    pub short_position: String,
+}
+
+/// 净持仓页的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
+fn seat_net_positions_sql() -> String {
+    format!(
+        "with picked as (
+             -- 去重纪律同 building_days_sql：先按来源收敛，再求和。不收敛的话
+             -- 日更源与官方历史源两行都会进来，同一家的持仓会被加两遍。
+             select distinct on (trade_date, contract, rank_type, {member_key})
+                    trade_date, contract, rank_type, quantity,
+                    {member_key} as member_key
+               from seat_history
+              where workspace_id = $1 and instrument = $2 and member = any($3::text[])
+                and not is_variety_total and contract is not null
+                -- 成交量榜不是持仓榜，理由见 building_days_sql 里的同一条。
+                and rank_type in ('long', 'short')
+                and ($4::text is null or contract = $4)
+              order by trade_date, contract, rank_type, {member_key}, {source_rank}, source
+         )
+         select member_key, contract, trade_date,
+                sum(case when rank_type = 'long' then quantity else 0 end)::text
+                    as long_position,
+                sum(case when rank_type = 'short' then quantity else 0 end)::text
+                    as short_position
+           from picked
+          group by member_key, contract, trade_date
+          order by trade_date, member_key, contract",
+        member_key = member_key_sql(),
+        source_rank = SEAT_SOURCE_RANK,
+    )
+}
+
+/// 取所选席位在某品种（或某合约）上的逐日多空持仓。
+///
+/// `members` 传归一后的展示名；这里逐个展开成该名字的全部历史写法再过滤——
+/// 用变体过滤走得到索引，用归一表达式过滤走不到。两边归一是否一致由
+/// `rust_normalisation_matches_the_sql_member_key` 钉住：不一致的话，某一家会
+/// 一行都匹配不上，在界面上表现为「他天天掉榜」，而不会报任何错。
+pub async fn load_seat_net_positions(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    members: &[String],
+    contract: Option<&str>,
+) -> Result<Vec<SeatNetPositionRow>, sqlx::Error> {
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let mut variants: Vec<String> = Vec::new();
+    for member in members {
+        variants.extend(seat_member_variants(&mut tx, workspace_id, member).await?);
+    }
+    let rows = sqlx::query(&seat_net_positions_sql())
+        .bind(workspace_id)
+        .bind(instrument)
+        .bind(variants)
+        .bind(contract)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SeatNetPositionRow {
+            member_key: row.get("member_key"),
+            contract: row.get("contract"),
+            trade_date: row.get("trade_date"),
+            long_position: row.get("long_position"),
+            short_position: row.get("short_position"),
+        })
+        .collect())
+}
+
+/// 一条席位组合收藏。
+#[derive(Debug, Clone)]
+pub struct SeatMemberFavorite {
+    pub id: Uuid,
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+pub async fn list_seat_member_favorites(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<SeatMemberFavorite>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select id, name, members from seat_member_favorites
+          where workspace_id = $1 order by created_at desc",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SeatMemberFavorite {
+            id: row.get("id"),
+            name: row.get("name"),
+            members: row.get("members"),
+        })
+        .collect())
+}
+
+/// 建一条收藏。同名会被表上的唯一约束顶回来，由调用方翻译成 409。
+pub async fn create_seat_member_favorite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+    name: &str,
+    members: &[String],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    sqlx::query(
+        "insert into seat_member_favorites (id, workspace_id, name, members)
+         values ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .bind(name)
+    .bind(members)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 删一条收藏。返回是否真的删掉了——删一个不存在的东西该是 404，不是 200。
+pub async fn delete_seat_member_favorite(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let done = sqlx::query("delete from seat_member_favorites where workspace_id = $1 and id = $2")
+        .bind(workspace_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(done.rows_affected() > 0)
+}
+
 /// 品种汇总蜡烛图的一天。
 ///
 /// 与 [`VarietyBuildingRow`] 是**两路互不相干的数据**。那一路是这个席位在各合约上的
@@ -2369,6 +2528,51 @@ fn variety_candles_sql(mode: VarietyCandleMode) -> String {
               order by trade_date, open_interest desc, contract"
         ),
     }
+}
+
+/// 单个合约自己的 K 线。
+///
+/// 与 [`load_variety_candles`] 共用返回类型，但这里是**真实行情**，没有任何合成：
+/// 选定了具体合约就该看那个合约实际成交出来的价，加权与主连都不适用。
+pub async fn load_contract_candles(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    contract: &str,
+) -> Result<Vec<VarietyCandleRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let sql = format!(
+        "select distinct on (trade_date)
+                trade_date,
+                open_price::text as open_price, high_price::text as high_price,
+                low_price::text as low_price, close_price::text as close_price,
+                contract as source_contract
+           from price_history
+          where workspace_id = $1 and instrument = $2 and contract = $3
+            and open_price is not null and high_price is not null
+            and low_price is not null and close_price is not null
+          order by trade_date, {price_rank}, source",
+        price_rank = PRICE_SOURCE_RANK,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(instrument)
+        .bind(contract)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| VarietyCandleRow {
+            trade_date: row.get("trade_date"),
+            open_price: row.get("open_price"),
+            high_price: row.get("high_price"),
+            low_price: row.get("low_price"),
+            close_price: row.get("close_price"),
+            source_contract: row.get("source_contract"),
+        })
+        .collect())
 }
 
 /// 品种汇总的合成 K 线。**只用于显示**，调用方不得把它喂进成本或盈亏计算。

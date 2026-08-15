@@ -460,6 +460,7 @@ pub(crate) enum Permission {
     /// 不挪用 ManageSpreadFavorites：那是价差收藏，与这里没有关系，
     /// 混用会让日后想单独收紧其中一个时无从下手。
     ManageOverviewReport,
+    ManageSeatFavorites,
 }
 
 impl Permission {
@@ -473,6 +474,7 @@ impl Permission {
             Self::ReadSpreads => "spread.read",
             Self::ManageSpreadFavorites => "spread.favorite.manage",
             Self::ManageOverviewReport => "overview.report.manage",
+            Self::ManageSeatFavorites => "seat.favorite.manage",
         }
     }
 }
@@ -515,6 +517,7 @@ pub fn permissions_for_roles(roles: &[String]) -> Vec<String> {
         Permission::ReadSpreads,
         Permission::ManageSpreadFavorites,
         Permission::ManageOverviewReport,
+        Permission::ManageSeatFavorites,
     ] {
         if roles_allow_permission(roles, permission) {
             permissions.push(permission.as_str().to_string());
@@ -544,6 +547,10 @@ fn roles_allow_permission(roles: &[String], permission: Permission) -> bool {
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst" | "viewer")),
         Permission::ManageSpreadFavorites => roles
+            .iter()
+            .any(|role| matches!(role.as_str(), "admin" | "analyst")),
+        // 与价差收藏同档：收藏是个人的关注名单，能看数据的人就该能整理自己的名单。
+        Permission::ManageSeatFavorites => roles
             .iter()
             .any(|role| matches!(role.as_str(), "admin" | "analyst")),
         Permission::ManageOverviewReport => roles

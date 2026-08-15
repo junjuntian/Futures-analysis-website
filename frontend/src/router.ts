@@ -15,6 +15,7 @@ export const router = createRouter({
     { path: '/spread-analytics/monitor', component: () => import('./views/SpreadMonitorView.vue') },
     { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
     { path: '/seats', component: () => import('./views/SeatsView.vue') },
+    { path: '/seats/net-position', component: () => import('./views/NetPositionView.vue') },
     { path: '/smart-money-view', component: () => import('./views/SmartMoneyView.vue') },
     // /sessions 与 /system 已退役:登录设备收进右上角账号菜单,
     // 服务健康并进总览页页脚。老书签落到 404,不再静默重定向。

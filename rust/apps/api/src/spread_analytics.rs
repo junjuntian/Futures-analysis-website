@@ -15,6 +15,7 @@ use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
 use domain::seat_cost::{DailyPosition, build_cost_series, build_variety_series};
+use domain::seat_net_position::{SeatContractDay, build_net_position_series};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -977,6 +978,391 @@ async fn variety_building_days(
             }
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// 席位净持仓：几家席位合起来看
+// ---------------------------------------------------------------------------
+//
+// 与建仓过程那条路的区别只有一处：一次看好几家，把它们的持仓加到一起。**不算成本、
+// 不算盈亏**——五家机构的仓不是同一笔仓，给它们算一个「平均成本」会得出一个不对应
+// 任何真实仓位的数字。
+
+/// 一次最多合并多少家席位。
+///
+/// 十家是运营者定的。这个上限不只是为了界面好看：每多一家就多一次变体展开，而合起来
+/// 看二十家的意义本来也不大——那已经接近「全市场」，该看的是另一张图。
+const MAX_NET_POSITION_MEMBERS: usize = 10;
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SeatNetPositionQuery {
+    pub instrument: String,
+    /// 逗号分隔的会员名。会员名里不会有逗号（归一后是「中信期货」这种写法）。
+    pub members: Option<String>,
+    pub contract: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NetPositionDayItem {
+    pub trade_date: String,
+    pub open_price: Option<String>,
+    pub high_price: Option<String>,
+    pub low_price: Option<String>,
+    pub close_price: Option<String>,
+    /// 所选席位当天的合计净持仓。**只含当天在榜的那几家**，见 `missing_members`。
+    pub net_position: String,
+    /// 当天净多的那些「席位×合约」，手数相加。分腿口径同建仓过程的合约汇总。
+    pub long_lots: String,
+    pub short_lots: String,
+    pub counted_members: Vec<String>,
+    /// 当天掉出前二十的席位：持仓**未知**，没有计进上面的合计。
+    /// 界面必须把这件事说出来——按零计会画出一根假的大幅减仓。
+    pub missing_members: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatNetPositionResponse {
+    pub instrument: String,
+    pub contract: Option<String>,
+    pub is_variety_total: bool,
+    /// 去重后的所选席位，回显给界面对齐。
+    pub members: Vec<String>,
+    /// 该品种上有过持仓的全部会员，供选择器使用。
+    pub all_members: Vec<String>,
+    /// 所选席位在该品种上持有过的合约并集，新月份在前。
+    pub contracts: Vec<String>,
+    /// 汇总档 K 线的口径；选定单合约时为 `None`（那是真实行情）。
+    pub price_series_kind: Option<String>,
+    pub days: Vec<NetPositionDayItem>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/net-position",
+    params(
+        ("instrument" = String, Query),
+        ("members" = Option<String>, Query),
+        ("contract" = Option<String>, Query)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SeatNetPositionResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn query_seat_net_position(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<SeatNetPositionQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let instrument = query.instrument.trim().to_ascii_uppercase();
+    if instrument.is_empty() || !instrument.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err(SpreadApiError::Validation("invalid_instrument", request_id));
+    }
+    let members = parse_member_list(query.members.as_deref(), request_id)?;
+    let contract = query
+        .contract
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+
+    let all_members = database::spread_analytics::seat_members(
+        &state.auth.pool,
+        context.workspace_id(),
+        Some(instrument.as_str()),
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    // 合约选项取所选席位的并集：有的合约只有其中一家持有过，只列交集会让它消失。
+    let mut contracts: Vec<String> = Vec::new();
+    for member in &members {
+        let owned = database::spread_analytics::seat_member_contracts(
+            &state.auth.pool,
+            context.workspace_id(),
+            member,
+            &instrument,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        for code in owned {
+            if !contracts.contains(&code) {
+                contracts.push(code);
+            }
+        }
+    }
+    // 新月份在前，与建仓过程的合约选择器一致。
+    contracts.sort_by(|a, b| b.cmp(a));
+
+    let mut days = Vec::new();
+    if !members.is_empty() {
+        let rows = database::spread_analytics::load_seat_net_positions(
+            &state.auth.pool,
+            context.workspace_id(),
+            &instrument,
+            &members,
+            contract.as_deref(),
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+        // 行情：汇总档用合成价（金银加权、其余主连），选定单合约时用那个合约的真实行情。
+        let candles = match contract.as_deref() {
+            Some(code) => {
+                database::spread_analytics::load_contract_candles(
+                    &state.auth.pool,
+                    context.workspace_id(),
+                    &instrument,
+                    code,
+                )
+                .await
+            }
+            None => {
+                database::spread_analytics::load_variety_candles(
+                    &state.auth.pool,
+                    context.workspace_id(),
+                    &instrument,
+                )
+                .await
+            }
+        }
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        let candle_by_date: HashMap<Date, _> = candles
+            .into_iter()
+            .map(|candle| (candle.trade_date, candle))
+            .collect();
+
+        let observations: Vec<SeatContractDay> = rows
+            .into_iter()
+            .map(|row| SeatContractDay {
+                member: row.member_key,
+                trade_date: row.trade_date,
+                long: parse_decimal(&row.long_position),
+                short: parse_decimal(&row.short_position),
+            })
+            .collect();
+
+        days = build_net_position_series(&observations, &members)
+            .into_iter()
+            .map(|day| {
+                let candle = candle_by_date.get(&day.trade_date);
+                NetPositionDayItem {
+                    trade_date: day.trade_date.to_string(),
+                    open_price: candle.map(|c| c.open_price.clone()),
+                    high_price: candle.map(|c| c.high_price.clone()),
+                    low_price: candle.map(|c| c.low_price.clone()),
+                    close_price: candle.map(|c| c.close_price.clone()),
+                    net_position: day.net_position.to_string(),
+                    long_lots: day.long_lots.to_string(),
+                    short_lots: day.short_lots.to_string(),
+                    counted_members: day.counted_members,
+                    missing_members: day.missing_members,
+                }
+            })
+            .collect();
+    }
+
+    let is_variety_total = contract.is_none();
+    let price_series_kind = is_variety_total.then(|| {
+        database::spread_analytics::VarietyCandleMode::for_instrument(&instrument)
+            .as_str()
+            .to_string()
+    });
+
+    Ok(Json(ApiResponse::new(
+        SeatNetPositionResponse {
+            instrument,
+            contract,
+            is_variety_total,
+            members,
+            all_members,
+            contracts,
+            price_series_kind,
+            days,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+/// 解析逗号分隔的会员名，顺带去重。
+///
+/// **去重不是整洁癖**：同一家选两次会被逐日加两遍，合计直接翻倍，而图上看不出任何
+/// 异常。这是这条路最该防的一件事，所以查询与收藏两处都走这里。
+fn parse_member_list(raw: Option<&str>, request_id: Uuid) -> Result<Vec<String>, SpreadApiError> {
+    let mut members: Vec<String> = Vec::new();
+    for name in raw.unwrap_or_default().split(',') {
+        let name = name.trim();
+        if name.is_empty() || members.iter().any(|kept| kept == name) {
+            continue;
+        }
+        members.push(name.to_string());
+    }
+    if members.len() > MAX_NET_POSITION_MEMBERS {
+        return Err(SpreadApiError::Validation("too_many_members", request_id));
+    }
+    Ok(members)
+}
+
+// ---------------------------------------------------------------------------
+// 席位组合收藏
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatFavoriteResponse {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SaveSeatFavoriteRequest {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/member-favorites",
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = Vec<SeatFavoriteResponse>),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn list_seat_member_favorites(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let items: Vec<SeatFavoriteResponse> = database::spread_analytics::list_seat_member_favorites(
+        &state.auth.pool,
+        context.workspace_id(),
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?
+    .into_iter()
+    .map(|favorite| SeatFavoriteResponse {
+        id: favorite.id.to_string(),
+        name: favorite.name,
+        members: favorite.members,
+    })
+    .collect();
+    Ok(Json(ApiResponse::new(items, request_id)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/spread-analytics/seats/member-favorites",
+    params(("x-csrf-token" = String, Header)),
+    request_body = SaveSeatFavoriteRequest,
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SeatFavoriteResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody),
+        (status = 409, body = SpreadErrorBody)
+    )
+)]
+pub async fn create_seat_member_favorite(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Json(request): Json<SaveSeatFavoriteRequest>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = write_context(
+        &state,
+        &headers,
+        Permission::ManageSeatFavorites,
+        request_id,
+    )
+    .await?;
+    let name = request.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 40 {
+        return Err(SpreadApiError::Validation("invalid_name", request_id));
+    }
+    // 走同一个去重：收藏里混进重复的一家，之后每次用它都会把合计算翻倍。
+    let members = parse_member_list(Some(&request.members.join(",")), request_id)?;
+    if members.is_empty() {
+        return Err(SpreadApiError::Validation("empty_members", request_id));
+    }
+
+    let id = Uuid::now_v7();
+    database::spread_analytics::create_seat_member_favorite(
+        &state.auth.pool,
+        context.workspace_id(),
+        id,
+        &name,
+        &members,
+    )
+    .await
+    .map_err(|error| match error {
+        // 同名撞车是运营者能自己处理的事（换个名字），不是内部错误。
+        sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+            SpreadApiError::Conflict("favorite_name_taken", request_id)
+        }
+        _ => SpreadApiError::Internal(request_id),
+    })?;
+
+    Ok(Json(ApiResponse::new(
+        SeatFavoriteResponse {
+            id: id.to_string(),
+            name,
+            members,
+        },
+        request_id,
+    ))
+    .into_response())
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/spread-analytics/seats/member-favorites/{favorite_id}",
+    params(
+        ("favorite_id" = String, Path),
+        ("x-csrf-token" = String, Header)
+    ),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 204),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody),
+        (status = 404, body = SpreadErrorBody)
+    )
+)]
+pub async fn delete_seat_member_favorite(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Path(favorite_id): Path<Uuid>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = write_context(
+        &state,
+        &headers,
+        Permission::ManageSeatFavorites,
+        request_id,
+    )
+    .await?;
+    let removed = database::spread_analytics::delete_seat_member_favorite(
+        &state.auth.pool,
+        context.workspace_id(),
+        favorite_id,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    if !removed {
+        // 删一个不存在的东西该是 404。回 204 会让界面以为删掉了，刷新后它还在。
+        return Err(SpreadApiError::NotFound("favorite_not_found", request_id));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------

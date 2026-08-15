@@ -85,6 +85,7 @@ function handleCommand(command: string) {
           </template>
           <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
           <el-menu-item index="/seats?tab=building">建仓过程</el-menu-item>
+          <el-menu-item index="/seats/net-position">净持仓</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/smart-money-view">
           <span class="nav-emoji">💰</span>

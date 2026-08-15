@@ -296,6 +296,84 @@ export async function deleteSpreadFavorite(favoriteId: string, csrfToken: string
   if (!response.ok) throw await parseApiError(response, `delete favorite failed: ${response.status}`)
 }
 
+// —— 席位净持仓：几家席位合起来看 ——
+
+export interface NetPositionDay {
+  trade_date: string
+  open_price: string | null
+  high_price: string | null
+  low_price: string | null
+  close_price: string | null
+  /** 所选席位当天的合计净持仓。**只含当天在榜的那几家**，见 `missing_members`。 */
+  net_position: string
+  /** 当天净多的那些「席位×合约」，手数相加。分腿口径同建仓过程的合约汇总。 */
+  long_lots: string
+  short_lots: string
+  counted_members: string[]
+  /**
+   * 当天掉出前二十的席位：持仓**未知**，没有计进合计。
+   *
+   * 界面必须把这件事说出来。看的人以为合计覆盖了他选的全部席位，而那天少了一家，
+   * 曲线上就是一段无缘无故的下台阶。
+   */
+  missing_members: string[]
+}
+
+export interface SeatNetPositionResponse {
+  instrument: string
+  contract: string | null
+  is_variety_total: boolean
+  /** 去重后的所选席位。 */
+  members: string[]
+  all_members: string[]
+  contracts: string[]
+  price_series_kind: 'open_interest_weighted' | 'dominant_unadjusted' | null
+  days: NetPositionDay[]
+}
+
+export interface SeatFavorite {
+  id: string
+  name: string
+  members: string[]
+}
+
+export function getSeatNetPosition(options: {
+  instrument: string
+  members: string[]
+  contract?: string
+}): Promise<ApiEnvelope<SeatNetPositionResponse>> {
+  const params = new URLSearchParams()
+  params.set('instrument', options.instrument)
+  params.set('members', options.members.join(','))
+  if (options.contract) params.set('contract', options.contract)
+  return getJson(`/api/v1/spread-analytics/seats/net-position?${params.toString()}`)
+}
+
+export function getSeatFavorites(): Promise<ApiEnvelope<SeatFavorite[]>> {
+  return getJson('/api/v1/spread-analytics/seats/member-favorites')
+}
+
+export function createSeatFavorite(
+  request: { name: string; members: string[] },
+  csrfToken: string
+): Promise<ApiEnvelope<SeatFavorite>> {
+  return sendJson('/api/v1/spread-analytics/seats/member-favorites', request, csrfToken)
+}
+
+export async function deleteSeatFavorite(favoriteId: string, csrfToken: string): Promise<void> {
+  const response = await fetch(
+    `/api/v1/spread-analytics/seats/member-favorites/${encodeURIComponent(favoriteId)}`,
+    {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: { 'x-csrf-token': csrfToken }
+    }
+  )
+  if (!response.ok) {
+    throw await parseApiError(response, `delete seat favorite failed: ${response.status}`)
+  }
+}
+
 export interface SeatPositionRow {
   exchange: string
   instrument: string
