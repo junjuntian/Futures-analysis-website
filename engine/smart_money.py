@@ -461,6 +461,15 @@ class MarketEngine:
 
         c = self.cont["adj_close"]
         self.dist60 = c / c.rolling(RULES["dist_low_days"]).min() - 1
+        # 信号位置(2026-08-15 运营者要求):收盘在近 60 日高低区间里的位置,
+        # 1.0=贴着高点。**只标注,不参与任何买卖判定**。回测过六种把它写进规则的
+        # 变体(/tmp/sm-research,全样本 2015-2026):区间上 1/4 的 52 笔恰好贡献了
+        # +314% 里的 +272%——趋势延续单是这套策略的利润来源;各种「高位否决」
+        # 要么砍半收益,要么只是同一波行情晚几天进场的噪音。判断权交给看盘的人。
+        _low60 = c.rolling(RULES["dist_low_days"]).min()
+        _high60 = c.rolling(RULES["dist_low_days"]).max()
+        self.rangepos = (c - _low60) / (_high60 - _low60)
+        self.pct250 = c.rolling(250, min_periods=120).rank(pct=True)
         sub = self.md[self.md["member"].isin(self.group)]
         netsum = sub.groupby("trade_date")["net"].sum().reindex(self.dates).ffill(limit=10)
         self.netsum = netsum
@@ -640,6 +649,11 @@ class MarketEngine:
             "state": "holding" if holding else "watching",
             "last_close": r(self.cont["close"].iloc[-1]),
             "main_contract": self.cont["main"].iloc[-1],
+            # 现价位置标注,含义见 __init__ 里 rangepos 的注释。
+            "range_pos": (None if np.isnan(float(self.rangepos[last]))
+                          else round(float(self.rangepos[last]), 3)),
+            "pct_250d": (None if np.isnan(float(self.pct250[last]))
+                         else round(float(self.pct250[last]), 3)),
             "conditions": conds,
             "all_pass": all(c["pass"] for c in conds.values()),
             "prospective_zone": [r(zone[0]), r(zone[1])] if zone else None,
@@ -1003,6 +1017,9 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
             history.append({
                 "market": key, "name": eng.meta["name"],
                 "signal_date": str(t.signal_date.date()),
+                # 信号日的区间位置,只标注不判定,含义见 rangepos 的注释。
+                "range_pos": (None if pd.isna(eng.rangepos.get(t.signal_date, float("nan")))
+                              else round(float(eng.rangepos.get(t.signal_date)), 3)),
                 "seats": t.seats, "score": round(t.score, 1),
                 "zone": ([round(t.zone[0], eng.meta["decimals"]),
                           round(t.zone[1], eng.meta["decimals"])] if t.zone else None),

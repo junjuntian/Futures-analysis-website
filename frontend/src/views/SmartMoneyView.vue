@@ -24,6 +24,10 @@ interface MarketState {
   state: string
   last_close: number
   main_contract: string
+  /** 现价在近 60 日高低区间的位置,1=贴着高点。只标注不判定。旧 JSON 无此字段。 */
+  range_pos?: number | null
+  /** 现价在近 250 日收盘里的分位。旧 JSON 无此字段。 */
+  pct_250d?: number | null
   conditions: { score: Condition; dist_low: Condition; netq: Condition }
   all_pass: boolean
   prospective_zone: [number, number] | null
@@ -62,6 +66,8 @@ interface SignalsPayload {
     market: string
     name: string
     signal_date: string
+    /** 信号日的区间位置,同上。旧 JSON 无此字段。 */
+    range_pos?: number | null
     seats: { member: string; strength: number }[]
     score: number
     zone: [number, number] | null
@@ -148,6 +154,18 @@ function pnlClass(v: number | null | undefined): string {
   if (v === null || v === undefined) return 'gray'
   return v > 0 ? 'red' : v < 0 ? 'green' : 'gray'
 }
+/**
+ * 区间位置的展示。回测结论(2026-08-15):高位单恰是主要利润来源,所以这里
+ * 只如实标注位置,不做任何"危险"暗示——上色只为扫一眼能分层。
+ */
+function posText(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '—'
+  return `${Math.round(v * 100)}%`
+}
+function posClass(v: number | null | undefined): string {
+  if (v === null || v === undefined) return ''
+  return v >= 0.75 ? 'pos-high' : v <= 0.25 ? 'pos-low' : ''
+}
 function decimalsOf(market: string): number {
   return market === 'AU' ? 2 : 0
 }
@@ -223,6 +241,13 @@ onMounted(async () => {
                 <span class="v">{{ fmt(data.markets[key].last_close, decimalsOf(key)) }} ·
                   {{ data.markets[key].main_contract }}</span>
               </div>
+              <div v-if="data.markets[key].range_pos !== undefined" class="kv">
+                <span class="k">现价位置</span>
+                <span class="v" :class="posClass(data.markets[key].range_pos)">
+                  60日区间 {{ posText(data.markets[key].range_pos) }}
+                  <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
+                </span>
+              </div>
               <div class="kv">
                 <span class="k">止损价</span>
                 <span class="v red">{{ fmt(data.markets[key].position!.stop_px, decimalsOf(key)) }}</span>
@@ -258,6 +283,13 @@ onMounted(async () => {
                 <span class="k">现价</span>
                 <span class="v">{{ fmt(data.markets[key].last_close, decimalsOf(key)) }} ·
                   {{ data.markets[key].main_contract }}</span>
+              </div>
+              <div v-if="data.markets[key].range_pos !== undefined" class="kv">
+                <span class="k">现价位置</span>
+                <span class="v" :class="posClass(data.markets[key].range_pos)">
+                  60日区间 {{ posText(data.markets[key].range_pos) }}
+                  <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
+                </span>
               </div>
               <div v-if="data.markets[key].prospective_zone" class="kv">
                 <span class="k">参考买入上限</span>
@@ -406,7 +438,7 @@ onMounted(async () => {
           <table>
             <thead>
               <tr>
-                <th>品种</th><th>信号日</th><th>分数</th><th>触发席位</th><th>买入上限</th>
+                <th>品种</th><th>信号日</th><th>分数</th><th>位置</th><th>触发席位</th><th>买入上限</th>
                 <th>机构成本</th><th>进场</th><th>出场</th><th>结果</th><th>收益</th>
               </tr>
             </thead>
@@ -418,6 +450,9 @@ onMounted(async () => {
                   <span v-if="row.relay" class="pill relay" title="消退/止损离场后席位再共振的再进场,免贴低点与低仓条件,次日开盘市价">中继</span>
                 </td>
                 <td>{{ row.score }}</td>
+                <td :class="posClass(row.range_pos)" :title="row.range_pos === null || row.range_pos === undefined ? '' : '信号日收盘在近60日价格区间的位置,100%=贴着高点。只标注,不参与买卖判定。'">
+                  {{ posText(row.range_pos) }}
+                </td>
                 <td class="wrap">{{ row.seats.map((s) => `${s.member}(${s.strength})`).join('、') || '—' }}</td>
                 <td>{{ row.zone ? `≤${fmt(row.zone[1], decimalsOf(row.market))}` : '市价' }}</td>
                 <td class="gray">{{ row.inst_cost ? fmt(row.inst_cost, decimalsOf(row.market)) : '—' }}</td>
@@ -549,6 +584,9 @@ onMounted(async () => {
 .section { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; padding: 20px 22px; margin-bottom: 22px; }
 /* 分页条贴着表格下沿,窄屏时允许换行——挤成一行会把跳页框推出可视区。 */
 .pager { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
+/* 区间位置分层色:高位橙、低位青,中段不上色。只为扫一眼能分层,无褒贬。 */
+.pos-high { color: #e6a23c; font-weight: 600; }
+.pos-low { color: #178a5a; font-weight: 600; }
 .section h2 { font-size: 16px; margin: 0 0 4px; }
 .section .desc { color: #909399; font-size: 12.5px; margin-bottom: 14px; }
 .alert { display: flex; gap: 12px; padding: 13px 16px; border-radius: 6px; margin-bottom: 10px; align-items: flex-start; }
