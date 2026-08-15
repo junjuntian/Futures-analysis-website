@@ -66,20 +66,25 @@ RULES = {
     "weight_clip": 5.0, "weight_min_n": 30, "weight_horizon": 20,
     "theta_mult": 1.2,
     "dist_low_days": 60, "dist_low_max": 0.12,
-    # 重挫共振买点(2026-08-16 运营者立项,回测变体 c15zu_au)。
-    # 定义:距 250 日滚动最高点回撤 >= crash_dd 的"重挫态"里出现共振(分数过门槛),
-    # 即视为新一轮启动:免"贴低点/低仓"两个起点条件,**市价 T+1 进场,不挂
-    # 机构成本区间**——重挫后的 V 型底不给回踩机会,2026-02-02 那笔信号就是被
-    # 区间挂单杀掉的(限价 1033.25 十日未回踩,眼睁睁错过 1050→1246)。
-    # **仅黄金**:白银的重挫共振日级统计显著为负(t=-3.49,催化多为跑路警报
-    # 级别的结构性外逃),运营者的回撤统计表本身也只做了黄金。
+    # 重挫共振买点(2026-08-16 运营者立项并亲自纠正口径,回测变体 c15r_au)。
+    # 定义来自运营者的 XAU/USD 回撤周期统计表(黄金跌幅回撤2026_8_6.xlsx):
+    # 行情按 ±10% 之字形分轮——高点回落 10% 确认转降,低点回升 10% 开启新一轮;
+    # **回撤参照本轮高点**(升段=滚动新高,降段=冻结的轮内高点),不是固定窗口
+    # 滚动高点。第一版曾用 250 日滚动高点,被运营者当场纠正——那会让 1246 之后
+    # 一整年都算重挫态;分轮口径下参照随反弹高点重置,与盘面直觉一致。
+    # 口径优劣有硬数据:重挫(>=15%)且共振的日子后 20 日,本轮高点口径
+    # 胜率 85.0%、均值 +2.65%、t=7.79(N=80);250 日口径仅 65.6%/+0.91%/t=2.95。
+    # 阈值 15% 是甜点(12% 掉到 65.3%,18% 样本太少),恰为运营者表中下跌中位数。
+    #
+    # 触发动作:重挫态里出现共振即视为新一轮启动——免"贴低点/低仓"起点条件,
+    # **市价 T+1 进场,不挂机构成本区间**。2026-02-02 那笔三条件信号就是被区间
+    # 挂单杀掉的(限价 1033.25 十日未回踩,错过 1050→1246 的 V 型反转)。
+    # **仅黄金**:白银的重挫共振日级统计显著为负(t=-3.49)。
     # 不受跑路压制窗拦截:压制窗只拦中继(惯性接多),重挫共振是启动判定。
-    # 回测证据如实记:AU 全样本 +138.6%→+145.6%,增量几乎全部来自 2026-02-02
-    # 一笔(+7.65%),其余历史执行方式变化合计 -0.65——采纳依据是执行机制的
-    # 正确性(区间挂单在重挫 V 型底结构性失效),不是这一笔的收益。
-    # 日级底子:回撤>=15% 且共振的日子后 20 日胜率 65.6%、均值 +0.91%(t=2.95),
-    # 阈值 12% 无效(t=0.97),20% 样本太少。回退:删 crash_dd 与 crash_mask 相关行。
-    "crash_dd": 0.15, "crash_markets": ("AU",),
+    # 回放证据如实记:AU 全样本 +138.6%→+145.6%,增量几乎全部来自 2026-02-02
+    # 一笔(+7.65%);采纳依据是 85% 的日级胜率与执行机制的正确性(区间挂单在
+    # 重挫 V 型底结构性失效)。回退:删 crash_* 两键与 crash_mask 相关行。
+    "crash_dd": 0.15, "crash_markets": ("AU",), "zigzag_reversal": 0.10,
     "netq_window": 250, "netq_max": 0.60,
     "zone_half_width": 5.0, "zone_valid_days": 10,
     # fade_days:2026-08-14 由 10 改为 7,运营者拍板(理由:市场流动性强,
@@ -291,6 +296,34 @@ def detect_events(md: pd.DataFrame, cont: pd.DataFrame, members: list[str],
         }))
     return (pd.concat(out, ignore_index=True) if out
             else pd.DataFrame(columns=["member", "trade_date", "strength", "hands"]))
+
+
+def round_high_series(closes: np.ndarray, reversal: float) -> np.ndarray:
+    """逐日的「本轮高点」——运营者回撤表的 ±reversal 之字形分轮,因果实现。
+
+    升段里高点随创新高抬升;收盘较高点回落 reversal 确认转降,高点冻结为本轮
+    参照;降段里低点随创新低下探;收盘较低点回升 reversal 开启新一轮(参照换成
+    新升段的滚动高点)。只用当日及以前的数据,无未来函数。
+    """
+    rh = np.full(len(closes), np.nan)
+    up, peak, trough = True, closes[0], closes[0]
+    for i in range(len(closes)):
+        x = closes[i]
+        if np.isnan(x):
+            rh[i] = peak
+            continue
+        if up:
+            if x > peak:
+                peak = x
+            if x <= peak * (1 - reversal):
+                up, trough = False, x
+        else:
+            if x < trough:
+                trough = x
+            if x >= trough * (1 + reversal):
+                up, peak = True, x
+        rh[i] = peak
+    return rh
 
 
 def forward_returns(cont: pd.DataFrame, horizon: int) -> pd.Series:
@@ -564,10 +597,11 @@ class MarketEngine:
         # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
         relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
         # 重挫共振,口径与代价见 RULES["crash_dd"] 的注释。
-        _peak250 = self.cont["adj_close"].rolling(250, min_periods=60).max()
-        self.dd250 = 1 - self.cont["adj_close"] / _peak250
+        _rh = round_high_series(self.cont["adj_close"].to_numpy(), RULES["zigzag_reversal"])
+        self.round_high = pd.Series(_rh, index=self.cont.index)
+        self.dd_round = 1 - self.cont["adj_close"] / self.round_high
         crash_mask = ((self.score >= self.theta) & (self.theta > 0)
-                      & (self.dd250 >= RULES["crash_dd"]) & (self.dates >= d0))
+                      & (self.dd_round >= RULES["crash_dd"]) & (self.dates >= d0))
         if self.instrument not in RULES["crash_markets"]:
             crash_mask &= False
         trades, busy = [], -1
@@ -681,13 +715,15 @@ class MarketEngine:
                           else round(float(self.rangepos[last]), 3)),
             "pct_250d": (None if np.isnan(float(self.pct250[last]))
                          else round(float(self.pct250[last]), 3)),
-            # 距 250 日滚动高点的回撤深度与重挫共振状态(见 RULES["crash_dd"])。
-            "dd_250": (None if np.isnan(float(self.dd250[last]))
-                       else round(float(self.dd250[last]), 3)),
+            # 距本轮高点(±10%分轮)的回撤深度与重挫共振状态(见 RULES["crash_dd"])。
+            "dd_round": (None if np.isnan(float(self.dd_round[last]))
+                         else round(float(self.dd_round[last]), 3)),
+            "round_high": (None if np.isnan(float(self.round_high[last]))
+                           else round(float(self.round_high[last]) , self.meta["decimals"])),
             "crash_ready": bool(
                 self.instrument in RULES["crash_markets"]
-                and not np.isnan(float(self.dd250[last]))
-                and float(self.dd250[last]) >= RULES["crash_dd"]
+                and not np.isnan(float(self.dd_round[last]))
+                and float(self.dd_round[last]) >= RULES["crash_dd"]
                 and float(self.score[last]) >= float(self.theta[last]) > 0),
             "conditions": conds,
             "all_pass": all(c["pass"] for c in conds.values()),
@@ -1105,10 +1141,10 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
             alerts.append({
                 "type": "buy", "level": "danger", "market": key,
                 "date": str(data_date.date()),
-                "text": (f"{eng.meta['name']} 重挫共振买入触发 — 距 250 日高点回撤 "
-                         f"{round(float(snap['dd_250']) * 100)}% 且席位共振,"
+                "text": (f"{eng.meta['name']} 重挫共振买入触发 — 距本轮高点回撤 "
+                         f"{round(float(snap['dd_round']) * 100)}% 且席位共振,"
                          f"**次日开盘市价买入(不挂区间等回踩)**;止损 -4%。"
-                         f"历史上此类日子后 20 日胜率 65.6%"),
+                         f"历史上此类日子后 20 日胜率 85%"),
             })
         elif snap["all_pass"]:
             z, c0 = snap["prospective_zone"], snap["prospective_cost"]
@@ -1174,7 +1210,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "stats": stats,
         "rules": {
             "group": RULES["group"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金:距250日高点回撤≥15%且共振)免起点条件、次日开盘市价买入",
+            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金:距本轮高点回撤≥15%且共振,±10%之字形分轮)免起点条件、次日开盘市价买入",
             "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
             "cond_seats": RULES["cond_seats"],
         },
