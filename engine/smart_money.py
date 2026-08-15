@@ -994,8 +994,10 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
                 snap["env_boost"] = "金银比极端高,白银买点建议加倍仓位"
         markets[key] = snap
 
-        done = [t for t in trades[key] if t.result not in ("未回踩放弃",)]
-        for t in trades[key][-12:]:
+        # 全量写出。原来每个品种只取最近 12 笔，两个品种合计 24 条，而同一份 JSON 里
+        # 的成熟期统计是按全量算的（黄金 55 笔、白银 80 笔，自 2019 年）——表上的数
+        # 和表头的统计对不上，看的人无从核对。界面已经分页，条数多不再是问题。
+        for t in trades[key]:
             marks = cross_marks(eng, other, t.signal_date,
                                 [s["member"] for s in t.seats])
             history.append({
