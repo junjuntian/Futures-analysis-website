@@ -11,6 +11,9 @@
   - **引擎多了一条外部数据链**:伦敦金基线 `engine/data/london_xau.csv`
     随发布包走,GC=F 增量缓存 `gold_usd.csv`,重叠区基线为准。
   - **引擎改动部署后必须手动 run-smart-money 一次**,deploy 只装文件不重跑。
+    **判断跑没跑过看 `signals.json` 的 `generated_at` 与 `rules.buy` 串,别看
+    文件 mtime**——引擎文件会被二次部署刷新 mtime,08-16 已因此差点误判(实为
+    已跑;当日 01:23 复核重跑,新旧产物除 `generated_at` 外逐字节相等)。
   - 待办:08-17(周一)收盘后 `futures-cron-selfcheck` 验新规则首次 cron 实跑。
 
 - **(历史)权威交接:`docs/handoffs/HANDOFF_20260815_0150.md`**。它覆盖 08-11 之后的全部
