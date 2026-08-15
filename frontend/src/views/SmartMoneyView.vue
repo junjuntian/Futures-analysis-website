@@ -28,10 +28,12 @@ interface MarketState {
   range_pos?: number | null
   /** 现价在近 250 日收盘里的分位。旧 JSON 无此字段。 */
   pct_250d?: number | null
-  /** 距本轮高点(±10%之字形分轮)的回撤深度。旧 JSON 无此字段。 */
+  /** 距本轮高点的回撤深度(伦敦金美元口径,±10%分轮)。旧 JSON 无此字段。 */
   dd_round?: number | null
-  /** 本轮高点参照价。 */
+  /** 本轮高点参照价(美元/盎司)。 */
   round_high?: number | null
+  /** 重挫态(粘滞):本轮已回撤逾15%,直到新轮开启。仅黄金。 */
+  crash_zone?: boolean
   /** 重挫共振(仅黄金):回撤≥15% 且共振,次日开盘市价买入。 */
   crash_ready?: boolean
   conditions: { score: Condition; dist_low: Condition; netq: Condition; range_pos?: Condition }
@@ -255,8 +257,8 @@ onMounted(async () => {
                 <span class="v" :class="posClass(data.markets[key].range_pos)">
                   60日区间 {{ posText(data.markets[key].range_pos) }}
                   <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
-                  <span v-if="(data.markets[key].dd_round ?? 0) >= 0.15" class="pos-high">
-                    · 距本轮高点回撤 {{ posText(data.markets[key].dd_round) }}(重挫态)</span>
+                  <span v-if="data.markets[key].crash_zone" class="pos-high">
+                    · 伦敦金本轮回撤已达15%(现 {{ posText(data.markets[key].dd_round) }},重挫态)</span>
                 </span>
               </div>
               <div class="kv">
@@ -301,8 +303,8 @@ onMounted(async () => {
                 <span class="v" :class="posClass(data.markets[key].range_pos)">
                   60日区间 {{ posText(data.markets[key].range_pos) }}
                   <span class="gray">· 250日分位 {{ posText(data.markets[key].pct_250d) }}</span>
-                  <span v-if="(data.markets[key].dd_round ?? 0) >= 0.15" class="pos-high">
-                    · 距本轮高点回撤 {{ posText(data.markets[key].dd_round) }}(重挫态)</span>
+                  <span v-if="data.markets[key].crash_zone" class="pos-high">
+                    · 伦敦金本轮回撤已达15%(现 {{ posText(data.markets[key].dd_round) }},重挫态)</span>
                 </span>
               </div>
               <div v-if="data.markets[key].prospective_zone" class="kv">
@@ -474,7 +476,7 @@ onMounted(async () => {
                 <td><span class="pill" :class="row.market.toLowerCase()">{{ row.name }}</span></td>
                 <td>
                   {{ row.signal_date }}
-                  <span v-if="row.crash" class="pill crash" title="重挫共振:距本轮高点(±10%分轮)回撤≥15%时的共振,免起点条件,次日开盘市价买入(不挂区间)。仅黄金,历史胜率85%。">重挫</span>
+                  <span v-if="row.crash" class="pill crash" title="重挫共振:伦敦金±10%分轮内自轮高回撤触及15%后的共振,免起点条件,次日开盘市价买入(不挂区间)。仅黄金,历史同类日胜率73%,回放12笔11胜。">重挫</span>
                   <span v-else-if="row.relay" class="pill relay" title="消退/止损离场后席位再共振的再进场,免贴低点与低仓条件,次日开盘市价">中继</span>
                 </td>
                 <td>{{ row.score }}</td>

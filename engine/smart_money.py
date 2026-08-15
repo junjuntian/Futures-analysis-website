@@ -66,24 +66,27 @@ RULES = {
     "weight_clip": 5.0, "weight_min_n": 30, "weight_horizon": 20,
     "theta_mult": 1.2,
     "dist_low_days": 60, "dist_low_max": 0.12,
-    # 重挫共振买点(2026-08-16 运营者立项并亲自纠正口径,回测变体 c15r_au)。
-    # 定义来自运营者的 XAU/USD 回撤周期统计表(黄金跌幅回撤2026_8_6.xlsx):
-    # 行情按 ±10% 之字形分轮——高点回落 10% 确认转降,低点回升 10% 开启新一轮;
-    # **回撤参照本轮高点**(升段=滚动新高,降段=冻结的轮内高点),不是固定窗口
-    # 滚动高点。第一版曾用 250 日滚动高点,被运营者当场纠正——那会让 1246 之后
-    # 一整年都算重挫态;分轮口径下参照随反弹高点重置,与盘面直觉一致。
-    # 口径优劣有硬数据:重挫(>=15%)且共振的日子后 20 日,本轮高点口径
-    # 胜率 85.0%、均值 +2.65%、t=7.79(N=80);250 日口径仅 65.6%/+0.91%/t=2.95。
-    # 阈值 15% 是甜点(12% 掉到 65.3%,18% 样本太少),恰为运营者表中下跌中位数。
-    #
-    # 触发动作:重挫态里出现共振即视为新一轮启动——免"贴低点/低仓"起点条件,
-    # **市价 T+1 进场,不挂机构成本区间**。2026-02-02 那笔三条件信号就是被区间
-    # 挂单杀掉的(限价 1033.25 十日未回踩,错过 1050→1246 的 V 型反转)。
-    # **仅黄金**:白银的重挫共振日级统计显著为负(t=-3.49)。
-    # 不受跑路压制窗拦截:压制窗只拦中继(惯性接多),重挫共振是启动判定。
-    # 回放证据如实记:AU 全样本 +138.6%→+145.6%,增量几乎全部来自 2026-02-02
-    # 一笔(+7.65%);采纳依据是 85% 的日级胜率与执行机制的正确性(区间挂单在
-    # 重挫 V 型底结构性失效)。回退:删 crash_* 两键与 crash_mask 相关行。
+    # 重挫共振买点(2026-08-16 运营者立项并两次纠正口径,终稿=回测变体 c15L_au)。
+    # 基准:**伦敦金美元价**(运营者统计表 黄金跌幅回撤2026_8_6.xlsx 的原口径),
+    # 日内高/低 ±10% 之字形分轮;轮内自轮高回撤(按日低)触及 15% 即置位,
+    # **粘滞**到低点回升 10% 开启新轮才复位——"跌超15%之后"的共振都算,
+    # 不要求当天仍在 -15% 下方。两次纠正都是运营者抓的:
+    #   ①250 日滚动高点→本轮高点(固定窗口会让 1246 之后一整年都算重挫态);
+    #   ②人民币沪金→伦敦金美元(汇率会扭曲回撤深度:人民币口径把 2021 标出
+    #     69 个假重挫日——美元那轮只跌 14.96%,差一根头发;又漏掉 2016-2018 与
+    #     2022 的真实轮次。回放里 2021 那串 -4% 止损全是汇率假信号)。
+    # 触发动作:重挫态里出现共振(分数过门槛)即视为新一轮启动——免"贴低点/
+    # 低仓"起点条件,**次日开盘市价买入,不挂机构成本区间**(2026-02-02 那笔
+    # 三条件信号就是被区间挂单杀掉的:限价 1033.25 十日未回踩,错过 1050→1246)。
+    # **仅黄金**(白银重挫共振日级 t=-3.49);不受跑路压制窗拦截(压制窗只拦中继)。
+    # 因果纪律:沪金 D 日信号在北京晚间算,当天美盘未收——一律用美盘前一日;
+    # 日线 OHLC 分不出当天高低先后,反弹确认只用昨日为止的低点,不许当天自证。
+    # 回测证据(全样本 2015-2026):AU +138.6%→+146.2%,重挫单 12 笔胜率 91.7%
+    # 零止损,新增交易仅 2026-02-02(+7.65%),其余历史零变化;日级底子:重挫态
+    # 且共振的日子后 20 日胜率 73.3%(t=6.45,N=120)。数据基线 london_xau.csv
+    # 随发布包下发,增量走 GC=F 自动更新(缓存 gold_usd.csv),全不可用时重挫
+    # 判定自动关闭而不是让引擎死掉。回退:删 crash_*/zigzag_reversal 三键与
+    # usd_crash_state/load_gold_usd 相关块。
     "crash_dd": 0.15, "crash_markets": ("AU",), "zigzag_reversal": 0.10,
     "netq_window": 250, "netq_max": 0.60,
     "zone_half_width": 5.0, "zone_valid_days": 10,
@@ -298,32 +301,44 @@ def detect_events(md: pd.DataFrame, cont: pd.DataFrame, members: list[str],
             else pd.DataFrame(columns=["member", "trade_date", "strength", "hands"]))
 
 
-def round_high_series(closes: np.ndarray, reversal: float) -> np.ndarray:
-    """逐日的「本轮高点」——运营者回撤表的 ±reversal 之字形分轮,因果实现。
+def usd_crash_state(high: np.ndarray, low: np.ndarray, reversal: float,
+                    trigger: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """伦敦金重挫态(运营者回撤表口径),因果实现。
 
-    升段里高点随创新高抬升;收盘较高点回落 reversal 确认转降,高点冻结为本轮
-    参照;降段里低点随创新低下探;收盘较低点回升 reversal 开启新一轮(参照换成
-    新升段的滚动高点)。只用当日及以前的数据,无未来函数。
+    ±reversal 之字形分轮:升段里轮高随日高抬升,日低跌破轮高 (1-reversal) 转降;
+    降段里轮内自轮高回撤(按日低)触及 trigger 置位并**粘滞**;日高收复
+    「昨日为止低点」的 (1+reversal) 开启新轮并复位——反弹确认不许用当天新低
+    自证(日线 OHLC 分不出当天高低先后)。返回 (重挫态, 当日回撤深度, 轮高)。
     """
-    rh = np.full(len(closes), np.nan)
-    up, peak, trough = True, closes[0], closes[0]
-    for i in range(len(closes)):
-        x = closes[i]
-        if np.isnan(x):
-            rh[i] = peak
+    n = len(high)
+    state = np.zeros(n, dtype=bool)
+    dd_now = np.full(n, np.nan)
+    peak_arr = np.full(n, np.nan)
+    up, peak, trough, hit = True, high[0], low[0], False
+    for i in range(n):
+        h, l = high[i], low[i]
+        if np.isnan(h) or np.isnan(l):
+            state[i] = hit
+            peak_arr[i] = peak
             continue
         if up:
-            if x > peak:
-                peak = x
-            if x <= peak * (1 - reversal):
-                up, trough = False, x
+            if h > peak:
+                peak = h
+            if l <= peak * (1 - reversal):
+                up, trough = False, l
+                hit = (1 - l / peak) >= trigger
         else:
-            if x < trough:
-                trough = x
-            if x >= trough * (1 + reversal):
-                up, peak = True, x
-        rh[i] = peak
-    return rh
+            if h >= trough * (1 + reversal):
+                up, peak, hit = True, h, False
+            else:
+                if l < trough:
+                    trough = l
+                if not hit and (1 - trough / peak) >= trigger:
+                    hit = True
+        state[i] = hit
+        dd_now[i] = 1 - l / peak
+        peak_arr[i] = peak
+    return state, dd_now, peak_arr
 
 
 def forward_returns(cont: pd.DataFrame, horizon: int) -> pd.Series:
@@ -479,7 +494,9 @@ class Trade:
 
 
 class MarketEngine:
-    def __init__(self, instrument: str, price: pd.DataFrame, seat: pd.DataFrame):
+    def __init__(self, instrument: str, price: pd.DataFrame, seat: pd.DataFrame, crash_ref: pd.DataFrame | None = None):
+        # 伦敦金基准存到 self:重挫掩码在 replay() 里构建,拿不到入参。
+        self.crash_ref = crash_ref
         self.instrument = instrument
         self.meta = MARKETS[instrument]
         price = clean_price(price)
@@ -596,14 +613,36 @@ class MarketEngine:
         # 消退卖出后,七家再度共振(仅分数门槛)即视为同一轮趋势的延续,
         # 免"贴低点/低仓"两个起点条件;止损出场亦保持待命(止损是风险纪律非趋势判定)。
         relay_mask = (self.score >= self.theta) & (self.theta > 0) & (self.dates >= d0)
-        # 重挫共振,口径与代价见 RULES["crash_dd"] 的注释。
-        _rh = round_high_series(self.cont["adj_close"].to_numpy(), RULES["zigzag_reversal"])
-        self.round_high = pd.Series(_rh, index=self.cont.index)
-        self.dd_round = 1 - self.cont["adj_close"] / self.round_high
-        crash_mask = ((self.score >= self.theta) & (self.theta > 0)
-                      & (self.dd_round >= RULES["crash_dd"]) & (self.dates >= d0))
-        if self.instrument not in RULES["crash_markets"]:
-            crash_mask &= False
+        # 重挫共振,基准=伦敦金美元价,口径与代价见 RULES["crash_dd"] 的注释。
+        # 严格因果:沪金 D 日信号在北京晚间计算,当天美盘未收,一律取美盘前一日
+        # (shift 1)再按沪金日历 asof 映射。
+        if self.crash_ref is not None and self.instrument in RULES["crash_markets"]:
+            _ref = self.crash_ref
+            _st, _ddn, _pk = usd_crash_state(
+                _ref["High"].to_numpy(), _ref["Low"].to_numpy(),
+                RULES["zigzag_reversal"], RULES["crash_dd"])
+            _first = _ref.index[0]
+
+            def _map(values, default):
+                shifted = pd.Series(values, index=_ref.index).shift(1)
+                out = []
+                for _d in self.dates:
+                    v = shifted.asof(_d) if _d >= _first else None
+                    out.append(default if v is None or pd.isna(v) else v)
+                return out
+
+            self.crash_state = pd.Series([bool(x) for x in _map(_st, False)],
+                                         index=self.dates)
+            self.dd_round = pd.Series([float(x) for x in _map(_ddn, float("nan"))],
+                                      index=self.dates)
+            self.round_high_usd = pd.Series([float(x) for x in _map(_pk, float("nan"))],
+                                            index=self.dates)
+        else:
+            self.crash_state = pd.Series(False, index=self.dates)
+            self.dd_round = pd.Series(float("nan"), index=self.dates)
+            self.round_high_usd = pd.Series(float("nan"), index=self.dates)
+        crash_mask = (self.crash_state & (self.score >= self.theta) & (self.theta > 0)
+                      & (self.dates >= d0))
         trades, busy = [], -1
         relay_armed = False
         for d in self.dates:
@@ -715,15 +754,16 @@ class MarketEngine:
                           else round(float(self.rangepos[last]), 3)),
             "pct_250d": (None if np.isnan(float(self.pct250[last]))
                          else round(float(self.pct250[last]), 3)),
-            # 距本轮高点(±10%分轮)的回撤深度与重挫共振状态(见 RULES["crash_dd"])。
+            # 重挫态三件套,基准=伦敦金美元价(见 RULES["crash_dd"]):
+            # crash_zone=本轮已回撤逾15%(粘滞);dd_round=最近可用美盘日距本轮
+            # 高点的回撤;round_high=本轮高点(美元/盎司)。
+            "crash_zone": bool(self.crash_state[last]),
             "dd_round": (None if np.isnan(float(self.dd_round[last]))
                          else round(float(self.dd_round[last]), 3)),
-            "round_high": (None if np.isnan(float(self.round_high[last]))
-                           else round(float(self.round_high[last]) , self.meta["decimals"])),
+            "round_high": (None if np.isnan(float(self.round_high_usd[last]))
+                           else round(float(self.round_high_usd[last]), 2)),
             "crash_ready": bool(
-                self.instrument in RULES["crash_markets"]
-                and not np.isnan(float(self.dd_round[last]))
-                and float(self.dd_round[last]) >= RULES["crash_dd"]
+                self.crash_state[last]
                 and float(self.score[last]) >= float(self.theta[last]) > 0),
             "conditions": conds,
             "all_pass": all(c["pass"] for c in conds.values()),
@@ -771,6 +811,54 @@ def _fetch_comex_ratio(since_year: int = 2010) -> pd.Series:
         legs[sym] = s[~s.index.duplicated(keep="last")]
     df = pd.DataFrame({"xau": legs["GC=F"], "xag": legs["SI=F"]}).dropna()
     return (df["xau"] / df["xag"]).sort_index()
+
+
+def _fetch_gc_ohlc(since_year: int = 2010) -> pd.DataFrame:
+    """COMEX 黄金连续的日高/低/收,来源与 _fetch_comex_ratio 同一接口。"""
+    import time
+    import urllib.request
+
+    p1 = int(time.mktime((since_year, 1, 1, 0, 0, 0, 0, 0, 0)))
+    p2 = int(time.time())
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+           f"?period1={p1}&period2={p2}&interval=1d")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        d = json.load(r)["chart"]["result"][0]
+    q = d["indicators"]["quote"][0]
+    idx = pd.to_datetime(d["timestamp"], unit="s").normalize()
+    df = pd.DataFrame({"High": q["high"], "Low": q["low"], "Close": q["close"]},
+                      index=idx).dropna()
+    return df[~df.index.duplicated(keep="last")].sort_index()
+
+
+def load_gold_usd(data_dir: Path) -> pd.DataFrame:
+    """伦敦金/COMEX 美元金价日线(High/Low/Close),重挫态判定的基准序列。
+
+    基线 = 运营者的 london_xau.csv(2000 起,随发布包下发);增量 = GC=F 自动
+    更新;缓存 gold_usd.csv 保证离线可用。全部来源都不可用时抛出,由调用方把
+    重挫判定降级为关闭——宁可少一个买点判定,不能让引擎死掉。"""
+    cache = data_dir / "gold_usd.csv"
+    hist = pd.DataFrame()
+    if cache.exists():
+        hist = (pd.read_csv(cache, parse_dates=["date"]).set_index("date")
+                [["High", "Low", "Close"]].sort_index())
+    baseline = data_dir / "london_xau.csv"
+    if baseline.exists():
+        b = (pd.read_csv(baseline, parse_dates=["Date"]).set_index("Date")
+             [["High", "Low", "Close"]].sort_index())
+        hist = b.combine_first(hist) if len(hist) else b
+    try:
+        fresh = _fetch_gc_ohlc()
+        # 重叠区以伦敦基线为准,COMEX 只负责把序列往后延:两源的日内高低略有出入,
+        # 2018 那轮回撤 15.07% 贴着阈值,换源会翻转历史标签。基线静态=历史稳定。
+        merged = hist.combine_first(fresh).sort_index() if len(hist) else fresh
+        (merged.rename_axis("date").reset_index().to_csv(cache, index=False))
+        return merged
+    except Exception as e:                                   # 网络/上游异常
+        if len(hist):
+            return hist.sort_index()
+        raise RuntimeError(f"伦敦金数据不可用且无缓存/基线:{e}")
 
 
 def load_ratio(data_dir: Path) -> tuple[pd.Series, str]:
@@ -1141,10 +1229,11 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
             alerts.append({
                 "type": "buy", "level": "danger", "market": key,
                 "date": str(data_date.date()),
-                "text": (f"{eng.meta['name']} 重挫共振买入触发 — 距本轮高点回撤 "
-                         f"{round(float(snap['dd_round']) * 100)}% 且席位共振,"
-                         f"**次日开盘市价买入(不挂区间等回踩)**;止损 -4%。"
-                         f"历史上此类日子后 20 日胜率 85%"),
+                "text": (f"{eng.meta['name']} 重挫共振买入触发 — 伦敦金本轮自高点回撤"
+                         f"已触及 15%(现距本轮高点 "
+                         f"{'?' if snap['dd_round'] is None else round(float(snap['dd_round']) * 100)}%)"
+                         f"且席位共振,**次日开盘市价买入(不挂区间等回踩)**;止损 -4%。"
+                         f"历史同类日子后 20 日胜率 73%,重挫单回放 12 笔 11 胜"),
             })
         elif snap["all_pass"]:
             z, c0 = snap["prospective_zone"], snap["prospective_cost"]
@@ -1210,7 +1299,7 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "stats": stats,
         "rules": {
             "group": RULES["group"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金:距本轮高点回撤≥15%且共振,±10%之字形分轮)免起点条件、次日开盘市价买入",
+            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金,伦敦金口径:±10%分轮内自轮高回撤触及15%后的共振)免起点条件、次日开盘市价买入",
             "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
             "cond_seats": RULES["cond_seats"],
         },
@@ -1222,6 +1311,13 @@ def main():
     out_path = Path(os.environ.get("ENGINE_OUT", "/opt/futures-platform/signals/signals.json"))
     data_dir = Path(os.environ.get("ENGINE_DATA", Path(__file__).parent / "data"))
 
+    # 伦敦金基准(重挫态判定)。取不到就关掉这一路判定,别让引擎死掉。
+    gold_usd = None
+    try:
+        gold_usd = load_gold_usd(data_dir)
+    except Exception as e:
+        print(f"[engine] 伦敦金数据不可用,重挫判定本轮关闭:{e}")
+
     engines = {}
     for inst in ("AU", "AG"):
         if src == "csv":
@@ -1232,7 +1328,9 @@ def main():
                 os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
                 os.environ.get("PG_USER", "futures_app"),
                 os.environ.get("PG_DB", "futures_platform"))
-        engines[inst] = MarketEngine(inst, price, seat)
+        engines[inst] = MarketEngine(
+            inst, price, seat,
+            crash_ref=gold_usd if inst in RULES["crash_markets"] else None)
 
     ratio, ratio_src = load_ratio(data_dir)
     data_date = min(e.dates[-1] for e in engines.values())

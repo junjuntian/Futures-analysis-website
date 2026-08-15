@@ -292,6 +292,9 @@ jobs:
           install -m 700 engine/run-official-seats.sh "${RELEASE_BUNDLE}/engine/run-official-seats.sh"
           install -m 700 engine/run-smart-money.sh "${RELEASE_BUNDLE}/engine/run-smart-money.sh"
           install -m 600 engine/smart_money.py "${RELEASE_BUNDLE}/engine/smart_money.py"
+          # 伦敦金基线:重挫态判定的基准数据,随发布包走(手工文件会漂移,吃过亏)
+          install -d -m 700 "${RELEASE_BUNDLE}/engine/data"
+          install -m 600 engine/data/london_xau.csv "${RELEASE_BUNDLE}/engine/data/london_xau.csv"
           install -m 700 rust/tests/phase_4a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_4a_e2e.sh"
           install -m 700 rust/tests/phase_5a_e2e.sh "${RELEASE_BUNDLE}/e2e/phase_5a_e2e.sh"
           # 成本对拍守卫:phase_5a 的 cost_parity 步骤要用它。
@@ -950,6 +953,8 @@ jobs:
               echo "ENGINE_SUPERSEDED smart_money.py"
             fi
             install -m 644 "$RELEASE_DIR/engine/smart_money.py" "$engine_live"
+            install -d -m 755 /opt/futures-platform/smart-money/data
+            install -m 644 "$RELEASE_DIR/engine/data/london_xau.csv"               /opt/futures-platform/smart-money/data/london_xau.csv
           fi
           echo "DEPLOY_STAGE collector_schedule_installed"
 
