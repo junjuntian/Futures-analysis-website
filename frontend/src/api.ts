@@ -380,6 +380,13 @@ export interface SeatBuildingResponse {
   members: string[]
   /** 该会员在该品种上历史持有过的全部合约，新月份在前。不随所选交易日变化。 */
   contracts: string[]
+  /**
+   * 汇总档 K 线的口径。单合约档为 `null`——那是合约自己的真实行情。
+   *
+   * 汇总档画的是**合成价**，不是任何一个合约的真实成交价。界面必须写明是哪一种，
+   * 否则看的人会拿这个价位去定止损。
+   */
+  price_series_kind: 'open_interest_weighted' | 'dominant_unadjusted' | null
   days: BuildingDay[]
 }
 

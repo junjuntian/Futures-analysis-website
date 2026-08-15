@@ -1097,6 +1097,89 @@ mod tests {
     }
 
     #[test]
+    fn gold_and_silver_are_weighted_everything_else_is_dominant() {
+        // 运营者定的：金银用加权，其余用主连。
+        for weighted in ["AU", "AG"] {
+            assert_eq!(
+                VarietyCandleMode::for_instrument(weighted),
+                VarietyCandleMode::OpenInterestWeighted
+            );
+        }
+        for dominant in ["CU", "RB", "I", "AP", "JM", "A"] {
+            assert_eq!(
+                VarietyCandleMode::for_instrument(dominant),
+                VarietyCandleMode::DominantUnadjusted
+            );
+        }
+    }
+
+    #[test]
+    fn candle_mode_names_match_the_frontend_union_type() {
+        // 前端 api.ts 里 price_series_kind 就是这两个字面量的联合类型，改这里要改那里。
+        assert_eq!(
+            VarietyCandleMode::OpenInterestWeighted.as_str(),
+            "open_interest_weighted"
+        );
+        assert_eq!(
+            VarietyCandleMode::DominantUnadjusted.as_str(),
+            "dominant_unadjusted"
+        );
+    }
+
+    #[test]
+    fn weighted_candles_take_numerator_and_denominator_from_the_same_contracts() {
+        // 分子分母必须落在同一批合约上。某个合约缺开盘价却把它的持仓量计进分母，
+        // 算出来的开盘价会被系统性拉低——图上就是一根不存在的低开。
+        let sql = variety_candles_sql(VarietyCandleMode::OpenInterestWeighted);
+        assert!(sql.contains("open_price is not null and high_price is not null"));
+        assert!(sql.contains("low_price is not null and close_price is not null"));
+        assert!(sql.contains("where open_interest > 0"));
+        // 过滤只发生在 usable 一处，四个价格都从它取数。
+        assert_eq!(sql.matches("from usable").count(), 1);
+        assert_eq!(sql.matches("/ sum(open_interest)").count(), 4);
+    }
+
+    #[test]
+    fn dominant_candles_pick_the_largest_open_interest_and_stay_stable() {
+        let sql = variety_candles_sql(VarietyCandleMode::DominantUnadjusted);
+        assert!(sql.contains("distinct on (trade_date)"));
+        // 并列时按合约代码定序：同一天两次查询给出不同的主力是不能接受的。
+        assert!(sql.contains("order by trade_date, open_interest desc, contract"));
+        // 主连取的是真实合约的真实价，不做任何加权。
+        assert!(!sql.contains("sum("), "主连档不该出现聚合");
+    }
+
+    #[test]
+    fn both_candle_modes_converge_sources_before_synthesising() {
+        // 不按可信度收敛的话，日更源与官方历史源两行都会进来，
+        // 等于把同一个合约在同一天算了两遍。
+        for mode in [
+            VarietyCandleMode::OpenInterestWeighted,
+            VarietyCandleMode::DominantUnadjusted,
+        ] {
+            assert!(
+                variety_candles_sql(mode).contains("distinct on (contract, trade_date)"),
+                "{mode:?} 没有先收敛来源"
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_candles_never_touch_the_cost_query() {
+        // 合成价只画图。它一旦流进成本链路，算出来的就是「他在加权指数上的成本」，
+        // 而他持的是一个个具体合约——那个数不对应任何真实仓位。
+        let cost_sql = variety_building_sql();
+        assert!(
+            !cost_sql.contains("open_interest"),
+            "成本取数不该按持仓量加权"
+        );
+        assert!(
+            cost_sql.contains("p.settlement_price"),
+            "成本仍走各合约自己的结算价"
+        );
+    }
+
+    #[test]
     fn rust_normalisation_matches_the_sql_member_key() {
         // 过滤在 Rust 里归一（seat_member_variants），展示与去重键在 SQL 里归一
         // （MEMBER_KEY）。两边语义必须逐字相同，否则同一家会员在下拉里是一个名字、
@@ -2186,6 +2269,135 @@ pub struct VarietyBuildingRow {
     pub long_position: Option<String>,
     pub short_position: Option<String>,
     pub settlement_price: Option<String>,
+}
+
+/// 品种汇总蜡烛图的一天。
+///
+/// 与 [`VarietyBuildingRow`] 是**两路互不相干的数据**。那一路是这个席位在各合约上的
+/// 持仓配上那个合约自己的结算价，喂给成本引擎；这一路是整个品种的合成行情，只喂
+/// K 线。合成价**不参与任何成本与盈亏计算**——他持的是一个个具体合约，不是加权指数，
+/// 拿指数价去算他的成本会算出一个不存在的数。
+#[derive(Debug, Clone)]
+pub struct VarietyCandleRow {
+    pub trade_date: Date,
+    pub open_price: String,
+    pub high_price: String,
+    pub low_price: String,
+    pub close_price: String,
+    /// 主连档：当天被选中的那个合约。换月时它会变。
+    /// 加权档恒为 `None`——加权没有「是哪个合约」这回事。
+    pub source_contract: Option<String>,
+}
+
+/// 合成行情的口径。运营者拍板：金银用加权，其余用主连。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarietyCandleMode {
+    /// 持仓量加权：Σ(价×持仓量) / Σ持仓量。
+    OpenInterestWeighted,
+    /// 主力连续，**不复权**。
+    DominantUnadjusted,
+}
+
+impl VarietyCandleMode {
+    /// 金银用加权，其余用主连。
+    pub fn for_instrument(instrument: &str) -> Self {
+        match instrument {
+            "AU" | "AG" => Self::OpenInterestWeighted,
+            _ => Self::DominantUnadjusted,
+        }
+    }
+
+    /// 透出给界面的口径名。与 [`Self::for_instrument`] 挨着放：判定改了名字跟着改，
+    /// 免得界面上标着「加权」画的却是主连。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenInterestWeighted => "open_interest_weighted",
+            Self::DominantUnadjusted => "dominant_unadjusted",
+        }
+    }
+}
+
+/// 合成行情的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
+///
+/// 两档共用同一个 `picked`：先按来源可信度把同一合约同一天收敛成一行，再合成。不收敛
+/// 的话日更源与官方历史源两行都会进加权，等于把同一个合约算了两遍。
+fn variety_candles_sql(mode: VarietyCandleMode) -> String {
+    // 四价齐全才纳入。加权的分子分母必须来自同一批合约——某个合约缺开盘价却把它的
+    // 持仓量计进分母，算出来的开盘价会被系统性拉低。
+    let picked = format!(
+        "with picked as (
+             select distinct on (contract, trade_date)
+                    contract, trade_date,
+                    open_price, high_price, low_price, close_price, open_interest
+               from price_history
+              where workspace_id = $1 and instrument = $2
+              order by contract, trade_date, {price_rank}, source
+         ), usable as (
+             select * from picked
+              where open_interest > 0
+                and open_price is not null and high_price is not null
+                and low_price is not null and close_price is not null
+         )",
+        price_rank = PRICE_SOURCE_RANK,
+    );
+    match mode {
+        // 注意这里的 high/low 是「各合约当日最高价的加权平均」，不是「加权价格序列
+        // 当日的最高点」。后者要日内逐笔才算得出，我们只有日频。差别在振幅上：
+        // 各合约不会同时摸到各自的高点，所以合成出来的振幅略窄于真实加权指数。
+        VarietyCandleMode::OpenInterestWeighted => format!(
+            "{picked}
+             select trade_date,
+                    (sum(open_price * open_interest) / sum(open_interest))::text as open_price,
+                    (sum(high_price * open_interest) / sum(open_interest))::text as high_price,
+                    (sum(low_price * open_interest) / sum(open_interest))::text as low_price,
+                    (sum(close_price * open_interest) / sum(open_interest))::text as close_price,
+                    null::text as source_contract
+               from usable
+              group by trade_date
+              order by trade_date"
+        ),
+        // 持仓量最大的那个合约。并列时取合约代码小的（近月），只为让结果稳定——
+        // 同一天两次查询不该给出不同的主力。
+        VarietyCandleMode::DominantUnadjusted => format!(
+            "{picked}
+             select distinct on (trade_date)
+                    trade_date,
+                    open_price::text, high_price::text,
+                    low_price::text, close_price::text,
+                    contract as source_contract
+               from usable
+              order by trade_date, open_interest desc, contract"
+        ),
+    }
+}
+
+/// 品种汇总的合成 K 线。**只用于显示**，调用方不得把它喂进成本或盈亏计算。
+pub async fn load_variety_candles(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+) -> Result<Vec<VarietyCandleRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(&variety_candles_sql(VarietyCandleMode::for_instrument(
+        instrument,
+    )))
+    .bind(workspace_id)
+    .bind(instrument)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| VarietyCandleRow {
+            trade_date: row.get("trade_date"),
+            open_price: row.get("open_price"),
+            high_price: row.get("high_price"),
+            low_price: row.get("low_price"),
+            close_price: row.get("close_price"),
+            source_contract: row.get("source_contract"),
+        })
+        .collect())
 }
 
 /// 品种汇总的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。

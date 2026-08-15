@@ -10,6 +10,7 @@ import {
   getSeatPositions,
   getSpreadVarieties,
   type BuildingDay,
+  type SeatBuildingResponse,
   type SeatPositionRow
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
@@ -56,6 +57,8 @@ const buildingContract = ref('')
 const buildingContracts = ref<string[]>([])
 const days = ref<BuildingDay[]>([])
 const multiplier = ref<string | null>(null)
+// 汇总档 K 线的口径。单合约档为 null（那是真实行情，没有口径可言）。
+const priceSeriesKind = ref<SeatBuildingResponse['price_series_kind']>(null)
 const loadingBuilding = ref(false)
 
 // 品种的中文名。库里 product_instrument_scope 定了它，那张表也是套利页品种下拉的
@@ -123,6 +126,7 @@ async function loadBuilding() {
     multiplier.value = data.price_multiplier
     days.value = data.days
     buildingContracts.value = data.contracts
+    priceSeriesKind.value = data.price_series_kind
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '建仓过程读取失败')
     days.value = []
@@ -412,6 +416,23 @@ const latest = computed(() => {
   return { date: day.trade_date, parts }
 })
 
+/**
+ * 汇总档 K 线的口径说明，摆在「行情」标题旁边。
+ *
+ * 这根 K 线是算出来的，不是任何一个合约的真实成交价——不写明，看的人会拿这个价位
+ * 去定止损。加权那句不提「指数」二字：市面上的指数各家算法不同，说了反而像在对标。
+ */
+const priceSeriesNote = computed(() => {
+  switch (priceSeriesKind.value) {
+    case 'open_interest_weighted':
+      return '按持仓量加权 · 合成价'
+    case 'dominant_unadjusted':
+      return '主力连续 · 不复权，换月处有跳空'
+    default:
+      return null
+  }
+})
+
 /** ECharts 把 axis 小窗的参数传成数组；取哪一条都行，要的只是那天的下标。 */
 function axisIndex(params: unknown) {
   const first = Array.isArray(params) ? params[0] : params
@@ -470,11 +491,15 @@ const priceOption = computed<EChartsOption>(() => ({
       const index = axisIndex(params)
       if (index === null) return ''
       // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
+      // 四项各占一行：挤成「开盘 / 收盘  955.82 / 943.16」要读的人自己在心里
+      // 把两个数配回两个标签，配错一次就看反了当天的涨跌。
       const bar = candles.value[index]
       const head = Array.isArray(bar)
         ? [
-            row('开盘 / 收盘', `${price(bar[0])} / ${price(bar[1])}`),
-            row('最低 / 最高', `${price(bar[2])} / ${price(bar[3])}`)
+            row('开盘', price(bar[0])),
+            row('收盘', price(bar[1])),
+            row('最低', price(bar[2])),
+            row('最高', price(bar[3]))
           ]
         : [row('行情', '当日无 K 线')]
       return tooltipBody(index, head)
@@ -716,14 +741,20 @@ const cumulativeTotal = computed(() => {
         <el-card shadow="never">
           <!-- 原来叫「行情与成本线」。成本线已按运营者要求从图上撤掉（数字进小窗），
                标题里再留「成本线」就是说了一件图上没有的事。 -->
-          <template #header><h2>行情</h2></template>
+          <template #header>
+            <div class="panel-head">
+              <h2>行情</h2>
+              <!-- 汇总档画的是合成价，口径必须写在图边上，不能只藏在文档里。 -->
+              <span v-if="priceSeriesNote" class="series-note">{{ priceSeriesNote }}</span>
+            </div>
+          </template>
           <SpreadChart v-if="hasCandles" :option="priceOption" :height="320" export-name="建仓过程-行情" />
           <el-alert
             v-else
             type="info"
             :closable="false"
-            title="合约汇总没有单一合约的 K 线"
-            description="把某个合约的 K 线安在合约汇总上会把两件事画成一件。选一个具体合约即可看到 K 线。"
+            title="这段时间没有行情"
+            description="该品种在这些交易日上没有可用的开高低收，K 线画不出来。持仓与成本不受影响，仍在下面各图里。"
           />
         </el-card>
         <el-card shadow="never">
@@ -827,6 +858,12 @@ const cumulativeTotal = computed(() => {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* K 线口径，挨着「行情」标题。比数据摘要淡一档：它是注解，不是当天的数。 */
+.series-note {
+  font-size: 13px;
+  color: #909399;
 }
 
 /* 最新一天的摘要，挨着「净持仓」标题。窄屏换行而不是挤成一团。 */

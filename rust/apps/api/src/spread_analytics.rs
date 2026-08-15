@@ -25,7 +25,10 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::warn;
 use utoipa::ToSchema;
@@ -710,6 +713,12 @@ pub struct SeatBuildingResponse {
     /// 该会员在该品种上**历史持有过的全部合约**，新月份在前。
     /// 不随所选交易日变化：某个合约今天不在榜，不代表它的建仓过程不值得看。
     pub contracts: Vec<String>,
+    /// 汇总档 K 线的口径：`open_interest_weighted` 或 `dominant_unadjusted`。
+    /// 单合约档为 `None`——那是合约自己的真实行情，没有「口径」可言。
+    ///
+    /// 必须透出：图上那根 K 线是算出来的，不是任何一个合约的真实成交。界面不写明
+    /// 是哪一种，看的人会当成真实价位去定止损。
+    pub price_series_kind: Option<String>,
     pub days: Vec<BuildingDayItem>,
 }
 
@@ -841,15 +850,24 @@ pub async fn query_seat_building(
             .collect();
     }
 
+    let is_variety_total = contract.is_none();
+    // 口径跟着 load_variety_candles 用的同一个判定走，不在这里另写一遍。
+    let price_series_kind = is_variety_total.then(|| {
+        database::spread_analytics::VarietyCandleMode::for_instrument(&instrument)
+            .as_str()
+            .to_string()
+    });
+
     Ok(Json(ApiResponse::new(
         SeatBuildingResponse {
             instrument,
             member,
-            is_variety_total: contract.is_none(),
+            is_variety_total,
             contract,
             price_multiplier: multiplier,
             members,
             contracts,
+            price_series_kind,
             days,
         },
         request_id,
@@ -909,37 +927,54 @@ async fn variety_building_days(
             });
     }
 
+    // 合成行情：金银按持仓量加权，其余取当日主力合约（不复权）。**只画图**——
+    // 下面 cost / daily_pnl / cumulative_pnl 全部仍由 build_variety_series 从各合约
+    // 自己的结算价算出，没有一个数经过这里。他持的是具体合约，不是加权指数。
+    let candles = database::spread_analytics::load_variety_candles(
+        &state.auth.pool,
+        context.workspace_id(),
+        instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let candle_by_date: HashMap<Date, _> = candles
+        .into_iter()
+        .map(|candle| (candle.trade_date, candle))
+        .collect();
+
     Ok(build_variety_series(&per_contract, factor)
         .into_iter()
-        .map(|day| BuildingDayItem {
-            trade_date: day.trade_date.to_string(),
-            // 品种汇总没有单一合约的 K 线：把某个合约的 K 线安在汇总上，
-            // 是把两件事画成一件。
-            open_price: None,
-            high_price: None,
-            low_price: None,
-            close_price: None,
-            settlement_price: None,
-            // 汇总档不给多头榜/空头榜的原始手数：`legs` 里的多空是按**合约净方向**
-            // 分的组，与那两张榜不是一回事，共用字段名只会让人读错。
-            long_position: None,
-            short_position: None,
-            net_position: Some(day.net_position.to_string()),
-            // 多空混持时没有一个有意义的「净持仓成本」——净多两千手与净空一千手
-            // 不是同一笔仓位的两部分。两腿各自的均价在 `legs` 里。
-            cost: None,
-            daily_pnl: day.daily_pnl.map(|value| value.round_dp(2).to_string()),
-            cumulative_pnl: day.cumulative_pnl.round_dp(2).to_string(),
-            open_pnl: None,
-            cost_unknown_reason: None,
-            legs: Some(VarietyLegs {
-                long_lots: day.long_lots.to_string(),
-                long_cost: day.long_cost.map(|value| value.round_dp(4).to_string()),
-                long_cost_lots: day.long_cost_lots.to_string(),
-                short_lots: day.short_lots.to_string(),
-                short_cost: day.short_cost.map(|value| value.round_dp(4).to_string()),
-                short_cost_lots: day.short_cost_lots.to_string(),
-            }),
+        .map(|day| {
+            let candle = candle_by_date.get(&day.trade_date);
+            BuildingDayItem {
+                trade_date: day.trade_date.to_string(),
+                open_price: candle.map(|c| c.open_price.clone()),
+                high_price: candle.map(|c| c.high_price.clone()),
+                low_price: candle.map(|c| c.low_price.clone()),
+                close_price: candle.map(|c| c.close_price.clone()),
+                // 结算价留空：汇总档的结算价没有单一取值，成本引擎用的是各合约自己的那个。
+                settlement_price: None,
+                // 汇总档不给多头榜/空头榜的原始手数：`legs` 里的多空是按**合约净方向**
+                // 分的组，与那两张榜不是一回事，共用字段名只会让人读错。
+                long_position: None,
+                short_position: None,
+                net_position: Some(day.net_position.to_string()),
+                // 多空混持时没有一个有意义的「净持仓成本」——净多两千手与净空一千手
+                // 不是同一笔仓位的两部分。两腿各自的均价在 `legs` 里。
+                cost: None,
+                daily_pnl: day.daily_pnl.map(|value| value.round_dp(2).to_string()),
+                cumulative_pnl: day.cumulative_pnl.round_dp(2).to_string(),
+                open_pnl: None,
+                cost_unknown_reason: None,
+                legs: Some(VarietyLegs {
+                    long_lots: day.long_lots.to_string(),
+                    long_cost: day.long_cost.map(|value| value.round_dp(4).to_string()),
+                    long_cost_lots: day.long_cost_lots.to_string(),
+                    short_lots: day.short_lots.to_string(),
+                    short_cost: day.short_cost.map(|value| value.round_dp(4).to_string()),
+                    short_cost_lots: day.short_cost_lots.to_string(),
+                }),
+            }
         })
         .collect())
 }
