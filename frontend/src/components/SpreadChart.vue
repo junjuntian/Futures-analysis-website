@@ -8,7 +8,7 @@ import {
   MarkLineComponent,
   TooltipComponent
 } from 'echarts/components'
-import { init, use, type EChartsType } from 'echarts/core'
+import { connect, init, use, type EChartsType } from 'echarts/core'
 import { CanvasRenderer, SVGRenderer } from 'echarts/renderers'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { sanitizeSvgDataUrl } from '../spreadCharts'
@@ -17,9 +17,16 @@ const props = withDefaults(defineProps<{
   option: EChartsOption
   height?: number
   exportName?: string
+  /**
+   * 联动组。同组的图共享缩放与悬停位置——拖上面那张的滑钮，下面那张跟着走。
+   *
+   * 竖着叠的几张图讲的是同一段时间，各滑各的就没法把行情和持仓对着看。
+   */
+  group?: string
 }>(), {
   height: 360,
-  exportName: 'spread-chart'
+  exportName: 'spread-chart',
+  group: undefined
 })
 
 const root = ref<HTMLDivElement>()
@@ -81,6 +88,11 @@ onMounted(async () => {
   await nextTick()
   if (!root.value) return
   chart = init(root.value, undefined, { renderer: 'svg' })
+  if (props.group) {
+    chart.group = props.group
+    // connect 认的是 group 名，重复调用无害：后挂载的图会并进已有的组。
+    connect(props.group)
+  }
   render()
   resizeObserver = new ResizeObserver(() => chart?.resize())
   resizeObserver.observe(root.value)

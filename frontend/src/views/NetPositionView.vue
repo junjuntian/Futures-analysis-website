@@ -14,6 +14,7 @@ import {
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
 import { offBoardBands } from '../offBoard'
+import { searchHit } from '../pinyin'
 import { lastYearStartIndex } from '../spreadCharts'
 import { useAuthStore } from '../stores/auth'
 
@@ -74,6 +75,21 @@ function varietyLabel(code: string) {
 const favorites = ref<SeatFavorite[]>([])
 const favoriteName = ref('')
 const savingFavorite = ref(false)
+
+// —— 两个搜索框 ——
+//
+// 用自定义过滤而不是 el-select 自带的 filterable：自带的那个是大小写敏感的
+// 字面包含，输入小写 au 找不到「黄金 AU」，更别说用拼音首字母找「高盛」。
+// filter-method 只负责把输入记下来，真正的过滤在下面两个 computed 里。
+const varietyQuery = ref('')
+const memberQuery = ref('')
+
+const filteredVarieties = computed(() =>
+  varieties.value.filter((code) => searchHit(varietyLabel(code), varietyQuery.value))
+)
+const filteredMembers = computed(() =>
+  allMembers.value.filter((name) => searchHit(name, memberQuery.value))
+)
 
 watch(instrument, (value) => {
   if (value) remember('instrument', value)
@@ -424,11 +440,14 @@ const priceSeriesNote = computed(() => {
           v-model="instrument"
           style="width: 160px"
           placeholder="选择品种"
+          filterable
+          :filter-method="(query: string) => (varietyQuery = query)"
           :disabled="loading"
           @change="contract = ''"
+          @visible-change="(visible: boolean) => { if (!visible) varietyQuery = '' }"
         >
           <el-option
-            v-for="code in varieties"
+            v-for="code in filteredVarieties"
             :key="code"
             :label="varietyLabel(code)"
             :value="code"
@@ -447,12 +466,14 @@ const priceSeriesNote = computed(() => {
           v-model="members"
           multiple
           filterable
+          :filter-method="(query: string) => (memberQuery = query)"
           :multiple-limit="MAX_MEMBERS"
+          @visible-change="(visible: boolean) => { if (!visible) memberQuery = '' }"
           style="min-width: 320px; flex: 1"
           :placeholder="instrument ? `选席位（最多 ${MAX_MEMBERS} 家）` : '先选品种'"
           :disabled="loading || !instrument"
         >
-          <el-option v-for="name in allMembers" :key="name" :label="name" :value="name" />
+          <el-option v-for="name in filteredMembers" :key="name" :label="name" :value="name" />
         </el-select>
       </div>
 
@@ -519,7 +540,7 @@ const priceSeriesNote = computed(() => {
             <span v-if="priceSeriesNote" class="series-note">{{ priceSeriesNote }}</span>
           </div>
         </template>
-        <SpreadChart v-if="hasCandles" :option="priceOption" :height="300" export-name="净持仓-行情" />
+        <SpreadChart v-if="hasCandles" :option="priceOption" :height="300" group="net-position" export-name="净持仓-行情" />
         <el-alert
           v-else
           type="info"
@@ -547,7 +568,7 @@ const priceSeriesNote = computed(() => {
             </div>
           </div>
         </template>
-        <SpreadChart :option="netOption" :height="320" export-name="净持仓-合计" />
+        <SpreadChart :option="netOption" :height="320" group="net-position" export-name="净持仓-合计" />
         <p v-if="incompleteDays" class="note warn">
           这段区间里有 {{ incompleteDays }} 天至少有一家掉出前二十，合计少算了那几家（图上底色标出）。
         </p>
