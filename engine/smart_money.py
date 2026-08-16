@@ -118,6 +118,21 @@ RULES = {
     # MA20 出场与消退转追踪 6%(吃派发段的两个尝试,全期 -25/胜率 -9 与胜率
     # 崩至 43%——派发段收益在纯多头席位信息集内吃不到,证据见 DEC-059)。
     "relay_min_seats": 2,
+    # 高盛持有闸(DEC-061,2026-08-16 运营者案例驱动:高盛 2025-10-16 满仓
+    # 2,770 手、10-17 顶部当天翻净空 947 手,完美逃顶):**仅黄金**,消退满
+    # 7 日触发时,若高盛净多 > hold_seat_min 则不卖出继续持有;高盛 ≤ 阈值、
+    # 掉榜或翻空的次日恢复消退卖出;硬止损照旧盘中有效。语义=消退跟的是
+    # 流量(七家不再加),此闸跟的是存量(t=6.2 的最强席位还押着)——两者
+    # 结合:没人加仓但主力在场=拿住,主力也走=立即走。
+    # 掉榜=按「低于当日第 20 名门槛」保守判定为不在场(高盛掉榜实测门槛
+    # 2,334/2,055,恰在阈值附近;ffill 沿用旧值的口径回测差 24 个点)。
+    # 证据(2008 起全量,DEC-059 基线):AU 全期 +159.4%→+179.7%,激活窗
+    # (2023-08 起,高盛此前只上成交量榜无持仓数据)+103.8%→+126.2%,
+    # 四笔主升段大单 +21.4/+25.7/+21.9/+32.8,代价=胜率 63%→60% 与高位两笔
+    # -4% 止损(最差笔未恶化);AG 因高盛金多银空比价角色天然不适用,已限
+    # 仅 AU(不限时 AG -46.8)。边界:激活窗仅三年、阈值来自运营者案例读数
+    # 未扫参数、高盛哑火则自动休眠。全档见 DEC-061。
+    "hold_seat": "高盛期货", "hold_seat_min": 2000, "hold_markets": ("AU",),
     "replay_start": "2015-01-01",
     "ratio_extreme_low": 48.0,    # 银高估:禁买银 / 配对窗口
     "ratio_warn_low": 55.0,
@@ -528,6 +543,18 @@ class MarketEngine:
         self.seat_long = raw_long[raw_long["member"].isin(self.group)][
             ["trade_date", "member", "contract", "quantity"]].reset_index(drop=True)
 
+        # 高盛持有闸的净仓序列(DEC-061,口径注释见 RULES["hold_seat"])。
+        # 数据已过 clean_seat:反推行(reboard_inferred)已剔除,掉榜日无行
+        # →多头侧记 0=「低于门槛」的保守判定;空头侧 ffill(高盛空单变动慢,
+        # 方向保守——低估净多只会更早恢复卖出,不会多拿)。
+        _hl = raw_long[raw_long["member"] == RULES["hold_seat"]].groupby("trade_date")["quantity"].sum()
+        _rs = seat[(~seat["is_variety_total"]) & (seat["rank_type"] == "short")
+                   & seat["contract"].notna() & (seat["contract"] != "")]
+        _hs = _rs[_rs["member"] == RULES["hold_seat"]].groupby("trade_date")["quantity"].sum()
+        _hnet = (_hl.reindex(self.dates).fillna(0)
+                 - _hs.reindex(self.dates).ffill().fillna(0))
+        self.hold_seat_on = _hnet > RULES["hold_seat_min"]
+
         self.ev_long = detect_events(self.md, self.cont, self.group, "long")
         self.ev_short = detect_events(self.md, self.cont, self.group, "short")
         years = range(self.dates[0].year, self.dates[-1].year + 1)
@@ -721,7 +748,11 @@ class MarketEngine:
             for j in range(i0, len(self.dates)):
                 if np.isnan(lo_a[j]):
                     continue
-                if fade_from is not None and j > fade_from:
+                # 高盛持有闸(DEC-061):消退已满但高盛(昨日盘后)仍净多
+                # 超阈值,则不卖继续持有;高盛离场的次日恢复消退卖出。
+                if (fade_from is not None and j > fade_from
+                        and not (self.instrument in RULES["hold_markets"]
+                                 and bool(self.hold_seat_on[self.dates[j - 1]]))):
                     px = op_a[j] if not np.isnan(op_a[j]) else cl_a[j]
                     t.exit_date, t.exit_px = self.dates[j], px * f[j] / f_last
                     t.result, t.ret_pct = "消退卖出", (px / p0a - 1) * 100
