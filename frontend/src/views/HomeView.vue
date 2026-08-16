@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { getDataHealth, getSpreadMonitor, type DataHealthResponse, type SpreadMonitorItem } from '../api'
+import { getDataHealth, getSeatNetPosition, getSpreadMonitor, type DataHealthResponse, type SpreadMonitorItem } from '../api'
 // 排序与到齐判定在 overview.ts 里,那边有测试:这两处错了都不会露馅——
 // 排序错了照样列出三个组合、到齐判定错了有缺口的日子会显示成全绿。
 import { dayCompleteness, rankByExtremity } from '../overview'
@@ -29,6 +29,7 @@ const failed = ref<string[]>([])
 
 interface SmartMoneyPosition {
   entry_date: string
+  entry_px: number
   pnl_pct: number
   stop_px: number
   fade_days: number
@@ -61,16 +62,80 @@ onMounted(async () => {
     health.refresh(),
     auth.refresh()
   ])
+  let availableDates: string[] = []
   if (results[0].status === 'fulfilled') {
     monitor.value = results[0].value.data.items
     monitorDate.value = results[0].value.data.as_of
+    availableDates = results[0].value.data.available_dates
   } else failed.value.push('套利监控')
   if (results[1].status === 'fulfilled') dataHealth.value = results[1].value.data
   else failed.value.push('数据到齐情况')
   if (results[2].status === 'fulfilled') signals.value = results[2].value
   else failed.value.push('机构资金信号')
   loading.value = false
+  // 迷你走势图在主内容之后异步补画,取不到就不画,不算加载失败。
+  void loadPriceSparks()
+  void loadMonitorBars(availableDates)
 })
+
+// —— 卡片迷你走势图(2026-08-16 运营者拍板)——
+//
+// 持仓卡:进场日以来的合成收盘价,衬在浮盈数字下。价格线用净持仓接口的
+// 合成价(持仓量加权),形状参考用——进场价/现价仍以引擎口径为准。
+// 套利卡:近 10 个交易日的触发组合数(默认阈值现算,与大数字同口径)。
+interface Spark {
+  line: string
+  area: string
+  entryY: number
+}
+const sparks = ref<Record<string, Spark>>({})
+const monitorBars = ref<{ date: string; count: number }[]>([])
+
+function buildSpark(values: number[], entry: number): Spark | null {
+  if (values.length < 2) return null
+  const low = Math.min(...values, entry)
+  const high = Math.max(...values, entry)
+  const span = high - low || 1
+  const x = (i: number) => (i / (values.length - 1)) * 100
+  const y = (v: number) => 30 - ((v - low) / span) * 28
+  const points = values.map((v, i) => `${x(i).toFixed(2)},${y(v).toFixed(2)}`)
+  return {
+    line: `M${points.join(' L')}`,
+    area: `M${points.join(' L')} L100,32 L0,32 Z`,
+    entryY: y(entry)
+  }
+}
+
+async function loadPriceSparks() {
+  const markets = signals.value?.markets
+  if (!markets) return
+  for (const market of Object.values(markets)) {
+    const position = market.position
+    if (!position) continue
+    try {
+      // 任选一家常年在榜的席位:接口按品种回全套日线,席位只影响净持仓列。
+      const { data } = await getSeatNetPosition({ instrument: market.instrument, members: ['中信期货'] })
+      const closes = data.days
+        .filter((day) => day.trade_date >= position.entry_date && day.close_price !== null)
+        .map((day) => Number(day.close_price))
+      const spark = buildSpark(closes, position.entry_px)
+      if (spark) sparks.value = { ...sparks.value, [market.instrument]: spark }
+    } catch { /* 画不出就不画 */ }
+  }
+}
+
+async function loadMonitorBars(availableDates: string[]) {
+  const dates = [...availableDates].sort().slice(-10)
+  if (!dates.length) return
+  try {
+    const snapshots = await Promise.all(dates.map((date) => getSpreadMonitor(undefined, date)))
+    monitorBars.value = snapshots.map((snapshot, index) => ({
+      date: dates[index],
+      count: snapshot.data.items.filter((item) => item.alert !== null).length
+    }))
+  } catch { /* 同上 */ }
+}
+const monitorBarMax = computed(() => Math.max(1, ...monitorBars.value.map((bar) => bar.count)))
 
 // —— 套利监控 ——
 const triggered = computed(() => monitor.value.filter((item) => item.alert !== null))
@@ -173,6 +238,23 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
             </div>
             <p v-if="!topTriggered.length" class="ov-empty">今天没有组合贴近极值。</p>
           </div>
+          <div v-if="monitorBars.length" class="ov-spark">
+            <svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
+              <rect
+                v-for="(bar, index) in monitorBars"
+                :key="bar.date"
+                :x="index * (100 / monitorBars.length) + 1"
+                :width="100 / monitorBars.length - 2"
+                :y="32 - (bar.count / monitorBarMax) * 28 - 2"
+                :height="(bar.count / monitorBarMax) * 28 + 2"
+                :class="index === monitorBars.length - 1 ? 'spark-bar-now' : 'spark-bar'"
+              />
+            </svg>
+            <div class="ov-spark-foot">
+              <span>近 {{ monitorBars.length }} 交易日触发数</span>
+              <span>今 {{ monitorBars[monitorBars.length - 1].count }}</span>
+            </div>
+          </div>
           <el-button text type="primary" size="small" @click="router.push('/spread-analytics/monitor')">
             看全部 →
           </el-button>
@@ -204,6 +286,17 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
               </div>
               <div class="ov-row">
                 <span class="k">已持有</span><span class="v">{{ market.position.hold_days }} 日</span>
+              </div>
+            </div>
+            <div v-if="sparks[market.instrument]" class="ov-spark">
+              <svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true">
+                <path :d="sparks[market.instrument].area" class="spark-area" />
+                <path :d="sparks[market.instrument].line" class="spark-line" />
+                <line x1="0" x2="100" :y1="sparks[market.instrument].entryY" :y2="sparks[market.instrument].entryY" class="spark-entry" />
+              </svg>
+              <div class="ov-spark-foot">
+                <span>{{ market.position.entry_date }} 进场</span>
+                <span>持仓期合成价</span>
               </div>
             </div>
           </template>
@@ -364,6 +457,43 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
   font-size: 12.5px;
   color: var(--el-text-color-secondary);
   margin: 6px 0 0;
+}
+.ov-spark {
+  margin-top: 10px;
+}
+.ov-spark svg {
+  display: block;
+  width: 100%;
+  height: 44px;
+}
+.spark-line {
+  fill: none;
+  stroke: var(--tv-up);
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+.spark-area {
+  fill: var(--tv-up-bg);
+  stroke: none;
+}
+.spark-entry {
+  stroke: var(--tv-border-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.spark-bar {
+  fill: var(--tv-border-strong);
+}
+.spark-bar-now {
+  fill: var(--tv-blue);
+}
+.ov-spark-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--tv-text-muted);
+  margin-top: 3px;
 }
 .ov-strip {
   display: flex;

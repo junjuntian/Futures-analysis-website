@@ -142,6 +142,13 @@ body {
   min-height: 100vh;
 }
 
+/* 整页滚动的是 window;EP 的 el-main 默认 overflow:auto 会让 position:sticky
+   认它当滚动容器而永远吸不住(机构资金页状态条实测踩到)。这个应用里 el-main
+   自身从不滚动,放开即可。 */
+.el-main {
+  overflow: visible;
+}
+
 /* —— 应用壳:侧栏、顶栏 —— */
 
 .sidebar {

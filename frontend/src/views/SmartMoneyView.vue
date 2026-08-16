@@ -184,6 +184,24 @@ function costEdge(p: Position): number | null {
   if (!p.inst_cost) return null
   return ((p.inst_cost - p.entry_px) / p.inst_cost) * 100
 }
+
+/** 顶部状态条:只列有持仓的市场。空仓时整条不渲染,卡片区自会说明。 */
+const holdingKeys = computed(() =>
+  ['AU', 'AG'].filter((key) => data.value?.markets[key]?.position)
+)
+
+/**
+ * 近期动态显示窗:引擎输出三周,运营者定的显示口径是两周(2026-08-16)。
+ * 引擎目录冻结不改,窗口在显示层收——按数据日往回数 14 个自然日。
+ */
+const recentActivity = computed(() => {
+  if (!data.value) return []
+  const cutoff = new Date(`${data.value.data_date}T00:00:00`)
+  cutoff.setDate(cutoff.getDate() - 14)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const key = `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}`
+  return data.value.activity.filter((row) => row.date >= key)
+})
 function ratioNeedle(value: number): string {
   return `${Math.max(0, Math.min(100, ((value - 40) / 60) * 100))}%`
 }
@@ -218,6 +236,28 @@ onMounted(async () => {
     <div v-else-if="!data" class="loading">正在读取信号数据…</div>
 
     <template v-else>
+      <!-- TV 式品种状态条(2026-08-16 运营者拍板):把散在卡片里的关键数压成
+           一行,滚动吸顶,翻历史表时头顶始终有持仓状态。空仓不渲染。 -->
+      <div v-if="holdingKeys.length" class="symbol-strip">
+        <div v-for="key in holdingKeys" :key="key" class="strip-row">
+          <span class="strip-name">{{ data!.markets[key].name.replace(/ .*/, '') }} {{ data!.markets[key].main_contract }}</span>
+          <span class="strip-price" :class="pnlClass(data!.markets[key].position!.pnl_pct)">
+            {{ fmt(data!.markets[key].last_close, decimalsOf(key)) }}
+          </span>
+          <span class="strip-pct" :class="pnlClass(data!.markets[key].position!.pnl_pct)">
+            {{ pct(data!.markets[key].position!.pnl_pct) }}
+          </span>
+          <span class="strip-pill">持有中 {{ data!.markets[key].position!.hold_days }} 日</span>
+          <span class="strip-metrics">
+            <span class="m"><i>进场</i><b>{{ fmt(data!.markets[key].position!.entry_px, decimalsOf(key)) }}</b></span>
+            <span class="m"><i>硬止损</i><b class="red">{{ fmt(data!.markets[key].position!.stop_px, decimalsOf(key)) }}</b></span>
+            <span class="m"><i>消退</i><b :class="{ warn: data!.markets[key].position!.fade_days >= data!.markets[key].position!.fade_target - 2 }">{{ data!.markets[key].position!.fade_days }}/{{ data!.markets[key].position!.fade_target }} 日</b></span>
+            <span class="m"><i>60日区间</i><b>{{ posText(data!.markets[key].range_pos) }}</b></span>
+            <span class="m"><i>金银比</i><b>{{ data!.ratio.value }}</b></span>
+          </span>
+        </div>
+      </div>
+
       <div class="tabbar">
         <div class="tab" :class="{ on: tab === 'today' }" @click="tab = 'today'">今日信号</div>
         <div class="tab" :class="{ on: tab === 'history' }" @click="tab = 'history'">历史信号</div>
@@ -419,14 +459,14 @@ onMounted(async () => {
 
         <div class="section">
           <h2>七席位近期动态</h2>
-          <div class="desc">最近三周的有效增多事件(权重为当年生效值)。</div>
+          <div class="desc">最近两周的有效增多事件(权重为当年生效值)。</div>
           <div class="scroll-x">
             <table>
               <thead>
                 <tr><th>日期</th><th>席位</th><th>品种</th><th>动作</th><th>强度</th><th>权重</th><th>单日净增</th></tr>
               </thead>
               <tbody>
-                <tr v-for="(row, index) in data.activity" :key="index">
+                <tr v-for="(row, index) in recentActivity" :key="index">
                   <td>{{ row.date }}</td>
                   <td>{{ row.member }}</td>
                   <td><span class="pill" :class="row.market.toLowerCase()">{{ row.market_name }}</span></td>
@@ -435,7 +475,7 @@ onMounted(async () => {
                   <td>{{ row.weight }}</td>
                   <td class="red">+{{ fmt(row.hands) }} 手</td>
                 </tr>
-                <tr v-if="!data.activity.length"><td colspan="7" class="gray">近三周无事件</td></tr>
+                <tr v-if="!recentActivity.length"><td colspan="7" class="gray">近两周无事件</td></tr>
               </tbody>
             </table>
           </div>
@@ -607,6 +647,38 @@ onMounted(async () => {
 <style scoped>
 .smart-money h1 { font-size: 26px; font-weight: 700; margin: 0 0 6px; }
 .sub { color: var(--tv-text-secondary); margin: 0 0 22px; }
+
+/* —— TV 式品种状态条:滚动吸顶(el-main 是滚动容器,top:0 即贴其可视区顶) —— */
+.symbol-strip {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--tv-bg-card);
+  border: 1px solid var(--tv-border);
+  border-radius: var(--tv-radius);
+  padding: 10px 16px;
+  margin-bottom: 14px;
+  box-shadow: var(--tv-shadow);
+}
+.strip-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.strip-row + .strip-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--tv-border); }
+.strip-name { font-size: 15px; font-weight: 600; color: var(--tv-text); white-space: nowrap; }
+.strip-price { font-size: 24px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.strip-pct { font-size: 14px; font-variant-numeric: tabular-nums; }
+.strip-pill {
+  background: var(--tv-warn-bg);
+  color: var(--tv-warn);
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: var(--tv-radius-sm);
+  white-space: nowrap;
+}
+.strip-metrics { display: flex; gap: 16px; margin-left: auto; flex-wrap: wrap; }
+.strip-metrics .m { display: flex; flex-direction: column; gap: 1px; }
+.strip-metrics .m i { font-style: normal; font-size: 11px; color: var(--tv-text-muted); }
+.strip-metrics .m b { font-weight: 600; font-size: 13px; color: var(--tv-text); font-variant-numeric: tabular-nums; }
+.strip-metrics .m b.red { color: var(--tv-up); }
+.strip-metrics .m b.warn { color: var(--tv-warn); }
 .loading { padding: 60px; text-align: center; color: var(--tv-text-secondary); }
 .err { padding: 20px; background: var(--tv-up-bg); border: 1px solid var(--tv-up); border-radius: 6px; color: var(--tv-up); }
 .red { color: var(--tv-up); } .green { color: var(--tv-down); } .gray { color: var(--tv-text-muted); }
