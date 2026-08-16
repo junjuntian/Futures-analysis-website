@@ -59,13 +59,15 @@ docker exec -i "$PG" psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 
 -- market_prices 是导入通道的中转表,已删;同一个信号现在在 price_history,
 -- 那正是直灌写入的目标表。
 create temp table p_stage (like price_history);
-alter table p_stage drop column id, drop column workspace_id, drop column loaded_at;
+-- updated_at 也要 drop:stage 是 like 建的,CSV 里没有这两个时间戳列。
+alter table p_stage drop column id, drop column workspace_id, drop column loaded_at,
+  drop column updated_at;
 \copy p_stage from '/tmp/price_czce.csv' with (format csv, header true, null '')
 \copy p_stage from '/tmp/price_shfe.csv' with (format csv, header true, null '')
 insert into price_history (id, workspace_id, exchange, instrument, contract, trade_date,
   open_price, high_price, low_price, close_price, settlement_price, prev_settlement_price,
-  volume, volume_basis, turnover, open_interest, open_interest_change, source)
-select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*
+  volume, volume_basis, turnover, open_interest, open_interest_change, source, updated_at)
+select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*, now()
   from p_stage s
  -- 盘中快照(SHFE kx.dat 白天就能取到,收盘/结算为空)不入库;
  -- 收盘后的完整文件会在晚间 cron 覆盖原始文件并正常入库。
@@ -75,21 +77,25 @@ on conflict (workspace_id, contract, trade_date, source) do update set
   close_price=excluded.close_price, settlement_price=excluded.settlement_price,
   prev_settlement_price=excluded.prev_settlement_price, volume=excluded.volume,
   turnover=excluded.turnover, open_interest=excluded.open_interest,
-  open_interest_change=excluded.open_interest_change;
+  open_interest_change=excluded.open_interest_change,
+  -- loaded_at 保持首次入库不动、updated_at 刷新,口径见 load-seats-direct.sql。
+  updated_at=now();
 
 create temp table s_stage (like seat_history);
-alter table s_stage drop column id, drop column workspace_id, drop column loaded_at;
+alter table s_stage drop column id, drop column workspace_id, drop column loaded_at,
+  drop column updated_at;
 \copy s_stage from '/tmp/seat_czce.csv' with (format csv, header true, null '')
 \copy s_stage from '/tmp/seat_shfe.csv' with (format csv, header true, null '')
 insert into seat_history (id, workspace_id, exchange, instrument, contract, is_variety_total,
-  variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source)
-select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*
+  variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source,
+  updated_at)
+select gen_random_uuid(), (select workspace_id from price_history group by 1 order by count(*) desc limit 1), s.*, now()
   from (select distinct on (trade_date, exchange, instrument, contract, is_variety_total,
                             rank_type, member, source) *
           from s_stage) s
 on conflict (workspace_id, trade_date, exchange, instrument, contract, is_variety_total,
              rank_type, member, source) do update set
-  rank=excluded.rank, quantity=excluded.quantity, change=excluded.change;
+  rank=excluded.rank, quantity=excluded.quantity, change=excluded.change, updated_at=now();
 
 -- 官方已到的日子,akshare 的席位行是冗余且 change 为空,清除。
 -- 只清「官方同日已有数据」的行:官方哪天缺了,akshare 行保留兜底。

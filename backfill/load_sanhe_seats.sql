@@ -12,15 +12,17 @@
 begin;
 
 create temp table sanhe_stage (like seat_history);
-alter table sanhe_stage drop column id, drop column workspace_id, drop column loaded_at;
+alter table sanhe_stage drop column id, drop column workspace_id, drop column loaded_at,
+  drop column updated_at;
 
 \copy sanhe_stage from '/tmp/seat_dce.csv' with (format csv, header true, null '')
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
-    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source
+    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source,
+    updated_at
 )
-select gen_random_uuid(), w.id, s.*
+select gen_random_uuid(), w.id, s.*, now()
   from (
       -- 同一天同一榜同一会员可能因重复采集出现两次；冲突键里带 source，
       -- 重复行会在 on conflict 上互相打架，所以先去重再进正式表。
@@ -49,7 +51,8 @@ on conflict (workspace_id, trade_date, exchange, instrument, contract,
     rank = excluded.rank,
     quantity = excluded.quantity,
     change = excluded.change,
-    loaded_at = now();
+    -- loaded_at 保持首次入库不动、updated_at 刷新,口径见 load-seats-direct.sql。
+    updated_at = now();
 
 commit;
 

@@ -78,7 +78,8 @@ end $$;
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
-    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source
+    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source,
+    updated_at
 )
 select
     gen_random_uuid(),
@@ -101,7 +102,8 @@ select
     -- 必然与交易所公布的对不上,那就成了一个看起来像官方数字的自造数。
     -- 掉榜反推(infer-offboard-seats.sql)专门处理这件事,别在这里抢它的活。
     null,
-    :'source_code'
+    :'source_code',
+    now()
   from seat_stage s
   cross join (select id from workspaces order by created_at limit 1) w
  where s.contract_code is not null
@@ -118,11 +120,14 @@ select
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
     rank = excluded.rank,
-    quantity = excluded.quantity;
-    -- loaded_at 不随 upsert 刷新(2026-08-16 运营者立项):保持"该行首次入库
-    -- 时刻",min(loaded_at) 按 (交易日, 交易所) 聚合即为数据源到达时刻画像。
-    -- 晚间补采只更新数值,不再抹掉首轮到达的证据。全部装载路径同一口径:
-    -- 本文件 / load-dce-daily / load_history.py / run-official-seats.sh。
+    quantity = excluded.quantity,
+    -- 两个时间戳各司其职(2026-08-16,迁移 202608160001):loaded_at=首次
+    -- 入库时刻,upsert 不许碰——min(loaded_at) 按(交易日,交易所)聚合就是
+    -- 数据源到达时刻画像;updated_at=最近装载触碰时刻,E2E 拿它验"本轮
+    -- 真的写过"。首版误让画像挤掉验收语义,当晚被 4A E2E 拦下回滚过一次。
+    -- 全部装载路径同一口径:本文件 / load-dce-daily / load_history.py /
+    -- run-official-seats.sh。
+    updated_at = now();
 
 commit;
 

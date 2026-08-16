@@ -83,8 +83,11 @@ def seat_row(workspace, r):
     )
 
 
+# 两个时间戳各司其职(2026-08-16,迁移 202608160001,口径见 load-seats-direct.sql):
+# loaded_at=首次入库(default now(),upsert 不碰);updated_at=最近装载触碰
+# (insert 走 VALUES 模板末尾的 now(),upsert 显式刷新)。
 PRICE_SQL = f"""
-insert into price_history ({", ".join(PRICE_COLUMNS)})
+insert into price_history ({", ".join(PRICE_COLUMNS)}, updated_at)
 values %s
 on conflict (workspace_id, contract, trade_date, source) do update set
   open_price = excluded.open_price, high_price = excluded.high_price,
@@ -93,23 +96,25 @@ on conflict (workspace_id, contract, trade_date, source) do update set
   prev_settlement_price = excluded.prev_settlement_price,
   volume = excluded.volume, volume_basis = excluded.volume_basis,
   turnover = excluded.turnover, open_interest = excluded.open_interest,
-  open_interest_change = excluded.open_interest_change
+  open_interest_change = excluded.open_interest_change, updated_at = now()
 """
-# loaded_at 不随 upsert 刷新(到达时刻画像),口径见 load-seats-direct.sql。
+PRICE_TEMPLATE = "(" + ", ".join(["%s"] * len(PRICE_COLUMNS)) + ", now())"
 
 SEAT_SQL = f"""
-insert into seat_history ({", ".join(SEAT_COLUMNS)})
+insert into seat_history ({", ".join(SEAT_COLUMNS)}, updated_at)
 values %s
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
   rank = excluded.rank, quantity = excluded.quantity,
-  change = excluded.change
+  change = excluded.change, updated_at = now()
 """
+SEAT_TEMPLATE = "(" + ", ".join(["%s"] * len(SEAT_COLUMNS)) + ", now())"
 
 
 def flush(cur, sql, rows):
     if rows:
-        psycopg2.extras.execute_values(cur, sql, rows, page_size=1000)
+        template = PRICE_TEMPLATE if sql is PRICE_SQL else SEAT_TEMPLATE
+        psycopg2.extras.execute_values(cur, sql, rows, template=template, page_size=1000)
     return len(rows)
 
 

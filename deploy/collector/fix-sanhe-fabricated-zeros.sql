@@ -70,7 +70,9 @@ update seat_history s
    set quantity = f.true_quantity,
        -- 增减清空：三禾留下的是清零差分，与修正后的持仓自相矛盾。
        change = null,
-       loaded_at = now()
+       -- loaded_at 保持首次入库不动、updated_at 记录本次触碰(2026-08-16,
+       -- 口径见 load-seats-direct.sql)。
+       updated_at = now()
   from fixable f
  where s.id = f.id;
 

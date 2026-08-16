@@ -79,7 +79,9 @@ select s.id, s.quantity - s.prev_q true_change
 
 update seat_history s
    set change = r.true_change,
-       loaded_at = now()
+       -- loaded_at 保持首次入库不动、updated_at 记录本次触碰(2026-08-16,
+       -- 口径见 load-seats-direct.sql)。
+       updated_at = now()
   from rewritten r
  where s.id = r.id;
 

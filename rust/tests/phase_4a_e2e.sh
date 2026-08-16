@@ -152,11 +152,14 @@ SEAT_CSV="$CSV_DIR/DCE-seat_positions_v1-$COLLECTION_DATE.csv"
 if test -s "$SEAT_CSV"; then
   load_one "$SEAT_CSV" load-seats-direct.sql "-v source_code=eastmoney_seats_v1 -v expect_date=$COLLECTION_DATE" \
     >>"$EVIDENCE_DIR/load.log" 2>&1
-  # 看 loaded_at 而不是行数,理由同上面的目录:验收日通常已经有那天的数据
+  # 看 updated_at 而不是行数,理由同上面的目录:验收日通常已经有那天的数据
   # (补采、前一次部署、cron 都可能先写过),`count(*) > 0` 会在装载什么都没做时
   # 照样通过。2026-08-13 那次部署就是这样过的——断言绿,但没证明这一轮写了东西。
-  # 装载脚本冲突时会把 loaded_at 推到 now(),所以这一条才真正验的是「刚写过」。
-  test "$(psql_value -c "select count(*) from seat_history where source='eastmoney_seats_v1' and trade_date=date '$COLLECTION_DATE' and loaded_at > now() - interval '10 minutes'")" -gt 0
+  # 装载脚本 insert/upsert 都会把 updated_at 推到 now(),这一条才真正验「刚写过」。
+  # 原来看的是 loaded_at;2026-08-16 到达时刻画像要求 loaded_at 固定为首次入库
+  # 时刻、upsert 不再刷新,「刚写过」语义整体搬去 updated_at(迁移 202608160001)。
+  # 首版只改装载没换这条断言,当晚部署被它拦下回滚——断言本身是对的,拦得好。
+  test "$(psql_value -c "select count(*) from seat_history where source='eastmoney_seats_v1' and trade_date=date '$COLLECTION_DATE' and updated_at > now() - interval '10 minutes'")" -gt 0
   echo "PHASE4A_E2E_STAGE seat_rows_actually_written"
 fi
 

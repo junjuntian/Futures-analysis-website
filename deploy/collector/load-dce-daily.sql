@@ -21,12 +21,12 @@ create temp table dce_daily (
 insert into price_history (
     id, workspace_id, exchange, instrument, contract, trade_date,
     open_price, high_price, low_price, close_price, settlement_price, prev_settlement_price,
-    volume, volume_basis, turnover, open_interest, open_interest_change, source
+    volume, volume_basis, turnover, open_interest, open_interest_change, source, updated_at
 )
 select gen_random_uuid(), s.workspace_id, d.exchange, d.instrument, d.contract, d.trade_date,
        d.open_price, d.high_price, d.low_price, d.close_price, d.settlement_price,
        d.prev_settlement_price, d.volume, d.volume_basis, d.turnover,
-       d.open_interest, d.open_interest_change, d.source
+       d.open_interest, d.open_interest_change, d.source, now()
   from dce_daily d
   -- 只装两个产品覆盖的品种，且只装该 workspace 已经登记了范围的。
   join product_instrument_scope s
@@ -53,8 +53,9 @@ on conflict (workspace_id, contract, trade_date, source) do update set
     settlement_price = excluded.settlement_price,
     volume = excluded.volume,
     volume_basis = excluded.volume_basis,
-    open_interest = excluded.open_interest;
-    -- loaded_at 不随 upsert 刷新,口径说明见 load-seats-direct.sql。
+    open_interest = excluded.open_interest,
+    -- loaded_at 保持首次入库不动、updated_at 刷新,口径见 load-seats-direct.sql。
+    updated_at = now();
 
 commit;
 

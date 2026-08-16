@@ -117,14 +117,15 @@ analyze basis;
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
-    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source)
+    variety_total_is_computed, trade_date, rank_type, rank, member, quantity, change, source,
+    updated_at)
 select gen_random_uuid(), b.workspace_id, b.exchange, b.instrument, b.contract,
        false, false, c.prev_date, b.rank_type,
        -- 名次留空：他那天本来就不在榜上，编一个名次是凭空捏造。
        null, b.member, b.quantity - b.change,
        -- 增减留空。要算它得知道再前一天的持仓，而那天多半也不在榜上；留空是
        -- 「不知道」，填 0 是「没变化」——三禾的 1691 配 −2038 就是不肯留空的结果。
-       null, 'reboard_inferred'
+       null, 'reboard_inferred', now()
   from basis b
   join calendar_prev c
     on c.workspace_id = b.workspace_id and c.exchange = b.exchange
@@ -149,7 +150,10 @@ select gen_random_uuid(), b.workspace_id, b.exchange, b.instrument, b.contract,
    and b.quantity - b.change >= 0
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
-    quantity = excluded.quantity, loaded_at = now();
+    -- loaded_at 保持首次入库不动、updated_at 刷新(2026-08-16,口径见
+    -- load-seats-direct.sql)。反推行本就被到达时刻画像按 source 排除,
+    -- 但全部写入路径统一一个口径,不留例外。
+    quantity = excluded.quantity, updated_at = now();
 
 commit;
 
