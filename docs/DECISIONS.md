@@ -1058,7 +1058,9 @@ settlement，其余静默丢弃。导入全程报成功。
 - `DEC-013` 至 `DEC-025` 已关闭原 `OPEN-PRD-001`、`OPEN-PRD-002`、`OPEN-DATA-001`、`OPEN-DATA-002`、`OPEN-PORT-001`、`OPEN-DB-001`、`OPEN-DB-002`、`OPEN-IMP-001`、`OPEN-SEC-001`、`OPEN-COL-001` 和 `OPEN-COL-002`。
 - `DEC-026` 至 `DEC-035` 已关闭原 `OPEN-PRD-003`、`OPEN-ARC-001`、`OPEN-SEC-002`、`OPEN-COL-003`、`OPEN-COL-004`、`OPEN-ARC-002`、`OPEN-DB-003`、`OPEN-BROWSER-001`、`OPEN-AI-001` 以及 AI 模块部署边界相关开放项。
 - 2026-08-02 总方案重审废止 `DEC-023`、`DEC-030`、`DEC-034`，修订 `DEC-025`、`DEC-031`，新增 `DEC-038`、`DEC-039`、`DEC-040`；同日因 DCE 全局 WAF 实证新增 `DEC-041`。2026-08-05 用户授权新增 `DEC-042`，仅为 Phase 5 自由价差恢复三禾无需登录的三个只读 API，不改变 Phase 4 采集来源边界。旧正文保留用于变更审计，但不再构成活性要求。
-- 尚未决定的实现细节继续记录在 `OPEN_QUESTIONS.md`。
+- 尚未决定的实现细节直接立 `DEC-xxx` 草案或写进最新交接文档
+  (原 `OPEN_QUESTIONS.md` 的开放项已全部被 DEC 系列关闭,文件于
+  2026-08-16 随过时文档清理删除,git 历史可查)。
 - 任何偏离本文的实现必须先更新决策、设计和验收文档。
 
 ## 14. 与既有文档的冲突与处理
