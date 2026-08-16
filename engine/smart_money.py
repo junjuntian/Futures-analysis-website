@@ -111,6 +111,13 @@ RULES = {
     # 中继趋势态闸(DEC-058,2026-08-16):收盘 > MA(此窗) 才允许中继再进场,
     # 首进场/重挫共振不受影响。证据与备选否决记录见 replay() 内注释与 DEC-058。
     "relay_trend_ma": 200,
+    # 中继共振质量闸(DEC-059,2026-08-16):中继要求触发席位 ≥ 此数——单家
+    # 不叫共振。2025-10-15 海通单家 718 手擦线进场(-2.28%)与 11-13 单家笔
+    # (-4%)是案例;全量回测 AU +153.3→+159.4、胜率 60.2→62.6,AG 仅 -2.3,
+    # 金银同向。同批否决:流向为负禁中继(AG -29.8 跨市场不一致)、消退+破
+    # MA20 出场与消退转追踪 6%(吃派发段的两个尝试,全期 -25/胜率 -9 与胜率
+    # 崩至 43%——派发段收益在纯多头席位信息集内吃不到,证据见 DEC-059)。
+    "relay_min_seats": 2,
     "replay_start": "2015-01-01",
     "ratio_extreme_low": 48.0,    # 银高估:禁买银 / 配对窗口
     "ratio_warn_low": 55.0,
@@ -682,6 +689,10 @@ class MarketEngine:
                    .drop_duplicates("member"))
             seats = [{"member": r.member, "strength": round(float(r.strength), 2),
                       "hands": int(r.hands)} for r in agg.itertuples()]
+            # 中继共振质量闸(DEC-059):单家擦线不算共振,放弃这天的中继。
+            # 首进场不受影响——它的门槛分数天然要多家叠加。
+            if is_relay and len(seats) < RULES["relay_min_seats"]:
+                continue
             zone = None if (is_relay or is_crash) else self.cost_zone(d)
             i0 = p0r = None
             if zone:
