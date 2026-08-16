@@ -93,8 +93,9 @@ on conflict (workspace_id, contract, trade_date, source) do update set
   prev_settlement_price = excluded.prev_settlement_price,
   volume = excluded.volume, volume_basis = excluded.volume_basis,
   turnover = excluded.turnover, open_interest = excluded.open_interest,
-  open_interest_change = excluded.open_interest_change, loaded_at = now()
+  open_interest_change = excluded.open_interest_change
 """
+# loaded_at 不随 upsert 刷新(到达时刻画像),口径见 load-seats-direct.sql。
 
 SEAT_SQL = f"""
 insert into seat_history ({", ".join(SEAT_COLUMNS)})
@@ -102,7 +103,7 @@ values %s
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
   rank = excluded.rank, quantity = excluded.quantity,
-  change = excluded.change, loaded_at = now()
+  change = excluded.change
 """
 
 

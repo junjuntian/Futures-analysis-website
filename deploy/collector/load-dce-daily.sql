@@ -53,8 +53,8 @@ on conflict (workspace_id, contract, trade_date, source) do update set
     settlement_price = excluded.settlement_price,
     volume = excluded.volume,
     volume_basis = excluded.volume_basis,
-    open_interest = excluded.open_interest,
-    loaded_at = now();
+    open_interest = excluded.open_interest;
+    -- loaded_at 不随 upsert 刷新,口径说明见 load-seats-direct.sql。
 
 commit;
 

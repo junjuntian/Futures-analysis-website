@@ -118,8 +118,11 @@ select
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
     rank = excluded.rank,
-    quantity = excluded.quantity,
-    loaded_at = now();
+    quantity = excluded.quantity;
+    -- loaded_at 不随 upsert 刷新(2026-08-16 运营者立项):保持"该行首次入库
+    -- 时刻",min(loaded_at) 按 (交易日, 交易所) 聚合即为数据源到达时刻画像。
+    -- 晚间补采只更新数值,不再抹掉首轮到达的证据。全部装载路径同一口径:
+    -- 本文件 / load-dce-daily / load_history.py / run-official-seats.sh。
 
 commit;
 

@@ -601,6 +601,9 @@ export interface SpreadMonitorResponse {
 export interface DataHealthDay {
   trade_date: string
   exchanges: string[]
+  /** 各所首次入库时刻(北京时间 HH:MM),键=交易所代码。2026-08-16 起装载
+   * 侧不再让 upsert 刷新 loaded_at,此值即采集源当日更新时刻的画像。 */
+  arrivals?: Record<string, string>
 }
 
 export interface DataHealthResponse {

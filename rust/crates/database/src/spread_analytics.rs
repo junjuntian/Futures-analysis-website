@@ -2949,6 +2949,9 @@ pub struct DataFreshnessDay {
     pub trade_date: Date,
     /// 那天有数据的交易所，逗号分隔、已排序。
     pub exchanges: String,
+    /// 各所首次入库时刻,形如 "CZCE@15:41,SHFE@17:36"(北京时间)。口径见
+    /// SEAT_FRESHNESS_SQL 上的注释。
+    pub arrivals: String,
 }
 
 /// 回看窗。10 个交易日通常是 14 个自然日，撞上春节可能拉到 4 周——45 天留够余量。
@@ -2957,20 +2960,38 @@ pub struct DataFreshnessDay {
 const FRESHNESS_LOOKBACK_DAYS: i32 = 45;
 const FRESHNESS_DAYS: i64 = 10;
 
+// arrivals 列 = 各所首次入库时刻(北京时间 HH:MM),格式 "CZCE@15:41,SHFE@17:36"。
+// loaded_at 自 2026-08-16 起不再被 upsert 刷新(装载侧四处同批改),因此
+// min(loaded_at) 就是"该所当日数据首次到达"——运营者立项的采集源更新时刻画像。
+// 在此之前入库的历史日子,时刻反映的是最后一轮补采,当参考即可。
+// 反推行(reboard_inferred)不算到达,按 source 排除(反推行不得进统计的教训)。
 const SEAT_FRESHNESS_SQL: &str = "
-    select trade_date, string_agg(distinct exchange, ',' order by exchange) as exchanges
-      from seat_history
-     where workspace_id = $1 and not is_variety_total
-       and trade_date >= current_date - $2::int
+    select trade_date,
+           string_agg(exchange, ',' order by exchange) as exchanges,
+           string_agg(exchange || '@' ||
+                      to_char(first_at at time zone 'Asia/Shanghai', 'HH24:MI'),
+                      ',' order by exchange) as arrivals
+      from (select trade_date, exchange, min(loaded_at) as first_at
+              from seat_history
+             where workspace_id = $1 and not is_variety_total
+               and source <> 'reboard_inferred'
+               and trade_date >= current_date - $2::int
+             group by trade_date, exchange) g
      group by trade_date
      order by trade_date desc
      limit $3";
 
 const PRICE_FRESHNESS_SQL: &str = "
-    select trade_date, string_agg(distinct exchange, ',' order by exchange) as exchanges
-      from price_history
-     where workspace_id = $1
-       and trade_date >= current_date - $2::int
+    select trade_date,
+           string_agg(exchange, ',' order by exchange) as exchanges,
+           string_agg(exchange || '@' ||
+                      to_char(first_at at time zone 'Asia/Shanghai', 'HH24:MI'),
+                      ',' order by exchange) as arrivals
+      from (select trade_date, exchange, min(loaded_at) as first_at
+              from price_history
+             where workspace_id = $1
+               and trade_date >= current_date - $2::int
+             group by trade_date, exchange) g
      group by trade_date
      order by trade_date desc
      limit $3";
@@ -3001,6 +3022,7 @@ pub async fn data_freshness(
                     exchanges: row
                         .get::<Option<String>, _>("exchanges")
                         .unwrap_or_default(),
+                    arrivals: row.get::<Option<String>, _>("arrivals").unwrap_or_default(),
                 })
                 .collect::<Vec<_>>(),
         );

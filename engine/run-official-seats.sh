@@ -75,7 +75,7 @@ on conflict (workspace_id, contract, trade_date, source) do update set
   close_price=excluded.close_price, settlement_price=excluded.settlement_price,
   prev_settlement_price=excluded.prev_settlement_price, volume=excluded.volume,
   turnover=excluded.turnover, open_interest=excluded.open_interest,
-  open_interest_change=excluded.open_interest_change, loaded_at=now();
+  open_interest_change=excluded.open_interest_change;
 
 create temp table s_stage (like seat_history);
 alter table s_stage drop column id, drop column workspace_id, drop column loaded_at;
@@ -89,7 +89,7 @@ select gen_random_uuid(), (select workspace_id from price_history group by 1 ord
           from s_stage) s
 on conflict (workspace_id, trade_date, exchange, instrument, contract, is_variety_total,
              rank_type, member, source) do update set
-  rank=excluded.rank, quantity=excluded.quantity, change=excluded.change, loaded_at=now();
+  rank=excluded.rank, quantity=excluded.quantity, change=excluded.change;
 
 -- 官方已到的日子,akshare 的席位行是冗余且 change 为空,清除。
 -- 只清「官方同日已有数据」的行:官方哪天缺了,akshare 行保留兜底。

@@ -194,7 +194,10 @@ const exchangeRows = computed(() =>
       code,
       name: EXCHANGE_NAMES[code] ?? code,
       seatDate: seat?.trade_date ?? null,
-      priceDate: price?.trade_date ?? null
+      priceDate: price?.trade_date ?? null,
+      // 最新一日该所数据的首次入库时刻——运营者要的"采集源几点更新"画像。
+      // 注意 2026-08-16 之前入库的日子,这个时刻反映的是最后一轮补采。
+      seatAt: seat?.arrivals?.[code] ?? null
     }
   })
 )
@@ -329,6 +332,7 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
               <span class="v">
                 {{ row.seatDate ?? '—' }}
                 <template v-if="row.priceDate !== row.seatDate"> / {{ row.priceDate ?? '—' }}</template>
+                <span v-if="row.seatAt" class="ov-arrival">{{ row.seatAt }} 到达</span>
               </span>
             </div>
             <p v-if="!exchangeRows.length" class="ov-empty">回看窗内没有任何数据。</p>
@@ -457,6 +461,12 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
   font-size: 12.5px;
   color: var(--el-text-color-secondary);
   margin: 6px 0 0;
+}
+.ov-arrival {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--tv-text-muted);
+  font-variant-numeric: tabular-nums;
 }
 .ov-spark {
   margin-top: 10px;

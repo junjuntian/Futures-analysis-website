@@ -1910,6 +1910,9 @@ pub async fn save_overview_report_seat_groups(
 pub struct DataHealthDay {
     pub trade_date: String,
     pub exchanges: Vec<String>,
+    /// 各所数据首次入库时刻(北京时间 HH:MM),键=交易所代码。装载侧自
+    /// 2026-08-16 起 upsert 不再刷新 loaded_at,此值即采集源到达时刻画像。
+    pub arrivals: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1932,6 +1935,14 @@ fn to_health_days(rows: Vec<database::spread_analytics::DataFreshnessDay>) -> Ve
                 .split(',')
                 .filter(|item| !item.is_empty())
                 .map(str::to_string)
+                .collect(),
+            arrivals: row
+                .arrivals
+                .split(',')
+                .filter_map(|item| {
+                    item.split_once('@')
+                        .map(|(code, at)| (code.to_string(), at.to_string()))
+                })
                 .collect(),
         })
         .collect()

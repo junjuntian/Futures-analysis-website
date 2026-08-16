@@ -56,6 +56,20 @@ else
   no "signals.json 不存在"
 fi
 
+# ---- 3.5 采集源到达时刻(信息展示,不计入通过/失败) ----
+# loaded_at 自 2026-08-16 起不被 upsert 刷新,min(loaded_at) 即各源当日首次
+# 到达时刻——运营者立项的"采集源几点更新"画像,攒两周分布后再定迟发告警阈值。
+printf '\n\033[1m三点五、采集源到达时刻(今日,北京时间)\033[0m\n'
+docker exec futures-analysis-platform-postgres-1 psql -U futures_app -d futures_platform -t -A -F' ' -c "
+  select '  席位 ' || exchange || ' ' || to_char(min(loaded_at) at time zone 'Asia/Shanghai', 'HH24:MI')
+    from seat_history
+   where trade_date = '$DAY' and not is_variety_total and source <> 'reboard_inferred'
+   group by exchange
+  union all
+  select '  行情 ' || exchange || ' ' || to_char(min(loaded_at) at time zone 'Asia/Shanghai', 'HH24:MI')
+    from price_history where trade_date = '$DAY' group by exchange
+  order by 1" 2>/dev/null || printf '  (查询失败,不影响自检结论)\n'
+
 # ---- 4. 异地备份(23:40 才跑,早于此时不算失败) ----
 printf '\n\033[1m四、异地备份\033[0m\n'
 now_hm=$(TZ=Asia/Shanghai date +%H%M)
