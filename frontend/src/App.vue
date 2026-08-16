@@ -65,7 +65,17 @@ function handleCommand(command: string) {
 <template>
   <el-container class="app-shell">
     <el-aside width="232px" class="sidebar">
-      <div class="brand"><span class="brand-mark">F</span>Futures Analysis</div>
+      <!-- 品牌标「趋势折线」(2026-08-16 运营者七选一拍板):深色方章 + 红色
+           上行折线 + 金色终点。红=站内红涨语义,金点=机构那一步,全站唯一
+           点缀金 #FFC94D。favicon 是它的 16px 加粗版(public/favicon.svg)。 -->
+      <div class="brand">
+        <svg class="brand-logo" viewBox="0 0 36 36" aria-hidden="true">
+          <rect x="0.75" y="0.75" width="34.5" height="34.5" rx="7.5" fill="#131722" stroke="#363a45" stroke-width="1.5" />
+          <path d="M7,26 L15,17 L19.5,21 L28.5,9" fill="none" stroke="#F23645" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="28.5" cy="9" r="3.4" fill="#FFC94D" />
+        </svg>
+        <span>期货机构资金</span>
+      </div>
       <el-menu router :default-active="$route.path">
         <el-menu-item index="/">
           <span class="nav-emoji">🏠</span>

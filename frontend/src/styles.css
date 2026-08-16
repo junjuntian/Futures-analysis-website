@@ -191,24 +191,18 @@ body {
   height: 56px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   padding: 0 20px;
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: 0.2px;
+  letter-spacing: 1px;
   color: var(--tv-text);
   border-bottom: 1px solid var(--tv-border);
 }
 
-.brand-mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: var(--tv-blue);
-  color: #fff;
-  display: grid;
-  place-items: center;
-  font-size: 13px;
-  font-weight: 800;
+.brand-logo {
+  width: 26px;
+  height: 26px;
   flex: none;
 }
 
