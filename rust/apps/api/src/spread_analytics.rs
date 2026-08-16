@@ -938,15 +938,72 @@ async fn variety_building_days(
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let candle_dates: Vec<Date> = candles.iter().map(|candle| candle.trade_date).collect();
     let candle_by_date: HashMap<Date, _> = candles
         .into_iter()
         .map(|candle| (candle.trade_date, candle))
         .collect();
 
-    Ok(build_variety_series(&per_contract, factor)
+    // 掉榜日补轴(2026-08-16 运营者拍板,高盛 2026-01-29 实例):席位行驱动的
+    // 日期轴在「全部合约同日掉榜」时整天消失,K 线与三张折线一起断。以合成
+    // 行情的完整交易日历为外轴,把席位序列首尾之间缺失的交易日补回来:
+    // 持仓留 None(前端按掉榜口径画 0 并标注)、当日盈亏留 None、累计盈亏
+    // 沿用前值(与「不可知的天按 0 计入、累计线不断开」同一条既有口径)、
+    // legs/成本一概留空——**这些补行绝不进成本引擎**(0 进成本链的假盈亏
+    // 事故见 building_days_sql 内注释)。
+    let series = build_variety_series(&per_contract, factor);
+    let series_by_date: HashMap<Date, usize> = series
+        .iter()
+        .enumerate()
+        .map(|(index, day)| (day.trade_date, index))
+        .collect();
+    let (first, last) = match (series.first(), series.last()) {
+        (Some(first), Some(last)) => (first.trade_date, last.trade_date),
+        _ => return Ok(Vec::new()),
+    };
+    let mut merged: Vec<(Date, Option<usize>)> = Vec::new();
+    for date in candle_dates {
+        if date < first || date > last {
+            continue;
+        }
+        merged.push((date, series_by_date.get(&date).copied()));
+    }
+    // 行情缺席位有的日子(理论上不该有,但两表来源不同)不能反过来丢席位行。
+    let merged_dates: BTreeSet<Date> = merged.iter().map(|(date, _)| *date).collect();
+    for (index, day) in series.iter().enumerate() {
+        if !merged_dates.contains(&day.trade_date) {
+            merged.push((day.trade_date, Some(index)));
+        }
+    }
+    merged.sort_by_key(|(date, _)| *date);
+
+    let mut last_cumulative = String::from("0");
+    Ok(merged
         .into_iter()
-        .map(|day| {
-            let candle = candle_by_date.get(&day.trade_date);
+        .map(|(date, series_index)| {
+            let candle = candle_by_date.get(&date);
+            let Some(index) = series_index else {
+                // 补回来的掉榜日:只有行情,没有任何席位与盈亏数字。
+                return BuildingDayItem {
+                    trade_date: date.to_string(),
+                    open_price: candle.map(|c| c.open_price.clone()),
+                    high_price: candle.map(|c| c.high_price.clone()),
+                    low_price: candle.map(|c| c.low_price.clone()),
+                    close_price: candle.map(|c| c.close_price.clone()),
+                    settlement_price: None,
+                    long_position: None,
+                    short_position: None,
+                    net_position: None,
+                    cost: None,
+                    daily_pnl: None,
+                    cumulative_pnl: last_cumulative.clone(),
+                    open_pnl: None,
+                    cost_unknown_reason: Some("seat_off_the_board".to_string()),
+                    legs: None,
+                };
+            };
+            let day = &series[index];
+            last_cumulative = day.cumulative_pnl.round_dp(2).to_string();
             BuildingDayItem {
                 trade_date: day.trade_date.to_string(),
                 open_price: candle.map(|c| c.open_price.clone()),
