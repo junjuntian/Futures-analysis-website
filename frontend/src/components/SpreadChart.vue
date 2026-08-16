@@ -11,6 +11,7 @@ import {
 import { connect, init, use, type EChartsType } from 'echarts/core'
 import { CanvasRenderer, SVGRenderer } from 'echarts/renderers'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { chartTokens } from '../chartTheme'
 import { sanitizeSvgDataUrl } from '../spreadCharts'
 
 const props = withDefaults(defineProps<{
@@ -66,13 +67,13 @@ function download(type: 'png' | 'svg') {
     const canvasChart = init(holder, undefined, { renderer: 'canvas' })
     try {
       canvasChart.setOption(props.option, { notMerge: true })
-      raw = canvasChart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+      raw = canvasChart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: chartTokens().cardBg })
     } finally {
       canvasChart.dispose()
       holder.remove()
     }
   } else {
-    raw = chart.getDataURL({ type: 'svg', backgroundColor: '#fff' })
+    raw = chart.getDataURL({ type: 'svg', backgroundColor: chartTokens().cardBg })
   }
   const href = type === 'svg' ? sanitizeSvgDataUrl(raw) : raw
   const anchor = document.createElement('a')

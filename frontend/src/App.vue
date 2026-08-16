@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from './stores/auth'
+import { themeMode, toggleTheme } from './theme'
 
 const auth = useAuthStore()
 
@@ -64,7 +65,7 @@ function handleCommand(command: string) {
 <template>
   <el-container class="app-shell">
     <el-aside width="232px" class="sidebar">
-      <div class="brand">Futures Analysis</div>
+      <div class="brand"><span class="brand-mark">F</span>Futures Analysis</div>
       <el-menu router :default-active="$route.path">
         <el-menu-item index="/">
           <span class="nav-emoji">🏠</span>
@@ -97,6 +98,20 @@ function handleCommand(command: string) {
       <el-header class="topbar">
         <span>期货与套利数据分析平台</span>
         <div class="topbar-actions">
+          <button
+            class="theme-toggle"
+            :title="themeMode === 'dark' ? '切到浅色' : '切到深色'"
+            @click="toggleTheme"
+          >
+            <!-- 太阳/月亮沿用 SSPanel 暗色开关的图标语言 -->
+            <svg v-if="themeMode === 'dark'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4" />
+            </svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+            </svg>
+          </button>
           <el-dropdown v-if="auth.me" trigger="click" @command="handleCommand">
             <span class="account-trigger">
               <span class="account-avatar">{{ auth.me.user.username.slice(0, 1).toUpperCase() }}</span>
@@ -121,7 +136,8 @@ function handleCommand(command: string) {
         </div>
       </el-header>
       <el-main>
-        <router-view />
+        <!-- :key 绑主题:切主题强制重挂载视图,让 ECharts 带新配色重建(理由见 theme.ts) -->
+        <router-view :key="themeMode" />
       </el-main>
     </el-container>
   </el-container>

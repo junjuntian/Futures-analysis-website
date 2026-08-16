@@ -15,6 +15,7 @@ import {
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
 import { lastYearStartIndex } from '../spreadCharts'
+import { chartTokens, sliderStyle, tooltipStyle } from '../chartTheme'
 
 // 选过的席位、品种、合约记在本地，刷新、关标签页、明天再来都还在，直到下次主动改选。
 // 运营者盯的通常就是那么几家机构的那么一两个品种，每次进来重选一遍是纯粹的重复劳动。
@@ -281,12 +282,12 @@ const pnlSeries = computed(() => days.value.map((day) => num(day.daily_pnl)))
 const cumulativeSeries = computed(() => days.value.map((day) => num(day.cumulative_pnl)))
 
 // 国内看盘的惯例：红涨绿跌。盈亏柱按正负着色，一眼能看出哪天在赚。
-const UP = '#c0392b'
-const DOWN = '#27ae60'
+// 颜色在构建时从 chartTokens() 取当前主题值，不能提到模块顶层缓存。
 function pnlBars(values: Array<number | null>) {
+  const tokens = chartTokens()
   return values.map((value) => ({
     value,
-    itemStyle: { color: (value ?? 0) >= 0 ? UP : DOWN }
+    itemStyle: { color: (value ?? 0) >= 0 ? tokens.up : tokens.down }
   }))
 }
 
@@ -336,9 +337,15 @@ const bands = computed(() =>
   )
 )
 
+/** token 没有单独的图表警示底色，由 accent 色值加透明度得出。 */
+function withAlpha(hex: string, alpha: number) {
+  const value = parseInt(hex.slice(1), 16)
+  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`
+}
+
 const offBoardMark = computed(() => ({
   silent: true,
-  itemStyle: { color: 'rgba(230, 162, 60, 0.16)' },
+  itemStyle: { color: withAlpha(chartTokens().accent, 0.16) },
   label: { show: false },
   data: bands.value
 }))
@@ -369,6 +376,7 @@ function legCost(cost: string | null, costLots: string, allLots: string) {
 function tooltipBody(index: number, head: string[] = []) {
   const day = days.value[index]
   if (!day) return ''
+  const tokens = chartTokens()
   const parts = [`<div style="margin-bottom:4px"><b>${day.trade_date}</b></div>`, ...head]
 
   if (day.legs) {
@@ -377,12 +385,12 @@ function tooltipBody(index: number, head: string[] = []) {
     const long = Number(day.legs.long_lots)
     const short = Number(day.legs.short_lots)
     if (long > 0) {
-      parts.push(row('多单', lots(long), UP))
+      parts.push(row('多单', lots(long), tokens.up))
       parts.push(row('　净持仓成本（推算）',
         legCost(day.legs.long_cost, day.legs.long_cost_lots, day.legs.long_lots)))
     }
     if (short > 0) {
-      parts.push(row('空单', lots(short), DOWN))
+      parts.push(row('空单', lots(short), tokens.down))
       parts.push(row('　净持仓成本（推算）',
         legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)))
     }
@@ -393,7 +401,7 @@ function tooltipBody(index: number, head: string[] = []) {
     parts.push(row('净持仓', '掉出前 20 · 未知'))
   } else {
     parts.push(row('净持仓', lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
-      net === 0 ? undefined : net > 0 ? UP : DOWN))
+      net === 0 ? undefined : net > 0 ? tokens.up : tokens.down))
   }
   // 单合约档的成本。汇总档已经在上面按两腿分别列过了。
   if (!day.legs) {
@@ -406,7 +414,7 @@ function tooltipBody(index: number, head: string[] = []) {
   if (cumulative !== null) {
     parts.push(row('估计累计盈利',
       `${cumulative >= 0 ? '+' : '−'}${money(Math.abs(cumulative))}`,
-      cumulative >= 0 ? UP : DOWN))
+      cumulative >= 0 ? tokens.up : tokens.down))
   }
   return parts.join('')
 }
@@ -501,102 +509,153 @@ const zoom = computed(() => [
     endValue: Math.max(dates.value.length - 1, 0),
     height: 26,
     bottom: 8,
-    borderColor: '#e2e1dd',
-    fillerColor: 'rgba(120,150,200,0.12)',
-    handleStyle: { color: '#b9b8b4' },
-    dataBackground: {
-      lineStyle: { color: '#c9c8c4' },
-      areaStyle: { color: '#eeeeec' }
-    },
+    ...sliderStyle(),
     labelFormatter: (value: number) => dates.value[Math.round(value)] ?? ''
   }
 ])
 /** 留给滑钮的高度。忘了加就是滑钮压在横轴标签上。 */
 const GRID_BOTTOM = 62
 
-const priceOption = computed<EChartsOption>(() => ({
-  grid: { left: 60, right: 24, top: 24, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  // K 线图上原来还有一条成本蓝线，运营者要求撤掉：图上只留行情，成本进小窗。
-  // 数一个没少，见 tooltipBody。
-  tooltip: {
-    ...tooltip,
-    formatter: (params: unknown) => {
-      const index = axisIndex(params)
-      if (index === null) return ''
-      // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
-      // 四项各占一行：挤成「开盘 / 收盘  955.82 / 943.16」要读的人自己在心里
-      // 把两个数配回两个标签，配错一次就看反了当天的涨跌。
-      const bar = candles.value[index]
-      const head = Array.isArray(bar)
-        ? [
-            row('开盘', price(bar[0])),
-            row('收盘', price(bar[1])),
-            row('最低', price(bar[2])),
-            row('最高', price(bar[3]))
-          ]
-        : [row('行情', '当日无 K 线')]
-      return tooltipBody(index, head)
-    }
-  },
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, scale: true },
-  series: [
-    {
-      name: 'K线',
-      type: 'candlestick' as const,
-      data: candles.value as unknown as CandlestickSeriesOption['data'],
-      // 掉榜区间的底色原先挂在成本线上，成本线撤了就得挪过来，否则整段标注消失。
-      markArea: offBoardMark.value
-    }
-  ]
-}))
-const netOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  tooltip,
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
-  yAxis: { type: 'value' as const },
-  series: [
-    {
-      name: '净持仓',
-      type: 'line' as const,
-      data: netSeries.value,
-      showSymbol: false,
-      connectNulls: false,
-      lineStyle: { width: 2 },
-      // 掉榜区间的底色。断开加底色，才分得清「缺数据」和「真的平了」。
-      markArea: offBoardMark.value,
-      // 零轴：正的是净多、负的是净空，没有这条线读不出方向。
-      markLine: {
-        silent: true,
-        symbol: 'none',
-        data: [{ yAxis: 0 }],
-        lineStyle: { color: '#999', type: 'dashed' as const },
-        label: { show: false }
+const priceOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 60, right: 24, top: 24, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    // K 线图上原来还有一条成本蓝线，运营者要求撤掉：图上只留行情，成本进小窗。
+    // 数一个没少，见 tooltipBody。
+    tooltip: {
+      ...tooltip,
+      ...tooltipStyle(),
+      formatter: (params: unknown) => {
+        const index = axisIndex(params)
+        if (index === null) return ''
+        // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
+        // 四项各占一行：挤成「开盘 / 收盘  955.82 / 943.16」要读的人自己在心里
+        // 把两个数配回两个标签，配错一次就看反了当天的涨跌。
+        const bar = candles.value[index]
+        const head = Array.isArray(bar)
+          ? [
+              row('开盘', price(bar[0])),
+              row('收盘', price(bar[1])),
+              row('最低', price(bar[2])),
+              row('最高', price(bar[3]))
+            ]
+          : [row('行情', '当日无 K 线')]
+        return tooltipBody(index, head)
       }
-    }
-  ]
-}))
-const pnlOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  tooltip,
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
-  series: [{ name: '当日盈亏', type: 'bar' as const, data: pnlBars(pnlSeries.value) }]
-}))
-const cumulativeOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  tooltip,
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, axisLabel: { formatter: money } },
-  series: [
-    { name: '合约累计盈亏', type: 'bar' as const, data: pnlBars(cumulativeSeries.value) }
-  ]
-}))
+    },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      scale: true,
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: 'K线',
+        type: 'candlestick' as const,
+        data: candles.value as unknown as CandlestickSeriesOption['data'],
+        // 红涨绿跌，国内惯例：阳线 = up（红），阴线 = down（绿）。
+        itemStyle: {
+          color: tokens.up,
+          color0: tokens.down,
+          borderColor: tokens.up,
+          borderColor0: tokens.down
+        },
+        // 掉榜区间的底色原先挂在成本线上，成本线撤了就得挪过来，否则整段标注消失。
+        markArea: offBoardMark.value
+      }
+    ]
+  }
+})
+const netOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...tooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: '净持仓',
+        type: 'line' as const,
+        data: netSeries.value,
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 2 },
+        // 掉榜区间的底色。断开加底色，才分得清「缺数据」和「真的平了」。
+        markArea: offBoardMark.value,
+        // 零轴：正的是净多、负的是净空，没有这条线读不出方向。
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          data: [{ yAxis: 0 }],
+          lineStyle: { color: tokens.baseline, type: 'dashed' as const },
+          label: { show: false }
+        }
+      }
+    ]
+  }
+})
+const pnlOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...tooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { formatter: money, color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [{ name: '当日盈亏', type: 'bar' as const, data: pnlBars(pnlSeries.value) }]
+  }
+})
+const cumulativeOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...tooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { formatter: money, color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      { name: '合约累计盈亏', type: 'bar' as const, data: pnlBars(cumulativeSeries.value) }
+    ]
+  }
+})
 /** 末日累计值，放在标题旁边——图能看趋势，数字才好念。 */
 const cumulativeTotal = computed(() => {
   const last = cumulativeSeries.value.filter((value) => value !== null).pop()
@@ -845,17 +904,17 @@ const cumulativeTotal = computed(() => {
   width: 14px;
   height: 10px;
   border-radius: 2px;
-  background: rgba(230, 162, 60, 0.16);
-  border: 1px solid rgba(230, 162, 60, 0.5);
+  background: var(--tv-warn-bg);
+  border: 1px solid color-mix(in srgb, var(--tv-warn) 50%, transparent);
 }
 
 .up {
-  color: #c0392b;
+  color: var(--tv-up);
   font-weight: 600;
   margin-left: 8px;
 }
 .down {
-  color: #27ae60;
+  color: var(--tv-down);
   font-weight: 600;
   margin-left: 8px;
 }
@@ -898,7 +957,7 @@ const cumulativeTotal = computed(() => {
 /* K 线口径，挨着「行情」标题。比数据摘要淡一档：它是注解，不是当天的数。 */
 .series-note {
   font-size: 13px;
-  color: #909399;
+  color: var(--tv-text-muted);
 }
 
 /* 最新一天的摘要，挨着「净持仓」标题。窄屏换行而不是挤成一团。 */
@@ -908,19 +967,19 @@ const cumulativeTotal = computed(() => {
   gap: 14px;
   flex-wrap: wrap;
   font-size: 13px;
-  color: #606266;
+  color: var(--tv-text-secondary);
 }
 .latest-date {
   font-weight: 600;
-  color: #303133;
+  color: var(--tv-text);
 }
 .latest .up {
-  color: #c0392b;
+  color: var(--tv-up);
   font-weight: 600;
   margin-left: 0;
 }
 .latest .down {
-  color: #27ae60;
+  color: var(--tv-down);
   font-weight: 600;
   margin-left: 0;
 }

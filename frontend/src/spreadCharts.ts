@@ -1,20 +1,8 @@
 import type { EChartsOption, SeriesOption } from 'echarts'
 import type { FreeSpreadQueryResponse } from './api'
-
-const RED = '#e64b4b'
-const GREEN = '#4f8f22'
-const ORANGE = '#d97706'
-const GREY = '#8d8c87'
-const CURRENT_YEAR_COLOR = '#df572d'
-// Distinct hues for the historical years of the seasonal chart. Painting them
-// all grey made the years indistinguishable, which defeats the comparison the
-// chart exists for. The current year keeps CURRENT_YEAR_COLOR and is excluded
-// from this palette so it always stands out.
-const SEASONAL_PALETTE = [
-  '#2f6fa8', '#4f8f22', '#9a4fb5', '#c79a1e', '#1f9a91',
-  '#b8437b', '#5c6ac4', '#7d8b2c', '#a2563a', '#3a8fd4',
-  '#8a5cd6', '#2d9a5b'
-]
+// 颜色全部走 chartTheme token(双主题)。正价差=红、负价差=绿,沿用红涨绿跌
+// 语义;叠年图历史年份用区分度色板,当前年单独高亮,理由见 chartTheme.ts。
+import { chartTokens, sliderStyle, tooltipStyle } from './chartTheme'
 
 /**
  * 最近一年的起点下标。带时间轴的图默认落在这一段。
@@ -38,6 +26,7 @@ export function lastYearStartIndex(dates: string[]): number {
 }
 
 export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOption {
+  const tokens = chartTokens()
   const points = data.continuous_series.points
   // The upstream series alternates the forward and the reverse leg pair day by
   // day around each January expiry, so one contract roll arrives as a dozen
@@ -55,21 +44,21 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
   const markLine = {
     silent: false,
     symbol: 'none' as const,
-    label: { color: GREY, formatter: '{b}' },
+    label: { color: tokens.axisLabel, formatter: '{b}' },
     data: [
-      { name: '', yAxis: 0, lineStyle: { color: '#aaa9a5', type: 'solid' as const, width: 1 } },
+      { name: '', yAxis: 0, lineStyle: { color: tokens.baseline, type: 'solid' as const, width: 1 } },
       ...(current === null || current === undefined ? [] : [{
         name: formatNumber(current),
         yAxis: current,
-        lineStyle: { color: ORANGE, type: 'dashed' as const, width: 1.5 },
-        label: { color: ORANGE, formatter: formatNumber(current), position: 'insideEndTop' as const }
+        lineStyle: { color: tokens.accent, type: 'dashed' as const, width: 1.5 },
+        label: { color: tokens.accent, formatter: formatNumber(current), position: 'insideEndTop' as const }
       }]),
       ...boundaries.flatMap((boundary) => {
         const index = boundaryIndexes.get(boundary.trade_date)
         return index === undefined ? [] : [{
           name: `${boundary.previous_from_code?.toUpperCase() ?? '—'}−${boundary.previous_to_code?.toUpperCase() ?? '—'} → ${boundary.from_code.toUpperCase()}−${boundary.to_code.toUpperCase()}`,
           xAxis: index,
-          lineStyle: { color: '#c7c6c2', type: 'dashed' as const, width: 1 },
+          lineStyle: { color: tokens.boundary, type: 'dashed' as const, width: 1 },
           label: { show: false }
         }]
       })
@@ -92,18 +81,13 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
         endValue: Math.max(points.length - 1, 0),
         height: 26,
         bottom: 30,
-        borderColor: '#e2e1dd',
-        fillerColor: 'rgba(120,150,200,0.12)',
-        handleStyle: { color: '#b9b8b4' },
-        dataBackground: {
-          lineStyle: { color: '#c9c8c4' },
-          areaStyle: { color: '#eeeeec' }
-        },
+        ...sliderStyle(),
         labelFormatter: (value: number) => points[Math.round(value)]?.trade_date ?? ''
       }
     ],
     tooltip: {
       trigger: 'axis',
+      ...tooltipStyle(),
       formatter: (params: unknown) => {
         const item = Array.isArray(params) ? params[0] as { axisValue?: number } : undefined
         const point = item?.axisValue === undefined ? undefined : points[Math.round(item.axisValue)]
@@ -118,26 +102,29 @@ export function continuousChartOption(data: FreeSpreadQueryResponse): EChartsOpt
       max: Math.max(points.length - 1, 1),
       minInterval: 1,
       axisLabel: {
-        color: GREY,
+        color: tokens.axisLabel,
         hideOverlap: true,
         formatter: (value: number) => points[Math.round(value)]?.trade_date ?? ''
       },
-      axisLine: { lineStyle: { color: '#d8d8d5' } },
-      axisTick: { show: false }
+      axisLine: { lineStyle: { color: tokens.axisLine } },
+      axisTick: { show: false },
+      // value 型 x 轴的 splitLine 默认开且用 ECharts 自带浅灰——深色底上比数据线
+      // 还亮,喧宾夺主(2026-08-16 视觉审查抓到)。收进主题网格色。
+      splitLine: { lineStyle: { color: tokens.splitLine } }
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: GREY },
-      splitLine: { lineStyle: { color: '#f0f0ee' } }
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
     },
     series: signedSegments.map((segment, index) => ({
       name: segment.sign === 'positive' ? '正价差' : '负价差',
       type: 'line',
       showSymbol: false,
       data: segment.points,
-      lineStyle: { width: 2.5, color: segment.sign === 'positive' ? RED : GREEN },
-      itemStyle: { color: segment.sign === 'positive' ? RED : GREEN },
+      lineStyle: { width: 2.5, color: segment.sign === 'positive' ? tokens.up : tokens.down },
+      itemStyle: { color: segment.sign === 'positive' ? tokens.up : tokens.down },
       markLine: index === 0 ? markLine : undefined
     } as SeriesOption))
   }
@@ -211,6 +198,7 @@ export function buildSignedLineSegments(
 }
 
 export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOption {
+  const tokens = chartTokens()
   const currentYear = data.seasonal_series.current_year
   // The axis spans every calendar day of the window, so days no year traded
   // (weekends, holidays, dates outside every year's tradable window) leave
@@ -226,8 +214,8 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
   const series: SeriesOption[] = data.seasonal_series.years.map((year) => {
     const isCurrent = year.year === currentYear
     const color = isCurrent
-      ? CURRENT_YEAR_COLOR
-      : SEASONAL_PALETTE[paletteCursor++ % SEASONAL_PALETTE.length]
+      ? tokens.currentYear
+      : tokens.seasonalPalette[paletteCursor++ % tokens.seasonalPalette.length]
     return {
       name: String(year.year),
       type: 'line',
@@ -238,7 +226,7 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
       itemStyle: { color },
       emphasis: { focus: 'series', lineStyle: { width: 3.2, opacity: 1 } },
       endLabel: isCurrent
-        ? { show: true, formatter: String(year.year), color: '#b44020', fontSize: 15 }
+        ? { show: true, formatter: String(year.year), color: tokens.currentYearLabel, fontSize: 15 }
         : { show: false }
     } as SeriesOption
   })
@@ -255,13 +243,7 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
         type: 'slider',
         height: 26,
         bottom: 24,
-        borderColor: '#e2e1dd',
-        fillerColor: 'rgba(120,150,200,0.12)',
-        handleStyle: { color: '#b9b8b4' },
-        dataBackground: {
-          lineStyle: { color: '#c9c8c4' },
-          areaStyle: { color: '#eeeeec' }
-        },
+        ...sliderStyle(),
         labelFormatter: (value: number) => axis[Math.round(value)]?.replace('-', '/') ?? ''
       }
     ],
@@ -269,26 +251,26 @@ export function seasonalChartOption(data: FreeSpreadQueryResponse): EChartsOptio
       top: 8,
       left: 0,
       type: 'scroll',
-      textStyle: { color: GREY, fontSize: 13 },
+      textStyle: { color: tokens.legend, fontSize: 13 },
       selected: Object.fromEntries(data.seasonal_series.years.map((year, index, all) => [
         String(year.year),
         year.year === currentYear || index >= all.length - 3
       ]))
     },
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', ...tooltipStyle() },
     xAxis: {
       type: 'category',
       boundaryGap: false,
       data: axis.map((value) => value.replace('-', '/')),
-      axisLabel: { color: GREY, hideOverlap: true },
-      axisLine: { lineStyle: { color: '#d8d8d5' } },
+      axisLabel: { color: tokens.axisLabel, hideOverlap: true },
+      axisLine: { lineStyle: { color: tokens.axisLine } },
       axisTick: { show: false }
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: GREY },
-      splitLine: { lineStyle: { color: '#f0f0ee' } }
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
     },
     series
   }

@@ -1,38 +1,219 @@
+/*
+ * TradingView 风格双主题 token 层(2026-08-16 视觉改造)。
+ *
+ * 约定:
+ * - 业务代码只允许引用 --tv-* 与 --el-* 变量,不得再写死十六进制色。
+ * - 涨跌语义固定红涨绿跌(国内期货惯例):--tv-up 红、--tv-down 绿。
+ *   借 TradingView 的色相(#F23645/#089981),不借它的涨跌方向。
+ * - 深色通过 html.dark 切换(Element Plus 官方约定),index.html 里有防闪屏
+ *   内联脚本,进 app 前就把类挂好。
+ * - ECharts 不认 CSS 变量,图表颜色在 chartTheme.ts 里维护同一套值;改这里
+ *   的图表相关色要同步改那边。
+ */
+
 :root {
-  color: #17202a;
-  background: #f5f7fb;
-  font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+  /* —— TradingView 浅色 —— */
+  --tv-bg-page: #f0f3fa;
+  --tv-bg-card: #ffffff;
+  --tv-bg-hover: #f0f3fa;
+  --tv-bg-inset: #f8f9fd;
+  --tv-border: #e0e3eb;
+  --tv-border-strong: #d1d4dc;
+  --tv-text: #131722;
+  --tv-text-secondary: #6a6d78;
+  --tv-text-muted: #9598a1;
+  --tv-blue: #2962ff;
+  --tv-blue-hover: #1e53e5;
+  --tv-blue-bg: rgba(41, 98, 255, 0.1);
+  --tv-up: #f23645;
+  --tv-up-bg: rgba(242, 54, 69, 0.08);
+  --tv-down: #089981;
+  --tv-down-bg: rgba(8, 153, 129, 0.08);
+  --tv-warn: #f57c00;
+  --tv-warn-bg: rgba(245, 124, 0, 0.1);
+  --tv-shadow: 0 1px 2px rgba(19, 23, 34, 0.06), 0 2px 8px rgba(19, 23, 34, 0.04);
+  --tv-radius: 8px;
+  --tv-radius-sm: 4px;
+
+  color: var(--tv-text);
+  background: var(--tv-bg-page);
+  font-family: Inter, -apple-system, "Microsoft YaHei", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+
+  /* —— Element Plus 变量映射(浅色) —— */
+  --el-color-primary: var(--tv-blue);
+  --el-color-primary-light-3: #5b83f7;
+  --el-color-primary-light-5: #86a3f9;
+  --el-color-primary-light-7: #b3c6fb;
+  --el-color-primary-light-8: #ccd8fc;
+  --el-color-primary-light-9: #e8eefe;
+  --el-color-primary-dark-2: var(--tv-blue-hover);
+  --el-color-success: var(--tv-down);
+  --el-color-danger: var(--tv-up);
+  --el-color-error: var(--tv-up);
+  --el-color-warning: var(--tv-warn);
+  --el-bg-color: var(--tv-bg-card);
+  --el-bg-color-page: var(--tv-bg-page);
+  --el-bg-color-overlay: var(--tv-bg-card);
+  --el-text-color-primary: var(--tv-text);
+  --el-text-color-regular: var(--tv-text);
+  --el-text-color-secondary: var(--tv-text-secondary);
+  --el-text-color-placeholder: var(--tv-text-muted);
+  --el-border-color: var(--tv-border);
+  --el-border-color-light: var(--tv-border);
+  --el-border-color-lighter: var(--tv-border);
+  --el-border-color-extra-light: var(--tv-border);
+  --el-fill-color: var(--tv-bg-inset);
+  --el-fill-color-light: var(--tv-bg-hover);
+  --el-fill-color-lighter: var(--tv-bg-inset);
+  --el-fill-color-blank: var(--tv-bg-card);
+  --el-border-radius-base: var(--tv-radius-sm);
+  --el-box-shadow-light: var(--tv-shadow);
+}
+
+html.dark {
+  /* —— TradingView 深色 —— */
+  --tv-bg-page: #131722;
+  --tv-bg-card: #1e222d;
+  --tv-bg-hover: #2a2e39;
+  --tv-bg-inset: #262b38;
+  --tv-border: #2a2e39;
+  --tv-border-strong: #363a45;
+  --tv-text: #d1d4dc;
+  --tv-text-secondary: #9598a1;
+  --tv-text-muted: #787b86;
+  --tv-blue: #2962ff;
+  --tv-blue-hover: #1e53e5;
+  --tv-blue-bg: rgba(41, 98, 255, 0.16);
+  --tv-up: #f7525f;
+  --tv-up-bg: rgba(247, 82, 95, 0.12);
+  --tv-down: #22ab94;
+  --tv-down-bg: rgba(34, 171, 148, 0.12);
+  --tv-warn: #ffa726;
+  --tv-warn-bg: rgba(255, 167, 38, 0.12);
+  --tv-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.2);
+
+  --el-color-primary-light-3: #4472e0;
+  --el-color-primary-light-5: #34549f;
+  --el-color-primary-light-7: #2a3c66;
+  --el-color-primary-light-8: #25314d;
+  --el-color-primary-light-9: #1f2637;
+}
+
+/*
+ * EP 的 dark/css-vars.css 用 html.dark 选择器定义整套 --el-*,特异性压过
+ * :root 上的映射——不在 html.dark 下重申一遍,深色主题的 EP 主色会退回
+ * 默认蓝 #409eff(2026-08-16 实测抓到)。本文件在 main.ts 里排在 EP 之后,
+ * 同特异性后到者胜。
+ */
+html.dark {
+  --el-color-primary: var(--tv-blue);
+  --el-color-primary-dark-2: var(--tv-blue-hover);
+  --el-color-success: var(--tv-down);
+  --el-color-danger: var(--tv-up);
+  --el-color-error: var(--tv-up);
+  --el-color-warning: var(--tv-warn);
+  --el-bg-color: var(--tv-bg-card);
+  --el-bg-color-page: var(--tv-bg-page);
+  --el-bg-color-overlay: var(--tv-bg-card);
+  --el-text-color-primary: var(--tv-text);
+  --el-text-color-regular: var(--tv-text);
+  --el-text-color-secondary: var(--tv-text-secondary);
+  --el-text-color-placeholder: var(--tv-text-muted);
+  --el-border-color: var(--tv-border);
+  --el-border-color-light: var(--tv-border);
+  --el-border-color-lighter: var(--tv-border);
+  --el-border-color-extra-light: var(--tv-border);
+  --el-fill-color: var(--tv-bg-inset);
+  --el-fill-color-light: var(--tv-bg-hover);
+  --el-fill-color-lighter: var(--tv-bg-inset);
+  --el-fill-color-blank: var(--tv-bg-card);
+  --el-box-shadow-light: var(--tv-shadow);
 }
 
 body {
   margin: 0;
+  background: var(--tv-bg-page);
+  color: var(--tv-text);
+  transition: background-color 0.15s ease;
 }
 
 .app-shell {
   min-height: 100vh;
 }
 
+/* —— 应用壳:侧栏、顶栏 —— */
+
 .sidebar {
-  background: #fff;
-  border-right: 1px solid #e5eaf3;
+  background: var(--tv-bg-card);
+  border-right: 1px solid var(--tv-border);
+}
+
+.sidebar .el-menu {
+  border-right: none;
+  background: transparent;
+}
+
+.sidebar .el-menu-item,
+.sidebar .el-sub-menu__title {
+  height: 40px;
+  line-height: 40px;
+  margin: 2px 8px;
+  border-radius: var(--tv-radius-sm);
+  color: var(--tv-text-secondary);
+}
+
+.sidebar .el-menu-item:hover,
+.sidebar .el-sub-menu__title:hover {
+  background: var(--tv-bg-hover);
+  color: var(--tv-text);
+}
+
+.sidebar .el-menu-item.is-active {
+  background: var(--tv-blue-bg);
+  color: var(--tv-blue);
+  font-weight: 600;
+}
+
+.sidebar .el-menu .el-menu--inline .el-menu-item {
+  height: 36px;
+  line-height: 36px;
 }
 
 .brand {
-  height: 64px;
+  height: 56px;
   display: flex;
   align-items: center;
+  gap: 8px;
   padding: 0 20px;
   font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--tv-text);
+  border-bottom: 1px solid var(--tv-border);
+}
+
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--tv-blue);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 800;
+  flex: none;
 }
 
 .topbar {
-  height: 64px;
+  height: 56px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
-  border-bottom: 1px solid #e5eaf3;
+  background: var(--tv-bg-card);
+  border-bottom: 1px solid var(--tv-border);
   font-weight: 600;
+  color: var(--tv-text);
 }
 
 .topbar-actions {
@@ -41,8 +222,27 @@ body {
   gap: 12px;
 }
 
+.theme-toggle {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--tv-radius-sm);
+  background: transparent;
+  color: var(--tv-text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0;
+}
+
+.theme-toggle:hover {
+  background: var(--tv-bg-hover);
+  color: var(--tv-text);
+}
+
 .identity-chip {
-  color: #394551;
+  color: var(--tv-text-secondary);
   font-size: 14px;
   font-weight: 500;
 }
@@ -56,6 +256,8 @@ body {
   flex-shrink: 0;
 }
 
+/* —— 页面通用 —— */
+
 .page {
   max-width: 1120px;
   margin: 0 auto;
@@ -67,19 +269,21 @@ body {
 
 .page-heading h1 {
   margin: 0 0 8px;
-  font-size: 28px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
 }
 
 .page-heading p {
   margin: 0;
-  color: #5c6670;
+  color: var(--tv-text-secondary);
 }
 
 .eyebrow {
-  color: #0f8b8d !important;
-  font-size: 13px;
+  color: var(--tv-blue) !important;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 0.4px;
   text-transform: uppercase;
 }
 
@@ -110,4 +314,49 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+/* —— Element Plus 组件 TV 质感统一 —— */
+
+.el-card {
+  border: 1px solid var(--tv-border);
+  border-radius: var(--tv-radius);
+  box-shadow: var(--tv-shadow);
+  background: var(--tv-bg-card);
+}
+
+.el-card.is-never-shadow {
+  box-shadow: none;
+}
+
+.el-table {
+  --el-table-border-color: var(--tv-border);
+  --el-table-header-bg-color: var(--tv-bg-inset);
+  --el-table-header-text-color: var(--tv-text-secondary);
+  --el-table-row-hover-bg-color: var(--tv-bg-hover);
+  --el-table-tr-bg-color: var(--tv-bg-card);
+  font-variant-numeric: tabular-nums;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.el-dialog {
+  border-radius: var(--tv-radius);
+  border: 1px solid var(--tv-border);
+}
+
+.el-button {
+  font-weight: 500;
+}
+
+/* 涨跌数字通用类:红涨绿跌 */
+.num-up {
+  color: var(--tv-up);
+}
+
+.num-down {
+  color: var(--tv-down);
 }

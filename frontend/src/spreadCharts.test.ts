@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { ContinuousSpreadPoint } from './api'
-import { buildSignedLineSegments, sanitizeSvgDataUrl } from './spreadCharts'
+import type { ContinuousSpreadPoint, FreeSpreadQueryResponse } from './api'
+import { chartTokens } from './chartTheme'
+import { buildSignedLineSegments, continuousChartOption, sanitizeSvgDataUrl } from './spreadCharts'
 
 function point(index: number, value: number, segmentNo = 1): ContinuousSpreadPoint {
   return {
@@ -43,6 +44,21 @@ describe('free spread chart contracts', () => {
     const segments = buildSignedLineSegments(split)
     expect(segments).toHaveLength(1)
     expect(segments[0].points).toEqual([[0, 2], [1, 3]])
+  })
+
+  it('pins the x-axis grid lines to the theme token', () => {
+    // value 型 x 轴的 splitLine 默认开且用 ECharts 自带浅灰,深色底上比数据线
+    // 还亮(2026-08-16 视觉审查)。这里钉死它必须走主题网格色,防回归。
+    const data = {
+      continuous_series: {
+        points: [point(0, 6), point(1, -2)],
+        segment_boundaries: [],
+        current_value: null
+      }
+    } as unknown as FreeSpreadQueryResponse
+    const option = continuousChartOption(data)
+    const xAxis = option.xAxis as { splitLine?: { lineStyle?: { color?: string } } }
+    expect(xAxis.splitLine?.lineStyle?.color).toBe(chartTokens().splitLine)
   })
 
   it('sanitizes script, event handlers, and external links from SVG export', () => {

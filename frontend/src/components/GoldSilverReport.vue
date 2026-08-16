@@ -398,7 +398,7 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
 }
 .report-date {
   font-size: 13px;
-  color: #909399;
+  color: var(--tv-text-secondary);
 }
 .section-head {
   display: flex;
@@ -430,52 +430,52 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
 }
 .grid th,
 .grid td {
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--tv-border);
   padding: 6px 10px;
   text-align: center;
   white-space: nowrap;
 }
 .grid thead th {
-  background: #fafafa;
+  background: var(--tv-bg-inset);
   font-weight: 600;
-  color: #606266;
+  color: var(--tv-text-secondary);
 }
 .grid .row-label {
-  background: #fafafa;
+  background: var(--tv-bg-inset);
   text-align: left;
   font-weight: 600;
 }
 .grid tr.total .row-label,
 .grid tr.total td {
-  background: #f5f7fa;
+  background: var(--tv-bg-hover);
   font-weight: 600;
 }
 .grid tr.rating-row td {
-  background: #fffdf5;
+  background: var(--tv-warn-bg);
 }
 
 .level-value {
   font-weight: 600;
 }
 .rating-text {
-  color: #b45309;
+  color: var(--tv-warn);
 }
 .stars {
-  color: #e6a23c;
+  color: var(--tv-warn);
   letter-spacing: 2px;
 }
 .chips {
   font-weight: 600;
 }
 .muted {
-  color: #c0c4cc;
+  color: var(--tv-text-muted);
 }
 .up {
-  color: #c0392b;
+  color: var(--tv-up);
   font-weight: 600;
 }
 .down {
-  color: #27ae60;
+  color: var(--tv-down);
   font-weight: 600;
 }
 
@@ -488,13 +488,13 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
 .seat-group label {
   display: block;
   font-size: 12px;
-  color: #909399;
+  color: var(--tv-text-secondary);
   margin-bottom: 4px;
 }
 .note {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.7;
-  color: #909399;
+  color: var(--tv-text-secondary);
 }
 </style>

@@ -449,7 +449,8 @@ onMounted(async () => {
             <span class="s" />比价腿警示<template v-if="latestMarks?.spread_legs?.length">({{ latestMarks.spread_legs.join('、') }})</template>
           </span>
           <span class="badge" :class="{ on: latestMarks?.goldman_combo }"><span class="s" />高盛金银组合(历史命中 91%)</span>
-          <span class="badge on"><span class="s" />金银比 {{ data.ratio.value }} {{ data.ratio.zone }}</span>
+          <!-- 「正常」不点红:红是警示位,正常态点红等于让人天天看假警报。 -->
+          <span class="badge" :class="{ on: data.ratio.zone !== '正常' }"><span class="s" />金银比 {{ data.ratio.value }} {{ data.ratio.zone }}</span>
         </div>
       </template>
 
@@ -534,7 +535,7 @@ onMounted(async () => {
             </thead>
             <tbody>
               <tr v-for="(seg, index) in data.alert_history" :key="index">
-                <td><span class="pill loss">{{ seg.label }}</span></td>
+                <td><span class="pill alarm">{{ seg.label }}</span></td>
                 <td>{{ seg.market }}</td>
                 <td>{{ seg.start }}</td>
                 <td>{{ seg.end }}</td>
@@ -605,79 +606,83 @@ onMounted(async () => {
 
 <style scoped>
 .smart-money h1 { font-size: 26px; font-weight: 700; margin: 0 0 6px; }
-.sub { color: #909399; margin: 0 0 22px; }
-.loading { padding: 60px; text-align: center; color: #909399; }
-.err { padding: 20px; background: #fef0f0; border: 1px solid #fbc4c4; border-radius: 6px; color: #f56c6c; }
-.red { color: #f56c6c; } .green { color: #67c23a; } .gray { color: #909399; }
-.tabbar { display: flex; margin-bottom: 16px; border-bottom: 2px solid #ebeef5; }
-.tab { padding: 9px 22px; cursor: pointer; color: #606266; border-bottom: 2px solid transparent; margin-bottom: -2px; }
-.tab.on { color: #409eff; border-color: #409eff; font-weight: 600; }
+.sub { color: var(--tv-text-secondary); margin: 0 0 22px; }
+.loading { padding: 60px; text-align: center; color: var(--tv-text-secondary); }
+.err { padding: 20px; background: var(--tv-up-bg); border: 1px solid var(--tv-up); border-radius: 6px; color: var(--tv-up); }
+.red { color: var(--tv-up); } .green { color: var(--tv-down); } .gray { color: var(--tv-text-muted); }
+.tabbar { display: flex; margin-bottom: 16px; border-bottom: 2px solid var(--tv-border); }
+.tab { padding: 9px 22px; cursor: pointer; color: var(--tv-text-secondary); border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.tab.on { color: var(--tv-blue); border-color: var(--tv-blue); font-weight: 600; }
 .cards { display: flex; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; }
-.card { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; padding: 18px 20px; flex: 1; min-width: 290px; }
+.card { background: var(--tv-bg-card); border: 1px solid var(--tv-border); border-radius: 6px; padding: 18px 20px; flex: 1; min-width: 290px; }
 .card h3 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.dot.hold { background: #f56c6c; box-shadow: 0 0 6px #f56c6c88; }
-.dot.watch { background: #c0c4cc; }
-.dot.ok { background: #67c23a; }
+.dot.hold { background: var(--tv-up); box-shadow: 0 0 6px var(--tv-up); }
+.dot.watch { background: var(--tv-text-muted); }
+.dot.ok { background: var(--tv-down); }
 .big { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
 .kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; gap: 10px; }
-.kv .k { color: #909399; white-space: nowrap; }
+.kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; }
-.section { background: #fff; border: 1px solid #e4e7ed; border-radius: 6px; padding: 20px 22px; margin-bottom: 22px; }
+.section { background: var(--tv-bg-card); border: 1px solid var(--tv-border); border-radius: 6px; padding: 20px 22px; margin-bottom: 22px; }
 /* 分页条贴着表格下沿,窄屏时允许换行——挤成一行会把跳页框推出可视区。 */
 .pager { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
 /* 区间位置分层色:高位橙、低位青,中段不上色。只为扫一眼能分层,无褒贬。 */
-.pos-high { color: #e6a23c; font-weight: 600; }
-.pos-low { color: #178a5a; font-weight: 600; }
-.pill.crash { background: #fde2e2; color: #c0392b; }
+.pos-high { color: var(--tv-warn); font-weight: 600; }
+.pos-low { color: var(--tv-down); font-weight: 600; }
+.pill.crash { background: var(--tv-up-bg); color: var(--tv-up); }
 .section h2 { font-size: 16px; margin: 0 0 4px; }
-.section .desc { color: #909399; font-size: 12.5px; margin-bottom: 14px; }
+.section .desc { color: var(--tv-text-secondary); font-size: 12.5px; margin-bottom: 14px; }
 .alert { display: flex; gap: 12px; padding: 13px 16px; border-radius: 6px; margin-bottom: 10px; align-items: flex-start; }
-.alert .tag { font-size: 12px; padding: 2px 10px; border-radius: 4px; white-space: nowrap; font-weight: 600; margin-top: 1px; }
-.alert.danger { background: #fef0f0; border: 1px solid #fbc4c4; }
-.alert.danger .tag { background: #f56c6c; color: #fff; }
-.alert.warn { background: #fdf6ec; border: 1px solid #f5dab1; }
-.alert.warn .tag { background: #e6a23c; color: #fff; }
-.alert.info { background: #f4f4f5; border: 1px solid #e4e7ed; }
-.alert.info .tag { background: #909399; color: #fff; }
-.alert.pair { background: #ecf5ff; border: 1px solid #b3d8ff; }
-.alert.pair .tag { background: #409eff; color: #fff; }
-.alert .t { color: #909399; font-size: 12px; margin-left: auto; white-space: nowrap; }
+/* 彩色标签底上的白字两个主题都可读,无对应 token,保留白色字面量。 */
+.alert .tag { font-size: 12px; padding: 2px 10px; border-radius: 4px; white-space: nowrap; font-weight: 600; margin-top: 1px; color: #fff; }
+.alert.danger { background: var(--tv-up-bg); border: 1px solid var(--tv-up); }
+.alert.danger .tag { background: var(--tv-up); }
+.alert.warn { background: var(--tv-warn-bg); border: 1px solid var(--tv-warn); }
+.alert.warn .tag { background: var(--tv-warn); }
+.alert.info { background: var(--tv-bg-inset); border: 1px solid var(--tv-border); }
+.alert.info .tag { background: var(--tv-text-secondary); }
+.alert.pair { background: var(--tv-blue-bg); border: 1px solid var(--tv-blue); }
+.alert.pair .tag { background: var(--tv-blue); }
+.alert .t { color: var(--tv-text-secondary); font-size: 12px; margin-left: auto; white-space: nowrap; }
 .cond-title { margin: 14px 0 8px; font-weight: 600; }
 .cond { display: flex; gap: 26px; flex-wrap: wrap; }
 .cond .item { flex: 1; min-width: 230px; }
-.cond .name { font-size: 13px; color: #606266; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
-.bar { height: 8px; background: #ebeef5; border-radius: 4px; overflow: hidden; }
-.bar i { display: block; height: 100%; border-radius: 4px; background: #c0c4cc; }
-.bar.pass i { background: #67c23a; }
-.bar.warn i { background: #e6a23c; }
-.badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #e4e7ed; border-radius: 16px; padding: 5px 14px; font-size: 13px; margin: 0 8px 8px 0; background: #fafafa; }
-.badge .s { width: 8px; height: 8px; border-radius: 50%; background: #c0c4cc; }
-.badge.on { background: #fef0f0; border-color: #fbc4c4; }
-.badge.on .s { background: #f56c6c; }
+.cond .name { font-size: 13px; color: var(--tv-text-secondary); margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
+.bar { height: 8px; background: var(--tv-bg-hover); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 4px; background: var(--tv-text-muted); }
+.bar.pass i { background: var(--tv-down); }
+.bar.warn i { background: var(--tv-warn); }
+.badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--tv-border); border-radius: 16px; padding: 5px 14px; font-size: 13px; margin: 0 8px 8px 0; background: var(--tv-bg-inset); }
+.badge .s { width: 8px; height: 8px; border-radius: 50%; background: var(--tv-text-muted); }
+.badge.on { background: var(--tv-up-bg); border-color: var(--tv-up); }
+.badge.on .s { background: var(--tv-up); }
 .scroll-x { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { text-align: left; color: #909399; font-weight: 500; padding: 8px 7px; border-bottom: 1px solid #ebeef5; background: #fafafa; white-space: nowrap; }
-td { padding: 8px 7px; border-bottom: 1px solid #f2f6fc; white-space: nowrap; }
+th { text-align: left; color: var(--tv-text-secondary); font-weight: 500; padding: 8px 7px; border-bottom: 1px solid var(--tv-border); background: var(--tv-bg-inset); white-space: nowrap; }
+td { padding: 8px 7px; border-bottom: 1px solid var(--tv-border); white-space: nowrap; }
 td.wrap { white-space: normal; min-width: 150px; }
 /* 进场/出场一格两行:日期上、价格下。并排写要 170px,叠起来 90px 就够——
    正是这两列把整张表顶出屏幕,逼出横向滚动条。 */
 .d2 { line-height: 1.35; }
-.pill { font-size: 12px; padding: 1px 8px; border-radius: 4px; background: #f4f4f5; color: #606266; }
-.pill.au { background: #fdf6ec; color: #b88230; }
-.pill.ag { background: #f4f4f5; color: #606266; }
-.pill.win { background: #f0f9eb; color: #67c23a; }
-.pill.loss { background: #fef0f0; color: #f56c6c; }
-.pill.holding { background: #ecf5ff; color: #409eff; }
-.pill.relay { background: #fdf2e9; color: #e6a23c; margin-left: 4px; cursor: help; }
+.pill { font-size: 12px; padding: 1px 8px; border-radius: 4px; background: var(--tv-bg-inset); color: var(--tv-text-secondary); }
+.pill.au { background: var(--tv-warn-bg); color: var(--tv-warn); }
+.pill.ag { background: var(--tv-bg-inset); color: var(--tv-text-secondary); }
+/* 红涨绿跌:止盈红、止损/亏损绿(全站统一,与收益列的 red/green 同一套语义)。 */
+.pill.win { background: var(--tv-up-bg); color: var(--tv-up); }
+.pill.loss { background: var(--tv-down-bg); color: var(--tv-down); }
+.pill.holding { background: var(--tv-blue-bg); color: var(--tv-blue); }
+.pill.relay { background: var(--tv-warn-bg); color: var(--tv-warn); margin-left: 4px; cursor: help; }
+/* 警报历史的类型标签:警示语义,红系(与盈亏 pill 区分开)。 */
+.pill.alarm { background: var(--tv-up-bg); color: var(--tv-up); }
 .alert-history-title { margin-top: 28px; }
 .gauge { display: flex; align-items: center; gap: 14px; }
 .gwrap { flex: 1; }
 .gtrack { height: 10px; border-radius: 5px; position: relative;
-  background: linear-gradient(90deg, #f56c6c 0 14%, #e6a23c 14% 24%, #67c23a 24% 62%, #e6a23c 62% 78%, #f56c6c 78% 100%); }
-.gneedle { position: absolute; top: -5px; width: 2.5px; height: 20px; background: #303133; border-radius: 2px; }
-.gscale { display: flex; justify-content: space-between; color: #909399; font-size: 11px; margin-top: 4px; }
-.footnote { color: #c0c4cc; font-size: 12px; margin-top: 6px; }
-.rule-line { padding: 7px 0; border-bottom: 1px dashed #ebeef5; display: flex; gap: 14px; }
-.rule-line .lab { color: #909399; width: 80px; flex-shrink: 0; }
+  background: linear-gradient(90deg, var(--tv-up) 0 14%, var(--tv-warn) 14% 24%, var(--tv-down) 24% 62%, var(--tv-warn) 62% 78%, var(--tv-up) 78% 100%); }
+.gneedle { position: absolute; top: -5px; width: 2.5px; height: 20px; background: var(--tv-text); border-radius: 2px; }
+.gscale { display: flex; justify-content: space-between; color: var(--tv-text-secondary); font-size: 11px; margin-top: 4px; }
+.footnote { color: var(--tv-text-muted); font-size: 12px; margin-top: 6px; }
+.rule-line { padding: 7px 0; border-bottom: 1px dashed var(--tv-border); display: flex; gap: 14px; }
+.rule-line .lab { color: var(--tv-text-secondary); width: 80px; flex-shrink: 0; }
 </style>

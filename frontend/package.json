@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:proddata": "vite --host 0.0.0.0 --mode proddata",
     "build": "vue-tsc --noEmit && vite build",
     "lint": "vue-tsc --noEmit",
     "test": "vitest run"

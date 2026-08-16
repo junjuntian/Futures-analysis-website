@@ -30,6 +30,12 @@ vi.mock('echarts/components', () => ({
   MarkLineComponent: {}, TooltipComponent: {}
 }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: {}, SVGRenderer: {} }))
+// 导出底色跟随主题 token；mock 锁定浅色 cardBg，断言不依赖测试环境的主题缺省值。
+vi.mock('../chartTheme', () => ({
+  chartTokens: () => ({ cardBg: '#ffffff' }),
+  tooltipStyle: () => ({}),
+  sliderStyle: () => ({})
+}))
 
 class ResizeObserverStub {
   observe = vi.fn()
@@ -52,7 +58,7 @@ describe('SpreadChart export', () => {
 
     expect(charts.canvas.setOption).toHaveBeenCalledOnce()
     expect(charts.canvas.getDataURL).toHaveBeenCalledWith({
-      type: 'png', pixelRatio: 2, backgroundColor: '#fff'
+      type: 'png', pixelRatio: 2, backgroundColor: '#ffffff'
     })
     expect(charts.canvas.dispose).toHaveBeenCalledOnce()
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce()
@@ -66,7 +72,7 @@ describe('SpreadChart export', () => {
     await nextTick()
     ;(wrapper.vm as unknown as { download: (type: 'svg') => void }).download('svg')
 
-    expect(charts.svg.getDataURL).toHaveBeenCalledWith({ type: 'svg', backgroundColor: '#fff' })
+    expect(charts.svg.getDataURL).toHaveBeenCalledWith({ type: 'svg', backgroundColor: '#ffffff' })
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledOnce()
     await wrapper.unmount()
   })

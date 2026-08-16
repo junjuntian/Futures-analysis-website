@@ -13,6 +13,7 @@ import {
   type SeatNetPositionResponse
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
+import { chartTokens, sliderStyle, tooltipStyle } from '../chartTheme'
 import { offBoardBands } from '../offBoard'
 import { searchHit } from '../pinyin'
 import { lastYearStartIndex } from '../spreadCharts'
@@ -252,7 +253,8 @@ const bands = computed(() =>
 )
 const incompleteMark = computed(() => ({
   silent: true,
-  itemStyle: { color: 'rgba(230, 162, 60, 0.16)' },
+  // 掉榜底色：强调色加 16% 透明度（0x29），跟随主题。
+  itemStyle: { color: `${chartTokens().accent}29` },
   label: { show: false },
   data: bands.value
 }))
@@ -260,8 +262,6 @@ const incompleteDays = computed(
   () => days.value.filter((day) => day.missing_members.length > 0).length
 )
 
-const UP = '#c0392b'
-const DOWN = '#178a5a'
 const lots = (value: number) => `${value.toLocaleString('zh-CN')} 手`
 const price = (value: number) => value.toFixed(2)
 
@@ -273,19 +273,20 @@ function row(label: string, value: string, color?: string) {
 function tooltipBody(index: number, head: string[] = []) {
   const day = days.value[index]
   if (!day) return ''
+  const tokens = chartTokens()
   const parts = [`<div style="margin-bottom:4px"><b>${day.trade_date}</b></div>`, ...head]
 
   const long = Number(day.long_lots)
   const short = Number(day.short_lots)
-  if (long > 0) parts.push(row('多单', lots(long), UP))
-  if (short > 0) parts.push(row('空单', lots(short), DOWN))
+  if (long > 0) parts.push(row('多单', lots(long), tokens.up))
+  if (short > 0) parts.push(row('空单', lots(short), tokens.down))
 
   const net = Number(day.net_position)
   parts.push(
     row(
       '合计净持仓',
       lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
-      net === 0 ? undefined : net > 0 ? UP : DOWN
+      net === 0 ? undefined : net > 0 ? tokens.up : tokens.down
     )
   )
   parts.push(row('计入席位', `${day.counted_members.length} 家`))
@@ -294,7 +295,7 @@ function tooltipBody(index: number, head: string[] = []) {
     parts.push(
       row(
         '当日掉榜',
-        `<span style="color:#e6a23c">${day.missing_members.join('、')}（未计入）</span>`
+        `<span style="color:${tokens.accent}">${day.missing_members.join('、')}（未计入）</span>`
       )
     )
   }
@@ -329,77 +330,104 @@ const zoom = computed(() => [
     endValue: Math.max(dates.value.length - 1, 0),
     height: 26,
     bottom: 8,
-    borderColor: '#e2e1dd',
-    fillerColor: 'rgba(120,150,200,0.12)',
-    handleStyle: { color: '#b9b8b4' },
-    dataBackground: {
-      lineStyle: { color: '#c9c8c4' },
-      areaStyle: { color: '#eeeeec' }
-    },
+    ...sliderStyle(),
     labelFormatter: (value: number) => dates.value[Math.round(value)] ?? ''
   }
 ])
 const GRID_BOTTOM = 62
 
-const priceOption = computed<EChartsOption>(() => ({
-  grid: { left: 60, right: 24, top: 24, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  tooltip: {
-    ...tooltip,
-    formatter: (params: unknown) => {
-      const index = axisIndex(params)
-      if (index === null) return ''
-      // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
-      const bar = candles.value[index]
-      const head = Array.isArray(bar)
-        ? [
-            row('开盘', price(bar[0])),
-            row('收盘', price(bar[1])),
-            row('最低', price(bar[2])),
-            row('最高', price(bar[3]))
-          ]
-        : [row('行情', '当日无 K 线')]
-      return tooltipBody(index, head)
-    }
-  },
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  yAxis: { type: 'value' as const, scale: true },
-  series: [
-    {
-      name: 'K线',
-      type: 'candlestick' as const,
-      data: candles.value as unknown as CandlestickSeriesOption['data'],
-      markArea: incompleteMark.value
-    }
-  ]
-}))
+const priceOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 60, right: 24, top: 24, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: {
+      ...tooltip,
+      ...tooltipStyle(),
+      formatter: (params: unknown) => {
+        const index = axisIndex(params)
+        if (index === null) return ''
+        // ECharts 的 K 线原样是 [开, 收, 低, 高]，别按图上的高低顺序读。
+        const bar = candles.value[index]
+        const head = Array.isArray(bar)
+          ? [
+              row('开盘', price(bar[0])),
+              row('收盘', price(bar[1])),
+              row('最低', price(bar[2])),
+              row('最高', price(bar[3]))
+            ]
+          : [row('行情', '当日无 K 线')]
+        return tooltipBody(index, head)
+      }
+    },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      scale: true,
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: 'K线',
+        type: 'candlestick' as const,
+        // 红涨绿跌（国内惯例）：阳线 up、阴线 down。
+        itemStyle: {
+          color: tokens.up,
+          borderColor: tokens.up,
+          color0: tokens.down,
+          borderColor0: tokens.down
+        },
+        data: candles.value as unknown as CandlestickSeriesOption['data'],
+        markArea: incompleteMark.value
+      }
+    ]
+  }
+})
 
-const netOption = computed<EChartsOption>(() => ({
-  grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
-  dataZoom: zoom.value,
-  tooltip,
-  xAxis: { type: 'category' as const, data: dates.value, axisLabel: { hideOverlap: true } },
-  // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
-  yAxis: { type: 'value' as const },
-  series: [
-    {
-      name: '合计净持仓',
-      type: 'line' as const,
-      showSymbol: false,
-      data: netSeries.value,
-      lineStyle: { color: UP, width: 2 },
-      itemStyle: { color: UP },
-      markLine: {
-        silent: true,
-        symbol: 'none',
-        lineStyle: { color: '#909399', type: 'dashed' as const },
-        data: [{ yAxis: 0 }],
-        label: { show: false }
-      },
-      markArea: incompleteMark.value
-    }
-  ]
-}))
+const netOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...tooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    // scale 不能开：净持仓要看得出离零轴多远，多空翻向也全靠零轴分界。
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: '合计净持仓',
+        type: 'line' as const,
+        showSymbol: false,
+        data: netSeries.value,
+        lineStyle: { color: tokens.up, width: 2 },
+        itemStyle: { color: tokens.up },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          lineStyle: { color: tokens.baseline, type: 'dashed' as const },
+          data: [{ yAxis: 0 }],
+          label: { show: false }
+        },
+        markArea: incompleteMark.value
+      }
+    ]
+  }
+})
 
 /** 最新一天的摘要，常驻在标题旁——不必悬停就知道现在什么情况。 */
 const latest = computed(() => {
@@ -588,7 +616,7 @@ const priceSeriesNote = computed(() => {
 }
 .lede {
   margin: 0;
-  color: #606266;
+  color: var(--tv-text-secondary);
 }
 .control-row {
   display: flex;
@@ -603,11 +631,11 @@ const priceSeriesNote = computed(() => {
   flex-wrap: wrap;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid #ebeef5;
+  border-top: 1px solid var(--tv-border);
 }
 .favorites-label {
   font-weight: 600;
-  color: #303133;
+  color: var(--tv-text);
 }
 .favorite-tag {
   cursor: pointer;
@@ -620,14 +648,14 @@ const priceSeriesNote = computed(() => {
 }
 .note {
   margin: 12px 0 0;
-  color: #606266;
+  color: var(--tv-text-secondary);
   line-height: 1.7;
 }
 .muted {
-  color: #909399;
+  color: var(--tv-text-muted);
 }
 .warn {
-  color: #e6a23c;
+  color: var(--tv-warn);
 }
 .panel-head {
   display: flex;
@@ -641,7 +669,7 @@ const priceSeriesNote = computed(() => {
 }
 .series-note {
   font-size: 13px;
-  color: #909399;
+  color: var(--tv-text-muted);
 }
 .latest {
   display: flex;
@@ -649,18 +677,18 @@ const priceSeriesNote = computed(() => {
   gap: 14px;
   flex-wrap: wrap;
   font-size: 13px;
-  color: #606266;
+  color: var(--tv-text-secondary);
 }
 .latest-date {
   font-weight: 600;
-  color: #303133;
+  color: var(--tv-text);
 }
 .latest .up {
-  color: #c0392b;
+  color: var(--tv-up);
   font-weight: 600;
 }
 .latest .down {
-  color: #178a5a;
+  color: var(--tv-down);
   font-weight: 600;
 }
 </style>

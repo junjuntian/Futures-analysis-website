@@ -93,6 +93,12 @@ function positionLabel(item: SpreadMonitorItem) {
 }
 
 // —— 机构资金 ——
+/** 引擎状态是英文枚举,卡片上要说中文。名单外的值原样显示,不猜。 */
+const STATE_LABELS: Record<string, string> = {
+  holding: '持有中',
+  watching: '观望中',
+  armed: '待触发'
+}
 const marketCards = computed(() => {
   const markets = signals.value?.markets
   if (!markets) return []
@@ -177,7 +183,7 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
             <div class="ov-head">
               <span>机构资金 · {{ market.name }}</span>
               <el-tag :type="market.position ? 'warning' : 'info'" size="small" effect="light">
-                {{ market.position ? '持有中' : market.state }}
+                {{ market.position ? '持有中' : (STATE_LABELS[market.state] ?? market.state) }}
               </el-tag>
             </div>
           </template>
@@ -352,8 +358,8 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
   white-space: nowrap;
 }
 /* 国内看盘惯例：红涨绿跌。 */
-.ov-row .v.up { color: #c0392b; }
-.ov-row .v.down { color: #27ae60; }
+.ov-row .v.up { color: var(--tv-up); }
+.ov-row .v.down { color: var(--tv-down); }
 .ov-empty {
   font-size: 12.5px;
   color: var(--el-text-color-secondary);
