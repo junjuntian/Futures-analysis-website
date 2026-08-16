@@ -1355,8 +1355,22 @@ def build_payload(engines: dict, ratio_s: pd.Series, data_date: pd.Timestamp,
         "stats": stats,
         "rules": {
             "group": RULES["group"],
-            "buy": "加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位 → 机构成本±5元区间挂单(10日有效);重挫共振(仅黄金,伦敦金口径:±10%分轮内自轮高回撤触及15%后的共振)免起点条件、次日开盘市价买入",
-            "sell": f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘) / 进场价-{int(RULES['stop_loss']*100)}%盘中止损",
+            "buy": (
+                "首进场:加权增多分数 ≥ 门槛 + 距60日低点<12% + 七席位净仓<60分位"
+                " → 机构成本±5元区间挂单(10日有效);"
+                "中继再进场:出场后七席位再共振即免起点条件市价接回"
+                f"——须收盘在{RULES['relay_trend_ma']}日均线上方(DEC-058)"
+                f"且触发席位≥{RULES['relay_min_seats']}家(DEC-059),跑路警报后"
+                f"{RULES['flee_suppress_days']}日禁中继;"
+                "重挫共振(仅黄金,伦敦金口径:±10%分轮内自轮高回撤触及15%后的共振)"
+                "免起点条件、次日开盘市价买入"
+            ),
+            "sell": (
+                f"七席位连续{RULES['fade_days']}日无增多事件(次日开盘)"
+                f"——仅黄金:消退时{RULES['hold_seat']}净多>"
+                f"{RULES['hold_seat_min']}手则继续持有,其离场次日恢复卖出(DEC-061)"
+                f" / 进场价-{int(RULES['stop_loss']*100)}%盘中止损(无条件)"
+            ),
             "cond_seats": RULES["cond_seats"],
         },
     }
