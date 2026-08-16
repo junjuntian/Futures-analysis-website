@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
+    time::{Duration, Instant},
 };
 use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::warn;
@@ -39,7 +40,22 @@ use uuid::Uuid;
 pub struct SpreadAnalyticsState {
     pub auth: Arc<AuthState>,
     pub provider: Arc<dyn SpreadSeriesProvider>,
+    /// 总览报告表响应缓存,键=(工作区, 交易日),值=(写入时刻, 已序列化响应)。
+    ///
+    /// 报告表下半的筹码列每次要对七家席位×金银跑全历史成本推算(实测十几秒,
+    /// 这是"与席位页同引擎、不落表"设计的物理成本)。2026-08-16 运营者拍板
+    /// 方案 A:15 分钟 TTL 缓存——每天首开慢一次,其后毫秒级;晚间补采落库
+    /// 最多 15 分钟内可见。写端点(压力位/席位组)保存后整体失效。缓存的是
+    /// serde_json::Value 而不是响应结构体,免去给整棵响应类型树加 Clone。
+    pub report_cache: ReportCache,
 }
+
+/// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日)。
+type ReportCache = Arc<tokio::sync::RwLock<HashMap<(Uuid, Date), (Instant, serde_json::Value)>>>;
+
+/// 报告表缓存有效期。数据一天只在盘后两轮采集时变,15 分钟是"补采落库后
+/// 多久能在页面看到"的上限,不是精度要求。
+const REPORT_CACHE_TTL: Duration = Duration::from_secs(900);
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SpreadErrorBody {
@@ -1570,6 +1586,17 @@ pub async fn query_overview_report(
             .ok_or(SpreadApiError::Internal(request_id))?,
     };
 
+    // 缓存命中直接返回(设计与失效语义见 report_cache 字段注释)。
+    if let Some((cached_at, value)) = state
+        .report_cache
+        .read()
+        .await
+        .get(&(workspace, trade_date))
+        && cached_at.elapsed() < REPORT_CACHE_TTL
+    {
+        return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
+    }
+
     let stored = database::spread_analytics::load_report_seat_groups(&state.auth.pool, workspace)
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
@@ -1741,20 +1768,24 @@ pub async fn query_overview_report(
             .await
             .map_err(|_| SpreadApiError::Internal(request_id))?;
 
-    Ok(Json(ApiResponse::new(
-        OverviewReportResponse {
-            trade_date: trade_date.to_string(),
-            levels: levels.as_ref().map(|(_, cells)| cells.clone()),
-            levels_source_date: levels.as_ref().map(|(date, _)| date.to_string()),
-            seat_groups: groups
-                .into_iter()
-                .map(|(group_key, members)| ReportSeatGroup { group_key, members })
-                .collect(),
-            rows,
-        },
-        request_id,
-    ))
-    .into_response())
+    let response = OverviewReportResponse {
+        trade_date: trade_date.to_string(),
+        levels: levels.as_ref().map(|(_, cells)| cells.clone()),
+        levels_source_date: levels.as_ref().map(|(date, _)| date.to_string()),
+        seat_groups: groups
+            .into_iter()
+            .map(|(group_key, members)| ReportSeatGroup { group_key, members })
+            .collect(),
+        rows,
+    };
+    let value =
+        serde_json::to_value(&response).map_err(|_| SpreadApiError::Internal(request_id))?;
+    state
+        .report_cache
+        .write()
+        .await
+        .insert((workspace, trade_date), (Instant::now(), value.clone()));
+    Ok(Json(ApiResponse::new(value, request_id)).into_response())
 }
 
 #[utoipa::path(
@@ -1814,6 +1845,8 @@ pub async fn save_overview_report_levels(
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
+    // 压力位进了响应上半,保存后整体失效缓存,立即可见。
+    state.report_cache.write().await.clear();
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1867,6 +1900,8 @@ pub async fn save_overview_report_seat_groups(
     )
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
+    // 席位组决定响应下半的全部行,保存后整体失效缓存。
+    state.report_cache.write().await.clear();
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
