@@ -1,5 +1,5 @@
 @echo off
-rem 本地样式 + 生产数据的开发模式(视觉改版验收用)。
-rem 代理直连生产 IP 的原因与坑见 vite.config.ts 顶部注释。
+rem Local styles + production data proxy. See vite.config.ts header comments.
+rem ASCII only in this file: cmd parses UTF-8 Chinese as GBK garbage and breaks.
 cd /d "%~dp0.."
 npm run dev:proddata

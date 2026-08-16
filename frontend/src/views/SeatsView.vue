@@ -277,7 +277,11 @@ const fmt = (value: number) => value.toLocaleString('zh-CN')
 
 // —— 建仓过程的三联图 ——
 const dates = computed(() => days.value.map((day) => day.trade_date))
-const netSeries = computed(() => days.value.map((day) => num(day.net_position)))
+// 掉榜且反推不出的日子按 0 画(2026-08-16 运营者拍板:折线不留缺口,回测
+// 口径同引擎的「掉榜=不在场」)。**0 只进这条展示曲线**:掉榜底色标注、
+// 小窗「按 0 计入」说明、成本与盈亏的三态口径(掉榜=未知)全部保持——
+// 把 0 喂给成本链曾造出 16 万行假盈亏(DEC-048),别再来一次。
+const netSeries = computed(() => days.value.map((day) => num(day.net_position) ?? 0))
 const pnlSeries = computed(() => days.value.map((day) => num(day.daily_pnl)))
 const cumulativeSeries = computed(() => days.value.map((day) => num(day.cumulative_pnl)))
 
@@ -398,7 +402,7 @@ function tooltipBody(index: number, head: string[] = []) {
 
   const net = num(day.net_position)
   if (net === null) {
-    parts.push(row('净持仓', '掉出前 20 · 未知'))
+    parts.push(row('净持仓', '掉出前 20 · 按 0 计入(实际低于当日榜单门槛)'))
   } else {
     parts.push(row('净持仓', lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
       net === 0 ? undefined : net > 0 ? tokens.up : tokens.down))
