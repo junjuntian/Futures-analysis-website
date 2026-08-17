@@ -1,5 +1,15 @@
 # 最新交接状态
 
+- **🎉 DEC-066 席位契约扩列 change 已上线并验证(2026-08-17 深夜,生产=`46149cc`,
+  deploy 32026081005)**:病根=seat_positions_v1 契约无 change 列,东财增减在归一化
+  被丢(akshare 老坑二次发作)。契约三处同批扩列(normalize SEAT_FIELDS+Rust 域
+  SEAT_DATASET_FIELDS+load-seats-direct stage/insert/upsert),pivot 透传三个
+  *_CHANGE(_signed_integer:可负可零);infer-offboard 纳入 eastmoney(DCE)+同日
+  去重层(官方>东财>三禾)。**部署后手动重采:东财 08-17 增减 1,002/1,020 行入库
+  (回看窗把 08-14 也补了);恒等式检验 635/635=100.000% 放行;DCE 掉榜反推恢复产出
+  (08-14 反推 81 行/08-13 103 行)**。历史(08-06~08-13)东财 change 回填待运营者
+  要时按日重采。collector 114 测试全过(新增 change 透传测试含负值与零)。
+
 - **DEC-065 推算持仓四面打标 + 品种下拉改历史口径已上线(2026-08-17 深夜,生产=`1b92a89`,
   deploy 32024276647)**:回榜反推行(reboard_inferred)在建仓过程(小窗行+淡底色带 7%,
   与掉榜带 16% 区分)/席位持仓表(行级「推算·未上榜」标)/净持仓页(inferred_members
