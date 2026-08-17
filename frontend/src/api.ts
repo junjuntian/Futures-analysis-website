@@ -486,6 +486,8 @@ export function getSeatBuilding(
 /** 一个品种上的昨 / 今净持仓与筹码。`null` = 那天不在榜上，**不是零**。 */
 export interface ReportSeatCell {
   previous_net: string | null
+  /** previous_net 含反推成分:该席位前一日掉榜,值由今日「持仓−增减」反推。 */
+  previous_net_inferred: boolean
   net: string | null
   /** 筹码 = 净持仓成本（推算），与席位页同一个引擎算出的同一个数。合计行为 null。 */
   cost: string | null

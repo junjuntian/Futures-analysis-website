@@ -162,6 +162,12 @@ async function saveSeats() {
 // —— 下半部分的显示 ——
 
 /** 手数。`null` 是「那天不在榜上」，不是零——显示成 0 就等于说他清仓了。 */
+// 掉榜日的昨持仓反推(运营者 2026-08-17 拍板):昨日掉榜、今日回榜带增减时,
+// 昨持仓 = 今持仓 − 增减(交易所增减相对会员全量仓算,回榜反推的既有口径)。
+// 打「推」字标与真数区分;反推不出的仍显示横杠。
+const INFERRED_HINT =
+  '该席位前一日掉榜(榜单前20没有它),此值由今日「持仓−增减」反推;合计行含反推成分也打此标。'
+
 function lots(value: string | null) {
   if (value === null) return '—'
   const number = Number(value)
@@ -357,11 +363,17 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
           <tbody>
             <tr v-for="row in report.rows" :key="row.label" :class="{ total: row.is_total }">
               <th class="row-label">{{ row.label }}</th>
-              <td :class="tone(row.gold.previous_net)">{{ lots(row.gold.previous_net) }}</td>
+              <td :class="tone(row.gold.previous_net)">
+                {{ lots(row.gold.previous_net) }}
+                <sup v-if="row.gold.previous_net_inferred" class="inferred" :title="INFERRED_HINT">推</sup>
+              </td>
               <td :class="tone(row.gold.net)">{{ lots(row.gold.net) }}</td>
               <td v-if="row.is_total" :class="moveTone(row, 'gold')">{{ moveLabel(row, 'gold') }}</td>
               <td v-else class="chips">{{ chips(row.gold.cost, 'AU') }}</td>
-              <td :class="tone(row.silver.previous_net)">{{ lots(row.silver.previous_net) }}</td>
+              <td :class="tone(row.silver.previous_net)">
+                {{ lots(row.silver.previous_net) }}
+                <sup v-if="row.silver.previous_net_inferred" class="inferred" :title="INFERRED_HINT">推</sup>
+              </td>
               <td :class="tone(row.silver.net)">{{ lots(row.silver.net) }}</td>
               <td v-if="row.is_total" :class="moveTone(row, 'silver')">{{ moveLabel(row, 'silver') }}</td>
               <td v-else class="chips" :title="chipsFull(row.silver.cost)">
@@ -496,5 +508,12 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
   font-size: 12px;
   line-height: 1.7;
   color: var(--tv-text-secondary);
+}
+.inferred {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--tv-text-muted);
+  cursor: help;
+  margin-left: 1px;
 }
 </style>

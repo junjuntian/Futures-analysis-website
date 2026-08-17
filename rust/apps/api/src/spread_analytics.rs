@@ -1461,11 +1461,12 @@ pub struct ReportSeatRow {
 /// 一个品种上的昨 / 今净持仓与筹码。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ReportSeatCell {
-    /// 上一个有数据的交易日的净持仓。**`None` = 那天他不在榜上，不是零。**
+    /// 前一交易日净仓。掉榜且反推不出时为空(三态口径,显示横杠)。
     pub previous_net: Option<String>,
+    /// previous_net 里含有反推成分(该席位前一日掉榜,值由当日「持仓−增减」反推;
+    /// 合计行只要有一家是反推的就为 true)。界面据此打「推」字标。
+    pub previous_net_inferred: bool,
     pub net: Option<String>,
-    /// 筹码 = 净持仓成本（推算），与席位页同一个引擎算出来的同一个数。
-    /// 净多按多头腿加权、净空按空头腿加权；两边都有时取手数大的那一腿。
     pub cost: Option<String>,
 }
 
@@ -1738,20 +1739,25 @@ pub async fn query_overview_report(
     let rows: Vec<ReportSeatRow> = report_row_plan(&groups)
         .into_iter()
         .map(|(label, members, is_total)| {
-            let cell = |instrument: &str| ReportSeatCell {
-                previous_net: net_of(&yesterday, &members, instrument),
-                net: net_of(&today, &members, instrument),
-                // 合计行不给筹码：把几家成本不同的仓位平均成一个数没有意义，
-                // 运营者那张表在合计行放的也是「加/减」方向而不是价。
-                cost: (!is_total)
-                    .then(|| {
-                        members.first().and_then(|member| {
-                            costs
-                                .get(&(member.clone(), instrument.to_string()))
-                                .map(|value| value.round_dp(4).to_string())
+            let cell = |instrument: &str| {
+                let (previous_net, previous_net_inferred) =
+                    report_prev_net(&yesterday, &today, &members, instrument);
+                ReportSeatCell {
+                    previous_net,
+                    previous_net_inferred,
+                    net: net_of(&today, &members, instrument),
+                    // 合计行不给筹码：把几家成本不同的仓位平均成一个数没有意义，
+                    // 运营者那张表在合计行放的也是「加/减」方向而不是价。
+                    cost: (!is_total)
+                        .then(|| {
+                            members.first().and_then(|member| {
+                                costs
+                                    .get(&(member.clone(), instrument.to_string()))
+                                    .map(|value| value.round_dp(4).to_string())
+                            })
                         })
-                    })
-                    .flatten(),
+                        .flatten(),
+                }
             };
             ReportSeatRow {
                 gold: cell("AU"),
@@ -3257,6 +3263,70 @@ mod monitor_tests {
         assert_eq!(monitor_turn(None, Some(1.0), Some(0.0)), None);
     }
 
+    fn net_row(
+        member: &str,
+        instrument: &str,
+        net: &str,
+        inferred: Option<&str>,
+        inferable: bool,
+    ) -> database::spread_analytics::ReportNetRow {
+        database::spread_analytics::ReportNetRow {
+            member: member.to_string(),
+            instrument: instrument.to_string(),
+            net_position: net.to_string(),
+            inferred_prev: inferred.map(str::to_string),
+            inferable,
+        }
+    }
+
+    #[test]
+    fn a_reboard_day_backfills_yesterday_from_todays_change() {
+        // 高盛 2026-08-17 实例:前一日白银掉榜(昨无行),今天回榜空 2364、增 14
+        // → 反推昨净仓 −2350,并打「推」标。
+        let today = vec![net_row("高盛期货", "AG", "-2364", Some("-2350"), true)];
+        let (value, inferred) = report_prev_net(&[], &today, &["高盛期货".to_string()], "AG");
+        assert_eq!(value.as_deref(), Some("-2350"));
+        assert!(inferred);
+    }
+
+    #[test]
+    fn a_missing_change_poisons_the_inference() {
+        // 任何一条腿的增减缺失,反推作废 —— 显示横杠,不显示半截和。
+        let today = vec![net_row("高盛期货", "AG", "-2364", Some("-2350"), false)];
+        let (value, inferred) = report_prev_net(&[], &today, &["高盛期货".to_string()], "AG");
+        assert_eq!(value, None);
+        assert!(!inferred);
+    }
+
+    #[test]
+    fn an_actual_yesterday_row_beats_the_inference() {
+        // 昨天真在榜上就用真数,反推只补缺口,不覆盖事实。
+        let yesterday = vec![net_row("中信期货", "AG", "-26944", None, false)];
+        let today = vec![net_row("中信期货", "AG", "-25222", Some("-99999"), true)];
+        let (value, inferred) =
+            report_prev_net(&yesterday, &today, &["中信期货".to_string()], "AG");
+        assert_eq!(value.as_deref(), Some("-26944"));
+        assert!(!inferred);
+    }
+
+    #[test]
+    fn a_group_mixes_actual_and_inferred_and_flags_it() {
+        // 机构合计行:六家有真数、高盛靠反推 —— 合计给和,并因含反推成分打标。
+        let yesterday = vec![net_row("中财期货", "AG", "11234", None, false)];
+        let today = vec![
+            net_row("中财期货", "AG", "11330", Some("11200"), true),
+            net_row("高盛期货", "AG", "-2364", Some("-2350"), true),
+        ];
+        let members = vec!["中财期货".to_string(), "高盛期货".to_string()];
+        let (value, inferred) = report_prev_net(&yesterday, &today, &members, "AG");
+        assert_eq!(value.as_deref(), Some("8884")); // 11234 + (−2350)
+        assert!(inferred);
+        // 完全没数的品种照旧未知。
+        let (none, flag) = report_prev_net(&yesterday, &today, &members, "AU");
+        assert_eq!(none, None);
+        assert!(!flag);
+    }
+
     #[test]
     fn the_entry_day_is_the_day_the_position_crosses_the_line() {
         // FG2701/SA2701 生产序列:08-04 位置 1.000(带内,未拐头)→ 08-05 退到
@@ -3602,6 +3672,42 @@ fn monitor_turn(pos: Option<f64>, hi20: Option<f64>, lo20: Option<f64>) -> Optio
 /// 今天成立」只可能因为位置今天穿线,不可能因为 band 今天才进窗(自相矛盾)。
 /// 判定线附近的抖动(穿线→弹回→再穿线)会再亮一次——没上车的人得到第二次提示,
 /// 已上车的人无视即可。
+/// 报告表「昨持仓」的合成:实际昨行优先;席位整日掉榜但当日各腿增减齐全时,
+/// 用「持仓 − 增减」的反推值补上(运营者 2026-08-17 拍板:回榜日能反推的要写进
+/// 报告表);两者都没有的席位不计入,一家都没有 → 整格未知(横杠)。
+/// 返回 (值, 是否含反推成分)。
+fn report_prev_net(
+    yesterday: &[database::spread_analytics::ReportNetRow],
+    today: &[database::spread_analytics::ReportNetRow],
+    members: &[String],
+    instrument: &str,
+) -> (Option<String>, bool) {
+    let mut total = Decimal::ZERO;
+    let mut seen = false;
+    let mut inferred_used = false;
+    for name in members {
+        if let Some(row) = yesterday
+            .iter()
+            .find(|row| row.instrument == instrument && &row.member == name)
+        {
+            total += parse_decimal(&row.net_position);
+            seen = true;
+            continue;
+        }
+        let inferred = today
+            .iter()
+            .find(|row| row.instrument == instrument && &row.member == name && row.inferable);
+        if let Some(row) = inferred
+            && let Some(raw) = row.inferred_prev.as_deref()
+        {
+            total += parse_decimal(raw);
+            seen = true;
+            inferred_used = true;
+        }
+    }
+    (seen.then(|| total.normalize().to_string()), inferred_used)
+}
+
 fn monitor_turn_is_new(turn: Option<&str>, prev_pair: Option<f64>) -> bool {
     match turn {
         Some("high") => prev_pair.is_some_and(|p| p > 1.0 - TURN_RETREAT),

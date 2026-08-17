@@ -2788,6 +2788,10 @@ pub struct ReportNetRow {
     pub member: String,
     pub instrument: String,
     pub net_position: String,
+    /// 由当日各腿「持仓 − 增减」反推出的前一日净仓。只在当日行上有意义;
+    /// 任何一条腿的增减缺失则整个反推作废(见 SQL 里的吸收律注释)。
+    pub inferred_prev: Option<String>,
+    pub inferable: bool,
 }
 
 /// 报告表要用的「昨 / 今净持仓」。
@@ -2815,7 +2819,7 @@ pub async fn load_report_nets(
              -- 同一条身份键多个来源只取最可信的那个，纪律同 building_days_sql。
              select distinct on (s.instrument, {member_key}, s.contract, s.trade_date, s.rank_type)
                     s.instrument, {member_key} as member_key, s.trade_date,
-                    s.rank_type, s.quantity
+                    s.rank_type, s.quantity, s.change
                from seat_history s
                left join prev p on p.instrument = s.instrument
               where s.workspace_id = $1 and s.instrument = any($2::text[])
@@ -2828,7 +2832,14 @@ pub async fn load_report_nets(
          )
          select member_key as member, instrument, trade_date,
                 (sum(case when rank_type = 'long' then quantity else 0 end)
-                 - sum(case when rank_type = 'short' then quantity else 0 end))::text as net
+                 - sum(case when rank_type = 'short' then quantity else 0 end))::text as net,
+                -- 反推的昨净仓:交易所的 change 相对**会员全量仓**算(回榜反推的既有
+                -- 口径,龙虎榜铁律),所以 quantity − change 就是该腿前一日的真实仓,
+                -- 哪怕前一日掉榜。sum 会跳过 change 为空的行,所以必须配着 inferable
+                -- 用——有一条腿推不出,整个反推作废(吸收律)。
+                (sum(case when rank_type = 'long' then quantity - change
+                          else -(quantity - change) end))::text as inferred_prev,
+                (count(*) filter (where change is null) = 0) as inferable
            from picked
           group by member_key, instrument, trade_date",
         member_key = member_key_sql(),
@@ -2850,6 +2861,8 @@ pub async fn load_report_nets(
             member: row.get("member"),
             instrument: row.get("instrument"),
             net_position: row.get("net"),
+            inferred_prev: row.get("inferred_prev"),
+            inferable: row.get("inferable"),
         };
         if row.get::<Date, _>("trade_date") == trade_date {
             today.push(item);
