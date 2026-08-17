@@ -84,8 +84,12 @@ alter table spread_monitor_daily
 -- 命中数与样本数必须成对且 0 <= 命中 <= 样本、样本 > 0。
 -- 样本为 0 存 NULL 而不是 0:`0/0` 在界面上会变成「0% 回归率」,那是最坏的一种错
 -- ——看着像结论,其实是没有数据。
--- move 按定义非负(它是「最有利那一刻」到起点的距离);drift 可正可负,不设符号约束。
+-- ⚠️ 下面这条 `move >= 0` **是错的**,已由 202608170003 修掉——保留在这里是因为它
+-- 已经在生产执行过,改掉会让文件与真实执行过的内容对不上。错在:低位段的 move =
+-- 后续最高价差 − 起点,历年那一年后续最高仍低于起点时它就是负的(高位段同理)。
+-- 负的 move 是有效信息(「中位年份下压根没回到起点」),不是脏数据。
 alter table spread_monitor_daily
+    drop constraint if exists spread_monitor_daily_revert_pairs_sane,
     add constraint spread_monitor_daily_revert_pairs_sane
         check ((revert_high_hit is null) = (revert_high_n is null)
            and (revert_high_n is null

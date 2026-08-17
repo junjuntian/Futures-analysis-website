@@ -1323,6 +1323,20 @@ mod tests {
             second.matches("add column if not exists").count() == 10,
             "新口径是 5 个数 × 高低两侧"
         );
+        // move 可以为负（低位段历年后续最高仍低于起点时）。202608170002 曾把它约束成
+        // 非负，全量重算时被 check 当场拦下（LH2609/LH2701 低位 move=−45），
+        // 202608170003 修掉了——别再加回来。
+        let third =
+            include_str!("../../../migrations/202608170003_revert_move_may_be_negative.sql");
+        assert!(
+            !third.contains("revert_high_move >= 0") && !third.contains("revert_low_move >= 0"),
+            "move 不是非负的"
+        );
+        assert!(
+            third.contains("drop constraint if exists"),
+            "替换约束必须先 drop if exists，否则重放迁移会撞「约束已存在」"
+        );
+
         for gone in ["revert_low_hit_3", "revert_high_n_10"] {
             assert!(
                 !MONITOR_COLUMNS.contains(gone),
