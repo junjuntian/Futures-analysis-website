@@ -3206,46 +3206,51 @@ mod monitor_tests {
     }
 
     #[test]
-    fn the_revert_band_closest_to_the_threshold_wins() {
-        let bands = [
-            (0.03, Some(28), Some(52)),
-            (0.05, Some(40), Some(80)),
-            (0.10, Some(60), Some(150)),
-        ];
-        // 阈值正好是某一档就取那档。
-        let picked = revert_pick(bands, "low", 0.03).expect("有样本");
-        assert_eq!((picked.hit, picked.n), (28, 52));
-        assert_eq!(picked.threshold, "0.03");
-        assert_eq!(picked.rate, "0.5385");
-        // 阈值落在档位之间取最近的一档 —— 用户把阈值调到 4% 不该让整块统计消失。
-        assert_eq!(
-            revert_pick(bands, "low", 0.04).expect("有样本").threshold,
-            "0.03"
-        );
-        assert_eq!(
-            revert_pick(bands, "low", 0.08).expect("有样本").threshold,
-            "0.10"
-        );
-        assert_eq!(
-            revert_pick(bands, "low", 0.45).expect("有样本").threshold,
-            "0.10"
-        );
+    fn the_revert_stats_carry_all_three_numbers() {
+        // 生产实例：JD2609/JD2701 在 2026-08-14 的高位统计。
+        let s = revert_stats(
+            "high",
+            Some(11),
+            Some(12),
+            Some("101.5".into()),
+            Some("81".into()),
+            Some(12),
+        )
+        .expect("有样本");
+        assert_eq!((s.hit, s.n), (11, 12));
+        assert_eq!(s.rate, "0.9167");
+        assert_eq!(s.move_points.as_deref(), Some("101.5"));
+        assert_eq!(s.drift_points.as_deref(), Some("81"));
+        assert_eq!(s.days, Some(12));
     }
 
     #[test]
-    fn a_band_without_samples_is_skipped_not_shown_as_zero() {
+    fn without_samples_nothing_is_shown_rather_than_zero_percent() {
         // 样本为 0 显示成「0% 回归率」是最坏的一种错：看着像结论，其实是没有数据。
-        let sparse = [
-            (0.03, None, None),
-            (0.05, None, None),
-            (0.10, Some(3), Some(9)),
-        ];
-        let picked = revert_pick(sparse, "high", 0.03).expect("退到有样本的那档");
-        assert_eq!(picked.threshold, "0.10");
-        assert_eq!((picked.hit, picked.n), (3, 9));
-        // 一档都没有就整个不给，页面上不显示这一块。
-        let empty = [(0.03, None, None), (0.05, None, None), (0.10, None, None)];
-        assert!(revert_pick(empty, "high", 0.03).is_none());
+        assert!(revert_stats("high", None, None, None, None, None).is_none());
+        assert!(revert_stats("high", Some(0), Some(0), None, None, None).is_none());
+        // 计数在、点数缺（中位算不出来）时仍然给比率，只是点数留空。
+        let s = revert_stats("low", Some(4), Some(5), None, None, Some(30)).expect("有样本");
+        assert_eq!(s.rate, "0.8000");
+        assert!(s.move_points.is_none());
+    }
+
+    #[test]
+    fn a_high_hit_rate_with_a_negative_drift_is_the_trap_worth_showing() {
+        // JD2612/JD2701：12 年全都曾跌破起点（rate=100%），但一直持到窗口止点的净
+        // 变化中位是 −166 点 —— 方向是反的。只显示 rate 会把这种组合读成安全机会，
+        // 所以 drift 必须和 rate 一起出现在响应里。
+        let s = revert_stats(
+            "high",
+            Some(12),
+            Some(12),
+            Some("88".into()),
+            Some("-166".into()),
+            Some(70),
+        )
+        .expect("有样本");
+        assert_eq!(s.rate, "1.0000");
+        assert_eq!(s.drift_points.as_deref(), Some("-166"));
     }
 }
 
@@ -3439,23 +3444,34 @@ pub struct SpreadMonitorItem {
     pub revert: Option<SpreadRevertStats>,
 }
 
-/// 该月份组合模板历史上，贴到同一侧极值之后价差回归的频率。
+/// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
 ///
-/// **不是这一组合自己的胜率**:主体是月份组合模板(同品种 + 同月份对 + 同年差，
-/// 例如鸡蛋 09-01)跨年拼起来的样本。一个具体合约对一辈子只有一个生命周期，极值段
-/// 两三段，算不出有意义的比率。完整口径见迁移 202608170001。
+/// **不是这一组合自己的胜率**:样本是同品种、同月份对、同年差的模板跨年拼起来的
+/// (例如鸡蛋 09-01)。一个具体合约对一辈子只有一个生命周期,算不出有意义的比率。
+///
+/// 口径(完整版见迁移 202608170002):可交易窗口照 5A 窗口引擎——止点 = 先到期那条
+/// 腿的散户最后交易日;历年按**月-日**对齐,一直看到各自窗口的止点;**曾经触及**
+/// 即算回归,不比终点。只用已走完的年份实例。
+///
+/// **单看 rate 会骗人**,所以三个数一起给:剩余期一长 rate 就趋近 100%(任何波动
+/// 序列在足够长的窗口里几乎必然回落一次);JD2612/JD2701 的 rate 是 100% 而 drift
+/// 中位是 −166 点,方向反的。
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SpreadRevertStats {
-    /// 统计所用的档位("0.03" / "0.05" / "0.10")。取与本次阈值**最接近**的一档，
-    /// 不一定等于本次阈值——界面要把它显示出来，否则读的人会以为是按当前阈值算的。
-    pub threshold: String,
-    /// 与本次报警同侧:"low" 统计低位段，"high" 统计高位段。
+    /// 与本次报警同侧:"low" 统计低位、"high" 统计高位。
     pub side: String,
-    /// 命中段数与样本段数。给原始计数是有意的:「52 段里 28 段」比孤零零一个 54%
-    /// 更能让人看出样本有多薄。
+    /// 曾经触及回归的年数与样本年数。给原始计数是有意的:「12 年里 11 年」比孤零零
+    /// 一个 92% 更能让人看出样本有多薄。不设年数门槛,薄不薄由界面写出来让人自己判断。
     pub hit: i32,
     pub n: i32,
     pub rate: String,
+    /// 最有利那一刻相对起点走了多少**点**(择时平仓的上限)。价差会跨零,所以不给
+    /// 百分比——2019-08-14 起点 −8 点、回落 407 点,百分比是 5000%,毫无意义。
+    pub move_points: Option<String>,
+    /// 一直持到窗口止点的净变化,已标准化成**正数 = 朝回归走**。
+    pub drift_points: Option<String>,
+    /// 历年剩余交易日中位数,给上面几个数一个时间尺度。
+    pub days: Option<i32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -3522,27 +3538,28 @@ fn combined_alert(
     )
 }
 
-/// 三档统计里挑与本次阈值最接近的一档。
-///
-/// 请求阈值是连续的（0~0.5），统计只有 3 / 5 / 10 三档。硬要求相等，用户把阈值调到
-/// 4% 就什么都不显示了——那种「功能时有时无」比数字差一点糟得多。挑中的档位原样
-/// 回给界面，由界面标明。
-fn revert_pick(
-    bands: [(f64, Option<i32>, Option<i32>); 3],
+/// 组装同侧的历年统计。样本为 0(或整块缺失)时返回 None —— 界面不显示这一块，
+/// 而不是显示一个「0% 回归率」：那看着像结论，其实是没有数据。
+fn revert_stats(
     side: &str,
-    threshold: f64,
+    hit: Option<i32>,
+    n: Option<i32>,
+    move_points: Option<String>,
+    drift_points: Option<String>,
+    days: Option<i32>,
 ) -> Option<SpreadRevertStats> {
-    let (band, hit, n) = bands
-        .into_iter()
-        .filter(|(_, hit, n)| hit.is_some() && n.is_some_and(|n| n > 0))
-        .min_by(|a, b| (a.0 - threshold).abs().total_cmp(&(b.0 - threshold).abs()))?;
     let (hit, n) = (hit?, n?);
+    if n <= 0 {
+        return None;
+    }
     Some(SpreadRevertStats {
-        threshold: format!("{band:.2}"),
         side: side.to_string(),
         hit,
         n,
         rate: format!("{:.4}", f64::from(hit) / f64::from(n)),
+        move_points,
+        drift_points,
+        days,
     })
 }
 
@@ -3664,22 +3681,28 @@ pub async fn query_spread_monitor(
                 && has_prev
                 && combined_alert_at(prev_pair, prev_years, threshold).is_none();
 
-            // Option<i32> 是 Copy，这里读不会移动 row，下面照样能把字符串字段移走。
+            // 计数是 Copy、点数是短字符串 clone 一下，都不会妨碍下面把 row 的其余
+            // 字段移走。统计与阈值无关，所以这里不再挑档位，直接按报警侧取。
             let revert = alert.and_then(|side| {
-                let bands = if side == "low" {
-                    [
-                        (0.03, row.revert_low_hit_3, row.revert_low_n_3),
-                        (0.05, row.revert_low_hit_5, row.revert_low_n_5),
-                        (0.10, row.revert_low_hit_10, row.revert_low_n_10),
-                    ]
+                if side == "high" {
+                    revert_stats(
+                        side,
+                        row.revert_high_hit,
+                        row.revert_high_n,
+                        row.revert_high_move.clone(),
+                        row.revert_high_drift.clone(),
+                        row.revert_high_days,
+                    )
                 } else {
-                    [
-                        (0.03, row.revert_high_hit_3, row.revert_high_n_3),
-                        (0.05, row.revert_high_hit_5, row.revert_high_n_5),
-                        (0.10, row.revert_high_hit_10, row.revert_high_n_10),
-                    ]
-                };
-                revert_pick(bands, side, threshold)
+                    revert_stats(
+                        side,
+                        row.revert_low_hit,
+                        row.revert_low_n,
+                        row.revert_low_move.clone(),
+                        row.revert_low_drift.clone(),
+                        row.revert_low_days,
+                    )
+                }
             });
 
             SpreadMonitorItem {

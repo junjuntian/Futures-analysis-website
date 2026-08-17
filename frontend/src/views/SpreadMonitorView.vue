@@ -9,7 +9,7 @@ import {
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
-import { revertPct, revertTone } from '../revert'
+import { driftTone, points, revertPct, revertTone } from '../revert'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
 // 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
@@ -127,8 +127,10 @@ const newCount = computed(() => fired.value.filter((item) => item.is_new_alert).
 
 const REVERT_HINT =
   '同月份组合（同品种 + 同月份对 + 同年差）跨年拼起来的样本，不是这一组合自己的胜率。' +
-  '按当年轨划分极值段，段首日起 20 个交易日看价差有没有朝回归方向走。' +
-  '与页面报警用的合成轨口径可能有出入。'
+  '可交易窗口照 5A 那套：止点＝先到期那条腿的散户最后交易日。历年按月-日对齐，' +
+  '从今天这个日历位置一直看到各自窗口的止点，期间任何一天触及即算回归（不比终点）。' +
+  '只用已走完的年份。剩余期越长回归率越接近 100%，所以要连着「持到期」一起看：' +
+  '它为负说明历年这段最终是朝反方向走的。'
 
 /** 圆点在轨道上的位置。位置可以落在 0~1 之外（历年轨用的是百分位区间），画到边上为止。 */
 function markLeft(track: SpreadMonitorTrack) {
@@ -178,9 +180,10 @@ function openDetail(item: SpreadMonitorItem) {
       </p>
       <p class="caveat">
         <strong>贴到极值不等于会回归。</strong>
-        每组后面的「历史回归」是它自己的成绩单，组与组之间差得很远——
-        2026-08-17 的全样本扫描里，鸡蛋极值段有 45% 朝回归方向走，焦煤只有 29%，
-        后者意味着继续极端化的概率是回归的两倍多。先看那个数字，再决定要不要当机会。
+        每组后面是它自己的历年成绩：从今天这个日历位置起，到该组合退出散户可交易区间为止，
+        历年有几年曾经回落、最有利时能走多少点、一路持到最后又是多少。
+        剩余时间越长「曾经回归」越容易达成，所以别只看那个百分比——
+        <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
       </p>
     </header>
 
@@ -292,14 +295,22 @@ function openDetail(item: SpreadMonitorItem) {
               <div class="revert" :class="revertTone(item.revert)">
                 <span class="rate">{{ revertPct(item.revert) }}</span>
                 <span class="basis">
-                  历史回归 {{ item.revert.hit }}/{{ item.revert.n }} 段
-                  <template v-if="Number(item.revert.threshold) !== threshold">
-                    · 按 {{ Math.round(Number(item.revert.threshold) * 100) }}% 档
+                  {{ item.revert.hit }}/{{ item.revert.n }} 年曾回归
+                  <template v-if="item.revert.days">· 剩 {{ item.revert.days }} 天</template>
+                </span>
+                <span class="basis" v-if="points(item.revert.move_points)">
+                  最有利 {{ points(item.revert.move_points) }}
+                  <template v-if="points(item.revert.drift_points)">
+                    · 持到期
+                    <em :class="driftTone(item.revert.drift_points)">
+                      {{ points(item.revert.drift_points) }}
+                    </em>
                   </template>
+                  点
                 </span>
               </div>
             </el-tooltip>
-            <div v-else class="revert absent">历史样本不足</div>
+            <div v-else class="revert absent">历年无可比样本</div>
 
             <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
           </div>
@@ -602,6 +613,18 @@ function openDetail(item: SpreadMonitorItem) {
   text-align: right;
   color: var(--tv-text-muted);
   font-variant-numeric: tabular-nums;
+}
+/* 「持到期」单独上色：它为负说明历年这段最终朝反方向走，是回归率骗人的地方。
+   仍然避开红绿——这不是价格方向，是统计倾向。 */
+.revert .basis em {
+  font-style: normal;
+  font-weight: 700;
+}
+.revert .basis em.with {
+  color: var(--tv-blue);
+}
+.revert .basis em.against {
+  color: var(--tv-warn);
 }
 .revert.absent {
   font-size: 11px;

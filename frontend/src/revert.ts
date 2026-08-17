@@ -2,7 +2,7 @@
  * 历史回归率的显示口径。
  *
  * 抽出来是为了能测：埋在 `.vue` 的 `<script setup>` 里的函数导不出来，测不到——
- * 席位页的三态吸收律（seatChange.ts）当初就是这么栽的。这两个函数错了都不露馅：
+ * 席位页的三态吸收律（seatChange.ts）当初就是这么栽的。这几个函数错了都不露馅：
  * 百分比多一位少一位没人会发现，强弱配色反了更是只会让人默默做出相反的判断。
  */
 import type { SpreadRevertStats } from './api'
@@ -28,4 +28,27 @@ export function revertTone(stats: SpreadRevertStats): 'strong' | 'weak' | '' {
   if (value >= 0.55) return 'strong'
   if (value <= 0.45) return 'weak'
   return ''
+}
+
+/** 点数带符号显示，取整。正数 = 朝回归方向走。 */
+export function points(raw: string | null): string | null {
+  if (raw === null) return null
+  const value = Number(raw)
+  if (!Number.isFinite(value)) return null
+  const rounded = Math.round(value)
+  return rounded > 0 ? `+${rounded}` : `${rounded}`
+}
+
+/**
+ * 「一直持到窗口止点」的净变化是正是负。
+ *
+ * 单独拎出来上色，是因为它能揭穿回归率的陷阱：JD2612/JD2701 历年 12 次全都曾跌破
+ * 起点（回归率 100%），可一路持到到期的中位是 −166 点，方向反的。只看回归率会把
+ * 这种组合读成安全机会，所以负的 drift 必须显眼。
+ */
+export function driftTone(raw: string | null): 'with' | 'against' | '' {
+  if (raw === null) return ''
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value === 0) return ''
+  return value > 0 ? 'with' : 'against'
 }

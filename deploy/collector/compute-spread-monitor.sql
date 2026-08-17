@@ -48,7 +48,13 @@ select distinct on (p.workspace_id, p.instrument, p.contract, p.trade_date)
   join monitor_scope s on s.instrument = p.instrument
  where p.close_price is not null
  order by p.workspace_id, p.instrument, p.contract, p.trade_date,
-          case when p.source like '%\_official' then 0
+          -- 「凡带 official 的都是交易所自己发的」。原来写的是 like '%\_official'
+          -- ——要求以 _official 结尾，而大商所的源叫 dce_official_history，**匹配不上**，
+          -- 官方数据反而掉到最后一档（2026-08-17 核对回归率时抓到）。实测影响为零：
+          -- 2024 年底前大商所只有这一个源，2025 起是 sina，只有 2026-07-31~08-05
+          -- 六天 akshare 与 sina 并存；两种写法跑出来的统计逐字节相同。但郑商所能
+          -- 匹配、大商所匹配不上这种不对称迟早会在别处咬人，就手修掉。
+          case when p.source like '%official%' then 0
                when p.source = 'akshare_v1' then 1
                when p.source like 'eastmoney%' then 2
                when p.source like 'sina%' then 3
@@ -183,94 +189,143 @@ select s.*,
                                 and y.trade_date = p.trade_date) s;
 
 -- ---------------------------------------------------------------------------
--- 历史回归率。口径的完整理由写在迁移 202608170001 里，这里只记要点：
---   · 主体是**月份组合模板**（同品种 + 同月份对 + 同年差），不是具体合约对——
---     一个具体合约对一辈子只有一个生命周期，极值段两三段，算不出有意义的比率。
---   · 极值段按**当年轨**划分，不用页面报警的合成轨:合成轨要先有历年百分位，而
---     历年轨是逐 (组合,日期) 跑 percentile_cont 的，推到全历史会从百来次变成几万次。
---     这是工程折中，页面必须标注口径。
---   · 段首日起 20 个交易日，价差朝该回归的方向走即算命中。
+-- 历史回归率(完整口径见迁移 202608170002)。要点:
+--   · 可交易窗口照 **5A 窗口引擎**(rust/crates/domain/src/spread_analytics.rs),
+--     不另立一套:止点 = 先到期那条腿的散户最后交易日 = 交割月前月的最后一个
+--     非周末日(那边的 last_weekday_before_delivery)。
+--   · 历年按**月-日**对齐,一直看到各自窗口的止点;**曾经触及**即算回归,不比终点
+--     ——套利仓在期间任何有利时刻都能平掉。
+--   · 只用**已走完**的年份实例(止点晚于最新数据日的一律排除,含当年)。
+--   · 存四个数:hit/n(曾经触及的年数)、move(最有利幅度)、drift(持到止点的净
+--     变化,已按方向标准化成「正数=朝回归走」)、days(剩余交易日中位)。
+--     **单看 hit/n 会骗人**:剩余期一长它就趋近 100%;JD2612/JD2701 回归率 100%
+--     而 drift 中位 −166 点,方向是反的。
 -- ---------------------------------------------------------------------------
 
 create temp table template as
 select distinct i1, m1, i2, m2, (y2 - y1) ydiff from combo;
 
--- 模板下所有年份的实例，不限于当前挂牌的那几个合约。
-create temp table hist_pair as
-select t.i1, t.m1, t.i2, t.m2, t.ydiff,
-       a.workspace_id, a.contract c1, b.contract c2, a.trade_date,
-       (a.close_price - b.close_price) v
+-- 模板下所有年份实例及其窗口止点。两条腿各算一个散户最后交易日,取先到期那个。
+create temp table hist_meta as
+select t.i1, t.m1, t.i2, t.m2, t.ydiff, a.contract c1, b.contract c2,
+       least(
+         (select (e - (case extract(isodow from e) when 6 then 1 when 7 then 2 else 0 end)
+                      * interval '1 day')::date
+            from (select (date_trunc('month', make_date(2000 + a.yy, t.m1, 1))
+                          - interval '1 day')::date e) z1),
+         (select (e - (case extract(isodow from e) when 6 then 1 when 7 then 2 else 0 end)
+                      * interval '1 day')::date
+            from (select (date_trunc('month', make_date(2000 + b.yy, t.m2, 1))
+                          - interval '1 day')::date e) z2)
+       ) win_end
   from template t
-  join legs a on a.instrument = t.i1 and a.mm = t.m1
-  join legs b on b.workspace_id = a.workspace_id
-             and b.instrument = t.i2 and b.mm = t.m2
-             and b.yy = a.yy + t.ydiff
-             and b.trade_date = a.trade_date;
+  join (select distinct instrument, contract, yy, mm from legs) a
+    on a.instrument = t.i1 and a.mm = t.m1
+  join (select distinct instrument, contract, yy, mm from legs) b
+    on b.instrument = t.i2 and b.mm = t.m2 and b.yy = a.yy + t.ydiff;
 
-create index hist_pair_key on hist_pair (workspace_id, c1, c2, trade_date);
-analyze hist_pair;
+-- 价差序列裁到窗口内,只保留已走完的实例。
+create temp table hist_win as
+select m.i1, m.m1, m.i2, m.m2, m.ydiff, m.c1, m.c2, m.win_end,
+       x.trade_date, (x.close_price - y.close_price) v
+  from hist_meta m
+  join legs x on x.contract = m.c1
+  join legs y on y.workspace_id = x.workspace_id and y.contract = m.c2
+             and y.trade_date = x.trade_date
+ where x.trade_date <= m.win_end
+   and m.win_end <= (select max(trade_date) from legs);
 
--- 滚动区间位置与 20 交易日后的价差。
---
--- `lead` 取了未来，但它是**被统计的结果**，不是判定触发的输入：位置仍然只用截至
--- 当日的滚动极值算。两者混在一起才是未来函数，分开就不是。不足 20 日的段（最近
--- 发生的那些）v20 为空，自然不计入——它们的结果还没发生，统计因此永远落后 20 个
--- 交易日，这是对的。
-create temp table hist_pos as
-select y.*,
-       lag(y.pos) over (partition by y.workspace_id, y.c1, y.c2
-                        order by y.trade_date) prev_pos
-  from (select x.i1, x.m1, x.i2, x.m2, x.ydiff, x.workspace_id, x.c1, x.c2,
-               x.trade_date, x.v, x.v20,
-               case when x.hi > x.lo and x.n >= 60
-                    then (x.v - x.lo) / (x.hi - x.lo) end pos
-          from (select h.*,
-                       min(v) over w lo,
-                       max(v) over w hi,
-                       count(*) over w n,
-                       lead(v, 20) over (partition by workspace_id, c1, c2
-                                         order by trade_date) v20
-                  from hist_pair h
-                window w as (partition by workspace_id, c1, c2 order by trade_date
-                             rows between unbounded preceding and current row)) x) y;
+-- 每行带上「从下一行到窗口止点」的前向统计。预算一次,后面找到锚点行直接读,
+-- 省得为每个 (当前日 × 实例) 各扫一遍尾巴。
+create temp table hist_fwd as
+select h.*,
+       min(v) over w fmin,
+       max(v) over w fmax,
+       count(*) over w fdays,
+       last_value(v) over w flast,
+       min(trade_date) over (partition by c1, c2) win_start
+  from hist_win h
+window w as (partition by c1, c2 order by trade_date
+             rows between 1 following and unbounded following);
 
--- 段首日 = 今天触发、前一天不触发。三档各判一次。
--- `prev_pos is null` 也算段首日：那是「刚攒够 60 天历史就触发」，确实是新进入极值。
+create index hist_fwd_key on hist_fwd (c1, c2, trade_date);
+analyze hist_fwd;
+
+-- 每个「当前组合-日」× 每个历史实例的锚点日期 = 与当前日同月-日、且落进该实例
+-- 窗口的那一天。窗口可能跨年(02-06 这类会跨到次年 1 月),所以窗口起、止两个年份
+-- 都试一次;日号按当月天数截断,否则 2-29 碰上平年 make_date 直接报错。
+create temp table anchor as
+select s.c1 cur_c1, s.c2 cur_c2, s.trade_date cur_date, f.c1, f.c2,
+       case when d2.d between f.win_start and f.win_end then d2.d
+            when d1.d between f.win_start and f.win_end then d1.d end anchor_date
+  from snap s
+  join combo k on k.workspace_id = s.workspace_id and k.c1 = s.c1 and k.c2 = s.c2
+  join (select distinct c1, c2, i1, m1, i2, m2, ydiff, win_start, win_end
+          from hist_fwd) f
+    on f.i1 = k.i1 and f.m1 = k.m1 and f.i2 = k.i2 and f.m2 = k.m2
+   and f.ydiff = (k.y2 - k.y1)
+   and f.c1 <> s.c1
+  cross join lateral (
+      select make_date(q.y, q.m, least(q.dd, q.mdays)) d from (
+        select extract(year from f.win_start)::int y,
+               extract(month from s.trade_date)::int m,
+               extract(day from s.trade_date)::int dd,
+               extract(day from (date_trunc('month',
+                   make_date(extract(year from f.win_start)::int,
+                             extract(month from s.trade_date)::int, 1))
+                   + interval '1 month' - interval '1 day'))::int mdays) q) d1
+  cross join lateral (
+      select make_date(q.y, q.m, least(q.dd, q.mdays)) d from (
+        select extract(year from f.win_end)::int y,
+               extract(month from s.trade_date)::int m,
+               extract(day from s.trade_date)::int dd,
+               extract(day from (date_trunc('month',
+                   make_date(extract(year from f.win_end)::int,
+                             extract(month from s.trade_date)::int, 1))
+                   + interval '1 month' - interval '1 day'))::int mdays) q) d2;
+
+-- 锚点当天(非交易日则顺延到之后第一个交易日)那一行。
+create temp table anchor_row as
+select distinct on (a.cur_c1, a.cur_c2, a.cur_date, a.c1, a.c2)
+       a.cur_c1, a.cur_c2, a.cur_date, a.c1, a.c2,
+       f.v p0, f.fmin, f.fmax, f.flast, f.fdays
+  from anchor a
+  join hist_fwd f on f.c1 = a.c1 and f.c2 = a.c2 and f.trade_date >= a.anchor_date
+ where a.anchor_date is not null
+ order by a.cur_c1, a.cur_c2, a.cur_date, a.c1, a.c2, f.trade_date;
+
+-- 锚点正好落在窗口最后一天时没有「后续」,那一年不构成样本。
+delete from anchor_row where fdays = 0;
+
 create temp table revert_stat as
-select i1, m1, i2, m2, ydiff, thr, side,
+select cur_c1, cur_c2, cur_date, side,
        count(*)::int n,
-       count(*) filter (where hit)::int hit
-  from (select h.i1, h.m1, h.i2, h.m2, h.ydiff, t.thr,
-               case when h.pos <= t.thr then 'low' else 'high' end side,
-               case when h.pos <= t.thr then (h.v20 - h.v) > 0
-                    else (h.v20 - h.v) < 0 end hit
-          from hist_pos h
-          cross join (values (0.03::numeric), (0.05), (0.10)) t(thr)
-         where h.pos is not null
-           and h.v20 is not null
-           and (h.pos <= t.thr or h.pos >= 1 - t.thr)
-           and (h.prev_pos is null
-                or not (h.prev_pos <= t.thr or h.prev_pos >= 1 - t.thr))) s
- group by 1, 2, 3, 4, 5, 6, 7;
+       count(*) filter (where hit)::int hit,
+       percentile_cont(0.5) within group (order by move) move_med,
+       percentile_cont(0.5) within group (order by drift) drift_med,
+       round(percentile_cont(0.5) within group (order by fdays))::int days_med
+  from (select r.cur_c1, r.cur_c2, r.cur_date, s.side, r.fdays,
+               case when s.side = 'high' then r.fmin < r.p0 else r.fmax > r.p0 end hit,
+               case when s.side = 'high' then r.p0 - r.fmin else r.fmax - r.p0 end move,
+               case when s.side = 'high' then r.p0 - r.flast else r.flast - r.p0 end drift
+          from anchor_row r
+          cross join (values ('high'), ('low')) s(side)) x
+ group by 1, 2, 3, 4;
 
--- 摊平成一行一模板。样本为 0 的档在这里就是 null（filter 没命中 → max 为 null），
--- 与表上「命中与样本必须成对、样本 > 0」的约束一致：0/0 显示成 0% 是最坏的一种错。
 create temp table revert_wide as
-select i1, m1, i2, m2, ydiff,
-       max(hit) filter (where side = 'low'  and thr = 0.03) low_hit_3,
-       max(n)   filter (where side = 'low'  and thr = 0.03) low_n_3,
-       max(hit) filter (where side = 'low'  and thr = 0.05) low_hit_5,
-       max(n)   filter (where side = 'low'  and thr = 0.05) low_n_5,
-       max(hit) filter (where side = 'low'  and thr = 0.10) low_hit_10,
-       max(n)   filter (where side = 'low'  and thr = 0.10) low_n_10,
-       max(hit) filter (where side = 'high' and thr = 0.03) high_hit_3,
-       max(n)   filter (where side = 'high' and thr = 0.03) high_n_3,
-       max(hit) filter (where side = 'high' and thr = 0.05) high_hit_5,
-       max(n)   filter (where side = 'high' and thr = 0.05) high_n_5,
-       max(hit) filter (where side = 'high' and thr = 0.10) high_hit_10,
-       max(n)   filter (where side = 'high' and thr = 0.10) high_n_10
+select cur_c1, cur_c2, cur_date,
+       max(hit)       filter (where side = 'high') high_hit,
+       max(n)         filter (where side = 'high') high_n,
+       max(move_med)  filter (where side = 'high') high_move,
+       max(drift_med) filter (where side = 'high') high_drift,
+       max(days_med)  filter (where side = 'high') high_days,
+       max(hit)       filter (where side = 'low')  low_hit,
+       max(n)         filter (where side = 'low')  low_n,
+       max(move_med)  filter (where side = 'low')  low_move,
+       max(drift_med) filter (where side = 'low')  low_drift,
+       max(days_med)  filter (where side = 'low')  low_days
   from revert_stat
- group by 1, 2, 3, 4, 5;
+ group by 1, 2, 3;
 
 analyze revert_wide;
 
@@ -291,22 +346,21 @@ insert into spread_monitor_daily (
     is_cross_variety, spread, pair_days, pair_low, pair_high, pair_position,
     years_days, years_low, years_high, years_position,
     prev_pair_position, prev_years_position,
-    revert_low_hit_3, revert_low_n_3, revert_low_hit_5, revert_low_n_5,
-    revert_low_hit_10, revert_low_n_10,
-    revert_high_hit_3, revert_high_n_3, revert_high_hit_5, revert_high_n_5,
-    revert_high_hit_10, revert_high_n_10)
+    revert_high_hit, revert_high_n, revert_high_move, revert_high_drift,
+    revert_high_days,
+    revert_low_hit, revert_low_n, revert_low_move, revert_low_drift,
+    revert_low_days)
 select gen_random_uuid(), s.workspace_id, s.trade_date,
        k.i1, k.c1, k.i2, k.c2, k.is_cross, s.now,
        s.days, s.lo, s.hi, s.pair_pos,
        s.years_days, s.years_lo, s.years_hi, s.years_pos,
        s.prev_pair_pos, s.prev_years_pos,
-       r.low_hit_3, r.low_n_3, r.low_hit_5, r.low_n_5, r.low_hit_10, r.low_n_10,
-       r.high_hit_3, r.high_n_3, r.high_hit_5, r.high_n_5, r.high_hit_10, r.high_n_10
+       r.high_hit, r.high_n, r.high_move, r.high_drift, r.high_days,
+       r.low_hit, r.low_n, r.low_move, r.low_drift, r.low_days
   from snap s
   join combo k on k.workspace_id = s.workspace_id and k.c1 = s.c1 and k.c2 = s.c2
-  left join revert_wide r on r.i1 = k.i1 and r.m1 = k.m1
-                         and r.i2 = k.i2 and r.m2 = k.m2
-                         and r.ydiff = (k.y2 - k.y1)
+  left join revert_wide r on r.cur_c1 = s.c1 and r.cur_c2 = s.c2
+                         and r.cur_date = s.trade_date
  where s.trade_date >= current_date - (:window_days || ' days')::interval
 on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     spread = excluded.spread,
@@ -316,18 +370,16 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     years_high = excluded.years_high, years_position = excluded.years_position,
     prev_pair_position = excluded.prev_pair_position,
     prev_years_position = excluded.prev_years_position,
-    revert_low_hit_3 = excluded.revert_low_hit_3,
-    revert_low_n_3 = excluded.revert_low_n_3,
-    revert_low_hit_5 = excluded.revert_low_hit_5,
-    revert_low_n_5 = excluded.revert_low_n_5,
-    revert_low_hit_10 = excluded.revert_low_hit_10,
-    revert_low_n_10 = excluded.revert_low_n_10,
-    revert_high_hit_3 = excluded.revert_high_hit_3,
-    revert_high_n_3 = excluded.revert_high_n_3,
-    revert_high_hit_5 = excluded.revert_high_hit_5,
-    revert_high_n_5 = excluded.revert_high_n_5,
-    revert_high_hit_10 = excluded.revert_high_hit_10,
-    revert_high_n_10 = excluded.revert_high_n_10,
+    revert_high_hit = excluded.revert_high_hit,
+    revert_high_n = excluded.revert_high_n,
+    revert_high_move = excluded.revert_high_move,
+    revert_high_drift = excluded.revert_high_drift,
+    revert_high_days = excluded.revert_high_days,
+    revert_low_hit = excluded.revert_low_hit,
+    revert_low_n = excluded.revert_low_n,
+    revert_low_move = excluded.revert_low_move,
+    revert_low_drift = excluded.revert_low_drift,
+    revert_low_days = excluded.revert_low_days,
     computed_at = now();
 
 commit;
@@ -341,7 +393,7 @@ select trade_date 交易日, count(*) 组合数,
        -- 前一日位置的覆盖率:全空说明 lag 没生效(多留 7 天那步被改坏了),
        -- 段首日标记会整片消失,而页面上只是「没有新触发」,看不出是坏了。
        count(*) filter (where prev_pair_position is not null) 有前值,
-       count(*) filter (where revert_low_n_3 is not null
-                           or revert_high_n_3 is not null) 有回归率
+       count(*) filter (where revert_low_n is not null
+                           or revert_high_n is not null) 有回归率
   from spread_monitor_daily
  group by 1 order by 1 desc limit 5;

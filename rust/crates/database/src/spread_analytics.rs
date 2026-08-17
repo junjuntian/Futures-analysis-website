@@ -1268,18 +1268,16 @@ mod tests {
         for column in [
             "prev_pair_position",
             "prev_years_position",
-            "revert_low_hit_3",
-            "revert_low_n_3",
-            "revert_low_hit_5",
-            "revert_low_n_5",
-            "revert_low_hit_10",
-            "revert_low_n_10",
-            "revert_high_hit_3",
-            "revert_high_n_3",
-            "revert_high_hit_5",
-            "revert_high_n_5",
-            "revert_high_hit_10",
-            "revert_high_n_10",
+            "revert_high_hit",
+            "revert_high_n",
+            "revert_high_move",
+            "revert_high_drift",
+            "revert_high_days",
+            "revert_low_hit",
+            "revert_low_n",
+            "revert_low_move",
+            "revert_low_drift",
+            "revert_low_days",
         ] {
             assert!(
                 MONITOR_COLUMNS.contains(column),
@@ -1296,23 +1294,41 @@ mod tests {
     fn the_revert_migration_keeps_the_threshold_out_of_the_table() {
         // 与 202608120001 同一条原则：存素材不存结论。段首日靠「前一日位置」在读时
         // 判，不许出现 is_segment_start 之类的落库列——那等于把阈值焊死。
-        let migration = include_str!("../../../migrations/202608170001_spread_monitor_revert.sql");
-        assert!(migration.contains("prev_pair_position"));
-        assert!(migration.contains("prev_years_position"));
+        let first = include_str!("../../../migrations/202608170001_spread_monitor_revert.sql");
+        assert!(first.contains("prev_pair_position"));
+        assert!(first.contains("prev_years_position"));
         assert!(
-            !migration.contains("is_segment_start") && !migration.contains("is_new_alert"),
+            !first.contains("is_segment_start") && !first.contains("is_new_alert"),
             "段首日必须读时判，不许落库"
         );
         // 加列迁移必须可重跑：2026-08-17 这套 DDL 曾被开发期的验证脚本意外落进生产，
         // 不幂等的话正式部署必然撞「列已存在」。
         assert!(
-            migration.matches("add column if not exists").count() == 14,
+            first.matches("add column if not exists").count() == 14,
             "14 个新列都必须 add column if not exists"
         );
         assert!(
-            migration.contains("drop constraint if exists"),
+            first.contains("drop constraint if exists"),
             "约束没有 add if not exists，必须先 drop if exists 才能重跑"
         );
+
+        // 换口径那一版同样要能重跑，而且必须把带档位的旧列删干净——新口径与阈值
+        // 无关，留着 _3/_5/_10 只会让人以为还能按档查。
+        let second = include_str!("../../../migrations/202608170002_spread_revert_by_window.sql");
+        assert!(
+            second.matches("drop column if exists").count() == 12,
+            "202608170001 加的 12 列都要删掉"
+        );
+        assert!(
+            second.matches("add column if not exists").count() == 10,
+            "新口径是 5 个数 × 高低两侧"
+        );
+        for gone in ["revert_low_hit_3", "revert_high_n_10"] {
+            assert!(
+                !MONITOR_COLUMNS.contains(gone),
+                "列清单里还留着已删的 {gone}"
+            );
+        }
     }
 
     #[test]
@@ -3247,20 +3263,23 @@ pub struct SpreadMonitorRow {
     /// 读的时候按当次阈值算，任何阈值都能在任何一天重判（迁移 202608170001）。
     pub prev_pair_position: Option<String>,
     pub prev_years_position: Option<String>,
-    /// 该月份组合模板历史上，极值段首日起 20 交易日朝回归方向走的命中数与样本数。
-    /// 三档分别对应阈值 3% / 5% / 10%，读时取与当次阈值最接近的一档。
-    pub revert_low_hit_3: Option<i32>,
-    pub revert_low_n_3: Option<i32>,
-    pub revert_low_hit_5: Option<i32>,
-    pub revert_low_n_5: Option<i32>,
-    pub revert_low_hit_10: Option<i32>,
-    pub revert_low_n_10: Option<i32>,
-    pub revert_high_hit_3: Option<i32>,
-    pub revert_high_n_3: Option<i32>,
-    pub revert_high_hit_5: Option<i32>,
-    pub revert_high_n_5: Option<i32>,
-    pub revert_high_hit_10: Option<i32>,
-    pub revert_high_n_10: Option<i32>,
+    /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现
+    /// （迁移 202608170002）。四个数一组,与阈值无关——它只跟今天是几月几号、
+    /// 以及报的是高位还是低位有关:
+    ///   hit/n   历年里「曾经触及」回归的年数。剩余期一长就趋近 100%,只是下限。
+    ///   move    最有利那一刻相对起点走了多少点。
+    ///   drift   一直持到窗口止点的净变化,已标准化成「正数 = 朝回归走」。
+    ///   days    历年剩余交易日中位,给上面三个数一个时间尺度。
+    pub revert_high_hit: Option<i32>,
+    pub revert_high_n: Option<i32>,
+    pub revert_high_move: Option<String>,
+    pub revert_high_drift: Option<String>,
+    pub revert_high_days: Option<i32>,
+    pub revert_low_hit: Option<i32>,
+    pub revert_low_n: Option<i32>,
+    pub revert_low_move: Option<String>,
+    pub revert_low_drift: Option<String>,
+    pub revert_low_days: Option<i32>,
 }
 
 /// 两条查询共用的列清单。写成常量是因为它出现在两处 SQL 里，而 `monitor_row`
@@ -3270,10 +3289,10 @@ const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_
             pair_low::text, pair_high::text, pair_position::text,
             years_days, years_low::text, years_high::text, years_position::text,
             prev_pair_position::text, prev_years_position::text,
-            revert_low_hit_3, revert_low_n_3, revert_low_hit_5, revert_low_n_5,
-            revert_low_hit_10, revert_low_n_10,
-            revert_high_hit_3, revert_high_n_3, revert_high_hit_5, revert_high_n_5,
-            revert_high_hit_10, revert_high_n_10";
+            revert_high_hit, revert_high_n, revert_high_move::text,
+            revert_high_drift::text, revert_high_days,
+            revert_low_hit, revert_low_n, revert_low_move::text,
+            revert_low_drift::text, revert_low_days";
 
 /// 监控页的当前快照：**每组组合各取自己最新的那一条**。
 ///
@@ -3375,17 +3394,15 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         years_position: row.get("years_position"),
         prev_pair_position: row.get("prev_pair_position"),
         prev_years_position: row.get("prev_years_position"),
-        revert_low_hit_3: row.get("revert_low_hit_3"),
-        revert_low_n_3: row.get("revert_low_n_3"),
-        revert_low_hit_5: row.get("revert_low_hit_5"),
-        revert_low_n_5: row.get("revert_low_n_5"),
-        revert_low_hit_10: row.get("revert_low_hit_10"),
-        revert_low_n_10: row.get("revert_low_n_10"),
-        revert_high_hit_3: row.get("revert_high_hit_3"),
-        revert_high_n_3: row.get("revert_high_n_3"),
-        revert_high_hit_5: row.get("revert_high_hit_5"),
-        revert_high_n_5: row.get("revert_high_n_5"),
-        revert_high_hit_10: row.get("revert_high_hit_10"),
-        revert_high_n_10: row.get("revert_high_n_10"),
+        revert_high_hit: row.get("revert_high_hit"),
+        revert_high_n: row.get("revert_high_n"),
+        revert_high_move: row.get("revert_high_move"),
+        revert_high_drift: row.get("revert_high_drift"),
+        revert_high_days: row.get("revert_high_days"),
+        revert_low_hit: row.get("revert_low_hit"),
+        revert_low_n: row.get("revert_low_n"),
+        revert_low_move: row.get("revert_low_move"),
+        revert_low_drift: row.get("revert_low_drift"),
+        revert_low_days: row.get("revert_low_days"),
     }
 }
