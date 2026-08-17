@@ -624,7 +624,7 @@ onMounted(async () => {
         <div class="rule-line"><span class="lab">卖点</span><span>{{ data.rules.sell }}</span></div>
         <div class="rule-line">
           <span class="lab">事件定义</span>
-          <span>净多增加且多头腿主导,且 |ΔNet/全市场持仓| ≥ 该席位近 250 个上榜日的 80 分位(每家自适应门槛)</span>
+          <span>净多增加且多头腿主导,且 |ΔNet/全市场持仓| ≥ 该席位近 250 个上榜日的 80 分位(每家自适应门槛);{{ data.rules.cond_seats.join('/') }}为条件计分席位,仅贴 60 日低点 &lt;5% 时计入,其余日子的增多不进分数也不重置静默</span>
         </div>
         <div class="rule-line">
           <span class="lab">时序</span>
