@@ -577,6 +577,22 @@ export interface SpreadMonitorTrack {
   alert: string | null
 }
 
+/** 该月份组合模板历史上，贴到同一侧极值之后价差回归的频率。
+ *
+ * **不是这一组合自己的胜率**:样本是同品种、同月份对、同年差的模板跨年拼起来的
+ * (例如鸡蛋 09-01)。一个具体合约对一辈子只有一个生命周期，算不出有意义的比率。
+ * 口径按当年轨划分极值段、段首日起 20 个交易日看方向，与页面报警用的合成轨可能
+ * 有出入——所以界面必须把口径标出来。 */
+export interface SpreadRevertStats {
+  /** 统计所用的档位('0.03' / '0.05' / '0.10')，取与当前阈值最接近的一档，
+   * 不一定等于当前阈值。 */
+  threshold: string
+  side: string
+  hit: number
+  n: number
+  rate: string
+}
+
 export interface SpreadMonitorItem {
   trade_date: string
   instrument_1: string
@@ -588,6 +604,11 @@ export interface SpreadMonitorItem {
   pair: SpreadMonitorTrack
   years: SpreadMonitorTrack | null
   alert: string | null
+  /** 今天触发、前一交易日按同一阈值不触发 —— 刚进极值。持续触发的段为 false，
+   * 前一日位置缺失时也为 false(判不了就不标)。 */
+  is_new_alert: boolean
+  /** 未触发、或样本不足时为 null。 */
+  revert: SpreadRevertStats | null
 }
 
 export interface SpreadMonitorResponse {

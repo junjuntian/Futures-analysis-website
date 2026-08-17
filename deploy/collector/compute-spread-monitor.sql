@@ -111,20 +111,32 @@ select k.workspace_id, k.c1, k.c2, x.trade_date,
 create index pair_series_key on pair_series (workspace_id, c1, c2, trade_date);
 analyze pair_series;
 
+-- 三层套下来是为了拿到 `prev_pair_pos`：窗口函数不能引用同一层的别名，位置要先
+-- 算出来才能对它取 lag。前一日位置是给读时判「段首日」用的（迁移 202608170001）。
 create temp table pair_stat as
-select workspace_id, c1, c2, trade_date, v now,
-       min(v) over w lo,
-       max(v) over w hi,
-       count(*) over w days
-  from pair_series
-window w as (partition by workspace_id, c1, c2 order by trade_date
-             rows between unbounded preceding and current row);
+select y.*,
+       lag(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
+                             order by y.trade_date) prev_pair_pos
+  from (select x.*,
+               case when x.hi > x.lo and x.days >= 60
+                    then (x.now - x.lo) / (x.hi - x.lo) end pair_pos
+          from (select workspace_id, c1, c2, trade_date, v now,
+                       min(v) over w lo,
+                       max(v) over w hi,
+                       count(*) over w days
+                  from pair_series
+                window w as (partition by workspace_id, c1, c2 order by trade_date
+                             rows between unbounded preceding and current row)) x) y;
 
 -- 只保留窗口内、且到那天为止已积累够 60 天的行。
 -- 60 天的门槛也按当日算：一个组合在它上市第 30 天时，「历史极值」确实还没有意义。
+--
+-- **窗口比要写入的多留 7 天**：历年轨的前一日位置也得算出来才能判段首日，而历年轨
+-- 是只对保留下来的行算的。7 天覆盖得住周末与长假。多出来的行在最后 insert 时按
+-- `:window_days` 过滤掉，不会写进表。
 delete from pair_stat
  where days < 60
-    or trade_date < current_date - (:window_days || ' days')::interval;
+    or trade_date < current_date - ((:window_days + 7) || ' days')::interval;
 
 create index pair_stat_key on pair_stat (workspace_id, c1, c2, trade_date);
 analyze pair_stat;
@@ -154,6 +166,114 @@ select p.workspace_id, p.c1, p.c2, p.trade_date, y.days, y.lo, y.hi
 create index years_stat_key on years_stat (workspace_id, c1, c2, trade_date);
 analyze years_stat;
 
+-- 两条轨的位置与各自的前一日值汇到一张表，insert 从这里取。
+-- 历年轨的 lag 必须在这里做：years_stat 只对保留下来的行算，而 pair_stat 已经按
+-- 「窗口 + 7 天」多留了几天，正好够 lag 取到前一交易日。
+create temp table snap as
+select s.*,
+       lag(s.years_pos) over (partition by s.workspace_id, s.c1, s.c2
+                              order by s.trade_date) prev_years_pos
+  from (select p.workspace_id, p.c1, p.c2, p.trade_date, p.now, p.days,
+               p.lo, p.hi, p.pair_pos, p.prev_pair_pos,
+               y.days years_days, y.lo years_lo, y.hi years_hi,
+               case when y.hi > y.lo then (p.now - y.lo) / (y.hi - y.lo) end years_pos
+          from pair_stat p
+          left join years_stat y on y.workspace_id = p.workspace_id
+                                and y.c1 = p.c1 and y.c2 = p.c2
+                                and y.trade_date = p.trade_date) s;
+
+-- ---------------------------------------------------------------------------
+-- 历史回归率。口径的完整理由写在迁移 202608170001 里，这里只记要点：
+--   · 主体是**月份组合模板**（同品种 + 同月份对 + 同年差），不是具体合约对——
+--     一个具体合约对一辈子只有一个生命周期，极值段两三段，算不出有意义的比率。
+--   · 极值段按**当年轨**划分，不用页面报警的合成轨:合成轨要先有历年百分位，而
+--     历年轨是逐 (组合,日期) 跑 percentile_cont 的，推到全历史会从百来次变成几万次。
+--     这是工程折中，页面必须标注口径。
+--   · 段首日起 20 个交易日，价差朝该回归的方向走即算命中。
+-- ---------------------------------------------------------------------------
+
+create temp table template as
+select distinct i1, m1, i2, m2, (y2 - y1) ydiff from combo;
+
+-- 模板下所有年份的实例，不限于当前挂牌的那几个合约。
+create temp table hist_pair as
+select t.i1, t.m1, t.i2, t.m2, t.ydiff,
+       a.workspace_id, a.contract c1, b.contract c2, a.trade_date,
+       (a.close_price - b.close_price) v
+  from template t
+  join legs a on a.instrument = t.i1 and a.mm = t.m1
+  join legs b on b.workspace_id = a.workspace_id
+             and b.instrument = t.i2 and b.mm = t.m2
+             and b.yy = a.yy + t.ydiff
+             and b.trade_date = a.trade_date;
+
+create index hist_pair_key on hist_pair (workspace_id, c1, c2, trade_date);
+analyze hist_pair;
+
+-- 滚动区间位置与 20 交易日后的价差。
+--
+-- `lead` 取了未来，但它是**被统计的结果**，不是判定触发的输入：位置仍然只用截至
+-- 当日的滚动极值算。两者混在一起才是未来函数，分开就不是。不足 20 日的段（最近
+-- 发生的那些）v20 为空，自然不计入——它们的结果还没发生，统计因此永远落后 20 个
+-- 交易日，这是对的。
+create temp table hist_pos as
+select y.*,
+       lag(y.pos) over (partition by y.workspace_id, y.c1, y.c2
+                        order by y.trade_date) prev_pos
+  from (select x.i1, x.m1, x.i2, x.m2, x.ydiff, x.workspace_id, x.c1, x.c2,
+               x.trade_date, x.v, x.v20,
+               case when x.hi > x.lo and x.n >= 60
+                    then (x.v - x.lo) / (x.hi - x.lo) end pos
+          from (select h.*,
+                       min(v) over w lo,
+                       max(v) over w hi,
+                       count(*) over w n,
+                       lead(v, 20) over (partition by workspace_id, c1, c2
+                                         order by trade_date) v20
+                  from hist_pair h
+                window w as (partition by workspace_id, c1, c2 order by trade_date
+                             rows between unbounded preceding and current row)) x) y;
+
+-- 段首日 = 今天触发、前一天不触发。三档各判一次。
+-- `prev_pos is null` 也算段首日：那是「刚攒够 60 天历史就触发」，确实是新进入极值。
+create temp table revert_stat as
+select i1, m1, i2, m2, ydiff, thr, side,
+       count(*)::int n,
+       count(*) filter (where hit)::int hit
+  from (select h.i1, h.m1, h.i2, h.m2, h.ydiff, t.thr,
+               case when h.pos <= t.thr then 'low' else 'high' end side,
+               case when h.pos <= t.thr then (h.v20 - h.v) > 0
+                    else (h.v20 - h.v) < 0 end hit
+          from hist_pos h
+          cross join (values (0.03::numeric), (0.05), (0.10)) t(thr)
+         where h.pos is not null
+           and h.v20 is not null
+           and (h.pos <= t.thr or h.pos >= 1 - t.thr)
+           and (h.prev_pos is null
+                or not (h.prev_pos <= t.thr or h.prev_pos >= 1 - t.thr))) s
+ group by 1, 2, 3, 4, 5, 6, 7;
+
+-- 摊平成一行一模板。样本为 0 的档在这里就是 null（filter 没命中 → max 为 null），
+-- 与表上「命中与样本必须成对、样本 > 0」的约束一致：0/0 显示成 0% 是最坏的一种错。
+create temp table revert_wide as
+select i1, m1, i2, m2, ydiff,
+       max(hit) filter (where side = 'low'  and thr = 0.03) low_hit_3,
+       max(n)   filter (where side = 'low'  and thr = 0.03) low_n_3,
+       max(hit) filter (where side = 'low'  and thr = 0.05) low_hit_5,
+       max(n)   filter (where side = 'low'  and thr = 0.05) low_n_5,
+       max(hit) filter (where side = 'low'  and thr = 0.10) low_hit_10,
+       max(n)   filter (where side = 'low'  and thr = 0.10) low_n_10,
+       max(hit) filter (where side = 'high' and thr = 0.03) high_hit_3,
+       max(n)   filter (where side = 'high' and thr = 0.03) high_n_3,
+       max(hit) filter (where side = 'high' and thr = 0.05) high_hit_5,
+       max(n)   filter (where side = 'high' and thr = 0.05) high_n_5,
+       max(hit) filter (where side = 'high' and thr = 0.10) high_hit_10,
+       max(n)   filter (where side = 'high' and thr = 0.10) high_n_10
+  from revert_stat
+ group by 1, 2, 3, 4, 5;
+
+analyze revert_wide;
+
 -- 先清掉窗口内的旧快照，再重算。
 --
 -- 只做 upsert 是不够的：**监控范围变小时，upsert 不会删掉已经不该存在的行。**
@@ -164,26 +284,50 @@ analyze years_stat;
 delete from spread_monitor_daily
  where trade_date >= current_date - (:window_days || ' days')::interval;
 
+-- `where` 那一行把「为算 lag 多留的 7 天」挡在表外——多留是手段，不是要写进去的
+-- 数据。漏掉它会把窗口外的旧行也重写一遍，看不出错但白做功。
 insert into spread_monitor_daily (
     id, workspace_id, trade_date, instrument_1, contract_1, instrument_2, contract_2,
     is_cross_variety, spread, pair_days, pair_low, pair_high, pair_position,
-    years_days, years_low, years_high, years_position)
-select gen_random_uuid(), p.workspace_id, p.trade_date,
-       k.i1, k.c1, k.i2, k.c2, k.is_cross, p.now,
-       p.days, p.lo, p.hi,
-       case when p.hi > p.lo then (p.now - p.lo) / (p.hi - p.lo) end,
-       y.days, y.lo, y.hi,
-       case when y.hi > y.lo then (p.now - y.lo) / (y.hi - y.lo) end
-  from pair_stat p
-  join combo k on k.workspace_id = p.workspace_id and k.c1 = p.c1 and k.c2 = p.c2
-  left join years_stat y on y.workspace_id = p.workspace_id and y.c1 = p.c1
-                        and y.c2 = p.c2 and y.trade_date = p.trade_date
+    years_days, years_low, years_high, years_position,
+    prev_pair_position, prev_years_position,
+    revert_low_hit_3, revert_low_n_3, revert_low_hit_5, revert_low_n_5,
+    revert_low_hit_10, revert_low_n_10,
+    revert_high_hit_3, revert_high_n_3, revert_high_hit_5, revert_high_n_5,
+    revert_high_hit_10, revert_high_n_10)
+select gen_random_uuid(), s.workspace_id, s.trade_date,
+       k.i1, k.c1, k.i2, k.c2, k.is_cross, s.now,
+       s.days, s.lo, s.hi, s.pair_pos,
+       s.years_days, s.years_lo, s.years_hi, s.years_pos,
+       s.prev_pair_pos, s.prev_years_pos,
+       r.low_hit_3, r.low_n_3, r.low_hit_5, r.low_n_5, r.low_hit_10, r.low_n_10,
+       r.high_hit_3, r.high_n_3, r.high_hit_5, r.high_n_5, r.high_hit_10, r.high_n_10
+  from snap s
+  join combo k on k.workspace_id = s.workspace_id and k.c1 = s.c1 and k.c2 = s.c2
+  left join revert_wide r on r.i1 = k.i1 and r.m1 = k.m1
+                         and r.i2 = k.i2 and r.m2 = k.m2
+                         and r.ydiff = (k.y2 - k.y1)
+ where s.trade_date >= current_date - (:window_days || ' days')::interval
 on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     spread = excluded.spread,
     pair_days = excluded.pair_days, pair_low = excluded.pair_low,
     pair_high = excluded.pair_high, pair_position = excluded.pair_position,
     years_days = excluded.years_days, years_low = excluded.years_low,
     years_high = excluded.years_high, years_position = excluded.years_position,
+    prev_pair_position = excluded.prev_pair_position,
+    prev_years_position = excluded.prev_years_position,
+    revert_low_hit_3 = excluded.revert_low_hit_3,
+    revert_low_n_3 = excluded.revert_low_n_3,
+    revert_low_hit_5 = excluded.revert_low_hit_5,
+    revert_low_n_5 = excluded.revert_low_n_5,
+    revert_low_hit_10 = excluded.revert_low_hit_10,
+    revert_low_n_10 = excluded.revert_low_n_10,
+    revert_high_hit_3 = excluded.revert_high_hit_3,
+    revert_high_n_3 = excluded.revert_high_n_3,
+    revert_high_hit_5 = excluded.revert_high_hit_5,
+    revert_high_n_5 = excluded.revert_high_n_5,
+    revert_high_hit_10 = excluded.revert_high_hit_10,
+    revert_high_n_10 = excluded.revert_high_n_10,
     computed_at = now();
 
 commit;
@@ -193,6 +337,11 @@ select trade_date 交易日, count(*) 组合数,
        count(*) filter (where pair_position >= 0.9 or pair_position <= 0.1) 当年触发,
        count(*) filter (where years_position >= 0.9 or years_position <= 0.1) 历年触发,
        round(min(least(pair_position, years_position)), 3) 最低位置,
-       round(max(greatest(pair_position, years_position)), 3) 最高位置
+       round(max(greatest(pair_position, years_position)), 3) 最高位置,
+       -- 前一日位置的覆盖率:全空说明 lag 没生效(多留 7 天那步被改坏了),
+       -- 段首日标记会整片消失,而页面上只是「没有新触发」,看不出是坏了。
+       count(*) filter (where prev_pair_position is not null) 有前值,
+       count(*) filter (where revert_low_n_3 is not null
+                           or revert_high_n_3 is not null) 有回归率
   from spread_monitor_daily
  group by 1 order by 1 desc limit 5;

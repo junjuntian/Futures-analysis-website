@@ -9,6 +9,7 @@ import {
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
+import { revertPct, revertTone } from '../revert'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
 // 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
@@ -24,6 +25,9 @@ const tradeDate = ref('')
 const direction = ref<'all' | 'high' | 'low'>('all')
 const varietyFilter = ref<string[]>([])
 const showQuiet = ref(false)
+// 只看刚进极值的。焦煤 2026 年有 64% 的交易日都在 3% 触发（价差持续创新低，滚动
+// 区间天天被刷新），而连续触发段的中位长度只有 3 日——长段拖着不放才是噪音的来源。
+const onlyNew = ref(false)
 
 const items = ref<SpreadMonitorItem[]>([])
 const asOf = ref<string | null>(null)
@@ -107,6 +111,9 @@ const filtered = computed(() => {
         return false
       }
       if (direction.value !== 'all' && item.alert !== direction.value) return false
+      // 「仅新触发」只筛触发中那一组；未触发的本来就没有新旧之分，
+      // 让它跟着一起消失会让人以为下面那半屏也被过滤了。
+      if (onlyNew.value && item.alert && !item.is_new_alert) return false
       return true
     })
     .sort((a, b) => extremity(b) - extremity(a))
@@ -116,6 +123,12 @@ const fired = computed(() => filtered.value.filter((item) => item.alert))
 const quiet = computed(() => filtered.value.filter((item) => !item.alert))
 const highCount = computed(() => fired.value.filter((item) => item.alert === 'high').length)
 const lowCount = computed(() => fired.value.filter((item) => item.alert === 'low').length)
+const newCount = computed(() => fired.value.filter((item) => item.is_new_alert).length)
+
+const REVERT_HINT =
+  '同月份组合（同品种 + 同月份对 + 同年差）跨年拼起来的样本，不是这一组合自己的胜率。' +
+  '按当年轨划分极值段，段首日起 20 个交易日看价差有没有朝回归方向走。' +
+  '与页面报警用的合成轨口径可能有出入。'
 
 /** 圆点在轨道上的位置。位置可以落在 0~1 之外（历年轨用的是百分位区间），画到边上为止。 */
 function markLeft(track: SpreadMonitorTrack) {
@@ -160,8 +173,14 @@ function openDetail(item: SpreadMonitorItem) {
     <header class="page-heading">
       <h1>套利监控</h1>
       <p>
-        盯住每一组合约的价差，看它是不是快到历史极值了。触发与否是按下面的阈值现算的，
+        盯住每一组合约的价差，看它是不是走到了历史极值。触发与否是按下面的阈值现算的，
         换个阈值同一天的结论就跟着变。
+      </p>
+      <p class="caveat">
+        <strong>贴到极值不等于会回归。</strong>
+        每组后面的「历史回归」是它自己的成绩单，组与组之间差得很远——
+        2026-08-17 的全样本扫描里，鸡蛋极值段有 45% 朝回归方向走，焦煤只有 29%，
+        后者意味着继续极端化的概率是回归的两倍多。先看那个数字，再决定要不要当机会。
       </p>
     </header>
 
@@ -199,11 +218,14 @@ function openDetail(item: SpreadMonitorItem) {
           <el-radio-button value="high">高位</el-radio-button>
           <el-radio-button value="low">低位</el-radio-button>
         </el-radio-group>
+
+        <el-checkbox v-model="onlyNew" border>仅新触发</el-checkbox>
       </div>
 
       <div class="tally">
         <div class="cell"><span class="k">监控组合</span><span class="v">{{ items.length }}</span></div>
         <div class="cell"><span class="k">触发</span><span class="v">{{ fired.length }}</span></div>
+        <div class="cell"><span class="k">新触发</span><span class="v fresh">{{ newCount }}</span></div>
         <div class="cell"><span class="k">高位</span><span class="v high">{{ highCount }}</span></div>
         <div class="cell"><span class="k">低位</span><span class="v low">{{ lowCount }}</span></div>
         <div class="cell" v-if="asOf"><span class="k">数据日</span><span class="v date">{{ asOf }}</span></div>
@@ -228,6 +250,13 @@ function openDetail(item: SpreadMonitorItem) {
               <el-tag size="small" :type="item.is_cross_variety ? 'warning' : 'info'" effect="plain">
                 {{ item.is_cross_variety ? '跨品种' : label(item.instrument_1) }}
               </el-tag>
+              <el-tooltip
+                v-if="item.is_new_alert"
+                content="前一交易日按同一阈值还没触发，今天才进极值区。"
+                placement="top"
+              >
+                <span class="badge-new">新</span>
+              </el-tooltip>
               <span class="asof" v-if="item.trade_date !== asOf">{{ item.trade_date }}</span>
             </div>
             <div class="now">{{ signedSpread(item.spread) }}</div>
@@ -258,6 +287,20 @@ function openDetail(item: SpreadMonitorItem) {
             <el-tag :type="item.alert === 'high' ? 'danger' : 'success'" effect="light" size="small">
               {{ item.alert === 'high' ? '高位' : '低位' }}
             </el-tag>
+
+            <el-tooltip v-if="item.revert" :content="REVERT_HINT" placement="top">
+              <div class="revert" :class="revertTone(item.revert)">
+                <span class="rate">{{ revertPct(item.revert) }}</span>
+                <span class="basis">
+                  历史回归 {{ item.revert.hit }}/{{ item.revert.n }} 段
+                  <template v-if="Number(item.revert.threshold) !== threshold">
+                    · 按 {{ Math.round(Number(item.revert.threshold) * 100) }}% 档
+                  </template>
+                </span>
+              </div>
+            </el-tooltip>
+            <div v-else class="revert absent">历史样本不足</div>
+
             <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
           </div>
         </article>
@@ -340,6 +383,9 @@ function openDetail(item: SpreadMonitorItem) {
 }
 .tally .v.low {
   color: var(--tv-down);
+}
+.tally .v.fresh {
+  color: var(--tv-warn);
 }
 .tally .v.date {
   font-size: 16px;
@@ -500,6 +546,69 @@ function openDetail(item: SpreadMonitorItem) {
   gap: 6px;
 }
 
+/* 页头的提醒段：贴到极值不等于会回归。 */
+.caveat {
+  color: var(--tv-text-secondary);
+  border-left: 3px solid var(--tv-warn);
+  padding-left: 12px;
+  margin-top: 10px;
+}
+.caveat strong {
+  color: var(--tv-text);
+}
+
+/* 「新」徽标：前一交易日按同一阈值还没触发。
+   用警示橙而不是红绿——红绿在全站是涨跌语义，借过来会被读成方向。 */
+.badge-new {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--tv-warn);
+  border-radius: var(--tv-radius-sm);
+  background: var(--tv-warn-bg);
+  color: var(--tv-warn);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+/* 历史回归率。同样避开红绿：这是个概率，不是价格方向。
+   强弱只用主色与灰色的深浅区分。 */
+.revert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  cursor: help;
+}
+.revert .rate {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  color: var(--tv-text-secondary);
+}
+.revert.strong .rate {
+  color: var(--tv-blue);
+}
+.revert.weak .rate {
+  color: var(--tv-text-muted);
+}
+.revert .basis {
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: right;
+  color: var(--tv-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.revert.absent {
+  font-size: 11px;
+  color: var(--tv-text-muted);
+  cursor: default;
+}
+
 @media (max-width: 880px) {
   .row {
     grid-template-columns: 1fr;
@@ -507,7 +616,19 @@ function openDetail(item: SpreadMonitorItem) {
   }
   .tail {
     flex-direction: row;
-    align-items: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+  }
+  /* 窄屏下 .tail 横过来了，回归率跟着改成左对齐横排，
+     否则右对齐的两行文字会吊在按钮中间。 */
+  .revert {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .revert .basis {
+    text-align: left;
   }
 }
 </style>

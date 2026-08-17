@@ -1241,7 +1241,8 @@ mod tests {
         // 看不出漏了，它只是少了几行。
         assert!(
             MONITOR_SNAPSHOT_SQL.contains("distinct on (contract_1, contract_2)"),
-            "必须按组合去重取最新，而不是按日期一刀切：{MONITOR_SNAPSHOT_SQL}"
+            "必须按组合去重取最新，而不是按日期一刀切：{}",
+            *MONITOR_SNAPSHOT_SQL
         );
         assert!(
             MONITOR_SNAPSHOT_SQL.contains("order by contract_1, contract_2, trade_date desc"),
@@ -1256,6 +1257,61 @@ mod tests {
         assert!(
             !MONITOR_SNAPSHOT_SQL.contains("regexp_replace"),
             "监控快照的过滤条件里不许出现非 leakproof 函数"
+        );
+    }
+
+    #[test]
+    fn every_column_the_row_mapper_reads_is_actually_selected() {
+        // `monitor_row` 按列名取值，列清单少一列就是运行期的 ColumnNotFound——
+        // 编译器不管，只有真去查一次库才炸。两处 SQL 都从 MONITOR_COLUMNS 生成，
+        // 这里把「取的列」与「选的列」对一遍，漏改在编译期的测试里就拦下。
+        for column in [
+            "prev_pair_position",
+            "prev_years_position",
+            "revert_low_hit_3",
+            "revert_low_n_3",
+            "revert_low_hit_5",
+            "revert_low_n_5",
+            "revert_low_hit_10",
+            "revert_low_n_10",
+            "revert_high_hit_3",
+            "revert_high_n_3",
+            "revert_high_hit_5",
+            "revert_high_n_5",
+            "revert_high_hit_10",
+            "revert_high_n_10",
+        ] {
+            assert!(
+                MONITOR_COLUMNS.contains(column),
+                "monitor_row 读了 {column}，但列清单里没有它"
+            );
+            assert!(
+                MONITOR_SNAPSHOT_SQL.contains(column),
+                "快照 SQL 没有带上 {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_revert_migration_keeps_the_threshold_out_of_the_table() {
+        // 与 202608120001 同一条原则：存素材不存结论。段首日靠「前一日位置」在读时
+        // 判，不许出现 is_segment_start 之类的落库列——那等于把阈值焊死。
+        let migration = include_str!("../../../migrations/202608170001_spread_monitor_revert.sql");
+        assert!(migration.contains("prev_pair_position"));
+        assert!(migration.contains("prev_years_position"));
+        assert!(
+            !migration.contains("is_segment_start") && !migration.contains("is_new_alert"),
+            "段首日必须读时判，不许落库"
+        );
+        // 加列迁移必须可重跑：2026-08-17 这套 DDL 曾被开发期的验证脚本意外落进生产，
+        // 不幂等的话正式部署必然撞「列已存在」。
+        assert!(
+            migration.matches("add column if not exists").count() == 14,
+            "14 个新列都必须 add column if not exists"
+        );
+        assert!(
+            migration.contains("drop constraint if exists"),
+            "约束没有 add if not exists，必须先 drop if exists 才能重跑"
         );
     }
 
@@ -3187,7 +3243,37 @@ pub struct SpreadMonitorRow {
     pub years_low: Option<String>,
     pub years_high: Option<String>,
     pub years_position: Option<String>,
+    /// 前一交易日的两轨位置。存位置而不是「是不是段首日」，理由同阈值：判定留到
+    /// 读的时候按当次阈值算，任何阈值都能在任何一天重判（迁移 202608170001）。
+    pub prev_pair_position: Option<String>,
+    pub prev_years_position: Option<String>,
+    /// 该月份组合模板历史上，极值段首日起 20 交易日朝回归方向走的命中数与样本数。
+    /// 三档分别对应阈值 3% / 5% / 10%，读时取与当次阈值最接近的一档。
+    pub revert_low_hit_3: Option<i32>,
+    pub revert_low_n_3: Option<i32>,
+    pub revert_low_hit_5: Option<i32>,
+    pub revert_low_n_5: Option<i32>,
+    pub revert_low_hit_10: Option<i32>,
+    pub revert_low_n_10: Option<i32>,
+    pub revert_high_hit_3: Option<i32>,
+    pub revert_high_n_3: Option<i32>,
+    pub revert_high_hit_5: Option<i32>,
+    pub revert_high_n_5: Option<i32>,
+    pub revert_high_hit_10: Option<i32>,
+    pub revert_high_n_10: Option<i32>,
 }
+
+/// 两条查询共用的列清单。写成常量是因为它出现在两处 SQL 里，而 `monitor_row`
+/// 按列名取值——三处漏改任何一处都是运行期才炸的 `ColumnNotFound`。
+const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_2, contract_2,
+            is_cross_variety, spread::text, pair_days,
+            pair_low::text, pair_high::text, pair_position::text,
+            years_days, years_low::text, years_high::text, years_position::text,
+            prev_pair_position::text, prev_years_position::text,
+            revert_low_hit_3, revert_low_n_3, revert_low_hit_5, revert_low_n_5,
+            revert_low_hit_10, revert_low_n_10,
+            revert_high_hit_3, revert_high_n_3, revert_high_hit_5, revert_high_n_5,
+            revert_high_hit_10, revert_high_n_10";
 
 /// 监控页的当前快照：**每组组合各取自己最新的那一条**。
 ///
@@ -3197,18 +3283,19 @@ pub struct SpreadMonitorRow {
 ///
 /// `stale_days` 是兜底：合约到期后不再有新快照，它的最后一条会永远留在表里。
 /// 超过这个天数没更新的组合不再当作「当前」。
-const MONITOR_SNAPSHOT_SQL: &str = "with newest as (
+static MONITOR_SNAPSHOT_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "with newest as (
          select max(trade_date) d from spread_monitor_daily where workspace_id = $1
      )
      select distinct on (contract_1, contract_2)
-            trade_date, instrument_1, contract_1, instrument_2, contract_2,
-            is_cross_variety, spread::text, pair_days,
-            pair_low::text, pair_high::text, pair_position::text,
-            years_days, years_low::text, years_high::text, years_position::text
+            {MONITOR_COLUMNS}
        from spread_monitor_daily, newest
       where workspace_id = $1
         and trade_date > newest.d - ($2 || ' days')::interval
-      order by contract_1, contract_2, trade_date desc";
+      order by contract_1, contract_2, trade_date desc"
+    )
+});
 
 pub async fn spread_monitor_snapshot(
     pool: &PgPool,
@@ -3217,7 +3304,7 @@ pub async fn spread_monitor_snapshot(
 ) -> Result<Vec<SpreadMonitorRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query(MONITOR_SNAPSHOT_SQL)
+    let rows = sqlx::query(MONITOR_SNAPSHOT_SQL.as_str())
         .bind(workspace_id)
         .bind(stale_days.to_string())
         .fetch_all(&mut *tx)
@@ -3235,15 +3322,12 @@ pub async fn spread_monitor_on(
 ) -> Result<Vec<SpreadMonitorRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
-    let rows = sqlx::query(
-        "select trade_date, instrument_1, contract_1, instrument_2, contract_2,
-                is_cross_variety, spread::text, pair_days,
-                pair_low::text, pair_high::text, pair_position::text,
-                years_days, years_low::text, years_high::text, years_position::text
+    let rows = sqlx::query(&format!(
+        "select {MONITOR_COLUMNS}
            from spread_monitor_daily
           where workspace_id = $1 and trade_date = $2
-          order by instrument_1, contract_1, contract_2",
-    )
+          order by instrument_1, contract_1, contract_2"
+    ))
     .bind(workspace_id)
     .bind(trade_date)
     .fetch_all(&mut *tx)
@@ -3289,5 +3373,19 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         years_low: row.get("years_low"),
         years_high: row.get("years_high"),
         years_position: row.get("years_position"),
+        prev_pair_position: row.get("prev_pair_position"),
+        prev_years_position: row.get("prev_years_position"),
+        revert_low_hit_3: row.get("revert_low_hit_3"),
+        revert_low_n_3: row.get("revert_low_n_3"),
+        revert_low_hit_5: row.get("revert_low_hit_5"),
+        revert_low_n_5: row.get("revert_low_n_5"),
+        revert_low_hit_10: row.get("revert_low_hit_10"),
+        revert_low_n_10: row.get("revert_low_n_10"),
+        revert_high_hit_3: row.get("revert_high_hit_3"),
+        revert_high_n_3: row.get("revert_high_n_3"),
+        revert_high_hit_5: row.get("revert_high_hit_5"),
+        revert_high_n_5: row.get("revert_high_n_5"),
+        revert_high_hit_10: row.get("revert_high_hit_10"),
+        revert_high_n_10: row.get("revert_high_n_10"),
     }
 }

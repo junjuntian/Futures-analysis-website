@@ -3125,27 +3125,33 @@ mod monitor_tests {
         let years = track(0.161, 0.20);
         assert_eq!(pair.alert.as_deref(), Some("high"));
         assert_eq!(years.alert.as_deref(), Some("low"));
-        assert_eq!(combined_alert(&pair, Some(&years)), Some("high"));
+        assert_eq!(combined_alert(&pair, Some(&years), 0.20), Some("high"));
 
         // 同一组数据在默认的 10% 阈值下只有当年那条触发——16.1% 够不着 10% 的低位带。
         // 写在这里是为了记住：设计图里那些「历年低位」的说法用的是 20% 阈值。
         let pair_10 = track(0.951, 0.10);
         let years_10 = track(0.161, 0.10);
         assert_eq!(years_10.alert, None);
-        assert_eq!(combined_alert(&pair_10, Some(&years_10)), Some("high"));
+        assert_eq!(
+            combined_alert(&pair_10, Some(&years_10), 0.10),
+            Some("high")
+        );
 
         // 反过来也要对：历年更极端时报历年那条。
         let pair_mild = track(0.88, 0.15);
         let years_wild = track(-0.20, 0.15);
-        assert_eq!(combined_alert(&pair_mild, Some(&years_wild)), Some("low"));
+        assert_eq!(
+            combined_alert(&pair_mild, Some(&years_wild), 0.15),
+            Some("low")
+        );
     }
 
     #[test]
     fn no_alert_anywhere_means_no_alert() {
         let pair = track(0.5, 0.10);
         let years = track(0.42, 0.10);
-        assert_eq!(combined_alert(&pair, Some(&years)), None);
-        assert_eq!(combined_alert(&pair, None), None);
+        assert_eq!(combined_alert(&pair, Some(&years), 0.10), None);
+        assert_eq!(combined_alert(&pair, None, 0.10), None);
     }
 
     #[test]
@@ -3153,7 +3159,93 @@ mod monitor_tests {
         // 历年轨可能缺席：跨品种组合的历史年份不够，或该月份组合是头一年出现。
         // 缺席不该让整行消失。
         let pair = track(0.97, 0.10);
-        assert_eq!(combined_alert(&pair, None), Some("high"));
+        assert_eq!(combined_alert(&pair, None, 0.10), Some("high"));
+    }
+
+    /// 段首日判定抽出来复算一遍：与 handler 里那段是同一条规则。
+    fn new_alert(today: (f64, Option<f64>), prev: (Option<f64>, Option<f64>), thr: f64) -> bool {
+        let alert = combined_alert_at(Some(today.0), today.1, thr);
+        let has_prev = prev.0.is_some() || prev.1.is_some();
+        alert.is_some() && has_prev && combined_alert_at(prev.0, prev.1, thr).is_none()
+    }
+
+    #[test]
+    fn a_new_alert_is_one_that_was_not_there_yesterday() {
+        // 昨天在区间中部、今天贴到下沿 —— 这才是「新出现的机会」。
+        assert!(new_alert((0.01, None), (Some(0.30), None), 0.03));
+        // 昨天已经在极值里，今天还在 —— 持续触发，不是新的。焦煤 2026 年 64% 的
+        // 交易日都在触发，全靠这一条把长段压下去。
+        assert!(!new_alert((0.01, None), (Some(0.02), None), 0.03));
+        // 今天没触发，昨天触没触发都无所谓。
+        assert!(!new_alert((0.50, None), (Some(0.01), None), 0.03));
+    }
+
+    #[test]
+    fn without_yesterdays_position_nothing_is_marked_new() {
+        // 该组合的第一天、或前一日没有快照。判不了就不打标记：把「不知道」当成
+        // 「刚触发」，页面上会天天冒出假的新触发，而且看不出是假的。
+        assert!(!new_alert((0.01, None), (None, None), 0.03));
+    }
+
+    #[test]
+    fn the_segment_start_follows_the_same_two_track_rule() {
+        // 前一日两轨方向相反时，也要按「更极端那条」判，否则会出现今天用合成轨、
+        // 昨天用当年轨的错配。昨天当年轨 0.951(高位触发)、历年 0.161(低位触发)，
+        // 20% 阈值下昨天已经触发，所以今天不是段首日。
+        assert!(!new_alert(
+            (0.97, Some(0.5)),
+            (Some(0.951), Some(0.161)),
+            0.20
+        ));
+        // 同一组前值放到 3% 阈值下，两条都够不着 —— 今天才算新触发。
+        assert!(new_alert(
+            (0.01, Some(0.5)),
+            (Some(0.951), Some(0.161)),
+            0.03
+        ));
+    }
+
+    #[test]
+    fn the_revert_band_closest_to_the_threshold_wins() {
+        let bands = [
+            (0.03, Some(28), Some(52)),
+            (0.05, Some(40), Some(80)),
+            (0.10, Some(60), Some(150)),
+        ];
+        // 阈值正好是某一档就取那档。
+        let picked = revert_pick(bands, "low", 0.03).expect("有样本");
+        assert_eq!((picked.hit, picked.n), (28, 52));
+        assert_eq!(picked.threshold, "0.03");
+        assert_eq!(picked.rate, "0.5385");
+        // 阈值落在档位之间取最近的一档 —— 用户把阈值调到 4% 不该让整块统计消失。
+        assert_eq!(
+            revert_pick(bands, "low", 0.04).expect("有样本").threshold,
+            "0.03"
+        );
+        assert_eq!(
+            revert_pick(bands, "low", 0.08).expect("有样本").threshold,
+            "0.10"
+        );
+        assert_eq!(
+            revert_pick(bands, "low", 0.45).expect("有样本").threshold,
+            "0.10"
+        );
+    }
+
+    #[test]
+    fn a_band_without_samples_is_skipped_not_shown_as_zero() {
+        // 样本为 0 显示成「0% 回归率」是最坏的一种错：看着像结论，其实是没有数据。
+        let sparse = [
+            (0.03, None, None),
+            (0.05, None, None),
+            (0.10, Some(3), Some(9)),
+        ];
+        let picked = revert_pick(sparse, "high", 0.03).expect("退到有样本的那档");
+        assert_eq!(picked.threshold, "0.10");
+        assert_eq!((picked.hit, picked.n), (3, 9));
+        // 一档都没有就整个不给，页面上不显示这一块。
+        let empty = [(0.03, None, None), (0.05, None, None), (0.10, None, None)];
+        assert!(revert_pick(empty, "high", 0.03).is_none());
     }
 }
 
@@ -3334,6 +3426,36 @@ pub struct SpreadMonitorItem {
     pub years: Option<SpreadMonitorTrack>,
     /// 两条轨里只要有一条触发就不为空。两条方向相反时以「更极端的那条」为准。
     pub alert: Option<String>,
+    /// 今天触发、前一交易日按同一阈值不触发 —— 也就是**刚进极值**。
+    ///
+    /// 焦煤 2026 年有 64% 的交易日都在 3% 触发(价差持续创新低，滚动区间天天被
+    /// 刷新)，而连续触发段的中位长度只有 3 日:绝大多数段是短的，长段拖着不放
+    /// 才是噪音。区分这两者，页面才能把「新出现的机会」从一片红里挑出来。
+    ///
+    /// 前一日位置缺失(该组合的第一天、或前一日没有快照)时为 false —— 判不了就
+    /// 不打标记，宁可漏标也不假报。
+    pub is_new_alert: bool,
+    /// 未触发时为空；触发时给出同侧的历史回归率，样本不足也为空。
+    pub revert: Option<SpreadRevertStats>,
+}
+
+/// 该月份组合模板历史上，贴到同一侧极值之后价差回归的频率。
+///
+/// **不是这一组合自己的胜率**:主体是月份组合模板(同品种 + 同月份对 + 同年差，
+/// 例如鸡蛋 09-01)跨年拼起来的样本。一个具体合约对一辈子只有一个生命周期，极值段
+/// 两三段，算不出有意义的比率。完整口径见迁移 202608170001。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpreadRevertStats {
+    /// 统计所用的档位("0.03" / "0.05" / "0.10")。取与本次阈值**最接近**的一档，
+    /// 不一定等于本次阈值——界面要把它显示出来，否则读的人会以为是按当前阈值算的。
+    pub threshold: String,
+    /// 与本次报警同侧:"low" 统计低位段，"high" 统计高位段。
+    pub side: String,
+    /// 命中段数与样本段数。给原始计数是有意的:「52 段里 28 段」比孤零零一个 54%
+    /// 更能让人看出样本有多薄。
+    pub hit: i32,
+    pub n: i32,
+    pub rate: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -3361,28 +3483,67 @@ fn monitor_alert(position: Option<f64>, threshold: f64) -> Option<&'static str> 
     }
 }
 
-/// 一条轨离中线有多远。0.5 是正中央，越大越极端；越界（位置在 0~1 之外）大于 0.5。
-fn monitor_extremity(track: &SpreadMonitorTrack) -> Option<f64> {
-    track.alert.as_ref()?;
-    let position: f64 = track.position.as_deref()?.parse().ok()?;
-    Some((position - 0.5).abs())
+fn track_position(track: &SpreadMonitorTrack) -> Option<f64> {
+    track.position.as_deref()?.parse().ok()
 }
 
-/// 两条轨合成一个结论。
+/// 两条轨合成一个结论，**只看位置与阈值**。
 ///
 /// **方向可能相反**：焦煤 JM2609−JM2701 在 2026-08-11 就是当年高位（95.1%）、
 /// 历年低位（16.1%）。这时报「更极端的那条」——离中线更远的一个。随便挑一条
 /// 会有一半的机会把方向说反，而页面上看不出它挑错了。
-fn combined_alert<'a>(
-    pair: &'a SpreadMonitorTrack,
-    years: Option<&'a SpreadMonitorTrack>,
-) -> Option<&'a str> {
-    [Some(pair), years]
+///
+/// 写成不依赖 `SpreadMonitorTrack` 的形式，是因为判段首日要拿**前一交易日**的两个
+/// 位置走同一条规则。同一个「取更极端那条」的判断在两处各写一遍，迟早会漂。
+fn combined_alert_at(
+    pair: Option<f64>,
+    years: Option<f64>,
+    threshold: f64,
+) -> Option<&'static str> {
+    [pair, years]
         .into_iter()
         .flatten()
-        .filter_map(|track| monitor_extremity(track).map(|far| (far, track)))
+        .filter_map(|position| {
+            monitor_alert(Some(position), threshold).map(|alert| ((position - 0.5).abs(), alert))
+        })
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .and_then(|(_, track)| track.alert.as_deref())
+        .map(|(_, alert)| alert)
+}
+
+fn combined_alert(
+    pair: &SpreadMonitorTrack,
+    years: Option<&SpreadMonitorTrack>,
+    threshold: f64,
+) -> Option<&'static str> {
+    combined_alert_at(
+        track_position(pair),
+        years.and_then(track_position),
+        threshold,
+    )
+}
+
+/// 三档统计里挑与本次阈值最接近的一档。
+///
+/// 请求阈值是连续的（0~0.5），统计只有 3 / 5 / 10 三档。硬要求相等，用户把阈值调到
+/// 4% 就什么都不显示了——那种「功能时有时无」比数字差一点糟得多。挑中的档位原样
+/// 回给界面，由界面标明。
+fn revert_pick(
+    bands: [(f64, Option<i32>, Option<i32>); 3],
+    side: &str,
+    threshold: f64,
+) -> Option<SpreadRevertStats> {
+    let (band, hit, n) = bands
+        .into_iter()
+        .filter(|(_, hit, n)| hit.is_some() && n.is_some_and(|n| n > 0))
+        .min_by(|a, b| (a.0 - threshold).abs().total_cmp(&(b.0 - threshold).abs()))?;
+    let (hit, n) = (hit?, n?);
+    Some(SpreadRevertStats {
+        threshold: format!("{band:.2}"),
+        side: side.to_string(),
+        hit,
+        n,
+        rate: format!("{:.4}", f64::from(hit) / f64::from(n)),
+    })
 }
 
 fn monitor_track(
@@ -3488,7 +3649,39 @@ pub async fn query_spread_monitor(
                 row.years_days,
                 threshold,
             );
-            let alert = combined_alert(&pair, years.as_ref()).map(str::to_string);
+            let alert = combined_alert(&pair, years.as_ref(), threshold);
+
+            // 段首日：今天触发、前一交易日按同一阈值不触发。前一日位置整个缺失时
+            // `combined_alert_at` 返回 None，会把「判不了」误判成「刚触发」，所以
+            // 额外要求至少有一条轨的前值存在。
+            let parse = |value: &Option<String>| -> Option<f64> {
+                value.as_deref().and_then(|raw| raw.parse().ok())
+            };
+            let prev_pair = parse(&row.prev_pair_position);
+            let prev_years = parse(&row.prev_years_position);
+            let has_prev = prev_pair.is_some() || prev_years.is_some();
+            let is_new_alert = alert.is_some()
+                && has_prev
+                && combined_alert_at(prev_pair, prev_years, threshold).is_none();
+
+            // Option<i32> 是 Copy，这里读不会移动 row，下面照样能把字符串字段移走。
+            let revert = alert.and_then(|side| {
+                let bands = if side == "low" {
+                    [
+                        (0.03, row.revert_low_hit_3, row.revert_low_n_3),
+                        (0.05, row.revert_low_hit_5, row.revert_low_n_5),
+                        (0.10, row.revert_low_hit_10, row.revert_low_n_10),
+                    ]
+                } else {
+                    [
+                        (0.03, row.revert_high_hit_3, row.revert_high_n_3),
+                        (0.05, row.revert_high_hit_5, row.revert_high_n_5),
+                        (0.10, row.revert_high_hit_10, row.revert_high_n_10),
+                    ]
+                };
+                revert_pick(bands, side, threshold)
+            });
+
             SpreadMonitorItem {
                 trade_date: row.trade_date.to_string(),
                 instrument_1: row.instrument_1,
@@ -3499,7 +3692,9 @@ pub async fn query_spread_monitor(
                 spread: row.spread,
                 pair,
                 years,
-                alert,
+                alert: alert.map(str::to_string),
+                is_new_alert,
+                revert,
             }
         })
         .collect();
