@@ -125,6 +125,9 @@ export function chartTokens(): ChartTokens {
 export function tooltipStyle() {
   const tokens = chartTokens()
   return {
+    // 钉在图表容器内。缺省 tooltip 跟随鼠标且允许出界,建仓过程行情图的
+    // 长小窗(行情+多空+净持仓九行)在图顶部悬停时上半截会被裁掉。
+    confine: true,
     backgroundColor: tokens.tooltipBg,
     borderColor: tokens.tooltipBorder,
     textStyle: { color: tokens.tooltipText }
