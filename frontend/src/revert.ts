@@ -70,9 +70,10 @@ export function isQualified(stats: SpreadRevertStats): boolean {
 /**
  * 拐头反复 = 信号差（DEC-063 修订，运营者拍板）。
  *
- * 近 20 个交易日内第 2 次及以后的穿线，说明这个组合的拐头不干脆——JM2609/JM2701
- * 八天三次穿线、期间价差打回区间顶，前两次进场按「创报警后新高离场」都得止损；
- * 对照 FG2701/SA2701 干脆的拐头一次穿线一路走。次数本身就是筛子。
+ * 近 20 个交易日内穿线 2 次及以上，说明这个组合的拐头不干脆——JM2609/JM2701
+ * 八天三次穿线、期间价差打回区间顶，前两次进场按「创报警后新高离场」都得止损。
+ * 注意这条门槛是严的：FG2701/SA2701(后续走得很好)也因 08-07 的贴线抖动
+ * (0.906→0.855)攒到 ×2 被标——标出来的是「谨慎」，不是「禁止」。
  */
 export function isChoppy(turnCrosses: number | null): boolean {
   return turnCrosses !== null && turnCrosses >= 2
