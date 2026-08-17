@@ -114,11 +114,8 @@ const title = computed(() => {
   return `${Number(month)}.${Number(day)} 黄金白银报告表`
 })
 
-/** 压力位是沿用早先某天填的，不是当天填的——必须标出来，不能冒充成今天的判断。 */
-const staleLevels = computed(() => {
-  const source = report.value?.levels_source_date
-  return source && report.value && source !== report.value.trade_date ? source : null
-})
+// 「沿用 X 填的,尚未确认」横幅已删(运营者 2026-08-17:压力位是手工维护的,
+// 要改自己会改,提示纯属噪音)。levels_source_date 字段 API 仍在,只是不再渲染。
 
 async function csrf() {
   if (!auth.csrfToken) await auth.loadCsrf()
@@ -225,9 +222,6 @@ function moveTone(row: ReportSeatRow, side: 'gold' | 'silver') {
       <div class="section-head">
         <h3>压力位与支撑位</h3>
         <div class="actions">
-          <el-tag v-if="staleLevels" type="warning" size="small" effect="light">
-            沿用 {{ staleLevels }} 填的，尚未确认
-          </el-tag>
           <template v-if="editingLevels">
             <el-button size="small" :loading="saving" type="primary" @click="saveLevels">
               保存
