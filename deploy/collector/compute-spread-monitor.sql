@@ -122,7 +122,15 @@ analyze pair_series;
 create temp table pair_stat as
 select y.*,
        lag(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
-                             order by y.trade_date) prev_pair_pos
+                             order by y.trade_date) prev_pair_pos,
+       -- 近 20 个交易日(含当日)的位置极值,「已拐头」的事实素材(迁移 202608170004)。
+       -- 按行数开窗:位置本来就只在交易日上有值,20 行即 20 个交易日。
+       max(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
+                             order by y.trade_date
+                             rows between 19 preceding and current row) pair_pos_hi20,
+       min(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
+                             order by y.trade_date
+                             rows between 19 preceding and current row) pair_pos_lo20
   from (select x.*,
                case when x.hi > x.lo and x.days >= 60
                     then (x.now - x.lo) / (x.hi - x.lo) end pair_pos
@@ -181,6 +189,7 @@ select s.*,
                               order by s.trade_date) prev_years_pos
   from (select p.workspace_id, p.c1, p.c2, p.trade_date, p.now, p.days,
                p.lo, p.hi, p.pair_pos, p.prev_pair_pos,
+               p.pair_pos_hi20, p.pair_pos_lo20,
                y.days years_days, y.lo years_lo, y.hi years_hi,
                case when y.hi > y.lo then (p.now - y.lo) / (y.hi - y.lo) end years_pos
           from pair_stat p
@@ -346,6 +355,7 @@ insert into spread_monitor_daily (
     is_cross_variety, spread, pair_days, pair_low, pair_high, pair_position,
     years_days, years_low, years_high, years_position,
     prev_pair_position, prev_years_position,
+    pair_pos_hi20, pair_pos_lo20,
     revert_high_hit, revert_high_n, revert_high_move, revert_high_drift,
     revert_high_days,
     revert_low_hit, revert_low_n, revert_low_move, revert_low_drift,
@@ -355,6 +365,7 @@ select gen_random_uuid(), s.workspace_id, s.trade_date,
        s.days, s.lo, s.hi, s.pair_pos,
        s.years_days, s.years_lo, s.years_hi, s.years_pos,
        s.prev_pair_pos, s.prev_years_pos,
+       s.pair_pos_hi20, s.pair_pos_lo20,
        r.high_hit, r.high_n, r.high_move, r.high_drift, r.high_days,
        r.low_hit, r.low_n, r.low_move, r.low_drift, r.low_days
   from snap s
@@ -370,6 +381,8 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     years_high = excluded.years_high, years_position = excluded.years_position,
     prev_pair_position = excluded.prev_pair_position,
     prev_years_position = excluded.prev_years_position,
+    pair_pos_hi20 = excluded.pair_pos_hi20,
+    pair_pos_lo20 = excluded.pair_pos_lo20,
     revert_high_hit = excluded.revert_high_hit,
     revert_high_n = excluded.revert_high_n,
     revert_high_move = excluded.revert_high_move,
@@ -394,6 +407,9 @@ select trade_date 交易日, count(*) 组合数,
        -- 段首日标记会整片消失,而页面上只是「没有新触发」,看不出是坏了。
        count(*) filter (where prev_pair_position is not null) 有前值,
        count(*) filter (where revert_low_n is not null
-                           or revert_high_n is not null) 有回归率
+                           or revert_high_n is not null) 有回归率,
+       -- 拐头素材的覆盖率:全空说明滚动窗那步被改坏,「已拐头」会整片消失,
+       -- 而页面上只是「没有拐头行」,看不出是坏了。
+       count(*) filter (where pair_pos_hi20 is not null) 有滚动位
   from spread_monitor_daily
  group by 1 order by 1 desc limit 5;

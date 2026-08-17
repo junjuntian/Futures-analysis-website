@@ -616,8 +616,11 @@ export interface SpreadMonitorItem {
   /** 今天触发、前一交易日按同一阈值不触发 —— 刚进极值。持续触发的段为 false，
    * 前一日位置缺失时也为 false(判不了就不标)。 */
   is_new_alert: boolean
-  /** 未触发、或样本不足时为 null。 */
+  /** 未触发且未拐头、或样本不足时为 null。报警侧优先，否则按拐头侧。 */
   revert: SpreadRevertStats | null
+  /** 'high' | 'low' | null —— 已拐头：近 20 个交易日内当年轨曾进 3% 报警带，
+   * 且当前已自极值回撤超过区间宽度的 10%。分层规则的进场信号（DEC-063）。 */
+  turn: string | null
 }
 
 export interface SpreadMonitorResponse {

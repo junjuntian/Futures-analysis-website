@@ -3236,6 +3236,39 @@ mod monitor_tests {
     }
 
     #[test]
+    fn a_turn_needs_a_recent_alert_and_a_real_retreat() {
+        // 近 20 日进过高位带(hi20=1.0),当前退到 0.88 —— 已拐头。
+        assert_eq!(
+            monitor_turn(Some(0.88), Some(1.0), Some(0.40)),
+            Some("high")
+        );
+        // 还贴在带里(0.98):机会在,但还没拐头。
+        assert_eq!(monitor_turn(Some(0.98), Some(1.0), Some(0.40)), None);
+        // 退了但不够(0.93 > 0.90):不算。
+        assert_eq!(monitor_turn(Some(0.93), Some(1.0), Some(0.40)), None);
+        // 报警是 20 多天前的事(hi20 已滑出带外):状态自动过期。
+        assert_eq!(monitor_turn(Some(0.85), Some(0.94), Some(0.40)), None);
+        // 低位对称。
+        assert_eq!(
+            monitor_turn(Some(0.12), Some(0.60), Some(0.01)),
+            Some("low")
+        );
+        // 位置缺失判不了。
+        assert_eq!(monitor_turn(None, Some(1.0), Some(0.0)), None);
+    }
+
+    #[test]
+    fn a_crash_through_both_bands_picks_the_side_with_more_margin() {
+        // 20 日内从上带砸到 0.05:高位侧余量 0.85,低位侧不足 —— 报高位拐头。
+        assert_eq!(
+            monitor_turn(Some(0.05), Some(1.0), Some(0.05)),
+            Some("high")
+        );
+        // 停在正中央,两侧都够格时也要有确定的答案,不许随机。
+        assert_eq!(monitor_turn(Some(0.50), Some(1.0), Some(0.0)), Some("high"));
+    }
+
+    #[test]
     fn a_high_hit_rate_with_a_negative_drift_is_the_trap_worth_showing() {
         // JD2612/JD2701：12 年全都曾跌破起点（rate=100%），但一直持到窗口止点的净
         // 变化中位是 −166 点 —— 方向是反的。只显示 rate 会把这种组合读成安全机会，
@@ -3440,8 +3473,17 @@ pub struct SpreadMonitorItem {
     /// 前一日位置缺失(该组合的第一天、或前一日没有快照)时为 false —— 判不了就
     /// 不打标记，宁可漏标也不假报。
     pub is_new_alert: bool,
-    /// 未触发时为空；触发时给出同侧的历史回归率，样本不足也为空。
+    /// 未触发、且未拐头时为空；否则给出报警侧（或拐头侧）的历年统计，样本不足也为空。
     pub revert: Option<SpreadRevertStats>,
+    /// "high" / "low" / null —— **已拐头**：近 20 个交易日内当年轨曾进 3% 报警带，
+    /// 且当前已自极值回撤超过区间宽度的 10%（= 位置退到 0.90 以下 / 0.10 以上）。
+    ///
+    /// 这是分层规则（DEC-063）的进场信号：报警只是机会出现，拐头才是上车点。
+    /// 全样本回放里报警即进持到底中位为负；先按历年统计筛资格、再等拐头，
+    /// 留一法验证下持到底中位 +39%。报警带取最严档（3%）、回撤量取通用 10%，
+    /// 都是常量不随页面阈值变——给两个可调旋钮只会诱导挑参数。
+    /// 只看当年轨：资格统计与回放验证都在当年轨的可交易窗口上，口径闭环。
+    pub turn: Option<String>,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -3496,6 +3538,33 @@ fn monitor_alert(position: Option<f64>, threshold: f64) -> Option<&'static str> 
         Some("high")
     } else {
         None
+    }
+}
+
+/// 拐头判定的两个常量。写死不进 Query:报警带用页面最严档,回撤量是全品种回放
+/// 验证过的通用值(5%/10%/15% 结果同向,取中)——做成旋钮只会诱导挑参数。
+const TURN_BAND: f64 = 0.03;
+const TURN_RETREAT: f64 = 0.10;
+
+/// 已拐头:近 20 个交易日当年轨曾进报警带,且当前位置已退到带外超过回撤量。
+///
+/// 「自极值回撤区间的 10%」等价于「位置退 10 个百分点」:报警时价差贴着滚动
+/// 极值,极值就是区间端点,(端点 − 当前) / 区间宽 = 1 − 位置。所以不需要另存
+/// 极值,只需要近 20 日位置的 max/min(迁移 202608170004)。
+/// 两侧同时满足(20 日内从上带砸穿到下带)取离自家门槛更远的一侧。
+fn monitor_turn(pos: Option<f64>, hi20: Option<f64>, lo20: Option<f64>) -> Option<&'static str> {
+    let pos = pos?;
+    let high = hi20.is_some_and(|h| h >= 1.0 - TURN_BAND) && pos <= 1.0 - TURN_RETREAT;
+    let low = lo20.is_some_and(|l| l <= TURN_BAND) && pos >= TURN_RETREAT;
+    match (high, low) {
+        (true, false) => Some("high"),
+        (false, true) => Some("low"),
+        (true, true) => Some(if (1.0 - TURN_RETREAT - pos) >= (pos - TURN_RETREAT) {
+            "high"
+        } else {
+            "low"
+        }),
+        (false, false) => None,
     }
 }
 
@@ -3681,9 +3750,17 @@ pub async fn query_spread_monitor(
                 && has_prev
                 && combined_alert_at(prev_pair, prev_years, threshold).is_none();
 
+            let turn = monitor_turn(
+                track_position(&pair),
+                parse(&row.pair_pos_hi20),
+                parse(&row.pair_pos_lo20),
+            );
+
             // 计数是 Copy、点数是短字符串 clone 一下，都不会妨碍下面把 row 的其余
-            // 字段移走。统计与阈值无关，所以这里不再挑档位，直接按报警侧取。
-            let revert = alert.and_then(|side| {
+            // 字段移走。统计与阈值无关，所以这里不再挑档位；报警侧优先，没报警但
+            // 已拐头的行按拐头侧给——拐头行多半已退出报警带，不给统计的话,恰恰是
+            // 该看数字的时候页面一片空白。
+            let revert = alert.or(turn).and_then(|side| {
                 if side == "high" {
                     revert_stats(
                         side,
@@ -3718,6 +3795,7 @@ pub async fn query_spread_monitor(
                 alert: alert.map(str::to_string),
                 is_new_alert,
                 revert,
+                turn: turn.map(str::to_string),
             }
         })
         .collect();

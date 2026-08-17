@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { driftTone, points, revertPct, revertTone } from './revert'
+import { driftTone, isQualified, points, revertPct, revertTone } from './revert'
 import type { SpreadRevertStats } from './api'
 
 function stats(rate: string, hit = 1, n = 2): SpreadRevertStats {
@@ -76,5 +76,27 @@ describe('driftTone', () => {
     expect(driftTone('0')).toBe('')
     expect(driftTone(null)).toBe('')
     expect(driftTone('nonsense')).toBe('')
+  })
+})
+
+describe('isQualified', () => {
+  function full(rate: string, drift: string | null): SpreadRevertStats {
+    return { side: 'high', hit: 10, n: 12, rate, move_points: '100', drift_points: drift, days: 30 }
+  }
+
+  it('触及率≥80% 且持到期为正才合格', () => {
+    // 生产实例：JD2609/JD2701 高位 92%、持到期 +81 —— 合格。
+    expect(isQualified(full('0.9167', '81'))).toBe(true)
+    // JD2612/JD2701:回归率 100% 但持到期 −166 —— 这正是要拦的陷阱。
+    expect(isQualified(full('1', '-166'))).toBe(false)
+    // 触及率不够。
+    expect(isQualified(full('0.44', '120'))).toBe(false)
+    // 边界:80% 恰好算合格,持到期 0 不算正。
+    expect(isQualified(full('0.80', '1'))).toBe(true)
+    expect(isQualified(full('0.9', '0'))).toBe(false)
+  })
+
+  it('持到期缺失按不合格 —— 资格要正证据,「不知道」不放行', () => {
+    expect(isQualified(full('1', null))).toBe(false)
   })
 })

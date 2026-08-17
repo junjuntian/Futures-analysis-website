@@ -1268,6 +1268,8 @@ mod tests {
         for column in [
             "prev_pair_position",
             "prev_years_position",
+            "pair_pos_hi20",
+            "pair_pos_lo20",
             "revert_high_hit",
             "revert_high_n",
             "revert_high_move",
@@ -1335,6 +1337,18 @@ mod tests {
         assert!(
             third.contains("drop constraint if exists"),
             "替换约束必须先 drop if exists，否则重放迁移会撞「约束已存在」"
+        );
+
+        // 0004（拐头素材）同样必须可重跑，且只存事实：判定阈值不落库。
+        let fourth = include_str!("../../../migrations/202608170004_pair_pos_rolling_extremes.sql");
+        assert!(
+            fourth.matches("add column if not exists").count() == 2
+                && fourth.contains("drop constraint if exists"),
+            "0004 必须幂等"
+        );
+        assert!(
+            !fourth.contains("is_turned") && !fourth.contains("turned boolean"),
+            "拐头是读时判定，不许落库"
         );
 
         for gone in ["revert_low_hit_3", "revert_high_n_10"] {
@@ -3277,6 +3291,11 @@ pub struct SpreadMonitorRow {
     /// 读的时候按当次阈值算，任何阈值都能在任何一天重判（迁移 202608170001）。
     pub prev_pair_position: Option<String>,
     pub prev_years_position: Option<String>,
+    /// 当年轨位置在近 20 个交易日（含当日）的最高/最低。「已拐头」的事实素材
+    /// （迁移 202608170004）：判定本身（报警带 0.97/0.03、回撤 10 个百分点）
+    /// 留在 API 常量里，读时套。
+    pub pair_pos_hi20: Option<String>,
+    pub pair_pos_lo20: Option<String>,
     /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现
     /// （迁移 202608170002）。四个数一组,与阈值无关——它只跟今天是几月几号、
     /// 以及报的是高位还是低位有关:
@@ -3303,6 +3322,7 @@ const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_
             pair_low::text, pair_high::text, pair_position::text,
             years_days, years_low::text, years_high::text, years_position::text,
             prev_pair_position::text, prev_years_position::text,
+            pair_pos_hi20::text, pair_pos_lo20::text,
             revert_high_hit, revert_high_n, revert_high_move::text,
             revert_high_drift::text, revert_high_days,
             revert_low_hit, revert_low_n, revert_low_move::text,
@@ -3408,6 +3428,8 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         years_position: row.get("years_position"),
         prev_pair_position: row.get("prev_pair_position"),
         prev_years_position: row.get("prev_years_position"),
+        pair_pos_hi20: row.get("pair_pos_hi20"),
+        pair_pos_lo20: row.get("pair_pos_lo20"),
         revert_high_hit: row.get("revert_high_hit"),
         revert_high_n: row.get("revert_high_n"),
         revert_high_move: row.get("revert_high_move"),
