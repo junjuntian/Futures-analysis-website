@@ -95,13 +95,31 @@ select workspace_id, exchange, instrument, contract, rank_type, member,
     select workspace_id, exchange, instrument, contract, rank_type, member,
            trade_date, quantity, change,
            lag(quantity) over m prev_q
-      from seat_history
-     where not is_variety_total and contract is not null and change is not null
-       and trade_date >= current_date - (:window_days + 40)
-       and (source like '%\_official'
-            -- 三禾只有大商所的数据（郑商所、上期所那五个品种一行都没有），
-            -- 写死 exchange 是为了将来它真的多出别家数据时不会悄悄混进来。
-            or (source = 'sanhe' and exchange = 'DCE'))
+      from (
+        -- 同一天同一身份键可能有多个源(三禾 2026-08-12 停采前与东财在窗口内
+        -- 并存过),不去重的话 lag 会把同日两行配成假的「相邻日」。官方压过
+        -- 东财压过三禾,与 SEAT_SOURCE_RANK 同一套排序。
+        select distinct on (workspace_id, exchange, instrument, contract,
+                            rank_type, member, trade_date)
+               workspace_id, exchange, instrument, contract, rank_type, member,
+               trade_date, quantity, change
+          from seat_history
+         where not is_variety_total and contract is not null and change is not null
+           and trade_date >= current_date - (:window_days + 40)
+           and (source like '%\_official'
+                -- 三禾、东财都只认大商所:郑商所上期所有官方增量,别让二手源
+                -- 悄悄混进来(写死 exchange 的理由同下一行的旧注释)。
+                or (source = 'sanhe' and exchange = 'DCE')
+                -- 东财增减 2026-08-17 起入库(此前契约把它丢了,DCE 反推自三禾
+                -- 停采后断供;运营者拍板纳入)。恒等式检验待首日数据落库后补做,
+                -- 指纹闸(见下)照常兜底。
+                or (source = 'eastmoney_seats_v1' and exchange = 'DCE'))
+         order by workspace_id, exchange, instrument, contract,
+                  rank_type, member, trade_date,
+                  case when source like '%\_official' then 0
+                       when source = 'eastmoney_seats_v1' then 1
+                       else 2 end, source
+      ) deduped
     window m as (partition by workspace_id, exchange, instrument, contract,
                               rank_type, member
                  order by trade_date)

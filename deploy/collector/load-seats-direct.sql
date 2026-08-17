@@ -43,6 +43,10 @@ create temp table seat_stage (
     volume numeric,
     long_position numeric,
     short_position numeric,
+    -- 增减量:可负可零。东财源自 2026-08-17 起给这一列(契约 seat_positions_v1
+    -- 同批扩列);不给的源留空。\copy 按列序对位,这里的顺序必须与
+    -- normalize.py 的 SEAT_FIELDS 一致。
+    change numeric,
     source_record_ref text
 );
 
@@ -97,11 +101,10 @@ select
     trim(s.seat_name),
     -- 一行只有一个榜有值,rank_type 决定是哪一列。
     coalesce(s.volume, s.long_position, s.short_position),
-    -- change 留空。交易所公布的「增减」是相对该会员前一日的**真实全量仓**算的,
-    -- 而这个源不给这一列;自己拿前后两天相减凑出来的数,在会员进出前二十那天
-    -- 必然与交易所公布的对不上,那就成了一个看起来像官方数字的自造数。
-    -- 掉榜反推(infer-offboard-seats.sql)专门处理这件事,别在这里抢它的活。
-    null,
+    -- 增减照源给的装,不自造。交易所公布的「增减」相对该会员前一日**真实全量仓**
+    -- 算;源没给就留空——拿前后两天自己相减凑数,在会员进出前二十那天必然与
+    -- 交易所口径对不上。东财源 2026-08-17 起带真增减(掉榜反推靠它续供)。
+    s.change,
     :'source_code',
     now()
   from seat_stage s
@@ -121,6 +124,9 @@ on conflict (workspace_id, trade_date, exchange, instrument, contract,
              is_variety_total, rank_type, member, source) do update set
     rank = excluded.rank,
     quantity = excluded.quantity,
+    -- 晚间第二轮采集会把早间没有的增减补上;同一 (身份键, source) 内自我更新,
+    -- 不跨源覆盖(source 在唯一键里)。
+    change = excluded.change,
     -- 两个时间戳各司其职(2026-08-16,迁移 202608160001):loaded_at=首次
     -- 入库时刻,upsert 不许碰——min(loaded_at) 按(交易日,交易所)聚合就是
     -- 数据源到达时刻画像;updated_at=最近装载触碰时刻,E2E 拿它验"本轮

@@ -123,6 +123,49 @@ def test_member_rows_are_rebuilt_into_the_exchange_rank_table(monkeypatch) -> No
     }
 
 
+def test_changes_survive_from_the_api_to_the_normalized_rows(monkeypatch) -> None:
+    # 增减是掉榜反推的算术依据(昨仓 = 今仓 − 增减)。这一列曾在契约里整个缺席,
+    # DCE 的反推因此断供(2026-08-17 运营者拍板修复)——负值、零值都必须原样活到
+    # 归一化输出,别再丢一次。
+    install_pages(
+        monkeypatch,
+        [
+            envelope(
+                [
+                    member(
+                        "JM2609",
+                        DCE,
+                        "甲期货",
+                        VOLUME_RANK=1,
+                        VOLUME=500,
+                        VOLUME_CHANGE=-2295,
+                        LP_RANK=1,
+                        LONG_POSITION=120,
+                        LP_CHANGE=14,
+                    ),
+                    member(
+                        "JM2609",
+                        DCE,
+                        "乙期货",
+                        SP_RANK=1,
+                        SHORT_POSITION=80,
+                        SP_CHANGE=0,
+                    ),
+                ]
+            )
+        ],
+    )
+    tables = AkshareAdapter().eastmoney_seats(eastmoney_seats_source("DCE"), date(2026, 8, 7))
+    rows = normalize_seats(eastmoney_seats_source("DCE"), date(2026, 8, 7), tables)
+    by_key = {(row["rank_type"], row["seat_name"]): row for row in rows}
+    assert by_key[("volume", "甲期货")]["change"] == "-2295"
+    assert by_key[("long", "甲期货")]["change"] == "14"
+    # 零是真实值(「没变化」),不是缺失。
+    assert by_key[("short", "乙期货")]["change"] == "0"
+    # 契约列齐全:每一行都带 change 键(可为空串)。
+    assert all("change" in row for row in rows)
+
+
 def test_unranked_sentinel_never_becomes_a_rank(monkeypatch) -> None:
     install_pages(
         monkeypatch,

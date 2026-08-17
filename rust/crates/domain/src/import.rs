@@ -1027,6 +1027,7 @@ const SEAT_DATASET_FIELDS: &[DatasetFieldRule] = dataset_fields! {
     "volume" => "成交量",
     "long_position" => "持买量",
     "short_position" => "持卖量",
+    "change" => "增减量",
     "source_record_ref" => "来源定位"
 };
 

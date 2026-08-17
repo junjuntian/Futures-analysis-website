@@ -63,6 +63,7 @@ SEAT_FIELDS = [
     "volume",
     "long_position",
     "short_position",
+    "change",
     "source_record_ref",
 ]
 DATASET_FIELDS = {
@@ -210,10 +211,22 @@ def normalize_seats(
             rank = _integer(_pick(raw, "rank", "名次"))
             if not contract or not rank:
                 continue
-            for rank_type, name_field, value_field, target in [
-                ("volume", "vol_party_name", "vol", "volume"),
-                ("long", "long_party_name", "long_open_interest", "long_position"),
-                ("short", "short_party_name", "short_open_interest", "short_position"),
+            for rank_type, name_field, value_field, target, change_field in [
+                ("volume", "vol_party_name", "vol", "volume", "vol_chg"),
+                (
+                    "long",
+                    "long_party_name",
+                    "long_open_interest",
+                    "long_position",
+                    "long_open_interest_chg",
+                ),
+                (
+                    "short",
+                    "short_party_name",
+                    "short_open_interest",
+                    "short_position",
+                    "short_open_interest_chg",
+                ),
             ]:
                 seat_name = _pick(raw, name_field)
                 value = _integer(_pick(raw, value_field), allow_zero=True)
@@ -229,6 +242,10 @@ def normalize_seats(
                     "volume": "",
                     "long_position": "",
                     "short_position": "",
+                    # 增减可负可零,与持仓不同一套校验;源不给就留空——空是
+                    # 「不知道」,拿前后两天自己相减凑数在会员进出前二十那天
+                    # 必然与交易所口径对不上(load-seats-direct.sql 同一条纪律)。
+                    "change": _signed_integer(_pick(raw, change_field)),
                     "source_record_ref": (
                         f"{source.code}:{contract}:{collection_date.isoformat()}:{rank_type}:{rank}"
                     ),
@@ -363,6 +380,17 @@ def _leading_number(value: str) -> str:
     if not match:
         raise ValueError("value does not start with a number")
     return match.group(0)
+
+
+def _signed_integer(value: str) -> str:
+    """增减量:整数,允许负与零。持仓走 `_integer`(拒负),别混用。"""
+    decimal = _decimal(value)
+    if not decimal:
+        return ""
+    number = Decimal(decimal)
+    if number != number.to_integral_value():
+        return ""
+    return str(int(number))
 
 
 def _integer(value: str, *, allow_zero: bool = False) -> str:

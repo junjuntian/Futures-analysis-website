@@ -247,10 +247,29 @@ EASTMONEY_MAX_PAGES = 80
 # The report uses 9999 in a rank column to mean "this member is not ranked for
 # that measure", not "rank 9999".
 EASTMONEY_UNRANKED = 9999
+# Each measure carries its exchange-published change alongside the level. The
+# change is relative to the member's true full position the day before (the
+# identity the reboard inference is built on), so it must survive to the
+# database — dropping it here is how the DCE off-board inference went dark
+# after sanhe stopped (2026-08-17, operator-ordered fix).
 EASTMONEY_RANK_KINDS = (
-    ("VOLUME_RANK", "VOLUME", "vol_party_name", "vol"),
-    ("LP_RANK", "LONG_POSITION", "long_party_name", "long_open_interest"),
-    ("SP_RANK", "SHORT_POSITION", "short_party_name", "short_open_interest"),
+    ("VOLUME_RANK", "VOLUME", "vol_party_name", "vol", "VOLUME_CHANGE", "vol_chg"),
+    (
+        "LP_RANK",
+        "LONG_POSITION",
+        "long_party_name",
+        "long_open_interest",
+        "LP_CHANGE",
+        "long_open_interest_chg",
+    ),
+    (
+        "SP_RANK",
+        "SHORT_POSITION",
+        "short_party_name",
+        "short_open_interest",
+        "SP_CHANGE",
+        "short_open_interest_chg",
+    ),
 )
 
 
@@ -797,7 +816,14 @@ def _pivot_eastmoney_seats(rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame
     tables: dict[str, pd.DataFrame] = {}
     for contract, members in by_contract.items():
         ranked: dict[int, dict[str, Any]] = {}
-        for rank_field, value_field, name_column, value_column in EASTMONEY_RANK_KINDS:
+        for (
+            rank_field,
+            value_field,
+            name_column,
+            value_column,
+            change_field,
+            change_column,
+        ) in EASTMONEY_RANK_KINDS:
             for member in members:
                 rank = member.get(rank_field)
                 value = member.get(value_field)
@@ -809,6 +835,10 @@ def _pivot_eastmoney_seats(rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame
                 slot = ranked.setdefault(rank, {"rank": rank, "symbol": contract})
                 slot[name_column] = seat_name
                 slot[value_column] = value
+                change = member.get(change_field)
+                # Zero and negative are real values; only absence stays absent.
+                if change is not None:
+                    slot[change_column] = change
         if ranked:
             tables[contract] = pd.DataFrame([ranked[rank] for rank in sorted(ranked)])
     if not tables:

@@ -1404,6 +1404,28 @@ settlement，其余静默丢弃。导入全程报成功。
 - **附带修正**:同日曾把 inferred 塞错进净持仓 mapper(替换锚点撞到文件里第一处
   同形代码)——编译器拦下;教训:python 批量替换的锚点必须含足够上下文。
 
+### `DEC-066` 席位契约扩列 change:东财增减入库,DCE 掉榜反推续供
+
+状态:已确认(2026-08-17 深夜,运营者拍板「把东财源纳入」)。
+
+- **病根两层。** 表层:infer-offboard 的源范围没含东财;深层:**东财行的增减在库里
+  全空(7,020 行全部 NULL)**——`seat_positions_v1` 契约(SEAT_FIELDS)里根本没有
+  change 列,东财 API 明明给了(实测 LP_CHANGE/SP_CHANGE/VOLUME_CHANGE 齐全,
+  国泰君安 SN2609 +194/−420)在归一化就被丢掉。这是 akshare 席位「契约无 change」
+  的同款老坑第二次发作。只改反推脚本是空转,必须先修契约。
+- **契约扩列(三处同批,生产方消费方同一提交)**:normalize.py SEAT_FIELDS 加
+  `change`(新 `_signed_integer`:增减可负可零,与持仓的拒负校验分开);Rust 域
+  `SEAT_DATASET_FIELDS` 同步(契约一致性测试钉着两边);load-seats-direct.sql
+  stage 表加列(\copy 按列序对位)、insert 取真值、**upsert 补 change**(晚间第二轮
+  采集把早间缺的增减补上;source 在唯一键里,不跨源覆盖)。pivot 透传三个 *_CHANGE。
+- **反推纳源**:basis 加 `eastmoney_seats_v1 & DCE`,并加**同日去重层**(三禾停采前
+  与东财窗口内并存,不去重 lag 会把同日两行配成假相邻日;官方>东财>三禾,同
+  SEAT_SOURCE_RANK)。指纹闸照旧兜底。**东财增减的恒等式检验(持仓−增减=前日仓)
+  待首日数据落库后补做**——三禾当年 99.997% 才放行,东财同一标准,不达标就回退
+  纳源(反推脚本删两行)。
+- **生效路径**:部署后手动重采当日→东财行 change 补上→infer 重跑→DCE 反推续供;
+  历史(08-06~08-14)东财行的 change 可按日重采回填,待运营者要时再做。
+
 ## 13. 变更控制
 
 - `DEC-013` 至 `DEC-025` 已关闭原 `OPEN-PRD-001`、`OPEN-PRD-002`、`OPEN-DATA-001`、`OPEN-DATA-002`、`OPEN-PORT-001`、`OPEN-DB-001`、`OPEN-DB-002`、`OPEN-IMP-001`、`OPEN-SEC-001`、`OPEN-COL-001` 和 `OPEN-COL-002`。
