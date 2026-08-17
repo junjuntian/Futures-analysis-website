@@ -9,7 +9,7 @@ import {
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
-import { driftTone, isQualified, points, revertPct, revertTone } from '../revert'
+import { driftTone, isChoppy, isQualified, points, revertPct, revertTone } from '../revert'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
 // 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
@@ -119,13 +119,18 @@ const filtered = computed(() => {
       if (onlyEntry.value && !isEntry(item)) return false
       return true
     })
-    // 进场信号置顶(运营者要求),其余仍按离中线远近排。
-    .sort((a, b) => Number(isEntry(b)) - Number(isEntry(a)) || extremity(b) - extremity(a))
+    // 干净的进场信号最上,信号差的进场其次,其余按离中线远近排(运营者要求)。
+    .sort((a, b) => entryRank(b) - entryRank(a) || extremity(b) - extremity(a))
 })
 
 /** ⚡ 进场 = 今天刚拐头 × 资格合格。两个已测部件的合取。 */
 function isEntry(item: SpreadMonitorItem) {
   return item.is_new_turn && item.revert !== null && isQualified(item.revert)
+}
+/** 排序权重:干净进场 2 > 信号差进场 1 > 其余 0。 */
+function entryRank(item: SpreadMonitorItem) {
+  if (!isEntry(item)) return 0
+  return isChoppy(item.turn_crosses) ? 1 : 2
 }
 
 // 「触发中」与「已拐头」同列展示:拐头行多半已退出报警带,只按 alert 分组的话,
@@ -140,6 +145,11 @@ const qualifiedCount = computed(
   () => fired.value.filter((item) => item.revert && isQualified(item.revert)).length
 )
 const entryCount = computed(() => fired.value.filter((item) => isEntry(item)).length)
+
+const CHOPPY_HINT =
+  '近 20 个交易日内第 2 次及以后的拐头穿线 —— 拐头反复=不干脆。JM 09-01 实例:' +
+  '八天三次穿线,期间价差打回区间顶,前两次进场按「创报警后新高离场」都得止损。' +
+  '这类信号建议降档仓位或放过,次数本身就是筛子。'
 
 const ENTRY_HINT =
   '今天刚拐头(位置今天才穿过回撤线)且资格合格 —— 回放口径里的进场日。' +
@@ -215,7 +225,8 @@ function openDetail(item: SpreadMonitorItem) {
         <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
         三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
         就是信号日（次日执行），带它的行排在最上面；仓位按「最有利/持到期」那两个点数
-        预留浮亏。「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态。
+        预留浮亏。「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态；
+        带 <strong>⚠ 信号差</strong> 的是 20 日内反复拐头的组合——降档仓位或放过。
         没有徽标的报警，当风景。
       </p>
     </header>
@@ -340,6 +351,9 @@ function openDetail(item: SpreadMonitorItem) {
                 <el-tag type="warning" effect="light" size="small">
                   已拐头{{ item.alert ? '' : item.turn === 'high' ? ' · 高位' : ' · 低位' }}
                 </el-tag>
+              </el-tooltip>
+              <el-tooltip v-if="isChoppy(item.turn_crosses)" :content="CHOPPY_HINT" placement="top">
+                <span class="badge-choppy">⚠ 信号差 ×{{ item.turn_crosses }}</span>
               </el-tooltip>
               <el-tooltip
                 v-if="item.revert && isQualified(item.revert)"
@@ -669,6 +683,24 @@ function openDetail(item: SpreadMonitorItem) {
   font-weight: 700;
   line-height: 1;
   cursor: help;
+}
+
+/* 「⚠ 信号差」:拐头反复。红色系但用描边不用实底——它是警示不是方向,
+   也不能比 ⚡ 更抢眼。 */
+.badge-choppy {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--tv-up);
+  border-radius: var(--tv-radius-sm);
+  background: var(--tv-up-bg);
+  color: var(--tv-up);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 「新」徽标：前一交易日按同一阈值还没触发。

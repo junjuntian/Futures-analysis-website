@@ -120,8 +120,24 @@ analyze pair_series;
 -- 三层套下来是为了拿到 `prev_pair_pos`：窗口函数不能引用同一层的别名，位置要先
 -- 算出来才能对它取 lag。前一日位置是给读时判「段首日」用的（迁移 202608170001）。
 create temp table pair_stat as
-select y.*,
-       lag(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
+select w.*,
+       -- 近 20 个交易日的拐头穿线次数(迁移 202608170005):「信号差」降级标的素材。
+       -- 0.90/0.10/0.97 与 API 的 TURN_RETREAT/TURN_BAND 同值,改一处必须同批改另一处。
+       sum(w.cross_h) over (partition by w.workspace_id, w.c1, w.c2
+                            order by w.trade_date
+                            rows between 19 preceding and current row)::int
+           turn_crosses_high_20,
+       sum(w.cross_l) over (partition by w.workspace_id, w.c1, w.c2
+                            order by w.trade_date
+                            rows between 19 preceding and current row)::int
+           turn_crosses_low_20
+  from (select z.*,
+               case when z.prev_pair_pos > 0.90 and z.pair_pos <= 0.90
+                     and z.pair_pos_hi20 >= 0.97 then 1 else 0 end cross_h,
+               case when z.prev_pair_pos < 0.10 and z.pair_pos >= 0.10
+                     and z.pair_pos_lo20 <= 0.03 then 1 else 0 end cross_l
+          from (select y.*,
+               lag(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
                              order by y.trade_date) prev_pair_pos,
        -- 近 20 个交易日(含当日)的位置极值,「已拐头」的事实素材(迁移 202608170004)。
        -- 按行数开窗:位置本来就只在交易日上有值,20 行即 20 个交易日。
@@ -140,7 +156,7 @@ select y.*,
                        count(*) over w days
                   from pair_series
                 window w as (partition by workspace_id, c1, c2 order by trade_date
-                             rows between unbounded preceding and current row)) x) y;
+                             rows between unbounded preceding and current row)) x) y) z) w;
 
 -- 只保留窗口内、且到那天为止已积累够 60 天的行。
 -- 60 天的门槛也按当日算：一个组合在它上市第 30 天时，「历史极值」确实还没有意义。
@@ -190,6 +206,7 @@ select s.*,
   from (select p.workspace_id, p.c1, p.c2, p.trade_date, p.now, p.days,
                p.lo, p.hi, p.pair_pos, p.prev_pair_pos,
                p.pair_pos_hi20, p.pair_pos_lo20,
+               p.turn_crosses_high_20, p.turn_crosses_low_20,
                y.days years_days, y.lo years_lo, y.hi years_hi,
                case when y.hi > y.lo then (p.now - y.lo) / (y.hi - y.lo) end years_pos
           from pair_stat p
@@ -356,6 +373,7 @@ insert into spread_monitor_daily (
     years_days, years_low, years_high, years_position,
     prev_pair_position, prev_years_position,
     pair_pos_hi20, pair_pos_lo20,
+    turn_crosses_high_20, turn_crosses_low_20,
     revert_high_hit, revert_high_n, revert_high_move, revert_high_drift,
     revert_high_days,
     revert_low_hit, revert_low_n, revert_low_move, revert_low_drift,
@@ -366,6 +384,7 @@ select gen_random_uuid(), s.workspace_id, s.trade_date,
        s.years_days, s.years_lo, s.years_hi, s.years_pos,
        s.prev_pair_pos, s.prev_years_pos,
        s.pair_pos_hi20, s.pair_pos_lo20,
+       s.turn_crosses_high_20, s.turn_crosses_low_20,
        r.high_hit, r.high_n, r.high_move, r.high_drift, r.high_days,
        r.low_hit, r.low_n, r.low_move, r.low_drift, r.low_days
   from snap s
@@ -383,6 +402,8 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     prev_years_position = excluded.prev_years_position,
     pair_pos_hi20 = excluded.pair_pos_hi20,
     pair_pos_lo20 = excluded.pair_pos_lo20,
+    turn_crosses_high_20 = excluded.turn_crosses_high_20,
+    turn_crosses_low_20 = excluded.turn_crosses_low_20,
     revert_high_hit = excluded.revert_high_hit,
     revert_high_n = excluded.revert_high_n,
     revert_high_move = excluded.revert_high_move,

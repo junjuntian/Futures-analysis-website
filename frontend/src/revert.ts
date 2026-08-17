@@ -66,3 +66,14 @@ export function isQualified(stats: SpreadRevertStats): boolean {
   const drift = stats.drift_points === null ? NaN : Number(stats.drift_points)
   return Number.isFinite(rate) && Number.isFinite(drift) && rate >= 0.8 && drift > 0
 }
+
+/**
+ * 拐头反复 = 信号差（DEC-063 修订，运营者拍板）。
+ *
+ * 近 20 个交易日内第 2 次及以后的穿线，说明这个组合的拐头不干脆——JM2609/JM2701
+ * 八天三次穿线、期间价差打回区间顶，前两次进场按「创报警后新高离场」都得止损；
+ * 对照 FG2701/SA2701 干脆的拐头一次穿线一路走。次数本身就是筛子。
+ */
+export function isChoppy(turnCrosses: number | null): boolean {
+  return turnCrosses !== null && turnCrosses >= 2
+}

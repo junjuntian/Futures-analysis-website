@@ -3507,6 +3507,11 @@ pub struct SpreadMonitorItem {
     /// 判定用 `prev_pair_position`(段首日标记的同一素材),前一日缺失时为 false
     /// ——判不了就不标,与 is_new_alert 同一条原则。
     pub is_new_turn: bool,
+    /// 拐头侧在近 20 个交易日内的穿线次数(含今天)。≥2 = 同一段行情里拐头反复
+    /// ——JM2609/JM2701 八天三次穿线、期间打回区间顶,前两次进场按离场规则都
+    /// 止损;FG2701/SA2701 干脆的拐头只有 1。界面用它打「信号差」降级标。
+    /// 仅拐头行给值(没拐头谈不上拐头质量)。
+    pub turn_crosses: Option<i32>,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -3793,6 +3798,11 @@ pub async fn query_spread_monitor(
                 parse(&row.pair_pos_lo20),
             );
             let is_new_turn = monitor_turn_is_new(turn, prev_pair);
+            let turn_crosses = match turn {
+                Some("high") => row.turn_crosses_high_20,
+                Some("low") => row.turn_crosses_low_20,
+                _ => None,
+            };
 
             // 计数是 Copy、点数是短字符串 clone 一下，都不会妨碍下面把 row 的其余
             // 字段移走。统计与阈值无关，所以这里不再挑档位；报警侧优先，没报警但
@@ -3835,6 +3845,7 @@ pub async fn query_spread_monitor(
                 revert,
                 turn: turn.map(str::to_string),
                 is_new_turn,
+                turn_crosses,
             }
         })
         .collect();

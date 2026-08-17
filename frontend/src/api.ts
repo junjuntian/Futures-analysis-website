@@ -624,6 +624,9 @@ export interface SpreadMonitorItem {
   /** 今天刚拐头：位置是今天才穿过回撤线的。拐头标最多挂 20 个交易日，
    * 「可进场状态」与「今天就是进场日」是两回事，这个字段点亮后者。 */
   is_new_turn: boolean
+  /** 拐头侧近 20 个交易日的穿线次数（含今天）。≥2 = 拐头反复 = 信号差。
+   * 仅拐头行有值。 */
+  turn_crosses: number | null
 }
 
 export interface SpreadMonitorResponse {

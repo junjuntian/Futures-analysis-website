@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { driftTone, isQualified, points, revertPct, revertTone } from './revert'
+import { driftTone, isChoppy, isQualified, points, revertPct, revertTone } from './revert'
 import type { SpreadRevertStats } from './api'
 
 function stats(rate: string, hit = 1, n = 2): SpreadRevertStats {
@@ -98,5 +98,19 @@ describe('isQualified', () => {
 
   it('持到期缺失按不合格 —— 资格要正证据,「不知道」不放行', () => {
     expect(isQualified(full('1', null))).toBe(false)
+  })
+})
+
+describe('isChoppy', () => {
+  it('第 2 次及以后的穿线算信号差', () => {
+    // JM2609/JM2701 生产序列:08-04 第 1 次(干净)、08-06 第 2 次、08-13 第 3 次。
+    expect(isChoppy(1)).toBe(false)
+    expect(isChoppy(2)).toBe(true)
+    expect(isChoppy(3)).toBe(true)
+  })
+
+  it('没拐头(null)谈不上拐头质量', () => {
+    expect(isChoppy(null)).toBe(false)
+    expect(isChoppy(0)).toBe(false)
   })
 })

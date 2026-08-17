@@ -1270,6 +1270,8 @@ mod tests {
             "prev_years_position",
             "pair_pos_hi20",
             "pair_pos_lo20",
+            "turn_crosses_high_20",
+            "turn_crosses_low_20",
             "revert_high_hit",
             "revert_high_n",
             "revert_high_move",
@@ -3296,6 +3298,10 @@ pub struct SpreadMonitorRow {
     /// 留在 API 常量里，读时套。
     pub pair_pos_hi20: Option<String>,
     pub pair_pos_lo20: Option<String>,
+    /// 近 20 个交易日的拐头穿线次数（迁移 202608170005）。≥2 = 拐头反复、
+    /// 「信号差」降级标的素材。
+    pub turn_crosses_high_20: Option<i32>,
+    pub turn_crosses_low_20: Option<i32>,
     /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现
     /// （迁移 202608170002）。四个数一组,与阈值无关——它只跟今天是几月几号、
     /// 以及报的是高位还是低位有关:
@@ -3323,6 +3329,7 @@ const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_
             years_days, years_low::text, years_high::text, years_position::text,
             prev_pair_position::text, prev_years_position::text,
             pair_pos_hi20::text, pair_pos_lo20::text,
+            turn_crosses_high_20, turn_crosses_low_20,
             revert_high_hit, revert_high_n, revert_high_move::text,
             revert_high_drift::text, revert_high_days,
             revert_low_hit, revert_low_n, revert_low_move::text,
@@ -3430,6 +3437,8 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         prev_years_position: row.get("prev_years_position"),
         pair_pos_hi20: row.get("pair_pos_hi20"),
         pair_pos_lo20: row.get("pair_pos_lo20"),
+        turn_crosses_high_20: row.get("turn_crosses_high_20"),
+        turn_crosses_low_20: row.get("turn_crosses_low_20"),
         revert_high_hit: row.get("revert_high_hit"),
         revert_high_n: row.get("revert_high_n"),
         revert_high_move: row.get("revert_high_move"),
