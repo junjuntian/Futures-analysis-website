@@ -1273,6 +1273,8 @@ mod tests {
             "turn_crosses_high_20",
             "turn_crosses_low_20",
             "revert_high_hit",
+            "revert_high_mae",
+            "revert_low_mae_max",
             "revert_high_n",
             "revert_high_move",
             "revert_high_drift",
@@ -3376,11 +3378,17 @@ pub struct SpreadMonitorRow {
     pub revert_high_n: Option<i32>,
     pub revert_high_move: Option<String>,
     pub revert_high_drift: Option<String>,
+    /// 历年 MAE:锚点后先朝不利方向走的最大幅度。中位=补仓参考,最大=风险预留
+    /// (DEC-067;盈亏比分级已回测否决,只留分母)。
+    pub revert_high_mae: Option<String>,
+    pub revert_high_mae_max: Option<String>,
     pub revert_high_days: Option<i32>,
     pub revert_low_hit: Option<i32>,
     pub revert_low_n: Option<i32>,
     pub revert_low_move: Option<String>,
     pub revert_low_drift: Option<String>,
+    pub revert_low_mae: Option<String>,
+    pub revert_low_mae_max: Option<String>,
     pub revert_low_days: Option<i32>,
 }
 
@@ -3394,9 +3402,11 @@ const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_
             pair_pos_hi20::text, pair_pos_lo20::text,
             turn_crosses_high_20, turn_crosses_low_20,
             revert_high_hit, revert_high_n, revert_high_move::text,
-            revert_high_drift::text, revert_high_days,
+            revert_high_drift::text, revert_high_mae::text,
+            revert_high_mae_max::text, revert_high_days,
             revert_low_hit, revert_low_n, revert_low_move::text,
-            revert_low_drift::text, revert_low_days";
+            revert_low_drift::text, revert_low_mae::text,
+            revert_low_mae_max::text, revert_low_days";
 
 /// 监控页的当前快照：**每组组合各取自己最新的那一条**。
 ///
@@ -3506,11 +3516,15 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         revert_high_n: row.get("revert_high_n"),
         revert_high_move: row.get("revert_high_move"),
         revert_high_drift: row.get("revert_high_drift"),
+        revert_high_mae: row.get("revert_high_mae"),
+        revert_high_mae_max: row.get("revert_high_mae_max"),
         revert_high_days: row.get("revert_high_days"),
         revert_low_hit: row.get("revert_low_hit"),
         revert_low_n: row.get("revert_low_n"),
         revert_low_move: row.get("revert_low_move"),
         revert_low_drift: row.get("revert_low_drift"),
+        revert_low_mae: row.get("revert_low_mae"),
+        revert_low_mae_max: row.get("revert_low_mae_max"),
         revert_low_days: row.get("revert_low_days"),
     }
 }

@@ -3293,6 +3293,8 @@ mod monitor_tests {
             Some(12),
             Some("101.5".into()),
             Some("81".into()),
+            Some("62".into()),
+            Some("247".into()),
             Some(12),
         )
         .expect("有样本");
@@ -3300,16 +3302,19 @@ mod monitor_tests {
         assert_eq!(s.rate, "0.9167");
         assert_eq!(s.move_points.as_deref(), Some("101.5"));
         assert_eq!(s.drift_points.as_deref(), Some("81"));
+        assert_eq!(s.mae_points.as_deref(), Some("62"));
+        assert_eq!(s.mae_max_points.as_deref(), Some("247"));
         assert_eq!(s.days, Some(12));
     }
 
     #[test]
     fn without_samples_nothing_is_shown_rather_than_zero_percent() {
         // 样本为 0 显示成「0% 回归率」是最坏的一种错：看着像结论，其实是没有数据。
-        assert!(revert_stats("high", None, None, None, None, None).is_none());
-        assert!(revert_stats("high", Some(0), Some(0), None, None, None).is_none());
+        assert!(revert_stats("high", None, None, None, None, None, None, None).is_none());
+        assert!(revert_stats("high", Some(0), Some(0), None, None, None, None, None).is_none());
         // 计数在、点数缺（中位算不出来）时仍然给比率，只是点数留空。
-        let s = revert_stats("low", Some(4), Some(5), None, None, Some(30)).expect("有样本");
+        let s = revert_stats("low", Some(4), Some(5), None, None, None, None, Some(30))
+            .expect("有样本");
         assert_eq!(s.rate, "0.8000");
         assert!(s.move_points.is_none());
     }
@@ -3401,6 +3406,29 @@ mod monitor_tests {
     }
 
     #[test]
+    fn the_delivery_red_line_counts_weekdays_to_the_window_end() {
+        fn day(y: i32, m: u8, d: u8) -> Date {
+            Date::from_calendar_date(y, time::Month::try_from(m).unwrap(), d).unwrap()
+        }
+        // JD2609/JD2701:先到期腿 09 月,止点 = 2026-08-31(周一)。
+        // 从 08-17(周一)数,剩 8/18~8/31 的十个周内日。
+        assert_eq!(
+            days_to_window_end("JD2609", "JD2701", day(2026, 8, 17)),
+            Some(10)
+        );
+        // FG2701/SA2701:止点 = 2026-12-31(周四),远月组合不在红线附近。
+        let left = days_to_window_end("FG2701", "SA2701", day(2026, 8, 17)).unwrap();
+        assert!(left > 90, "{left}");
+        // 已过止点:0,不给负数。
+        assert_eq!(
+            days_to_window_end("JD2608", "JD2702", day(2026, 8, 17)),
+            Some(0)
+        );
+        // 解析不了的代码判不了,不硬编。
+        assert_eq!(days_to_window_end("JD26", "JD2701", day(2026, 8, 17)), None);
+    }
+
+    #[test]
     fn the_entry_day_is_the_day_the_position_crosses_the_line() {
         // FG2701/SA2701 生产序列:08-04 位置 1.000(带内,未拐头)→ 08-05 退到
         // 0.884(拐头,前一日 1.000 在线上方)= 进场日。
@@ -3439,6 +3467,8 @@ mod monitor_tests {
             Some(12),
             Some("88".into()),
             Some("-166".into()),
+            None,
+            None,
             Some(70),
         )
         .expect("有样本");
@@ -3655,6 +3685,9 @@ pub struct SpreadMonitorItem {
     /// 止损;FG2701/SA2701 干脆的拐头只有 1。界面用它打「信号差」降级标。
     /// 仅拐头行给值(没拐头谈不上拐头质量)。
     pub turn_crosses: Option<i32>,
+    /// 距该组合可交易窗口止点(先到期腿散户最后交易日)的剩余交易日,周内日近似。
+    /// 界面按《体系》红线(≤15 清仓/压制进场)与数据实证的衰减区(<40)分档提示。
+    pub days_left: Option<i32>,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -3683,6 +3716,12 @@ pub struct SpreadRevertStats {
     pub move_points: Option<String>,
     /// 一直持到窗口止点的净变化,已标准化成**正数 = 朝回归走**。
     pub drift_points: Option<String>,
+    /// 历年 MAE 中位:锚点后先朝不利方向走的幅度,浮亏到这里是历年常态——
+    /// **补仓参考**(《盖楼》猪 11-05 分批法的数据化,DEC-067)。
+    pub mae_points: Option<String>,
+    /// 历年 MAE 最大:**风险预留**。仓位 = 可承受亏损 ÷ (此数 × 点值)。
+    /// 盈亏比分级(move÷MAE)已回测否决(">2.5 档"实际最差),只给分母不给比值。
+    pub mae_max_points: Option<String>,
     /// 历年剩余交易日中位数,给上面几个数一个时间尺度。
     pub days: Option<i32>,
 }
@@ -3789,6 +3828,57 @@ fn monitor_turn_is_new(turn: Option<&str>, prev_pair: Option<f64>) -> bool {
     }
 }
 
+/// 组合窗口止点(先到期腿的散户最后交易日)与当日之间的**剩余交易日**。
+///
+/// 口径照 5A 的 `last_weekday_before_delivery`:止点=交割月前月最后一个非周末日;
+/// 计数按周内日近似(节假日没有价格点,误差 ±2 天以内,红线用途足够)。
+/// 《体系》红线:交割前 15 个交易日全部清仓;留一法数据:合格段剩余 <15 日持到底
+/// 中位 −21.7%、15~40 日 −32.5%、>40 日 +54.8%(DEC-067)。
+fn days_to_window_end(c1: &str, c2: &str, today: Date) -> Option<i32> {
+    fn deadline(code: &str) -> Option<Date> {
+        let digits = code.find(|c: char| c.is_ascii_digit())?;
+        let raw = &code[digits..];
+        if raw.len() != 4 {
+            return None;
+        }
+        let year = 2000 + raw[0..2].parse::<i32>().ok()?;
+        let month = raw[2..4].parse::<u8>().ok()?;
+        let (py, pm) = if month == 1 {
+            (year - 1, 12u8)
+        } else {
+            (year, month - 1)
+        };
+        let month = time::Month::try_from(pm).ok()?;
+        let mut day = time::util::days_in_month(month, py);
+        loop {
+            let date = Date::from_calendar_date(py, month, day).ok()?;
+            if !matches!(
+                date.weekday(),
+                time::Weekday::Saturday | time::Weekday::Sunday
+            ) {
+                return Some(date);
+            }
+            day -= 1;
+        }
+    }
+    let end = deadline(c1)?.min(deadline(c2)?);
+    if end <= today {
+        return Some(0);
+    }
+    let mut count = 0i32;
+    let mut cursor = today.next_day()?;
+    while cursor <= end {
+        if !matches!(
+            cursor.weekday(),
+            time::Weekday::Saturday | time::Weekday::Sunday
+        ) {
+            count += 1;
+        }
+        cursor = cursor.next_day()?;
+    }
+    Some(count)
+}
+
 fn track_position(track: &SpreadMonitorTrack) -> Option<f64> {
     track.position.as_deref()?.parse().ok()
 }
@@ -3830,12 +3920,15 @@ fn combined_alert(
 
 /// 组装同侧的历年统计。样本为 0(或整块缺失)时返回 None —— 界面不显示这一块，
 /// 而不是显示一个「0% 回归率」：那看着像结论，其实是没有数据。
+#[allow(clippy::too_many_arguments)]
 fn revert_stats(
     side: &str,
     hit: Option<i32>,
     n: Option<i32>,
     move_points: Option<String>,
     drift_points: Option<String>,
+    mae_points: Option<String>,
+    mae_max_points: Option<String>,
     days: Option<i32>,
 ) -> Option<SpreadRevertStats> {
     let (hit, n) = (hit?, n?);
@@ -3849,6 +3942,8 @@ fn revert_stats(
         rate: format!("{:.4}", f64::from(hit) / f64::from(n)),
         move_points,
         drift_points,
+        mae_points,
+        mae_max_points,
         days,
     })
 }
@@ -3976,6 +4071,7 @@ pub async fn query_spread_monitor(
                 parse(&row.pair_pos_hi20),
                 parse(&row.pair_pos_lo20),
             );
+            let days_left = days_to_window_end(&row.contract_1, &row.contract_2, row.trade_date);
             let is_new_turn = monitor_turn_is_new(turn, prev_pair);
             let turn_crosses = match turn {
                 Some("high") => row.turn_crosses_high_20,
@@ -3995,6 +4091,8 @@ pub async fn query_spread_monitor(
                         row.revert_high_n,
                         row.revert_high_move.clone(),
                         row.revert_high_drift.clone(),
+                        row.revert_high_mae.clone(),
+                        row.revert_high_mae_max.clone(),
                         row.revert_high_days,
                     )
                 } else {
@@ -4004,6 +4102,8 @@ pub async fn query_spread_monitor(
                         row.revert_low_n,
                         row.revert_low_move.clone(),
                         row.revert_low_drift.clone(),
+                        row.revert_low_mae.clone(),
+                        row.revert_low_mae_max.clone(),
                         row.revert_low_days,
                     )
                 }
@@ -4025,6 +4125,7 @@ pub async fn query_spread_monitor(
                 turn: turn.map(str::to_string),
                 is_new_turn,
                 turn_crosses,
+                days_left,
             }
         })
         .collect();

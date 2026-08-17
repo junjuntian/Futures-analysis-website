@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { driftTone, isChoppy, isQualified, points, revertPct, revertTone } from './revert'
+import { driftTone, isChoppy, isDecayZone, isQualified, isRedLine, points, revertPct, revertTone } from './revert'
 import type { SpreadRevertStats } from './api'
 
 function stats(rate: string, hit = 1, n = 2): SpreadRevertStats {
@@ -11,6 +11,8 @@ function stats(rate: string, hit = 1, n = 2): SpreadRevertStats {
     rate,
     move_points: null,
     drift_points: null,
+    mae_points: null,
+    mae_max_points: null,
     days: null
   }
 }
@@ -81,7 +83,17 @@ describe('driftTone', () => {
 
 describe('isQualified', () => {
   function full(rate: string, drift: string | null): SpreadRevertStats {
-    return { side: 'high', hit: 10, n: 12, rate, move_points: '100', drift_points: drift, days: 30 }
+    return {
+      side: 'high',
+      hit: 10,
+      n: 12,
+      rate,
+      move_points: '100',
+      drift_points: drift,
+      mae_points: '62',
+      mae_max_points: '247',
+      days: 30
+    }
   }
 
   it('触及率≥80% 且持到期为正才合格', () => {
@@ -112,5 +124,24 @@ describe('isChoppy', () => {
   it('没拐头(null)谈不上拐头质量', () => {
     expect(isChoppy(null)).toBe(false)
     expect(isChoppy(0)).toBe(false)
+  })
+})
+
+describe('交割红线与衰减区', () => {
+  it('剩余 ≤15 交易日进红线,15~40 是衰减区,40 以上正常', () => {
+    // 留一法数据:<15 日段持到底中位 −21.7%、15~40 日 −32.5%、>40 日 +54.8%。
+    expect(isRedLine(10)).toBe(true)
+    expect(isRedLine(15)).toBe(true)
+    expect(isRedLine(16)).toBe(false)
+    expect(isDecayZone(16)).toBe(true)
+    expect(isDecayZone(39)).toBe(true)
+    expect(isDecayZone(40)).toBe(false)
+    expect(isRedLine(93)).toBe(false)
+    expect(isDecayZone(93)).toBe(false)
+  })
+
+  it('剩余天数未知时两者都不判 —— 判不了就不标', () => {
+    expect(isRedLine(null)).toBe(false)
+    expect(isDecayZone(null)).toBe(false)
   })
 })

@@ -618,6 +618,10 @@ export interface SpreadRevertStats {
   move_points: string | null
   /** 一直持到窗口止点的净变化，已标准化成**正数 = 朝回归走**。 */
   drift_points: string | null
+  /** 历年 MAE 中位：浮亏到这里是历年常态 —— 补仓参考。 */
+  mae_points: string | null
+  /** 历年 MAE 最大：风险预留。仓位 = 可承受亏损 ÷ (此数 × 点值)。 */
+  mae_max_points: string | null
   /** 历年剩余交易日中位数。 */
   days: number | null
 }
@@ -647,6 +651,8 @@ export interface SpreadMonitorItem {
   /** 拐头侧近 20 个交易日的穿线次数（含今天）。≥2 = 拐头反复 = 信号差。
    * 仅拐头行有值。 */
   turn_crosses: number | null
+  /** 距可交易窗口止点的剩余交易日（周内日近似）。≤15 = 交割红线，<40 = 衰减区。 */
+  days_left: number | null
 }
 
 export interface SpreadMonitorResponse {

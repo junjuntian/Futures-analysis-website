@@ -329,11 +329,17 @@ select cur_c1, cur_c2, cur_date, side,
        count(*) filter (where hit)::int hit,
        percentile_cont(0.5) within group (order by move) move_med,
        percentile_cont(0.5) within group (order by drift) drift_med,
+       -- 历年 MAE:锚点后先朝不利方向走的最大幅度(高位=继续冲高,低位对称)。
+       -- 中位=补仓参考,最大=风险预留(DEC-067)。盈亏比分级已回测否决,只留分母。
+       percentile_cont(0.5) within group (order by mae) mae_med,
+       max(mae) mae_max,
        round(percentile_cont(0.5) within group (order by fdays))::int days_med
   from (select r.cur_c1, r.cur_c2, r.cur_date, s.side, r.fdays,
                case when s.side = 'high' then r.fmin < r.p0 else r.fmax > r.p0 end hit,
                case when s.side = 'high' then r.p0 - r.fmin else r.fmax - r.p0 end move,
-               case when s.side = 'high' then r.p0 - r.flast else r.flast - r.p0 end drift
+               case when s.side = 'high' then r.p0 - r.flast else r.flast - r.p0 end drift,
+               greatest(case when s.side = 'high' then r.fmax - r.p0
+                             else r.p0 - r.fmin end, 0) mae
           from anchor_row r
           cross join (values ('high'), ('low')) s(side)) x
  group by 1, 2, 3, 4;
@@ -344,11 +350,15 @@ select cur_c1, cur_c2, cur_date,
        max(n)         filter (where side = 'high') high_n,
        max(move_med)  filter (where side = 'high') high_move,
        max(drift_med) filter (where side = 'high') high_drift,
+       max(mae_med)   filter (where side = 'high') high_mae,
+       max(mae_max)   filter (where side = 'high') high_mae_max,
        max(days_med)  filter (where side = 'high') high_days,
        max(hit)       filter (where side = 'low')  low_hit,
        max(n)         filter (where side = 'low')  low_n,
        max(move_med)  filter (where side = 'low')  low_move,
        max(drift_med) filter (where side = 'low')  low_drift,
+       max(mae_med)   filter (where side = 'low')  low_mae,
+       max(mae_max)   filter (where side = 'low')  low_mae_max,
        max(days_med)  filter (where side = 'low')  low_days
   from revert_stat
  group by 1, 2, 3;
@@ -375,9 +385,9 @@ insert into spread_monitor_daily (
     pair_pos_hi20, pair_pos_lo20,
     turn_crosses_high_20, turn_crosses_low_20,
     revert_high_hit, revert_high_n, revert_high_move, revert_high_drift,
-    revert_high_days,
+    revert_high_mae, revert_high_mae_max, revert_high_days,
     revert_low_hit, revert_low_n, revert_low_move, revert_low_drift,
-    revert_low_days)
+    revert_low_mae, revert_low_mae_max, revert_low_days)
 select gen_random_uuid(), s.workspace_id, s.trade_date,
        k.i1, k.c1, k.i2, k.c2, k.is_cross, s.now,
        s.days, s.lo, s.hi, s.pair_pos,
@@ -385,8 +395,10 @@ select gen_random_uuid(), s.workspace_id, s.trade_date,
        s.prev_pair_pos, s.prev_years_pos,
        s.pair_pos_hi20, s.pair_pos_lo20,
        s.turn_crosses_high_20, s.turn_crosses_low_20,
-       r.high_hit, r.high_n, r.high_move, r.high_drift, r.high_days,
-       r.low_hit, r.low_n, r.low_move, r.low_drift, r.low_days
+       r.high_hit, r.high_n, r.high_move, r.high_drift,
+       r.high_mae, r.high_mae_max, r.high_days,
+       r.low_hit, r.low_n, r.low_move, r.low_drift,
+       r.low_mae, r.low_mae_max, r.low_days
   from snap s
   join combo k on k.workspace_id = s.workspace_id and k.c1 = s.c1 and k.c2 = s.c2
   left join revert_wide r on r.cur_c1 = s.c1 and r.cur_c2 = s.c2
@@ -408,11 +420,15 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     revert_high_n = excluded.revert_high_n,
     revert_high_move = excluded.revert_high_move,
     revert_high_drift = excluded.revert_high_drift,
+    revert_high_mae = excluded.revert_high_mae,
+    revert_high_mae_max = excluded.revert_high_mae_max,
     revert_high_days = excluded.revert_high_days,
     revert_low_hit = excluded.revert_low_hit,
     revert_low_n = excluded.revert_low_n,
     revert_low_move = excluded.revert_low_move,
     revert_low_drift = excluded.revert_low_drift,
+    revert_low_mae = excluded.revert_low_mae,
+    revert_low_mae_max = excluded.revert_low_mae_max,
     revert_low_days = excluded.revert_low_days,
     computed_at = now();
 

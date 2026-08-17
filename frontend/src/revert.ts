@@ -78,3 +78,18 @@ export function isQualified(stats: SpreadRevertStats): boolean {
 export function isChoppy(turnCrosses: number | null): boolean {
   return turnCrosses !== null && turnCrosses >= 2
 }
+
+/**
+ * 交割红线（DEC-067 因子①，《体系》:交割前 15 个交易日全部清仓)。
+ *
+ * 留一法数据背书:合格段剩余 <15 日持到底中位 −21.7%(为正仅 20%)、15~40 日
+ * −32.5%,>40 日 +54.8%——合格段的全部利润来自剩余 40 天以上的机会。
+ * 红线内压制 ⚡ 进场信号并挂灰标;衰减区只提示不压制。
+ */
+export function isRedLine(daysLeft: number | null): boolean {
+  return daysLeft !== null && daysLeft <= 15
+}
+
+export function isDecayZone(daysLeft: number | null): boolean {
+  return daysLeft !== null && daysLeft > 15 && daysLeft < 40
+}

@@ -9,7 +9,7 @@ import {
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
-import { driftTone, isChoppy, isQualified, points, revertPct, revertTone } from '../revert'
+import { driftTone, isChoppy, isDecayZone, isQualified, isRedLine, points, revertPct, revertTone } from '../revert'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
 // 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
@@ -123,9 +123,15 @@ const filtered = computed(() => {
     .sort((a, b) => entryRank(b) - entryRank(a) || extremity(b) - extremity(a))
 })
 
-/** ⚡ 进场 = 今天刚拐头 × 资格合格。两个已测部件的合取。 */
+/** ⚡ 进场 = 今天刚拐头 × 资格合格 × 未进交割红线(DEC-067 因子①)。
+ * 红线内不是没机会,是《体系》的硬纪律+数据实证的负期望区,不当进场信号。 */
 function isEntry(item: SpreadMonitorItem) {
-  return item.is_new_turn && item.revert !== null && isQualified(item.revert)
+  return (
+    item.is_new_turn &&
+    item.revert !== null &&
+    isQualified(item.revert) &&
+    !isRedLine(item.days_left)
+  )
 }
 /** 排序权重:干净进场 2 > 信号差进场 1 > 其余 0。 */
 function entryRank(item: SpreadMonitorItem) {
@@ -150,6 +156,14 @@ const CHOPPY_HINT =
   '近 20 个交易日内穿线 2 次及以上 —— 拐头反复。JM 09-01 实例:八天三次穿线,' +
   '期间价差打回区间顶,前两次进场按「创报警后新高离场」都得止损。' +
   '次数越多信号越弱,降档仓位或放过。'
+
+const REDLINE_HINT =
+  '距可交易窗口止点 ≤15 个交易日(《体系》红线:交割前 15 个交易日全部清仓)。' +
+  '留一法数据:合格段剩余 <15 日持到底中位 −21.7%,为正仅 20%。' +
+  '红线内 ⚡ 进场信号被压制;已有持仓按纪律清仓。'
+const DECAY_HINT =
+  '距窗口止点 16~39 个交易日 —— 利润衰减区。留一法数据:合格段 15~40 日桶持到底' +
+  '中位 −32.5%,>40 日 +54.8%。可做,但降档仓位,盈利主要来自剩余 40 天以上的机会。'
 
 const ENTRY_HINT =
   '今天刚拐头(位置今天才穿过回撤线)且资格合格 —— 回放口径里的进场日。' +
@@ -224,8 +238,10 @@ function openDetail(item: SpreadMonitorItem) {
         剩余时间越长「曾经回归」越容易达成，所以别只看那个百分比——
         <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
         三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
-        就是信号日（次日执行），带它的行排在最上面；仓位按「最有利/持到期」那两个点数
-        预留浮亏。「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态；
+        就是信号日（次日执行），带它的行排在最上面；仓位按「风险预留」那个点数算:
+        可承受亏损 ÷ (风险预留 × 点值) = 手数;浮亏到「补仓参考」是历年常态,不是逻辑坏了。
+        <strong>剩余 ≤15 交易日进交割红线</strong>,⚡ 压制、持仓清掉;16~39 日是衰减区,降档。
+        「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态；
         带 <strong>⚠ 信号差</strong> 的是 20 日内反复拐头的组合——降档仓位或放过。
         没有徽标的报警，当风景。
       </p>
@@ -336,6 +352,16 @@ function openDetail(item: SpreadMonitorItem) {
 
           <div class="tail">
             <div class="state-tags">
+              <el-tooltip v-if="isRedLine(item.days_left)" :content="REDLINE_HINT" placement="top">
+                <span class="badge-redline">临近交割 · 剩 {{ item.days_left }} 日</span>
+              </el-tooltip>
+              <el-tooltip
+                v-else-if="isDecayZone(item.days_left)"
+                :content="DECAY_HINT"
+                placement="top"
+              >
+                <span class="badge-decay">衰减区 · 剩 {{ item.days_left }} 日</span>
+              </el-tooltip>
               <el-tooltip v-if="isEntry(item)" :content="ENTRY_HINT" placement="top">
                 <span class="badge-entry">⚡ 进场</span>
               </el-tooltip>
@@ -379,6 +405,15 @@ function openDetail(item: SpreadMonitorItem) {
                       {{ points(item.revert.drift_points) }}
                     </em>
                   </template>
+                  点
+                </span>
+                <span class="basis mae" v-if="points(item.revert.mae_points)">
+                  补仓参考 −{{ Math.abs(Number(item.revert.mae_points)).toFixed(0) }}
+                  · 风险预留 −{{
+                    item.revert.mae_max_points === null
+                      ? '—'
+                      : Math.abs(Number(item.revert.mae_max_points)).toFixed(0)
+                  }}
                   点
                 </span>
               </div>
@@ -683,6 +718,39 @@ function openDetail(item: SpreadMonitorItem) {
   font-weight: 700;
   line-height: 1;
   cursor: help;
+}
+
+/* 「临近交割」:灰底——不是机会也不是警报,是纪律性退出区。 */
+.badge-redline {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--tv-border-strong);
+  border-radius: var(--tv-radius-sm);
+  background: var(--tv-bg-inset);
+  color: var(--tv-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
+}
+.badge-decay {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px dashed var(--tv-border-strong);
+  border-radius: var(--tv-radius-sm);
+  color: var(--tv-text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: help;
+  font-variant-numeric: tabular-nums;
+}
+.revert .basis.mae {
+  color: var(--tv-text-secondary);
 }
 
 /* 「⚠ 信号差」:拐头反复。红色系但用描边不用实底——它是警示不是方向,
