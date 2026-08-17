@@ -8,8 +8,9 @@
  * 单独成文件是为了能测：区间合并是典型的差一格逻辑，画在图上错一天看不出来。
  */
 
-/** ECharts markArea 的一段：起止两个 x 轴刻度。 */
-export type Band = [{ xAxis: string }, { xAxis: string }]
+/** ECharts markArea 的一段：起止两个 x 轴刻度。首端可带 itemStyle 覆盖底色
+ * （推算日的带比掉榜带更淡，ECharts 按段首元素取样式）。 */
+export type Band = [{ xAxis: string; itemStyle?: { color: string } }, { xAxis: string }]
 
 /**
  * @param days 按日期升序排列的序列。`known` 为 false 表示那天持仓未知。

@@ -291,6 +291,14 @@ function tooltipBody(index: number, head: string[] = []) {
   )
   parts.push(row('计入席位', `${day.counted_members.length} 家`))
   // 掉榜必须逐个点名。只说「少了一家」，看的人不知道少的是不是他最在意的那家。
+  if (day.inferred_members.length) {
+    parts.push(
+      row(
+        '按反推计入',
+        `<span style="color:${tokens.accent}">${day.inferred_members.join('、')}（实际未上榜,数字由回榜日倒推）</span>`
+      )
+    )
+  }
   if (day.missing_members.length) {
     parts.push(
       row(

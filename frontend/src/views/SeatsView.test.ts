@@ -37,6 +37,9 @@ function stubFetch() {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString()
+      if (url.includes('/seats/member-instruments')) {
+        return response({ member: '中信', instruments: ['AU'] })
+      }
       if (url.includes('/seats/building')) return response(BUILDING)
       if (url.includes('/seats/positions')) {
         return response({

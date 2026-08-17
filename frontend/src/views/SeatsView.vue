@@ -2,11 +2,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { addChange, sideDelta, signedChange } from '../seatChange'
-import { offBoardBands } from '../offBoard'
+import { offBoardBands, type Band } from '../offBoard'
 import { ElMessage } from 'element-plus'
 import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
 import {
   getSeatBuilding,
+  getSeatMemberInstruments,
   getSeatPositions,
   getSpreadVarieties,
   type BuildingDay,
@@ -187,14 +188,30 @@ const instruments = computed(() =>
 )
 
 /**
- * 建仓过程的品种选项：当天在榜的品种，外加当前已选的那个。
+ * 建仓过程的品种选项：该席位**历史上持有过的全部品种**。
  *
- * 上次记住的品种今天可能不在榜（他那天没进前二十）。只列在榜品种的话，选择器会
- * 显示一片空白，而下面的图明明画着那个品种的数据——看上去像选择器坏了。
- * 建仓过程本来也不受所选交易日限制：不在榜不等于没有建仓过程可看。
+ * 不能只列「所选日期当天在榜」的——建仓过程是历史序列,不受所选交易日限制。
+ * 高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的建仓过程明明都在
+ * (运营者当日报的 bug)。历史列表取不到时(接口瞬断)退回当天在榜 + 已选,
+ * 宁可少列不可空白。
  */
+const memberInstruments = ref<string[]>([])
+watch(
+  member,
+  async (name) => {
+    memberInstruments.value = []
+    if (!name) return
+    try {
+      const { data } = await getSeatMemberInstruments(name)
+      memberInstruments.value = data.instruments
+    } catch {
+      // 退回旧口径,不打断页面。
+    }
+  },
+  { immediate: true }
+)
 const buildingInstrumentOptions = computed(() => {
-  const list = new Set(instruments.value)
+  const list = new Set([...memberInstruments.value, ...instruments.value])
   if (buildingInstrument.value) list.add(buildingInstrument.value)
   return [...list].sort()
 })
@@ -208,6 +225,8 @@ interface ContractLine {
   longChange: number | null | undefined
   short: number
   shortChange: number | null | undefined
+  /** 该行含回榜反推成分:那天实际未上榜,数字由回榜日增减倒推。 */
+  inferred: boolean
 }
 interface InstrumentBlock {
   instrument: string
@@ -231,8 +250,11 @@ const blocks = computed<InstrumentBlock[]>(() => {
       long: 0,
       longChange: undefined,
       short: 0,
-      shortChange: undefined
+      shortChange: undefined,
+      inferred: false
     }
+    // 任一腿来自回榜反推,整行标「推算」:那天他实际未上榜,数字是倒推的。
+    if (row.source === 'reboard_inferred') line.inferred = true
     const quantity = Number(row.quantity)
     const change = num(row.change)
     if (row.rank_type === 'long') {
@@ -347,11 +369,24 @@ function withAlpha(hex: string, alpha: number) {
   return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`
 }
 
+// 推算日的底色带:与掉榜带同一套机械,颜色更淡以示「有数,但数是倒推的」。
+// itemStyle 挂在段首元素上——ECharts markArea 按段首取样式。
+const inferredBands = computed(() =>
+  offBoardBands(
+    days.value.map((day) => ({ trade_date: day.trade_date, known: !day.inferred }))
+  ).map(
+    ([start, end]): Band => [
+      { ...start, itemStyle: { color: withAlpha(chartTokens().accent, 0.07) } },
+      end
+    ]
+  )
+)
+
 const offBoardMark = computed(() => ({
   silent: true,
   itemStyle: { color: withAlpha(chartTokens().accent, 0.16) },
   label: { show: false },
-  data: bands.value
+  data: [...bands.value, ...inferredBands.value]
 }))
 
 // —— 小窗 ——
@@ -401,6 +436,9 @@ function tooltipBody(index: number, head: string[] = []) {
   }
 
   const net = num(day.net_position)
+  if (day.inferred) {
+    parts.push(row('数据口径', '推算持仓 · 实际未上榜(由回榜日增减倒推)', chartTokens().accent))
+  }
   if (net === null) {
     parts.push(row('净持仓', '掉出前 20 · 按 0 计入(实际低于当日榜单门槛)'))
   } else {
@@ -449,6 +487,9 @@ const latest = computed(() => {
         text: `均价 ${legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)}`
       })
     }
+  }
+  if (day.inferred) {
+    parts.push({ text: '推算持仓 · 实际未上榜(由回榜日增减倒推)' })
   }
   parts.push({
     text: `净持仓 ${lots(Math.abs(net))}${net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'}`,
@@ -752,7 +793,14 @@ const cumulativeTotal = computed(() => {
                   </el-button>
                 </td>
                 <td class="contract">
-                  <div>{{ line.contract }}</div>
+                  <div>
+                    {{ line.contract }}
+                    <span
+                      v-if="line.inferred"
+                      class="inferred-tag"
+                      title="该日实际未上榜(前 20 没有他),持仓由回榜日的增减倒推。"
+                    >推算·未上榜</span>
+                  </div>
                   <el-button
                     size="small"
                     @click="openBuilding(block.instrument, line.contract)"
@@ -1036,5 +1084,18 @@ const cumulativeTotal = computed(() => {
 }
 .figure {
   min-width: 110px;
+}
+.inferred-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid var(--tv-warn);
+  border-radius: var(--tv-radius-sm);
+  background: var(--tv-warn-bg);
+  color: var(--tv-warn);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  cursor: help;
 }
 </style>

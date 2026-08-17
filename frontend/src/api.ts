@@ -317,6 +317,8 @@ export interface NetPositionDay {
    * 曲线上就是一段无缘无故的下台阶。
    */
   missing_members: string[]
+  /** 当天按回榜反推值计入合计的席位：实际未上榜，数字是倒推的。 */
+  inferred_members: string[]
 }
 
 export interface SeatNetPositionResponse {
@@ -432,6 +434,8 @@ export interface BuildingDay {
   cost_unknown_reason: string | null
   /** 品种汇总档才有：当日的多空两腿。单合约档为 null。 */
   legs: VarietyLegs | null
+  /** 该日持仓含回榜反推成分：他实际未上榜，数字由回榜日的增减倒推。 */
+  inferred: boolean
 }
 
 /**
@@ -466,6 +470,20 @@ export interface SeatBuildingResponse {
    */
   price_series_kind: 'open_interest_weighted' | 'dominant_unadjusted' | null
   days: BuildingDay[]
+}
+
+export interface MemberInstrumentsResponse {
+  member: string
+  /** 该席位历史上持有过的全部品种。建仓过程的品种下拉用它，不随所选日期变化。 */
+  instruments: string[]
+}
+
+export function getSeatMemberInstruments(
+  member: string
+): Promise<ApiEnvelope<MemberInstrumentsResponse>> {
+  return getJson(
+    `/api/v1/spread-analytics/seats/member-instruments?member=${encodeURIComponent(member)}`
+  )
 }
 
 export function getSeatBuilding(

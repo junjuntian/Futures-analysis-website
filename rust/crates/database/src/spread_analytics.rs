@@ -2210,6 +2210,35 @@ const PRICE_SOURCE_RANK: &str = "case
 ///
 /// 数量用文本承载而不是浮点：这些数字后面要拿去算持仓成本，一路保持精确比在
 /// 边界上来回转换安全。
+/// 该会员(按归一名,含全部历史写法)历史上持有过的全部品种。
+///
+/// 给建仓过程的品种下拉用:那是历史序列,品种列表不该跟着「所选日期当天是否在榜」
+/// 变——高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的建仓过程明明
+/// 都在(运营者当日报的 bug)。反推行不计入:一个品种若只有反推行,说明真行从未
+/// 出现过,那是不可能的,防御性排除而已。
+pub async fn load_member_instruments(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    member: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let variants = seat_member_variants(&mut tx, workspace_id, member).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        "select distinct instrument from seat_history
+          where workspace_id = $1 and member = any($2::text[])
+            and not is_variety_total and rank_type in ('long', 'short')
+            and source <> 'reboard_inferred'
+          order by instrument",
+    )
+    .bind(workspace_id)
+    .bind(variants)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 pub async fn load_seat_positions(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2311,7 +2340,7 @@ fn building_days_sql() -> String {
              -- 先按来源去重再求和。这里最要紧：这条是按会员逐日汇总的，同一天同一榜
              -- 若有两个源各一行，持仓会被直接算成两倍，而图上看不出任何异常。
              select distinct on (trade_date, contract, is_variety_total, rank_type, {member_key})
-                    trade_date, rank_type, quantity
+                    trade_date, rank_type, quantity, source
                from seat_history
               where workspace_id = $1 and instrument = $2 and member = any($3::text[])
                 and ($4::text is null or contract = $4)
@@ -2330,7 +2359,11 @@ fn building_days_sql() -> String {
          ), seats as (
              select trade_date,
                     sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
-                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position,
+                    -- 该日任一腿来自回榜反推(reboard_inferred)即标推算——那天他
+                    -- **实际未上榜**,数字是从回榜日的增减倒推出来的(运营者
+                    -- 2026-08-17:所有席位的推算持仓都要打上标记)。
+                    bool_or(source = 'reboard_inferred') as inferred
                from picked
               group by trade_date
          ), prices as (
@@ -2352,7 +2385,8 @@ fn building_days_sql() -> String {
                 -- 累计盈亏跟着算出一次不存在的巨额了结（净持仓 2038 → 0 → 2416）。
                 -- 留 NULL，一路传到界面上如实标成「掉榜 · 持仓未知」。
                 s.long_position::text as long_position,
-                s.short_position::text as short_position
+                s.short_position::text as short_position,
+                coalesce(s.inferred, false) as inferred
            from seats s
            full outer join prices p on p.trade_date = s.trade_date
           where coalesce(s.trade_date, p.trade_date) is not null
@@ -2370,6 +2404,8 @@ pub struct VarietyBuildingRow {
     pub trade_date: Date,
     pub long_position: Option<String>,
     pub short_position: Option<String>,
+    /// 该合约该日的持仓来自回榜反推:实际未上该合约的前二十。
+    pub inferred: bool,
     pub settlement_price: Option<String>,
 }
 
@@ -2385,6 +2421,8 @@ pub struct SeatNetPositionRow {
     pub trade_date: Date,
     pub long_position: String,
     pub short_position: String,
+    /// 该日该合约的持仓来自回榜反推:实际未上榜,数字由回榜日增减倒推。
+    pub inferred: bool,
 }
 
 /// 净持仓页的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
@@ -2394,7 +2432,7 @@ fn seat_net_positions_sql() -> String {
              -- 去重纪律同 building_days_sql：先按来源收敛，再求和。不收敛的话
              -- 日更源与官方历史源两行都会进来，同一家的持仓会被加两遍。
              select distinct on (trade_date, contract, rank_type, {member_key})
-                    trade_date, contract, rank_type, quantity,
+                    trade_date, contract, rank_type, quantity, source,
                     {member_key} as member_key
                from seat_history
               where workspace_id = $1 and instrument = $2 and member = any($3::text[])
@@ -2408,7 +2446,10 @@ fn seat_net_positions_sql() -> String {
                 sum(case when rank_type = 'long' then quantity else 0 end)::text
                     as long_position,
                 sum(case when rank_type = 'short' then quantity else 0 end)::text
-                    as short_position
+                    as short_position,
+                -- 任一腿来自回榜反推即标推算:那天他实际未上榜,数字是倒推的
+                -- (运营者 2026-08-17:所有席位的推算持仓都要打标)。
+                bool_or(source = 'reboard_inferred') as inferred
            from picked
           group by member_key, contract, trade_date
           order by trade_date, member_key, contract",
@@ -2455,6 +2496,7 @@ pub async fn load_seat_net_positions(
             trade_date: row.get("trade_date"),
             long_position: row.get("long_position"),
             short_position: row.get("short_position"),
+            inferred: row.get("inferred"),
         })
         .collect())
 }
@@ -2712,7 +2754,7 @@ fn variety_building_sql() -> String {
         "with picked as (
              -- 去重纪律同 building_days_sql：先按来源收敛，再求和。
              select distinct on (trade_date, contract, rank_type, {member_key})
-                    trade_date, contract, rank_type, quantity
+                    trade_date, contract, rank_type, quantity, source
                from seat_history
               where workspace_id = $1 and instrument = $2 and member = any($3::text[])
                 and not is_variety_total and contract is not null
@@ -2722,7 +2764,8 @@ fn variety_building_sql() -> String {
          ), seats as (
              select contract, trade_date,
                     sum(case when rank_type = 'long' then quantity else 0 end) as long_position,
-                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position
+                    sum(case when rank_type = 'short' then quantity else 0 end) as short_position,
+                    bool_or(source = 'reboard_inferred') as inferred
                from picked
               group by contract, trade_date
          ), prices as (
@@ -2738,6 +2781,7 @@ fn variety_building_sql() -> String {
          -- 三者从数据上分不开，一律当作那天他不在这个合约上。
          select s.contract, s.trade_date,
                 s.long_position::text, s.short_position::text,
+                s.inferred,
                 p.settlement_price::text
            from seats s
            left join prices p on p.contract = s.contract and p.trade_date = s.trade_date
@@ -2777,6 +2821,7 @@ pub async fn load_variety_building_days(
             trade_date: row.get("trade_date"),
             long_position: row.get("long_position"),
             short_position: row.get("short_position"),
+            inferred: row.get("inferred"),
             settlement_price: row.get("settlement_price"),
         })
         .collect())
@@ -2958,6 +3003,8 @@ pub async fn load_report_cost_rows(
                     trade_date: row.get("trade_date"),
                     long_position: row.get("long_position"),
                     short_position: row.get("short_position"),
+                    // 报告表成本链用不到推算标(标记只服务展示),这条查询也没带该列。
+                    inferred: false,
                     settlement_price: row.get("settlement_price"),
                 },
             )
@@ -3160,6 +3207,8 @@ pub struct BuildingDay {
     /// `None` = 那天该席位不在前二十榜上，持仓未知（不是零）。
     pub long_position: Option<String>,
     pub short_position: Option<String>,
+    /// 该日持仓含回榜反推成分：他实际未上榜，数字由回榜日的增减倒推。
+    pub inferred: bool,
 }
 
 /// 某席位在某合约（或某品种汇总）的逐日持仓与行情。
@@ -3198,6 +3247,7 @@ pub async fn load_building_days(
             settlement_price: row.get("settlement_price"),
             long_position: row.get("long_position"),
             short_position: row.get("short_position"),
+            inferred: row.get("inferred"),
         })
         .collect())
 }

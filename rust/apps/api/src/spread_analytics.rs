@@ -698,6 +698,9 @@ pub struct BuildingDayItem {
     pub cost_unknown_reason: Option<String>,
     /// 品种汇总档才有：当日的多空两腿。单合约档为空。
     pub legs: Option<VarietyLegs>,
+    /// 该日持仓含**回榜反推**成分:他实际未上榜,数字由回榜日的增减倒推
+    /// (运营者 2026-08-17:所有席位的推算持仓都要打标)。
+    pub inferred: bool,
 }
 
 /// 品种汇总当日的两腿。**这里的多空是按合约的净方向分的组**——净多的那些合约算
@@ -737,6 +740,53 @@ pub struct SeatBuildingResponse {
     /// 是哪一种，看的人会当成真实价位去定止损。
     pub price_series_kind: Option<String>,
     pub days: Vec<BuildingDayItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemberInstrumentsQuery {
+    pub member: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberInstrumentsResponse {
+    pub member: String,
+    /// 该席位历史上持有过的全部品种。建仓过程的品种下拉用它,不随所选日期变化。
+    pub instruments: Vec<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/member-instruments",
+    params(("member" = String, Query)),
+    security(("session_cookie" = [])),
+    responses((status = 200, body = MemberInstrumentsResponse), (status = 401), (status = 403))
+)]
+pub async fn query_member_instruments(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<MemberInstrumentsQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let member = query.member.trim().to_string();
+    if member.is_empty() || member.chars().count() > 40 {
+        return Err(SpreadApiError::Validation("invalid_member", request_id));
+    }
+    let instruments = database::spread_analytics::load_member_instruments(
+        &state.auth.pool,
+        context.workspace_id(),
+        &member,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    Ok(Json(ApiResponse::new(
+        MemberInstrumentsResponse {
+            member,
+            instruments,
+        },
+        request_id,
+    ))
+    .into_response())
 }
 
 #[utoipa::path(
@@ -863,6 +913,7 @@ pub async fn query_seat_building(
                 open_pnl: cost.open_pnl.map(|value| value.round_dp(2).to_string()),
                 cost_unknown_reason: cost.cost_unknown_reason.map(str::to_string),
                 legs: None,
+                inferred: row.inferred,
             })
             .collect();
     }
@@ -916,8 +967,12 @@ async fn variety_building_days(
 
     // SQL 已按 (contract, trade_date) 排序，顺序扫一遍切段即可。
     let mut per_contract: Vec<Vec<DailyPosition>> = Vec::new();
+    let mut inferred_dates: std::collections::HashSet<Date> = std::collections::HashSet::new();
     let mut current: Option<String> = None;
     for row in rows {
+        if row.inferred {
+            inferred_dates.insert(row.trade_date);
+        }
         if current.as_deref() != Some(row.contract.as_str()) {
             current = Some(row.contract.clone());
             per_contract.push(Vec::new());
@@ -1016,6 +1071,7 @@ async fn variety_building_days(
                     open_pnl: None,
                     cost_unknown_reason: Some("seat_off_the_board".to_string()),
                     legs: None,
+                    inferred: false,
                 };
             };
             let day = &series[index];
@@ -1048,6 +1104,7 @@ async fn variety_building_days(
                     short_cost: day.short_cost.map(|value| value.round_dp(4).to_string()),
                     short_cost_lots: day.short_cost_lots.to_string(),
                 }),
+                inferred: inferred_dates.contains(&date),
             }
         })
         .collect())
@@ -1091,6 +1148,8 @@ pub struct NetPositionDayItem {
     /// 当天掉出前二十的席位：持仓**未知**，没有计进上面的合计。
     /// 界面必须把这件事说出来——按零计会画出一根假的大幅减仓。
     pub missing_members: Vec<String>,
+    /// 当天按**回榜反推值**计入合计的席位:他们实际未上榜,数字是倒推的。
+    pub inferred_members: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1210,6 +1269,16 @@ pub async fn query_seat_net_position(
             .map(|candle| (candle.trade_date, candle))
             .collect();
 
+        let mut inferred_by_date: HashMap<Date, std::collections::BTreeSet<String>> =
+            HashMap::new();
+        for row in &rows {
+            if row.inferred {
+                inferred_by_date
+                    .entry(row.trade_date)
+                    .or_default()
+                    .insert(row.member_key.clone());
+            }
+        }
         let observations: Vec<SeatContractDay> = rows
             .into_iter()
             .map(|row| SeatContractDay {
@@ -1235,6 +1304,10 @@ pub async fn query_seat_net_position(
                     short_lots: day.short_lots.to_string(),
                     counted_members: day.counted_members,
                     missing_members: day.missing_members,
+                    inferred_members: inferred_by_date
+                        .get(&day.trade_date)
+                        .map(|set| set.iter().cloned().collect())
+                        .unwrap_or_default(),
                 }
             })
             .collect();

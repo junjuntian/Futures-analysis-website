@@ -45,6 +45,7 @@ use uuid::Uuid;
         spread_analytics::query_free_spread,
         spread_analytics::query_seat_positions,
         spread_analytics::query_seat_building,
+        spread_analytics::query_member_instruments,
         spread_analytics::query_seat_net_position,
         spread_analytics::list_seat_member_favorites,
         spread_analytics::create_seat_member_favorite,
@@ -280,6 +281,10 @@ fn router(
             get(spread_analytics::query_seat_building),
         )
         .route(
+            "/api/v1/spread-analytics/seats/member-instruments",
+            get(spread_analytics::query_member_instruments),
+        )
+        .route(
             "/api/v1/spread-analytics/seats/net-position",
             get(spread_analytics::query_seat_net_position),
         )
@@ -415,6 +420,7 @@ mod tests {
             ("/api/v1/spread-analytics/free-spread/query", "post"),
             ("/api/v1/spread-analytics/seats/positions", "get"),
             ("/api/v1/spread-analytics/seats/building", "get"),
+            ("/api/v1/spread-analytics/seats/member-instruments", "get"),
             ("/api/v1/spread-analytics/seats/net-position", "get"),
             ("/api/v1/spread-analytics/seats/member-favorites", "get"),
             ("/api/v1/spread-analytics/seats/member-favorites", "post"),
