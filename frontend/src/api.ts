@@ -621,6 +621,9 @@ export interface SpreadMonitorItem {
   /** 'high' | 'low' | null —— 已拐头：近 20 个交易日内当年轨曾进 3% 报警带，
    * 且当前已自极值回撤超过区间宽度的 10%。分层规则的进场信号（DEC-063）。 */
   turn: string | null
+  /** 今天刚拐头：位置是今天才穿过回撤线的。拐头标最多挂 20 个交易日，
+   * 「可进场状态」与「今天就是进场日」是两回事，这个字段点亮后者。 */
+  is_new_turn: boolean
 }
 
 export interface SpreadMonitorResponse {

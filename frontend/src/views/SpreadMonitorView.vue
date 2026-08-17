@@ -28,6 +28,8 @@ const showQuiet = ref(false)
 // 只看刚进极值的。焦煤 2026 年有 64% 的交易日都在 3% 触发（价差持续创新低，滚动
 // 区间天天被刷新），而连续触发段的中位长度只有 3 日——长段拖着不放才是噪音的来源。
 const onlyNew = ref(false)
+// 只看今天的进场信号:每天盘后勾上它,列表要么是空的,要么就是今天该动手的单子。
+const onlyEntry = ref(false)
 
 const items = ref<SpreadMonitorItem[]>([])
 const asOf = ref<string | null>(null)
@@ -114,10 +116,17 @@ const filtered = computed(() => {
       // 「仅新触发」只筛触发中那一组；已拐头与未触发的行没有新旧之分，
       // 让它们跟着一起消失会让人以为下面那半屏也被过滤了。
       if (onlyNew.value && item.alert && !item.is_new_alert) return false
+      if (onlyEntry.value && !isEntry(item)) return false
       return true
     })
-    .sort((a, b) => extremity(b) - extremity(a))
+    // 进场信号置顶(运营者要求),其余仍按离中线远近排。
+    .sort((a, b) => Number(isEntry(b)) - Number(isEntry(a)) || extremity(b) - extremity(a))
 })
+
+/** ⚡ 进场 = 今天刚拐头 × 资格合格。两个已测部件的合取。 */
+function isEntry(item: SpreadMonitorItem) {
+  return item.is_new_turn && item.revert !== null && isQualified(item.revert)
+}
 
 // 「触发中」与「已拐头」同列展示:拐头行多半已退出报警带,只按 alert 分组的话,
 // 恰恰在该进场的时候它掉进「未触发」堆里,规则第二层就白做了。
@@ -130,6 +139,12 @@ const turnCount = computed(() => fired.value.filter((item) => item.turn).length)
 const qualifiedCount = computed(
   () => fired.value.filter((item) => item.revert && isQualified(item.revert)).length
 )
+const entryCount = computed(() => fired.value.filter((item) => isEntry(item)).length)
+
+const ENTRY_HINT =
+  '今天刚拐头(位置今天才穿过回撤线)且资格合格 —— 回放口径里的进场日。' +
+  '统计是盘后算的,执行等于次日进场。判定线附近的抖动会让它再亮一次:' +
+  '没上车的人得到第二次提示,已上车的人无视即可。'
 
 const TURN_HINT =
   '近 20 个交易日内当年轨曾进 3% 报警带，当前已自极值回撤超过区间宽度的 10%。' +
@@ -198,8 +213,10 @@ function openDetail(item: SpreadMonitorItem) {
         历年有几年曾经回落、最有利时能走多少点、一路持到最后又是多少。
         剩余时间越长「曾经回归」越容易达成，所以别只看那个百分比——
         <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
-        三步用法：只看带 <strong>✓ 合格</strong> 的行；等 <strong>已拐头</strong> 再进；
-        仓位按「最有利/持到期」那两个点数预留浮亏。没有徽标的报警，当风景。
+        三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
+        就是信号日（次日执行），带它的行排在最上面；仓位按「最有利/持到期」那两个点数
+        预留浮亏。「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态。
+        没有徽标的报警，当风景。
       </p>
     </header>
 
@@ -239,6 +256,7 @@ function openDetail(item: SpreadMonitorItem) {
         </el-radio-group>
 
         <el-checkbox v-model="onlyNew" border>仅新触发</el-checkbox>
+        <el-checkbox v-model="onlyEntry" border>仅进场日</el-checkbox>
       </div>
 
       <div class="tally">
@@ -247,6 +265,7 @@ function openDetail(item: SpreadMonitorItem) {
         <div class="cell"><span class="k">新触发</span><span class="v fresh">{{ newCount }}</span></div>
         <div class="cell"><span class="k">已拐头</span><span class="v fresh">{{ turnCount }}</span></div>
         <div class="cell"><span class="k">✓ 合格</span><span class="v qual">{{ qualifiedCount }}</span></div>
+        <div class="cell"><span class="k">⚡ 进场</span><span class="v entry">{{ entryCount }}</span></div>
         <div class="cell"><span class="k">高位</span><span class="v high">{{ highCount }}</span></div>
         <div class="cell"><span class="k">低位</span><span class="v low">{{ lowCount }}</span></div>
         <div class="cell" v-if="asOf"><span class="k">数据日</span><span class="v date">{{ asOf }}</span></div>
@@ -306,6 +325,9 @@ function openDetail(item: SpreadMonitorItem) {
 
           <div class="tail">
             <div class="state-tags">
+              <el-tooltip v-if="isEntry(item)" :content="ENTRY_HINT" placement="top">
+                <span class="badge-entry">⚡ 进场</span>
+              </el-tooltip>
               <el-tag
                 v-if="item.alert"
                 :type="item.alert === 'high' ? 'danger' : 'success'"
@@ -630,6 +652,23 @@ function openDetail(item: SpreadMonitorItem) {
 }
 .tally .v.qual {
   color: var(--tv-blue);
+}
+.tally .v.entry {
+  color: var(--tv-blue);
+}
+/* 「⚡ 进场」:全页唯一的实心蓝——它是唯一的行动指令,必须一眼跳出来。 */
+.badge-entry {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--tv-radius-sm);
+  background: var(--tv-blue);
+  color: var(--el-color-white);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
 }
 
 /* 「新」徽标：前一交易日按同一阈值还没触发。

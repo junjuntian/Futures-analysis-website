@@ -3258,6 +3258,23 @@ mod monitor_tests {
     }
 
     #[test]
+    fn the_entry_day_is_the_day_the_position_crosses_the_line() {
+        // FG2701/SA2701 生产序列:08-04 位置 1.000(带内,未拐头)→ 08-05 退到
+        // 0.884(拐头,前一日 1.000 在线上方)= 进场日。
+        assert!(monitor_turn_is_new(Some("high"), Some(1.0)));
+        // 08-10:前一日 0.855 已在线下 —— 拐头持续中,不再是进场日。
+        assert!(!monitor_turn_is_new(Some("high"), Some(0.855)));
+        // 08-07 的抖动:前一日 0.906 弹回线上,再穿线 —— 第二次提示,再亮一次。
+        assert!(monitor_turn_is_new(Some("high"), Some(0.906)));
+        // 没拐头就谈不上进场日;前一日缺失判不了,宁可漏标。
+        assert!(!monitor_turn_is_new(None, Some(1.0)));
+        assert!(!monitor_turn_is_new(Some("high"), None));
+        // 低位对称:前一日 0.05 在线下方,今天 ≥0.10 穿上来。
+        assert!(monitor_turn_is_new(Some("low"), Some(0.05)));
+        assert!(!monitor_turn_is_new(Some("low"), Some(0.15)));
+    }
+
+    #[test]
     fn a_crash_through_both_bands_picks_the_side_with_more_margin() {
         // 20 日内从上带砸到 0.05:高位侧余量 0.85,低位侧不足 —— 报高位拐头。
         assert_eq!(
@@ -3484,6 +3501,12 @@ pub struct SpreadMonitorItem {
     /// 都是常量不随页面阈值变——给两个可调旋钮只会诱导挑参数。
     /// 只看当年轨：资格统计与回放验证都在当年轨的可交易窗口上，口径闭环。
     pub turn: Option<String>,
+    /// **今天刚拐头**：拐头成立，且前一交易日位置还在回撤线的另一侧——位置是今天
+    /// 才穿线的。这就是回放里的进场日；拐头标最多挂 20 个交易日,「处于可进场状态」
+    /// 与「今天就是进场日」是两回事,界面靠它把后者单独点亮并置顶。
+    /// 判定用 `prev_pair_position`(段首日标记的同一素材),前一日缺失时为 false
+    /// ——判不了就不标,与 is_new_alert 同一条原则。
+    pub is_new_turn: bool,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -3565,6 +3588,20 @@ fn monitor_turn(pos: Option<f64>, hi20: Option<f64>, lo20: Option<f64>) -> Optio
             "low"
         }),
         (false, false) => None,
+    }
+}
+
+/// 拐头是不是今天刚发生:前一日位置还在回撤线的另一侧。
+///
+/// 不必看前一日的 hi20:band 触碰当天位置必然 ≥0.97 > 0.90,所以「昨天拐头不成立、
+/// 今天成立」只可能因为位置今天穿线,不可能因为 band 今天才进窗(自相矛盾)。
+/// 判定线附近的抖动(穿线→弹回→再穿线)会再亮一次——没上车的人得到第二次提示,
+/// 已上车的人无视即可。
+fn monitor_turn_is_new(turn: Option<&str>, prev_pair: Option<f64>) -> bool {
+    match turn {
+        Some("high") => prev_pair.is_some_and(|p| p > 1.0 - TURN_RETREAT),
+        Some("low") => prev_pair.is_some_and(|p| p < TURN_RETREAT),
+        _ => false,
     }
 }
 
@@ -3755,6 +3792,7 @@ pub async fn query_spread_monitor(
                 parse(&row.pair_pos_hi20),
                 parse(&row.pair_pos_lo20),
             );
+            let is_new_turn = monitor_turn_is_new(turn, prev_pair);
 
             // 计数是 Copy、点数是短字符串 clone 一下，都不会妨碍下面把 row 的其余
             // 字段移走。统计与阈值无关，所以这里不再挑档位；报警侧优先，没报警但
@@ -3796,6 +3834,7 @@ pub async fn query_spread_monitor(
                 is_new_alert,
                 revert,
                 turn: turn.map(str::to_string),
+                is_new_turn,
             }
         })
         .collect();
