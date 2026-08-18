@@ -42,15 +42,24 @@ insert into main_month values
 --   哑：旧版有 group by 兜着不报错，但 `pair_days` 被算成两倍——「至少 60 天历史」
 --       那道门实际上是按 30 天在放行，而且没人看得出来。
 -- 交易所自己发的压过封装源，与席位那边的 SEAT_SOURCE_RANK 同一套道理。
+-- **收盘价 0 = 当天无成交,不是价格**(2026-08-18 做基差探针时挖出)。
+-- 郑商所对无成交合约的收盘价如实写 0,结算价照常有效:AP2111 在 2021-11-03
+-- 收盘 0 / 结算 7525,而 `close_price is not null` 只挡 NULL 不挡 0,于是
+-- AP2111−AP2112 那天的价差被算成 0 − 8020 = **−8020**(前后两天的真实价差是
+-- −363 与 −102)。这个假极值会永久钉死该组合区间的下界,造出假的低位报警、
+-- 假拐头,还污染历年百分位——实测 79 个组合 200 行中招。
+-- 修法:无成交日改用结算价(交易所在无成交时本就以结算价为当日代表价),
+-- 两者都无效才丢弃。**取价只在这一处,改这里全链路生效。**
 create temp table legs as
 select distinct on (p.workspace_id, p.instrument, p.contract, p.trade_date)
        p.workspace_id, p.instrument, p.contract, p.trade_date,
-       p.close_price, p.open_interest,
+       coalesce(nullif(p.close_price, 0), p.settlement_price) close_price,
+       p.open_interest,
        substring(p.contract from '([0-9]{2})[0-9]{2}$')::int yy,
        substring(p.contract from '[0-9]{2}$')::int mm
   from price_history p
   join monitor_scope s on s.instrument = p.instrument
- where p.close_price is not null
+ where coalesce(nullif(p.close_price, 0), p.settlement_price) > 0
  order by p.workspace_id, p.instrument, p.contract, p.trade_date,
           -- 「凡带 official 的都是交易所自己发的」。原来写的是 like '%\_official'
           -- ——要求以 _official 结尾，而大商所的源叫 dce_official_history，**匹配不上**，
