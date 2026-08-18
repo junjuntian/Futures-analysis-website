@@ -936,15 +936,16 @@ const cumulativeTotal = computed(() => {
 
     <el-card shadow="never" class="shared">
       <div class="control-row">
+        <!-- 不折叠：勾着的是哪几家，一眼要看全。折成「国泰君安 +4」等于把选择
+             藏进一个悬浮层，而这组选择正是两个子页共用的那一组，最该常驻可见。
+             标签多了就自动换行增高，这个框允许长高。 -->
         <el-select
           v-model="selected"
           multiple
-          collapse-tags
-          collapse-tags-tooltip
           filterable
           :filter-method="(value: string) => (memberQuery = value)"
           :multiple-limit="MAX_MEMBERS"
-          style="width: 320px"
+          class="member-select"
           :placeholder="`选择席位（最多 ${MAX_MEMBERS} 家）`"
           :disabled="loadingPositions"
         >
@@ -1262,6 +1263,12 @@ const cumulativeTotal = computed(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+/* 席位框占满剩下的宽度，标签多了往下长而不是挤成一行。
+   min-width 保证窄屏下它先换行而不是被压成一条缝。 */
+.member-select {
+  flex: 1 1 420px;
+  min-width: 280px;
 }
 .favorites {
   margin-top: 12px;
