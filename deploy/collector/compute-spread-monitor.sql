@@ -20,17 +20,21 @@ begin;
 create temp table monitor_scope (instrument text primary key);
 insert into monitor_scope values ('JD'), ('LH'), ('JM'), ('AP'), ('FG'), ('SA');
 
--- 主力月份。运营者 2026-08-12 明确：玻璃、纯碱、焦煤的主力合约是 1、5、9 月，
--- **其余月份不做套利，也不进监控**。非主力月份的合约成交稀疏，价差是几手撮出来的，
--- 报出来也没法交易。
+-- 主力月份。运营者 2026-08-12 明确：玻璃、纯碱、焦煤的主力合约是 1、5、9 月。
+-- 非主力月份的合约成交稀疏，价差是几手撮出来的，报出来也没法交易。
+--
+-- `pair_mode` 定这道门有多严（2026-08-18 运营者拍板把焦煤放宽）：
+--   both   —— 两条腿都必须是主力月（玻璃、纯碱：原规则不变）
+--   either —— **只要有一条腿是主力月就成对**（焦煤：主力对非主力也做套利）。
+--             非主力那条腿仍受持仓量前 6 的流动性门约束，不会把冷门远月放进来。
 --
 -- 只列运营者点名的三个品种。鸡蛋、生猪、苹果没说，就不限制——**猜一个月份清单去
 -- 悄悄删掉人家的组合，比多报几组糟得多**。要限制时往这张表里加一行即可。
-create temp table main_month (instrument text, mm int);
+create temp table main_month (instrument text, mm int, pair_mode text);
 insert into main_month values
-    ('FG', 1), ('FG', 5), ('FG', 9),
-    ('SA', 1), ('SA', 5), ('SA', 9),
-    ('JM', 1), ('JM', 5), ('JM', 9);
+    ('FG', 1, 'both'), ('FG', 5, 'both'), ('FG', 9, 'both'),
+    ('SA', 1, 'both'), ('SA', 5, 'both'), ('SA', 9, 'both'),
+    ('JM', 1, 'either'), ('JM', 5, 'either'), ('JM', 9, 'either');
 
 -- **必须按来源去重。** 同一合约同一天在多个源下各有一行（郑商所 08-11 就同时有
 -- czce_official 与 akshare_v1），不去重的后果有两个，一个吵一个哑：
@@ -81,7 +85,11 @@ select l.*
            and t.d = l.trade_date) l
  where l.oi_rank <= 6
    -- 主力月份限制。没在 main_month 里列出的品种不受限（见那张表上的注释）。
+   -- **either 模式的品种在这一层不筛月份**：它的非主力腿要留到 combo 里才判，
+   -- 在这里砍掉就配不出「主力 × 非主力」那种对了。流动性门(oi_rank<=6)照旧管着。
    and (not exists (select 1 from main_month m where m.instrument = l.instrument)
+        or exists (select 1 from main_month m
+                    where m.instrument = l.instrument and m.pair_mode = 'either')
         or exists (select 1 from main_month m
                     where m.instrument = l.instrument and m.mm = l.mm));
 
@@ -91,6 +99,12 @@ select a.workspace_id, a.instrument i1, a.contract c1, a.mm m1, a.yy y1,
   from liquid a
   join liquid b on b.workspace_id = a.workspace_id and b.instrument = a.instrument
  where (a.yy, a.mm) < (b.yy, b.mm)
+   -- either 模式(焦煤,2026-08-18 运营者拍板):至少一条腿是主力月即成对。
+   -- both 模式与不受限的品种在 liquid 层就筛完了,这里恒真。
+   and (not exists (select 1 from main_month m
+                     where m.instrument = a.instrument and m.pair_mode = 'either')
+        or exists (select 1 from main_month m
+                    where m.instrument = a.instrument and m.mm in (a.mm, b.mm)))
 union all
 select a.workspace_id, a.instrument, a.contract, a.mm, a.yy,
        b.instrument, b.contract, b.mm, b.yy, true

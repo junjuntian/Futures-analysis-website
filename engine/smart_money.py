@@ -216,7 +216,14 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
     else:
         seat["is_variety_total"] = (col.astype(str).str.strip().str.lower()
                                     .isin(["t", "true", "1", "yes"]))
-    seat["member"] = seat["member"].replace(RULES["alias"])
+    # 先剥「（代客）」这类括号限定词再套别名 —— 与 Rust 端 MEMBER_KEY 正则
+    # 同语义。源之间会写不同:大商所东财源写「一德期货（代客）」、三禾写
+    # 「一德期货」,不剥的话同一家在去重键里是两个人,双源并存的日子(实测
+    # 2026-08-06/07 的 JD/JM/LH)持仓直接翻倍。AU/AG 目前零括号写法,所以这
+    # 是防御性修复;引擎哪天纳入大商所品种就会用上。
+    seat["member"] = (seat["member"].astype(str)
+                      .str.replace(r"[（(][^）)]*[）)]$", "", regex=True)
+                      .replace(RULES["alias"]))
     # 多来源重复行必须按优先级去重:交易所官方 > 其它源,change 非空 > 空。
     # 实测 akshare_v1 自 2026-07-31 起写入与官方重复的席位行且 change 全为空,
     # 若保留了它,ΔNet 会变 0,当周信号会整体消失。
