@@ -22,7 +22,10 @@ create temp table stage_spot_basis (
     dominant_basis_rate numeric
 ) on commit drop;
 
-\copy stage_spot_basis from :'csv_path' with (format csv, header true)
+-- **固定路径,不用 `:'csv_path'`**:`\copy` 是客户端元命令,**不做变量插值**
+-- (load-seats-direct.sql 的注释早写过这条,我 2026-08-18 还是重踩了一次)。
+-- 路径与 run-collector.sh 里 docker cp 的目标一一对应,改一边必须改另一边。
+\copy stage_spot_basis from '/tmp/spot_basis.csv' with (format csv, header true)
 
 insert into spot_basis_history (
     workspace_id, trade_date, instrument, spot_price,

@@ -103,6 +103,10 @@
   拦下)。锚点必须含足够独特上下文。
 - **Bash heredoc 里的反斜杠会被二次转义**,Python 字符串尾随反斜杠直接
   SyntaxError 且整个脚本零编辑落盘。需要反斜杠用 `chr(92)`。
+- **`\copy` 不做变量插值**:`\copy t from :'csv_path'` 会把路径当成空串,报
+  `:: No such file or directory`。装载脚本一律写固定路径,与 run-collector.sh 里
+  `docker cp` 的目标一一对应。(2026-08-18 重踩过一次——教训当时只写在
+  load-seats-direct.sql 的注释里,**代码注释挡不住没读那个文件的人,所以提到本文**。)
 - **PowerShell 5.1 按 GBK 读 UTF-8**:改中文文档禁用 Get-Content/Set-Content,
   用 Edit 工具或 Python;改完查乱码字符数。
 

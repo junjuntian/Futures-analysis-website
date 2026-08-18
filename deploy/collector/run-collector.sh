@@ -271,7 +271,7 @@ if [ -r "$SPOT_BASIS_FETCH" ] && [ -r "$SPOT_BASIS_LOAD" ]; then
       docker cp /opt/futures-platform/load/spot_basis.csv "$postgres_id":/tmp/spot_basis.csv
       "${COMPOSE[@]}" exec -T postgres \
         psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
-        -v csv_path=/tmp/spot_basis.csv < "$SPOT_BASIS_LOAD" \
+        < "$SPOT_BASIS_LOAD" \
         || echo "SPOT_BASIS_LOAD_FAILED 装载没成功，基差今天不前进" >&2
     else
       echo "SPOT_BASIS_NO_CSV 采集没写出文件，跳过装载" >&2
