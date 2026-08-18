@@ -1,6 +1,6 @@
 # 最新交接状态
 
-最后更新:2026-08-18(净持仓取代建仓过程)。**接手三步:读本文 → 读 `docs/PITFALLS.md`(全部实抓教训)
+最后更新:2026-08-18(报告表缓存改数据版本驱动)。**接手三步:读本文 → 读 `docs/PITFALLS.md`(全部实抓教训)
 → 有疑问再查 `docs/DECISIONS.md` 对应条目。** 逐次变更的完整历史在
 `git log -- docs/handoffs/LATEST.md` 与 DECISIONS.md,本文不再堆历史条目
 (保留策略见 `docs/handoffs/README.md`:LATEST 只描述当前状态)。
@@ -9,7 +9,8 @@
 
 - **生产 = `bcba78c`**(deploy 32138304505,2026-08-18),站点 `https://shejimao.trade`,
   服务器别名 `qh`。发布流程照 `docs/RELEASE_PROCESS.md`,部署前跑
-  `ops/preflight-deploy.sh`。
+  `ops/preflight-deploy.sh`。分支 HEAD 比生产新的部分**只有文档提交**
+  (`git log bcba78c..HEAD` 核对),代码无差异,不需要补部署。
 - **套利监控现行规则(读时判定,存事实不存结论)**:
   - 报警:当年轨/历年轨位置进两端带,页面阈值可调(默认 5%);「新」=段首日。
   - ✓合格:留一法历年触及率 ≥80% 且持到期中位 >0(DEC-062/063)。
@@ -39,7 +40,7 @@
   改了 `compute-spread-monitor.sql` 的部署,完成后必须手动重算
   (见 RELEASE_PROCESS §八),脚本只从 `stable.env` 的 `$previous_release_dir` 取。
 - **会话 30 天**(DEC-076):绝对与闲置都是 30 天(原来是 7 天/**4 小时**,每天重登
-  的元凶是闲置那条)。改配置只影响新登录,旧会话按创建时写死的时间过期。
+  的元凶是闲置那条)。改配置只影响新登录——运营者已于 2026-08-18 重登,**此事已闭环**。
 - **席位页**:「建仓过程」入口已撤,其内容由**净持仓**页承接(多席位叠加 + 收藏
   + 盈亏 + 成本);单席位用法=多选框里只选一家(DEC-077)。
 
@@ -77,6 +78,14 @@
   文档预填)+ 回撤档分品种 + ⚡只认首次 + 历史信号视图。
 
 ## 待办与观察项
+
+**下一个交易日(2026-08-19)要做的一件事**:16:00 抢早轮是当天首次真实运行,
+盘后核对它到底采到了什么——三条链的日志在
+`/var/log/futures-collector.log`、`futures-official-seats.log`、
+`futures-smart-money.log`;数据侧看
+`select exchange, min(updated_at) from price_history where trade_date='2026-08-19' group by 1`
+(转北京时间)。**四家交易所若在 16:0x 就齐了,再考虑撤掉 17:30 那轮;不齐就保持
+现状**——原轮次本来就是为此保留的兜底,不要先撤后验。
 
 - **待验收:净持仓页(盈亏/成本两张新图)是否已完全够用**——确认后清理
   SeatsView 里的建仓过程代码(约占该文件一半)。
