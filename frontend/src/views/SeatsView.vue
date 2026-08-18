@@ -1157,7 +1157,13 @@ const cumulativeTotal = computed(() => {
               <span v-if="priceSeriesNote" class="series-note">{{ priceSeriesNote }}</span>
             </div>
           </template>
-          <SpreadChart v-if="hasCandles" :option="priceOption" :height="320" export-name="净持仓-行情" />
+          <SpreadChart
+            v-if="hasCandles"
+            :option="priceOption"
+            :height="320"
+            group="seats-net-position"
+            export-name="净持仓-行情"
+          />
           <el-alert
             v-else
             type="info"
@@ -1181,11 +1187,21 @@ const cumulativeTotal = computed(() => {
               </div>
             </div>
           </template>
-          <SpreadChart :option="netOption" :height="300" export-name="净持仓-合计" />
+          <SpreadChart
+            :option="netOption"
+            :height="300"
+            group="seats-net-position"
+            export-name="净持仓-合计"
+          />
         </el-card>
         <el-card shadow="never">
           <template #header><h2>当日盈亏</h2></template>
-          <SpreadChart :option="pnlOption" :height="300" export-name="净持仓-当日盈亏" />
+          <SpreadChart
+            :option="pnlOption"
+            :height="300"
+            group="seats-net-position"
+            export-name="净持仓-当日盈亏"
+          />
         </el-card>
         <el-card shadow="never">
           <template #header>
@@ -1197,7 +1213,12 @@ const cumulativeTotal = computed(() => {
               </span>
             </h2>
           </template>
-          <SpreadChart :option="cumulativeOption" :height="300" export-name="净持仓-累计盈亏" />
+          <SpreadChart
+            :option="cumulativeOption"
+            :height="300"
+            group="seats-net-position"
+            export-name="净持仓-累计盈亏"
+          />
           <p class="note">
             当日盈亏的逐日累加。当日盈亏不可知的那几天（掉出前 20 或当日无结算价）按 0 计入，
             累计线不断开——断开会看起来像仓位平了。所以这是<strong>已知部分</strong>的累计。

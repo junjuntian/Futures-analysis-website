@@ -1133,10 +1133,43 @@ mod tests {
         let sql = variety_candles_sql(VarietyCandleMode::OpenInterestWeighted);
         assert!(sql.contains("open_price is not null and high_price is not null"));
         assert!(sql.contains("low_price is not null and close_price is not null"));
-        assert!(sql.contains("where open_interest > 0"));
+        assert!(sql.contains("and open_interest > 0"));
         // 过滤只发生在 usable 一处，四个价格都从它取数。
         assert_eq!(sql.matches("from usable").count(), 1);
         assert_eq!(sql.matches("/ sum(open_interest)").count(), 4);
+    }
+
+    #[test]
+    fn candle_completeness_filter_runs_before_source_convergence() {
+        // 残缺行不能顶掉完整行。
+        //
+        // 过滤一旦排在 `distinct on` 的下游，语义就变成「先按源优先级挑一行，
+        // 再看它合不合格」——同一天同一合约若既有残缺的高优先级行、又有完整的
+        // 低优先级行，挑中前者、过滤掉，那天整根蜡烛就没了，而好数据就在旁边。
+        //
+        // 2026-08-18 实际咬到：通道退役前后留下的 `akshare_v1` 行只有收盘价与
+        // 结算价，把新浪的完整行顶掉，JM/LH/JD 三个品种 07-31、08-03、08-05
+        // 三天的品种汇总 K 线整根消失。
+        for mode in [
+            VarietyCandleMode::OpenInterestWeighted,
+            VarietyCandleMode::DominantUnadjusted,
+        ] {
+            let sql = variety_candles_sql(mode);
+            let distinct_at = sql
+                .find("distinct on (contract, trade_date)")
+                .expect("没有按 (合约, 交易日) 收敛来源");
+            let filter_at = sql
+                .find("open_price is not null")
+                .expect("没有四价完整性过滤");
+            let order_at = sql
+                .find("order by contract, trade_date")
+                .expect("没有源优先级定序");
+            // 三者同处一个 select：distinct on → where 过滤 → order by 定优先级。
+            assert!(
+                distinct_at < filter_at && filter_at < order_at,
+                "{mode:?} 的完整性过滤没有和 distinct on 同处一个 select 的 where 子句"
+            );
+        }
     }
 
     #[test]
@@ -2859,19 +2892,28 @@ impl VarietyCandleMode {
 fn variety_candles_sql(mode: VarietyCandleMode) -> String {
     // 四价齐全才纳入。加权的分子分母必须来自同一批合约——某个合约缺开盘价却把它的
     // 持仓量计进分母，算出来的开盘价会被系统性拉低。
+    //
+    // **完整性过滤必须在 distinct on 之前**（2026-08-18 修）。原先是先按源优先级
+    // 挑出一行、再检查它合不合格，于是一行残缺的高优先级数据会把同一天同一合约
+    // 的完整行**顶掉**，那天整根蜡烛就没了——而好数据明明就躺在旁边。
+    //
+    // 实际咬到的是大商所：通道退役前后留下一批 `akshare_v1` 行（2026-07-31~08-12），
+    // 只有收盘价与结算价，开高低和持仓量全空。郑商所与上期所有官方源（优先级 0）
+    // 压着不受影响，大商所只有新浪（优先级 3），被 akshare（1）压住，于是
+    // JM/LH/JD 三个品种在 07-31、08-03、08-05 三天的品种汇总 K 线整根消失。
+    // 单合约 K 线（`load_contract_candles`）本来就是先过滤再挑，没有这个毛病，
+    // 这里与它对齐。
     let picked = format!(
-        "with picked as (
+        "with usable as (
              select distinct on (contract, trade_date)
                     contract, trade_date,
                     open_price, high_price, low_price, close_price, open_interest
                from price_history
               where workspace_id = $1 and instrument = $2
-              order by contract, trade_date, {price_rank}, source
-         ), usable as (
-             select * from picked
-              where open_interest > 0
+                and open_interest > 0
                 and open_price is not null and high_price is not null
                 and low_price is not null and close_price is not null
+              order by contract, trade_date, {price_rank}, source
          )",
         price_rank = PRICE_SOURCE_RANK,
     );
