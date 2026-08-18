@@ -228,5 +228,31 @@ gh run view <deploy-run-id> --log-failed   # 失败时
 - 云端(Codex Cloud 等)不得连接生产 VPS、生产数据库或读取生产秘密;
   它的测试结果不能替代第 5 步的生产验证。
 - 每个镜像必须有 `sha-<完整 Git SHA>` 标签和完整 digest;`latest` 不能作为部署依据。
-- **不要碰 `research/` 和 `engine/`** ——那是运营者另一个会话在做的席位因子预测模型,
-  长期处于改动状态,前置检查也有意不拦它(一个总是红的门禁很快会被无视)。
+- `research/` 是研究脚本区,长期处于改动状态,前置检查有意不拦它。
+  `engine/`(机构资金引擎)**随发布包下发并自动装到
+  `/opt/futures-platform/smart-money/`**(2026-08-18 实证发布包与运行位置 md5
+  一致)——旧文档里「引擎不走镜像链要手动 install」的说法已过时。改了引擎想立即
+  生效,部署完成后手动跑一次 `run-smart-money` 即可,不必等晚间 cron。
+
+---
+
+## 八、部署后的手动重算(改了监控采集 SQL 必做)
+
+改了 `deploy/collector/compute-spread-monitor.sql`(分档、圈定、新列等)的部署,
+**完成后表里的存量数据还是旧口径**——日更 cron 只算最近 3 天,不会替你把历史刷新。
+
+```bash
+# 在 qh 上执行。脚本只从 stable.env 指向的发布目录取——
+# /opt/futures-platform 是旧 git 检出,拿它的 SQL 重算过一次,把 45 天新列
+# 全刷成 NULL(2026-08-18,PITFALLS 一)。
+. /var/lib/futures-platform/deployments/stable.env
+docker exec -i futures-analysis-platform-postgres-1 \
+  psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 -v window_days=45 \
+  < "$previous_release_dir/deploy/collector/compute-spread-monitor.sql"
+```
+
+- 窗口:日常改动 `window_days=45`(约 10-40 秒);动了**历年口径**(组合圈定、
+  历年实例、回归率算法)用 `window_days=5000` 全量(约 20-40 分钟,anchor_row
+  是大头;nohup + 日志轮询,ssh 长等待会超时但不杀进程)。
+- 重算完必须核对:新列非 NULL(`count(pair_pos_hi20)` 等于行数)、最新日组合数
+  符合预期、抽一行看分档判定。约束报错先看被拦的值是不是真实观测(PITFALLS 一)。

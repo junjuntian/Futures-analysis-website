@@ -76,7 +76,7 @@ Phase 1 至 Phase 3 已完成版本收口并经独立 Evaluator PASS。Phase 4A 
 - [AI 设计](docs/AI_DESIGN.md)
 - [开发计划](docs/DEVELOPMENT_PLAN.md)
 - [验收标准](docs/ACCEPTANCE_CRITERIA.md)
-- [待确认事项](docs/OPEN_QUESTIONS.md)
+- [踩坑与教训](docs/PITFALLS.md)
 - [当前计划](PLANS.md)
 - [原始设计方案](docs/reference/期货与套利数据分析平台_完整设计方案_v1.0.docx)
 
@@ -124,7 +124,7 @@ http://localhost:8088
 - 原始 Word 方案已原样保存，SHA-256：`15FE19E6DC222F37B8CC0959A985423A1B02044EA07877F3562BDCEE5F6A9521`。
 - 已完成方案内容审阅、Markdown 设计拆分和 `ce-doc-review` 文档审查。
 - 架构与业务口径已确认并写入 `docs/DECISIONS.md`。
-- 尚未确定的实现细节集中在 `docs/OPEN_QUESTIONS.md`。
+- 尚未确定的实现细节直接立 `DEC-xxx` 草案(原 OPEN_QUESTIONS.md 已删,开放项均已被 DEC 系列关闭)。
 - Phase 1、Phase 2、Phase 3 均已完成并经 Evaluator PASS；Phase 3 main CI Run `30703979390` success。
 - Phase 4A 候选 `944a4de` 的 CI Run `30753685223`、Container images Run `30753724067`、Deploy Run `30754021926` 全部 success；`futures` VPS 已运行该候选并返回 `PHASE4A_E2E_PASS`，现等待独立 Evaluator。
 - Phase 4A 覆盖指定日期单次采集；Phase 4B 全历史回填、套利/分析/图表、AI 与新前端页面仍未实施。
