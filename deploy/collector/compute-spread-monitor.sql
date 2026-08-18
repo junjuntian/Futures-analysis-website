@@ -213,7 +213,9 @@ select w.*,
                             then case when substring(z.c1 from '^[A-Z]+') = 'FG'
                                        and substring(z.c2 from '^[A-Z]+') = 'SA'
                                       then 0.08 else 0.10 end
-                       when z.c1 like 'JM%' or z.c1 like 'AP%' then 0.20
+                       -- AP 已于 DEC-075 退回默认档(原 0.20 建立在收盘价 0 的
+                       -- 脏数据上,清洗后证据消失)。JM 不受那次污染,保持 0.20。
+                       when z.c1 like 'JM%' then 0.20
                        when z.c1 like 'JD%' then 0.05
                        else 0.10
                      end as line) r) w;
