@@ -2247,6 +2247,77 @@ const PRICE_SOURCE_RANK: &str = "case
 /// 变——高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的建仓过程明明
 /// 都在(运营者当日报的 bug)。反推行不计入:一个品种若只有反推行,说明真行从未
 /// 出现过,那是不可能的,防御性排除而已。
+/// 一行现货基差:某品种在某交易日的现货价、主力基差,以及**该基差在历年同品种
+/// 里的百分位**(DEC-074)。
+///
+/// 分位是这张表的核心用法:基差的绝对点数在品种之间没有可比性(生猪几千点、
+/// 玻璃几十点),「现在处在历史什么位置」才有。取当日最近一条(源偶尔缺日,
+/// 用 `<= trade_date` 往前找,最多回看 7 天——再远就不代表当下了)。
+pub struct SpotBasisRow {
+    pub instrument: String,
+    pub trade_date: Date,
+    pub spot_price: String,
+    pub dominant_basis: Option<String>,
+    pub dominant_basis_rate: Option<String>,
+    /// 主力基差率在该品种全部历史里的百分位(0~1);样本不足 60 天时为 None。
+    pub basis_percentile: Option<String>,
+}
+
+/// 监控页要的那一批:每个品种取截至该日的最近一条。
+pub async fn load_spot_basis(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    trade_date: Date,
+) -> Result<Vec<SpotBasisRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "with latest as (
+             select distinct on (instrument) instrument, trade_date, spot_price,
+                    dominant_basis, dominant_basis_rate
+               from spot_basis_history
+              where workspace_id = $1 and trade_date <= $2
+                and trade_date >= $2 - interval '7 days'
+              order by instrument, trade_date desc
+         ),
+         ranked as (
+             select h.instrument,
+                    percent_rank() over (partition by h.instrument
+                                         order by h.dominant_basis_rate) pr,
+                    h.dominant_basis_rate rate,
+                    count(*) over (partition by h.instrument) n
+               from spot_basis_history h
+              where h.workspace_id = $1 and h.dominant_basis_rate is not null
+                and h.trade_date <= $2
+         )
+         select l.instrument, l.trade_date, l.spot_price::text spot_price,
+                l.dominant_basis::text dominant_basis,
+                l.dominant_basis_rate::text dominant_basis_rate,
+                (select case when max(r.n) >= 60 then
+                          round(max(r.pr) filter (where r.rate = l.dominant_basis_rate)::numeric, 4)
+                        end
+                   from ranked r where r.instrument = l.instrument)::text basis_percentile
+           from latest l
+          order by l.instrument",
+    )
+    .bind(workspace_id)
+    .bind(trade_date)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SpotBasisRow {
+            instrument: row.get("instrument"),
+            trade_date: row.get("trade_date"),
+            spot_price: row.get("spot_price"),
+            dominant_basis: row.get("dominant_basis"),
+            dominant_basis_rate: row.get("dominant_basis_rate"),
+            basis_percentile: row.get("basis_percentile"),
+        })
+        .collect())
+}
+
 /// 全部模板备注,一次取回(单人面板,总量个位数到几十条)。
 pub async fn load_template_notes(
     pool: &PgPool,

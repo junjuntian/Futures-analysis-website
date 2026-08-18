@@ -3780,6 +3780,23 @@ pub struct SpreadMonitorItem {
     /// 组合已到期(先到期腿的散户窗口在最新快照日之前已关):历史信号里的
     /// 过期组合打灰标(DEC-071)。按最新快照日判而不是墙钟,结果可复现。
     pub expired: bool,
+    /// 该品种当日的现货与基差背景(DEC-074)。跨期两条腿相对同一个现货,
+    /// 所以基差之差就是价差本身——这里给的是**水平与历史分位**,是背景不是信号。
+    pub basis: Option<SpreadBasisInfo>,
+}
+
+/// 现货与基差背景。跨品种组合按第一条腿的品种给(玻纯以玻璃为准)。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SpreadBasisInfo {
+    pub instrument: String,
+    /// 基差数据的交易日。源偶尔缺日,可能早于快照日(最多回看 7 天)。
+    pub trade_date: String,
+    pub spot_price: String,
+    /// 主力基差 = 现货 − 主力期货。为正是期货贴水,为负是期货升水。
+    pub dominant_basis: Option<String>,
+    pub dominant_basis_rate: Option<String>,
+    /// 主力基差率在该品种历年里的百分位(0~1),样本不足 60 天为 None。
+    pub percentile: Option<String>,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -4170,6 +4187,35 @@ pub async fn query_spread_monitor(
         database::spread_analytics::load_template_notes(&state.auth.pool, context.workspace_id())
             .await
             .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    // 现货基差背景(DEC-074)。按最新快照日取一批,历史模式下不逐日取——
+    // 历史行看的是当时的进场信号,基差是"现在的产业背景",给最新的即可。
+    let basis_rows = match rows.iter().map(|row| row.trade_date).max() {
+        Some(day) => database::spread_analytics::load_spot_basis(
+            &state.auth.pool,
+            context.workspace_id(),
+            day,
+        )
+        .await
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let basis_map: std::collections::HashMap<String, SpreadBasisInfo> = basis_rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.instrument.clone(),
+                SpreadBasisInfo {
+                    instrument: row.instrument,
+                    trade_date: row.trade_date.to_string(),
+                    spot_price: row.spot_price,
+                    dominant_basis: row.dominant_basis,
+                    dominant_basis_rate: row.dominant_basis_rate,
+                    percentile: row.basis_percentile,
+                },
+            )
+        })
+        .collect();
     let note_map: std::collections::HashMap<(String, i32, String, i32), String> = notes
         .into_iter()
         .map(|(i1, m1, i2, m2, note)| ((i1, m1, i2, m2), note))
@@ -4225,6 +4271,18 @@ pub async fn query_spread_monitor(
             let expired = latest_snapshot.is_some_and(|day| {
                 days_to_window_end(&row.contract_1, &row.contract_2, day) == Some(0)
             });
+            // 跨品种组合按第一条腿的品种给基差(玻纯以玻璃为准):两个品种各有
+            // 自己的现货,挑一个是显示取舍,不是计算。
+            let basis = basis_map
+                .get(&row.instrument_1)
+                .map(|info| SpreadBasisInfo {
+                    instrument: info.instrument.clone(),
+                    trade_date: info.trade_date.clone(),
+                    spot_price: info.spot_price.clone(),
+                    dominant_basis: info.dominant_basis.clone(),
+                    dominant_basis_rate: info.dominant_basis_rate.clone(),
+                    percentile: info.percentile.clone(),
+                });
             let retreat = turn_retreat(&row.instrument_1, &row.instrument_2);
             let turn = monitor_turn(
                 track_position(&pair),
@@ -4289,6 +4347,7 @@ pub async fn query_spread_monitor(
                 days_left,
                 note,
                 expired,
+                basis,
             }
         })
         .collect();

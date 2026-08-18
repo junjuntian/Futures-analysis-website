@@ -215,6 +215,12 @@ const QUALIFIED_HINT =
   '历年触及率 ≥80% 且「持到期」为正。留一法回放：合格的报警段持到底中位 +29% 区间，' +
   '不合格的 −26%。不合格的行没有徽标——没有徽标就是「别做」。'
 
+const BASIS_HINT =
+  '现货价与主力基差(生意社数据,DEC-074)。基差 = 现货 − 主力期货:为正是期货' +
+  '贴水(现货更贵),为负是期货升水。**跨期套利的两条腿相对同一个现货,所以两个' +
+  '基差之差就是价差本身**——这里给的是水平与历史分位,是产业背景不是进场信号。' +
+  '苹果没有现货报价,那几行不显示。跨品种组合按第一条腿的品种给。'
+
 const REVERT_HINT =
   '同月份组合（同品种 + 同月份对 + 同年差）跨年拼起来的样本，不是这一组合自己的胜率。' +
   '可交易窗口照 5A 那套：止点＝先到期那条腿的散户最后交易日。历年按月-日对齐，' +
@@ -535,6 +541,22 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
             <div v-else class="revert absent">历年无可比样本</div>
 
+            <el-tooltip v-if="item.basis" :content="BASIS_HINT" placement="top">
+              <div class="basis">
+                <span class="k">{{ label(item.basis.instrument) }}现货</span>
+                <span class="v">{{ num(item.basis.spot_price) }}</span>
+                <template v-if="item.basis.dominant_basis !== null">
+                  <span class="k">主力基差</span>
+                  <span class="v" :class="Number(item.basis.dominant_basis) >= 0 ? 'disc' : 'prem'">
+                    {{ signedSpread(item.basis.dominant_basis) }}
+                  </span>
+                </template>
+                <span class="pctile" v-if="item.basis.percentile !== null">
+                  历年 {{ (Number(item.basis.percentile) * 100).toFixed(0) }}% 位
+                </span>
+              </div>
+            </el-tooltip>
+
             <div v-if="item.note" class="note" @click="openNoteEditor(item)">
               📝 {{ item.note }}
             </div>
@@ -850,6 +872,32 @@ function openDetail(item: SpreadMonitorItem) {
 }
 .note:hover {
   background: color-mix(in srgb, var(--tv-warn) 14%, transparent);
+}
+/* 现货基差背景条:比统计弱一档,它是背景不是信号。 */
+.basis {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font-size: 12px;
+  color: var(--tv-text-secondary);
+}
+.basis .k {
+  color: var(--tv-text-muted);
+}
+.basis .v {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.basis .v.disc {
+  color: var(--tv-up);
+}
+.basis .v.prem {
+  color: var(--tv-down);
+}
+.basis .pctile {
+  color: var(--tv-text-muted);
 }
 .note-hint {
   margin: 0 0 10px;

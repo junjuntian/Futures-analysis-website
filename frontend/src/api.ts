@@ -672,6 +672,22 @@ export interface SpreadMonitorItem {
   note: string | null
   /** 组合已到期（先到期腿的散户窗口在最新快照日前已关）。历史信号里打灰标。 */
   expired: boolean
+  /** 该品种的现货与基差背景（DEC-074）。跨品种组合按第一条腿的品种给。 */
+  basis: SpreadBasisInfo | null
+}
+
+/** 现货与基差。跨期两条腿相对同一个现货，所以基差之差就是价差本身——
+ * 这里给的是水平与历史分位，是背景信息不是信号。 */
+export interface SpreadBasisInfo {
+  instrument: string
+  /** 基差数据的交易日，可能早于快照日（源缺日时最多回看 7 天）。 */
+  trade_date: string
+  spot_price: string
+  /** 主力基差 = 现货 − 主力期货。为正是期货贴水，为负是期货升水。 */
+  dominant_basis: string | null
+  dominant_basis_rate: string | null
+  /** 基差率在该品种历年里的百分位（0~1），样本不足 60 天为 null。 */
+  percentile: string | null
 }
 
 export interface SpreadMonitorResponse {
