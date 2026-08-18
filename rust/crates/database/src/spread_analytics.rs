@@ -3549,6 +3549,30 @@ pub async fn spread_monitor_on(
     Ok(rows.into_iter().map(monitor_row).collect())
 }
 
+/// 全部快照日的所有行,新日期在前(DEC-070「历史信号」视图)。
+///
+/// 量级:47 组合 × 已存快照日,几千行的水平;读时判定与单日路径完全同一套,
+/// 不另写口径。前端在历史模式下只渲染进场行,过滤放在前端是为了让
+/// 「什么算进场」只有一处定义(isEntry)。
+pub async fn spread_monitor_history(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<SpreadMonitorRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(&format!(
+        "select {MONITOR_COLUMNS}
+           from spread_monitor_daily
+          where workspace_id = $1
+          order by trade_date desc, instrument_1, contract_1, contract_2"
+    ))
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows.into_iter().map(monitor_row).collect())
+}
+
 /// 有快照的交易日，最新在前。历史页的日期选择器要靠它。
 pub async fn spread_monitor_dates(
     pool: &PgPool,

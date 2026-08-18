@@ -123,8 +123,11 @@ analyze pair_series;
 -- 算出来才能对它取 lag。前一日位置是给读时判「段首日」用的（迁移 202608170001）。
 create temp table pair_stat as
 select w.*,
-       -- 近 20 个交易日的拐头穿线次数(迁移 202608170005):「信号差」降级标的素材。
-       -- 0.90/0.10/0.97 与 API 的 TURN_RETREAT/TURN_BAND 同值,改一处必须同批改另一处。
+       -- 近 20 个交易日的拐头穿线次数(迁移 202608170005):「信号差」降级标与
+       -- ⚡「只认首次」(==1)的素材。回撤线按品种分档(DEC-070 全量回测:JM 位置
+       -- 日抖动全场最高要深线,JD 早进不受罚要浅线,玻纯回归快要浅线),r.line
+       -- 与 API 的 turn_retreat() 同值,0.97/0.03 与 TURN_BAND 同值——改一处
+       -- 必须同批改另一处并手动重跑重算。
        sum(w.cross_h) over (partition by w.workspace_id, w.c1, w.c2
                             order by w.trade_date
                             rows between 19 preceding and current row)::int
@@ -134,9 +137,9 @@ select w.*,
                             rows between 19 preceding and current row)::int
            turn_crosses_low_20
   from (select z.*,
-               case when z.prev_pair_pos > 0.90 and z.pair_pos <= 0.90
+               case when z.prev_pair_pos > 1 - r.line and z.pair_pos <= 1 - r.line
                      and z.pair_pos_hi20 >= 0.97 then 1 else 0 end cross_h,
-               case when z.prev_pair_pos < 0.10 and z.pair_pos >= 0.10
+               case when z.prev_pair_pos < r.line and z.pair_pos >= r.line
                      and z.pair_pos_lo20 <= 0.03 then 1 else 0 end cross_l
           from (select y.*,
                lag(y.pair_pos) over (partition by y.workspace_id, y.c1, y.c2
@@ -158,7 +161,18 @@ select w.*,
                        count(*) over w days
                   from pair_series
                 window w as (partition by workspace_id, c1, c2 order by trade_date
-                             rows between unbounded preceding and current row)) x) y) z) w;
+                             rows between unbounded preceding and current row)) x) y) z
+          cross join lateral (
+              -- 分档表与 API turn_retreat() 一一对应(跨品种现只有玻纯)。
+              select case
+                       when substring(z.c1 from '^[A-Z]+') <> substring(z.c2 from '^[A-Z]+')
+                            then case when substring(z.c1 from '^[A-Z]+') = 'FG'
+                                       and substring(z.c2 from '^[A-Z]+') = 'SA'
+                                      then 0.08 else 0.10 end
+                       when z.c1 like 'JM%' or z.c1 like 'AP%' then 0.20
+                       when z.c1 like 'JD%' then 0.05
+                       else 0.10
+                     end as line) r) w;
 
 -- 只保留窗口内、且到那天为止已积累够 30 天的行(2026-08-18 由 60 降,见上)。
 -- 门槛按当日算：一个组合在它上市第 10 天时,「历史极值」确实还没有意义。

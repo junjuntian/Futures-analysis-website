@@ -32,6 +32,9 @@ const showQuiet = ref(false)
 const onlyNew = ref(false)
 // 只看今天的进场信号:每天盘后勾上它,列表要么是空的,要么就是今天该动手的单子。
 const onlyEntry = ref(false)
+// 历史信号(DEC-070):一次取回全部快照日,只列历来的 ⚡ 进场行——
+// 运营者要回看信号不必逐个日期点选。
+const historyMode = ref(false)
 
 const items = ref<SpreadMonitorItem[]>([])
 const asOf = ref<string | null>(null)
@@ -55,11 +58,15 @@ async function loadVarietyNames() {
 async function load() {
   loading.value = true
   try {
-    const { data } = await getSpreadMonitor(threshold.value, tradeDate.value || undefined)
+    const { data } = await getSpreadMonitor(
+      threshold.value,
+      tradeDate.value || undefined,
+      historyMode.value
+    )
     items.value = data.items
     asOf.value = data.as_of
     availableDates.value = data.available_dates
-    if (!tradeDate.value && data.as_of) tradeDate.value = data.as_of
+    if (!historyMode.value && !tradeDate.value && data.as_of) tradeDate.value = data.as_of
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '套利监控读取失败')
     items.value = []
@@ -72,7 +79,7 @@ onMounted(() => {
   void loadVarietyNames()
   void load()
 })
-watch([threshold, tradeDate], () => void load())
+watch([threshold, tradeDate, historyMode], () => void load())
 
 const availableDateSet = computed(() => new Set(availableDates.value))
 function isNotTradingDay(day: Date) {
@@ -125,11 +132,14 @@ const filtered = computed(() => {
     .sort((a, b) => entryRank(b) - entryRank(a) || extremity(b) - extremity(a))
 })
 
-/** ⚡ 进场 = 今天刚拐头 × 资格合格 × 未进交割红线(DEC-067 因子①)。
- * 红线内不是没机会,是《体系》的硬纪律+数据实证的负期望区,不当进场信号。 */
+/** ⚡ 进场 = 今天刚拐头 × 本轮首次穿线 × 资格合格 × 未进交割红线。
+ * 红线内不是没机会,是《体系》的硬纪律+数据实证的负期望区,不当进场信号。
+ * 「首次」用 turn_crosses===1 判(DEC-070,运营者拍板):20 日窗内的第二次及
+ * 以后穿线只挂 ⚠ 信号差,不再亮 ⚡;窗滑过之后的新穿线计数归 1,算新一轮。 */
 function isEntry(item: SpreadMonitorItem) {
   return (
     item.is_new_turn &&
+    item.turn_crosses === 1 &&
     item.revert !== null &&
     isQualified(item.revert) &&
     !isRedLine(item.days_left)
@@ -143,8 +153,18 @@ function entryRank(item: SpreadMonitorItem) {
 
 // 「触发中」与「已拐头」同列展示:拐头行多半已退出报警带,只按 alert 分组的话,
 // 恰恰在该进场的时候它掉进「未触发」堆里,规则第二层就白做了。
-const fired = computed(() => filtered.value.filter((item) => item.alert || item.turn))
-const quiet = computed(() => filtered.value.filter((item) => !item.alert && !item.turn))
+// 历史模式下 fired = 历来的进场行(新日期在前),quiet 不展示。
+const fired = computed(() =>
+  historyMode.value
+    ? filtered.value
+        .filter((item) => isEntry(item))
+        .sort((a, b) => b.trade_date.localeCompare(a.trade_date))
+    : filtered.value.filter((item) => item.alert || item.turn)
+)
+const quiet = computed(() =>
+  historyMode.value ? [] : filtered.value.filter((item) => !item.alert && !item.turn)
+)
+const historyDays = computed(() => new Set(fired.value.map((item) => item.trade_date)).size)
 const highCount = computed(() => fired.value.filter((item) => item.alert === 'high').length)
 const lowCount = computed(() => fired.value.filter((item) => item.alert === 'low').length)
 const newCount = computed(() => fired.value.filter((item) => item.is_new_alert).length)
@@ -169,11 +189,13 @@ const DECAY_HINT =
 
 const ENTRY_HINT =
   '今天刚拐头(位置今天才穿过回撤线)且资格合格 —— 回放口径里的进场日。' +
-  '统计是盘后算的,执行等于次日进场。判定线附近的抖动会让它再亮一次:' +
-  '没上车的人得到第二次提示,已上车的人无视即可。'
+  '统计是盘后算的,执行等于次日进场。同一轮拐头只亮首次:20 日内第二次及以后的' +
+  '穿线不再给进场标,只挂 ⚠ 信号差(DEC-070,运营者拍板)。'
 
 const TURN_HINT =
-  '近 20 个交易日内当年轨曾进 3% 报警带，当前已自极值回撤超过区间宽度的 10%。' +
+  '近 20 个交易日内当年轨曾进 3% 报警带，当前已自极值回撤超过该品种的档位' +
+  '（全量回测分档:焦煤/苹果 20%、鸡蛋 5%、玻纯跨品种 8%、其余 10%——回撤线画在' +
+  '位置刻度上,焦煤位置日抖动全场最高要深线,鸡蛋季节趋势强早进不受罚要浅线）。' +
   '分层规则的进场信号：报警只是机会出现，拐头才是上车点——全样本回放里报警当天' +
   '就进持到底中位为负，等拐头才转正。'
 const QUALIFIED_HINT =
@@ -333,7 +355,7 @@ function openDetail(item: SpreadMonitorItem) {
           value-format="YYYY-MM-DD"
           :clearable="false"
           :disabled-date="isNotTradingDay"
-          :disabled="!availableDates.length"
+          :disabled="historyMode || !availableDates.length"
         />
 
         <el-radio-group v-model="direction">
@@ -342,11 +364,17 @@ function openDetail(item: SpreadMonitorItem) {
           <el-radio-button value="low">低位</el-radio-button>
         </el-radio-group>
 
-        <el-checkbox v-model="onlyNew" border>仅新触发</el-checkbox>
-        <el-checkbox v-model="onlyEntry" border>仅进场日</el-checkbox>
+        <el-checkbox v-model="onlyNew" border :disabled="historyMode">仅新触发</el-checkbox>
+        <el-checkbox v-model="onlyEntry" border :disabled="historyMode">仅进场日</el-checkbox>
+        <el-tooltip
+          content="一次列出全部快照日的 ⚡ 进场信号,不用逐个日期点选。"
+          placement="top"
+        >
+          <el-checkbox v-model="historyMode" border>历史信号</el-checkbox>
+        </el-tooltip>
       </div>
 
-      <div class="tally">
+      <div class="tally" v-if="!historyMode">
         <div class="cell"><span class="k">监控组合</span><span class="v">{{ items.length }}</span></div>
         <div class="cell"><span class="k">触发</span><span class="v">{{ fired.length }}</span></div>
         <div class="cell"><span class="k">新触发</span><span class="v fresh">{{ newCount }}</span></div>
@@ -357,17 +385,26 @@ function openDetail(item: SpreadMonitorItem) {
         <div class="cell"><span class="k">低位</span><span class="v low">{{ lowCount }}</span></div>
         <div class="cell" v-if="asOf"><span class="k">数据日</span><span class="v date">{{ asOf }}</span></div>
       </div>
+      <div class="tally" v-else>
+        <div class="cell"><span class="k">⚡ 历史进场信号</span><span class="v entry">{{ fired.length }}</span></div>
+        <div class="cell"><span class="k">覆盖信号日</span><span class="v">{{ historyDays }}</span></div>
+        <div class="cell" v-if="asOf"><span class="k">最新快照</span><span class="v date">{{ asOf }}</span></div>
+      </div>
     </el-card>
 
     <el-empty v-if="!loading && !items.length" description="这一天还没有监控快照" />
 
     <template v-else>
-      <h2 class="group-label">触发中 · 已拐头</h2>
-      <el-empty v-if="!fired.length" description="按当前阈值没有组合触发,也没有已拐头的组合" :image-size="70" />
+      <h2 class="group-label">{{ historyMode ? '历史进场信号 · 新日期在前' : '触发中 · 已拐头' }}</h2>
+      <el-empty
+        v-if="!fired.length"
+        :description="historyMode ? '已存快照日里没有出现过 ⚡ 进场信号' : '按当前阈值没有组合触发,也没有已拐头的组合'"
+        :image-size="70"
+      />
       <div class="rows" v-loading="loading">
         <article
           v-for="item in fired"
-          :key="item.contract_1 + item.contract_2"
+          :key="item.trade_date + item.contract_1 + item.contract_2"
           class="row"
           :class="(item.alert ?? item.turn) === 'high' ? 'fired-high' : 'fired-low'"
         >
@@ -384,7 +421,7 @@ function openDetail(item: SpreadMonitorItem) {
               >
                 <span class="badge-new">新</span>
               </el-tooltip>
-              <span class="asof" v-if="item.trade_date !== asOf">{{ item.trade_date }}</span>
+              <span class="asof" v-if="historyMode || item.trade_date !== asOf">{{ item.trade_date }}</span>
             </div>
             <div class="now">{{ signedSpread(item.spread) }}</div>
           </div>

@@ -701,11 +701,13 @@ export function getDataHealth(): Promise<ApiEnvelope<DataHealthResponse>> {
 
 export function getSpreadMonitor(
   threshold?: number,
-  tradeDate?: string
+  tradeDate?: string,
+  history?: boolean
 ): Promise<ApiEnvelope<SpreadMonitorResponse>> {
   const params = new URLSearchParams()
   if (threshold !== undefined) params.set('threshold', String(threshold))
   if (tradeDate) params.set('trade_date', tradeDate)
+  if (history) params.set('history', 'true')
   const query = params.toString()
   return getJson(`/api/v1/spread-analytics/monitor${query ? `?${query}` : ''}`)
 }

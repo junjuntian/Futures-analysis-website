@@ -3375,24 +3375,50 @@ mod monitor_tests {
 
     #[test]
     fn a_turn_needs_a_recent_alert_and_a_real_retreat() {
-        // 近 20 日进过高位带(hi20=1.0),当前退到 0.88 —— 已拐头。
+        // 近 20 日进过高位带(hi20=1.0),当前退到 0.88 —— 已拐头(默认档 10%)。
         assert_eq!(
-            monitor_turn(Some(0.88), Some(1.0), Some(0.40)),
+            monitor_turn(Some(0.88), Some(1.0), Some(0.40), 0.10),
             Some("high")
         );
         // 还贴在带里(0.98):机会在,但还没拐头。
-        assert_eq!(monitor_turn(Some(0.98), Some(1.0), Some(0.40)), None);
+        assert_eq!(monitor_turn(Some(0.98), Some(1.0), Some(0.40), 0.10), None);
         // 退了但不够(0.93 > 0.90):不算。
-        assert_eq!(monitor_turn(Some(0.93), Some(1.0), Some(0.40)), None);
+        assert_eq!(monitor_turn(Some(0.93), Some(1.0), Some(0.40), 0.10), None);
         // 报警是 20 多天前的事(hi20 已滑出带外):状态自动过期。
-        assert_eq!(monitor_turn(Some(0.85), Some(0.94), Some(0.40)), None);
+        assert_eq!(monitor_turn(Some(0.85), Some(0.94), Some(0.40), 0.10), None);
         // 低位对称。
         assert_eq!(
-            monitor_turn(Some(0.12), Some(0.60), Some(0.01)),
+            monitor_turn(Some(0.12), Some(0.60), Some(0.01), 0.10),
             Some("low")
         );
         // 位置缺失判不了。
-        assert_eq!(monitor_turn(None, Some(1.0), Some(0.0)), None);
+        assert_eq!(monitor_turn(None, Some(1.0), Some(0.0), 0.10), None);
+    }
+
+    #[test]
+    fn the_retreat_line_is_per_variety() {
+        // DEC-070:JM 抖动全场最高要深线,JD 早进不受罚要浅线。
+        assert_eq!(turn_retreat("JM", "JM"), 0.20);
+        assert_eq!(turn_retreat("AP", "AP"), 0.20);
+        assert_eq!(turn_retreat("JD", "JD"), 0.05);
+        assert_eq!(turn_retreat("FG", "SA"), 0.08);
+        assert_eq!(turn_retreat("LH", "LH"), 0.10);
+        assert_eq!(turn_retreat("FG", "FG"), 0.10);
+        // JM 退到 0.88 在默认档算拐头,在自家 20% 档还不算——同样的位置,
+        // 不同品种结论不同,这正是分档的意义。
+        assert_eq!(
+            monitor_turn(Some(0.88), Some(1.0), None, turn_retreat("JM", "JM")),
+            None
+        );
+        assert_eq!(
+            monitor_turn(Some(0.79), Some(1.0), None, turn_retreat("JM", "JM")),
+            Some("high")
+        );
+        // JD 5% 档:退过 0.95 就算。
+        assert_eq!(
+            monitor_turn(Some(0.94), Some(1.0), None, turn_retreat("JD", "JD")),
+            Some("high")
+        );
     }
 
     fn net_row(
@@ -3486,28 +3512,32 @@ mod monitor_tests {
     fn the_entry_day_is_the_day_the_position_crosses_the_line() {
         // FG2701/SA2701 生产序列:08-04 位置 1.000(带内,未拐头)→ 08-05 退到
         // 0.884(拐头,前一日 1.000 在线上方)= 进场日。
-        assert!(monitor_turn_is_new(Some("high"), Some(1.0)));
+        assert!(monitor_turn_is_new(Some("high"), Some(1.0), 0.10));
         // 08-10:前一日 0.855 已在线下 —— 拐头持续中,不再是进场日。
-        assert!(!monitor_turn_is_new(Some("high"), Some(0.855)));
-        // 08-07 的抖动:前一日 0.906 弹回线上,再穿线 —— 第二次提示,再亮一次。
-        assert!(monitor_turn_is_new(Some("high"), Some(0.906)));
+        assert!(!monitor_turn_is_new(Some("high"), Some(0.855), 0.10));
+        // 08-07 的抖动:前一日 0.906 弹回线上,再穿线 —— is_new_turn 会再真,
+        // 但 ⚡ 由前端按 turn_crosses==1 只认首次(DEC-070,运营者拍板)。
+        assert!(monitor_turn_is_new(Some("high"), Some(0.906), 0.10));
         // 没拐头就谈不上进场日;前一日缺失判不了,宁可漏标。
-        assert!(!monitor_turn_is_new(None, Some(1.0)));
-        assert!(!monitor_turn_is_new(Some("high"), None));
+        assert!(!monitor_turn_is_new(None, Some(1.0), 0.10));
+        assert!(!monitor_turn_is_new(Some("high"), None, 0.10));
         // 低位对称:前一日 0.05 在线下方,今天 ≥0.10 穿上来。
-        assert!(monitor_turn_is_new(Some("low"), Some(0.05)));
-        assert!(!monitor_turn_is_new(Some("low"), Some(0.15)));
+        assert!(monitor_turn_is_new(Some("low"), Some(0.05), 0.10));
+        assert!(!monitor_turn_is_new(Some("low"), Some(0.15), 0.10));
     }
 
     #[test]
     fn a_crash_through_both_bands_picks_the_side_with_more_margin() {
         // 20 日内从上带砸到 0.05:高位侧余量 0.85,低位侧不足 —— 报高位拐头。
         assert_eq!(
-            monitor_turn(Some(0.05), Some(1.0), Some(0.05)),
+            monitor_turn(Some(0.05), Some(1.0), Some(0.05), 0.10),
             Some("high")
         );
         // 停在正中央,两侧都够格时也要有确定的答案,不许随机。
-        assert_eq!(monitor_turn(Some(0.50), Some(1.0), Some(0.0)), Some("high"));
+        assert_eq!(
+            monitor_turn(Some(0.50), Some(1.0), Some(0.0), 0.10),
+            Some("high")
+        );
     }
 
     #[test]
@@ -3681,6 +3711,8 @@ pub struct SpreadMonitorQuery {
     pub threshold: Option<f64>,
     /// 看某一天的历史快照。不传看当前。
     pub trade_date: Option<String>,
+    /// true = 一次取回全部快照日的行(历史信号视图),忽略 trade_date。
+    pub history: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -3808,25 +3840,57 @@ fn monitor_alert(position: Option<f64>, threshold: f64) -> Option<&'static str> 
     }
 }
 
-/// 拐头判定的两个常量。写死不进 Query:报警带用页面最严档,回撤量是全品种回放
-/// 验证过的通用值(5%/10%/15% 结果同向,取中)——做成旋钮只会诱导挑参数。
+/// 报警带常量。写死不进 Query:用页面最严档,做成旋钮只会诱导挑参数。
 const TURN_BAND: f64 = 0.03;
-const TURN_RETREAT: f64 = 0.10;
+
+/// 回撤档按品种定(DEC-070,2026-08-18 全量回测 + 运营者拍板)。
+///
+/// 回撤线画在「位置」刻度上,起作用的波动率是**位置的日间抖动**,不是价格波动率:
+/// - JM 抖动全场最高(中位 6.4pp/日,P90 21pp),10% 线只有 1.5 天正常抖动宽,
+///   噪音一天就穿——深到 20%(≈3 倍日抖动)才滤得住,逐笔核查躲开三笔大亏;
+/// - AP 全曲线单调偏深(机制不是抖动——AP 抖动最低——是慢趋势里过滤假极端),
+///   置信度中于 JM/JD;
+/// - JD 是唯一「早进不受罚」的品种(早进组中位 +7.4%,季节备货趋势盖过波动),
+///   深回撤对它纯粹让利,浅至 5%;
+/// - FG-SA 跨品种回归快,逐年留一 6/6 选 5~8%,深档代价惨重(20% 档 −29.7%);
+/// - LH 与 FG 跨期相邻档正负翻转、逐年选择不稳,挑了就是过拟合,维持 10%。
+/// 与采集 SQL turn_crosses 的分档(compute-spread-monitor.sql)同值,改一处必须
+/// 同批改另一处并重跑重算。
+fn turn_retreat(instrument_1: &str, instrument_2: &str) -> f64 {
+    if instrument_1 != instrument_2 {
+        // 目前唯一的跨品种组合是玻璃纯碱;未来若出现别的跨品种对,回默认档。
+        return if (instrument_1, instrument_2) == ("FG", "SA") {
+            0.08
+        } else {
+            0.10
+        };
+    }
+    match instrument_1 {
+        "JM" | "AP" => 0.20,
+        "JD" => 0.05,
+        _ => 0.10,
+    }
+}
 
 /// 已拐头:近 20 个交易日当年轨曾进报警带,且当前位置已退到带外超过回撤量。
 ///
-/// 「自极值回撤区间的 10%」等价于「位置退 10 个百分点」:报警时价差贴着滚动
+/// 「自极值回撤区间的 X%」等价于「位置退 X 个百分点」:报警时价差贴着滚动
 /// 极值,极值就是区间端点,(端点 − 当前) / 区间宽 = 1 − 位置。所以不需要另存
-/// 极值,只需要近 20 日位置的 max/min(迁移 202608170004)。
-/// 两侧同时满足(20 日内从上带砸穿到下带)取离自家门槛更远的一侧。
-fn monitor_turn(pos: Option<f64>, hi20: Option<f64>, lo20: Option<f64>) -> Option<&'static str> {
+/// 极值,只需要近 20 日位置的 max/min(迁移 202608170004)。X 按品种定,见
+/// `turn_retreat`。两侧同时满足(20 日内从上带砸穿到下带)取离自家门槛更远的一侧。
+fn monitor_turn(
+    pos: Option<f64>,
+    hi20: Option<f64>,
+    lo20: Option<f64>,
+    retreat: f64,
+) -> Option<&'static str> {
     let pos = pos?;
-    let high = hi20.is_some_and(|h| h >= 1.0 - TURN_BAND) && pos <= 1.0 - TURN_RETREAT;
-    let low = lo20.is_some_and(|l| l <= TURN_BAND) && pos >= TURN_RETREAT;
+    let high = hi20.is_some_and(|h| h >= 1.0 - TURN_BAND) && pos <= 1.0 - retreat;
+    let low = lo20.is_some_and(|l| l <= TURN_BAND) && pos >= retreat;
     match (high, low) {
         (true, false) => Some("high"),
         (false, true) => Some("low"),
-        (true, true) => Some(if (1.0 - TURN_RETREAT - pos) >= (pos - TURN_RETREAT) {
+        (true, true) => Some(if (1.0 - retreat - pos) >= (pos - retreat) {
             "high"
         } else {
             "low"
@@ -3877,10 +3941,10 @@ fn report_prev_net(
     (seen.then(|| total.normalize().to_string()), inferred_used)
 }
 
-fn monitor_turn_is_new(turn: Option<&str>, prev_pair: Option<f64>) -> bool {
+fn monitor_turn_is_new(turn: Option<&str>, prev_pair: Option<f64>, retreat: f64) -> bool {
     match turn {
-        Some("high") => prev_pair.is_some_and(|p| p > 1.0 - TURN_RETREAT),
-        Some("low") => prev_pair.is_some_and(|p| p < TURN_RETREAT),
+        Some("high") => prev_pair.is_some_and(|p| p > 1.0 - retreat),
+        Some("low") => prev_pair.is_some_and(|p| p < retreat),
         _ => false,
     }
 }
@@ -4031,7 +4095,8 @@ fn monitor_track(
     path = "/api/v1/spread-analytics/monitor",
     params(
         ("threshold" = Option<f64>, Query),
-        ("trade_date" = Option<String>, Query)
+        ("trade_date" = Option<String>, Query),
+        ("history" = Option<bool>, Query)
     ),
     security(("session_cookie" = [])),
     responses(
@@ -4062,22 +4127,29 @@ pub async fn query_spread_monitor(
         ),
     };
 
-    let rows = match trade_date {
-        Some(day) => {
-            database::spread_analytics::spread_monitor_on(
-                &state.auth.pool,
-                context.workspace_id(),
-                day,
-            )
+    // 历史模式(DEC-070):一次取回全部快照日,前端只渲染进场行——
+    // 运营者要看历年 ⚡ 不必逐日期点选。判定与单日路径同一套读时逻辑。
+    let rows = if query.history.unwrap_or(false) {
+        database::spread_analytics::spread_monitor_history(&state.auth.pool, context.workspace_id())
             .await
-        }
-        None => {
-            database::spread_analytics::spread_monitor_snapshot(
-                &state.auth.pool,
-                context.workspace_id(),
-                MONITOR_STALE_DAYS,
-            )
-            .await
+    } else {
+        match trade_date {
+            Some(day) => {
+                database::spread_analytics::spread_monitor_on(
+                    &state.auth.pool,
+                    context.workspace_id(),
+                    day,
+                )
+                .await
+            }
+            None => {
+                database::spread_analytics::spread_monitor_snapshot(
+                    &state.auth.pool,
+                    context.workspace_id(),
+                    MONITOR_STALE_DAYS,
+                )
+                .await
+            }
         }
     }
     .map_err(|_| SpreadApiError::Internal(request_id))?;
@@ -4143,13 +4215,15 @@ pub async fn query_spread_monitor(
                 && has_prev
                 && combined_alert_at(prev_pair, prev_years, threshold).is_none();
 
+            let retreat = turn_retreat(&row.instrument_1, &row.instrument_2);
             let turn = monitor_turn(
                 track_position(&pair),
                 parse(&row.pair_pos_hi20),
                 parse(&row.pair_pos_lo20),
+                retreat,
             );
             let days_left = days_to_window_end(&row.contract_1, &row.contract_2, row.trade_date);
-            let is_new_turn = monitor_turn_is_new(turn, prev_pair);
+            let is_new_turn = monitor_turn_is_new(turn, prev_pair, retreat);
             let turn_crosses = match turn {
                 Some("high") => row.turn_crosses_high_20,
                 Some("low") => row.turn_crosses_low_20,
