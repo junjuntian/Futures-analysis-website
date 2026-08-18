@@ -179,3 +179,11 @@
   一次——运营者说的「没有联动」。**新功能默认长在已有界面上,另起一个页面要有
   明确理由**;当两个界面共享同一组输入(这里是席位与交易日),它们就是一个页面的
   两个子页,不是两个页面。
+
+- **部署卡在「Deploy, migrate, and run VPS acceptance」不代表没部署成功**
+  (2026-08-18,一轮跑了 16 分钟 vs 平常 3~4 分钟):远端脚本早就做完并切换了,
+  拖的是 GitHub 那边 SSH 会话收尾。**判据在服务器上,不在 Actions 页面**——
+  查 `stable.env` 的 `previous_git_sha`、发布目录名带的 run id、容器 Up 时长、
+  站点状态码,四样对上就是已经切过去了。别急着重发部署:那会在已经切换过的
+  机器上再切一次。锁与残留进程也顺手看一眼(`fuser -v /run/lock/futures-collector.lock`、
+  `ps -eo pid,etime,cmd | grep deploy-futures-remote`),空的就说明远端确实收工了。
