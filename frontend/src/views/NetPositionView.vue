@@ -782,11 +782,13 @@ const priceSeriesNote = computed(() => {
                   latest.net === 0 ? '' : latest.net > 0 ? '（净多）' : '（净空）'
                 }}
               </span>
+              <!-- 手数紧跟自己那条腿的成本：多单 → 多单成本 → 空单 → 空单成本。
+                   先并排两个手数再并排两个成本，眼睛要在四个数之间来回配对。 -->
               <span v-if="latest.long > 0" class="up">多 {{ lots(latest.long) }}</span>
-              <span v-if="latest.short > 0" class="down">空 {{ lots(latest.short) }}</span>
               <span v-if="latest.longCost" class="latest-cost">
                 净多成本 {{ latest.longCost }}
               </span>
+              <span v-if="latest.short > 0" class="down">空 {{ lots(latest.short) }}</span>
               <span v-if="latest.shortCost" class="latest-cost">
                 净空成本 {{ latest.shortCost }}
               </span>

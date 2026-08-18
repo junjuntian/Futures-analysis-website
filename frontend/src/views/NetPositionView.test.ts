@@ -172,6 +172,11 @@ describe('NetPositionView', () => {
     expect(text).toContain('空 50 手')
     expect(text).toContain('净多成本 903.40')
     expect(text).toContain('净空成本 917.10')
+    // 手数紧跟自己那条腿的成本。先两个手数再两个成本，眼睛要在四个数之间来回
+    // 配对——运营者上线当天就指出来了，顺序钉在这里。
+    expect(text.indexOf('多 1,200 手')).toBeLessThan(text.indexOf('净多成本'))
+    expect(text.indexOf('净多成本')).toBeLessThan(text.indexOf('空 50 手'))
+    expect(text.indexOf('空 50 手')).toBeLessThan(text.indexOf('净空成本'))
     // 最后一天那个数是倒推来的，摘要里必须写明，不能和实测日长成一个样。
     expect(text).toContain('按回榜反推计入')
     wrapper.unmount()
