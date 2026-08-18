@@ -340,6 +340,8 @@ export interface SeatNetPositionResponse {
   all_members: string[]
   contracts: string[]
   price_series_kind: 'open_interest_weighted' | 'dominant_unadjusted' | null
+  /** 合约点值。盈亏由它乘出来，界面把它写在明面上。库里没配就是 `null`，此时不算盈亏。 */
+  price_multiplier: string | null
   days: NetPositionDay[]
 }
 

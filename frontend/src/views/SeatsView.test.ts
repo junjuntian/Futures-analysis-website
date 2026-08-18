@@ -19,14 +19,19 @@ function response(data: unknown) {
   } as Response
 }
 
-/** 该席位在 AU 上历史持有过 AU2612，**没有** AU2608——后者已到期。 */
+/**
+ * 净持仓子页的数据。所选席位在 AU 上历史持有过 AU2612，**没有** AU2608——后者已到期。
+ *
+ * 走的是 `/seats/net-position`：净持仓子页（原「建仓过程」那四张图）从 2026-08-18 起
+ * 读合计接口，一家是多家的特例。
+ */
 const BUILDING = {
   instrument: 'AU',
-  member: '中信',
   contract: null,
   is_variety_total: true,
   price_multiplier: '1000',
   members: ['中信'],
+  all_members: ['中信', '国泰君安'],
   contracts: ['AU2612'],
   price_series_kind: 'open_interest_weighted',
   days: []
@@ -40,12 +45,13 @@ function stubFetch() {
       if (url.includes('/seats/member-instruments')) {
         return response({ member: '中信', instruments: ['AU'] })
       }
-      if (url.includes('/seats/building')) return response(BUILDING)
+      if (url.includes('/seats/net-position')) return response(BUILDING)
+      if (url.includes('/seats/favorites')) return response([])
       if (url.includes('/seats/positions')) {
         return response({
           member: '中信',
           instrument: null,
-          members: ['中信'],
+          members: ['中信', '国泰君安'],
           trade_date: '2026-08-14',
           available_dates: ['2026-08-14'],
           coverage_start: '2010-01-04',
@@ -111,6 +117,35 @@ describe('SeatsView 的选择记忆', () => {
     await flushPromises()
 
     expect(localStorage.getItem('seats.contract')).toBe('')
+    wrapper.unmount()
+  })
+
+  it('单选时代存的 seats.member 仍然读得回来', async () => {
+    // 运营者本地存着旧键。直接改读新键会让他打开页面时发现选择被清空了——
+    // 这种「升级即丢设置」的事一次都不该发生。
+    localStorage.setItem('seats.member', '中信')
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('中信')
+    // 读回来之后按新键写，旧键从此不再被写入。
+    expect(localStorage.getItem('seats.members')).toBe('中信')
+    wrapper.unmount()
+  })
+
+  it('所选席位逐家取一次持仓，不合并成一张表', async () => {
+    localStorage.setItem('seats.members', '中信,国泰君安')
+    const wrapper = mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    // 榜单的「名次」与「增减量」是逐家公布的，加起来没有意义，所以是各取各的。
+    const calls = (fetch as unknown as { mock: { calls: Array<[RequestInfo | URL]> } }).mock.calls
+      .map(([input]) => input.toString())
+      .filter((url) => url.includes('/seats/positions') && url.includes('member='))
+    const asked = calls.map((url) => decodeURIComponent(url))
+    expect(asked.some((url) => url.includes('member=中信'))).toBe(true)
+    expect(asked.some((url) => url.includes('member=国泰君安'))).toBe(true)
     wrapper.unmount()
   })
 })

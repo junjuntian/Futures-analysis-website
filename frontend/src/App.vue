@@ -95,9 +95,10 @@ function handleCommand(command: string) {
             <span>席位</span>
           </template>
           <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
-          <!-- 「建仓过程」入口已撤(2026-08-18):净持仓页覆盖了它的全部内容,
-               还多了多席位叠加与收藏。页内代码暂留,待运营者验收后清理。 -->
-          <el-menu-item index="/seats/net-position">净持仓</el-menu-item>
+          <!-- 净持仓不再是独立页面(2026-08-18 运营者拍板):它和席位持仓共用
+               顶部那组选择,分开成两个页面就意味着选了席位过去还得再选一次。
+               现在是席位页的第二个子页。 -->
+          <el-menu-item index="/seats?tab=building">净持仓</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/smart-money-view">
           <span class="nav-emoji">💰</span>

@@ -1306,6 +1306,9 @@ pub struct SeatNetPositionResponse {
     pub contracts: Vec<String>,
     /// 汇总档 K 线的口径；选定单合约时为 `None`（那是真实行情）。
     pub price_series_kind: Option<String>,
+    /// 合约点值。盈亏由它乘出来，界面要把它写在明面上——看的人有权知道那条
+    /// 曲线是按什么倍数算的。库里没有配置时为 `None`，此时盈亏整条不算。
+    pub price_multiplier: Option<String>,
     pub days: Vec<NetPositionDayItem>,
 }
 
@@ -1372,6 +1375,16 @@ pub async fn query_seat_net_position(
     // 新月份在前，与建仓过程的合约选择器一致。
     contracts.sort_by(|a, b| b.cmp(a));
 
+    // 点值在 members 为空时也要回：界面顶部那句「合约汇总 · 点值 1000」不该因为
+    // 一时没勾席位就消失。
+    let price_multiplier = database::spread_analytics::instrument_price_multiplier(
+        &state.auth.pool,
+        context.workspace_id(),
+        &instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+
     let mut days = Vec::new();
     if !members.is_empty() {
         let rows = database::spread_analytics::load_seat_net_positions(
@@ -1428,16 +1441,10 @@ pub async fn query_seat_net_position(
         // 那套逻辑里验证过。另起一套只会让两个页面的盈亏迟早对不上。
         // 没有点值就不算盈亏:宁可少一条曲线,也不要一条乘错倍数的曲线
         // (与建仓过程同一条纪律)。
-        let pnl_factor: Decimal = database::spread_analytics::instrument_price_multiplier(
-            &state.auth.pool,
-            context.workspace_id(),
-            &instrument,
-        )
-        .await
-        .map_err(|_| SpreadApiError::Internal(request_id))?
-        .as_deref()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(Decimal::ZERO);
+        let pnl_factor: Decimal = price_multiplier
+            .as_deref()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(Decimal::ZERO);
 
         let mut by_seat_contract: std::collections::BTreeMap<(String, String), Vec<DailyPosition>> =
             std::collections::BTreeMap::new();
@@ -1529,6 +1536,7 @@ pub async fn query_seat_net_position(
             all_members,
             contracts,
             price_series_kind,
+            price_multiplier,
             days,
         },
         request_id,

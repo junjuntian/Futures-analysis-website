@@ -15,7 +15,10 @@ export const router = createRouter({
     { path: '/spread-analytics/monitor', component: () => import('./views/SpreadMonitorView.vue') },
     { path: '/spread-analytics/free-spread', component: () => import('./views/FreeSpreadView.vue') },
     { path: '/seats', component: () => import('./views/SeatsView.vue') },
-    { path: '/seats/net-position', component: () => import('./views/NetPositionView.vue') },
+    // 净持仓曾短暂做成独立页面（2026-08-18 上线当天即撤）：它与席位持仓共用
+    // 顶部那组选择，分成两个页面就意味着选了席位过去还得再选一次。旧地址重定向
+    // 到席位页的那个子页，运营者存的书签不至于落到 404。
+    { path: '/seats/net-position', redirect: '/seats?tab=building' },
     { path: '/smart-money-view', component: () => import('./views/SmartMoneyView.vue') },
     // /sessions 与 /system 已退役:登录设备收进右上角账号菜单,
     // 服务健康并进总览页页脚。老书签落到 404,不再静默重定向。

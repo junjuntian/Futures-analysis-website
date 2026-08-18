@@ -3,17 +3,23 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { addChange, sideDelta, signedChange } from '../seatChange'
 import { offBoardBands, type Band } from '../offBoard'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
 import {
-  getSeatBuilding,
+  createSeatFavorite,
+  deleteSeatFavorite,
+  getSeatFavorites,
   getSeatMemberInstruments,
+  getSeatNetPosition,
   getSeatPositions,
   getSpreadVarieties,
-  type BuildingDay,
-  type SeatBuildingResponse,
+  type NetPositionDay,
+  type SeatFavorite,
+  type SeatNetPositionResponse,
   type SeatPositionRow
 } from '../api'
+import { searchHit } from '../pinyin'
+import { useAuthStore } from '../stores/auth'
 import SpreadChart from '../components/SpreadChart.vue'
 import { lastYearStartIndex } from '../spreadCharts'
 import { chartTokens, sliderStyle, tooltipStyle } from '../chartTheme'
@@ -22,10 +28,15 @@ import { chartTokens, sliderStyle, tooltipStyle } from '../chartTheme'
 // 运营者盯的通常就是那么几家机构的那么一两个品种，每次进来重选一遍是纯粹的重复劳动。
 // 日期不记：数据每天在长，记住某个旧日期只会让人看到过期的表还以为是最新的。
 const STORE_KEYS = {
+  /** 旧键，单选时代留下的。只读不写，见 `rememberedMembers()`。 */
   member: 'seats.member',
+  members: 'seats.members',
   instrument: 'seats.instrument',
   contract: 'seats.contract'
 } as const
+
+/** 一次最多合并多少家。与后端的 `MAX_NET_POSITION_MEMBERS` 是同一个数。 */
+const MAX_MEMBERS = 10
 
 function remembered(key: keyof typeof STORE_KEYS) {
   try {
@@ -44,8 +55,32 @@ function remember(key: keyof typeof STORE_KEYS, value: string) {
   }
 }
 
+/**
+ * 读回上次选的那几家。
+ *
+ * 去重是必须的：本地存的值能被手工改，同一家进来两次会让「最多十家」的计数虚高，
+ * 也会和后端去重后的回显对不上。
+ *
+ * 还要兼容单选时代的旧键——运营者本地存着 `seats.member`，直接改读新键会让他
+ * 打开页面时发现选择被清空了。旧键只读不写，新键一旦写过就以新键为准。
+ */
+function rememberedMembers() {
+  const parse = (raw: string) =>
+    [...new Set(raw.split(',').filter((name) => name.length > 0))].slice(0, MAX_MEMBERS)
+  const stored = remembered('members')
+  if (stored) return parse(stored)
+  // 旧键搬一次家。不能只是读——watch 只在值**变化**时写回，初始值原样读进来
+  // 不算变化，旧键就会一直是唯一的记录，而新键永远是空的。
+  const legacy = parse(remembered('member'))
+  if (legacy.length) remember('members', legacy.join(','))
+  return legacy
+}
+
 // 席位与日期由两个子页共用：先选好一次，切标签不用重选。
-const member = ref(remembered('member'))
+//
+// 席位是**多选**：净持仓子页把勾中的这几家加总成一条曲线，席位持仓子页按家分段
+// 罗列。只看一家就只勾一家——单选是多选的特例，不必为它留第二套界面。
+const selected = ref<string[]>(rememberedMembers())
 const tradeDate = ref('')
 const members = ref<string[]>([])
 const availableDates = ref<string[]>([])
@@ -59,21 +94,20 @@ function isNotTradingDay(day: Date) {
 const tab = ref<'positions' | 'building'>('positions')
 
 // 席位持仓
-const rows = ref<SeatPositionRow[]>([])
 const instrumentFilter = ref<string[]>([])
 const loadingPositions = ref(false)
 
-// 建仓过程
+// 净持仓（原「建仓过程」的四张图，现在按所选那几家合计）
 const buildingInstrument = ref(remembered('instrument'))
 const buildingContract = ref(remembered('contract'))
 // 合约选择器的选项由接口给,不再从「所选交易日当天的持仓行」推导。
 // 旧写法只列得出当天还在榜的两三个合约:换个日子就少几个选项,等于把
 // 「今天在榜」误当成「存在过」——运营者选了高盛后挑不到 AU2608,就是这个。
 const buildingContracts = ref<string[]>([])
-const days = ref<BuildingDay[]>([])
+const days = ref<NetPositionDay[]>([])
 const multiplier = ref<string | null>(null)
 // 汇总档 K 线的口径。单合约档为 null（那是真实行情，没有口径可言）。
-const priceSeriesKind = ref<SeatBuildingResponse['price_series_kind']>(null)
+const priceSeriesKind = ref<SeatNetPositionResponse['price_series_kind']>(null)
 const loadingBuilding = ref(false)
 
 // 品种的中文名。库里 product_instrument_scope 定了它，那张表也是套利页品种下拉的
@@ -87,9 +121,8 @@ function varietyLabel(code: string) {
   return name && name !== code ? `${name} ${code}` : code
 }
 
-watch(member, (value) => {
-  if (value) remember('member', value)
-})
+// 选择连空一起记：清空也是一种选择，只在非空时记会让他下次进来被翻出旧的那几家。
+watch(selected, (value) => remember('members', value.join(',')), { deep: true })
 watch(buildingInstrument, (value) => {
   if (value) remember('instrument', value)
 })
@@ -99,59 +132,170 @@ watch(buildingContract, (value) => remember('contract', value))
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
+
+// —— 席位搜索 ——
+//
+// 用自定义过滤而不是 el-select 自带的 filterable：自带的那个是大小写敏感的字面
+// 包含，输入小写 au 找不到「黄金 AU」，更别说用拼音首字母找「高盛」。
+const memberQuery = ref('')
+const filteredMembers = computed(() =>
+  members.value.filter((name) => searchHit(name, memberQuery.value))
+)
+
+// —— 收藏 ——
+//
+// 盯的常常是固定的那一组机构，每次进来重勾五家是纯粹的重复劳动。
+const favorites = ref<SeatFavorite[]>([])
+const favoriteName = ref('')
+const savingFavorite = ref(false)
+
+async function loadFavorites() {
+  try {
+    const { data } = await getSeatFavorites()
+    favorites.value = data
+  } catch {
+    // 收藏读不到不影响看数据，页面照常用。
+  }
+}
+
+/**
+ * 取写入保护令牌。
+ *
+ * store 里这个令牌是**懒加载**的：刚进页面或刷新之后它是 null，要先 loadCsrf()。
+ * 直接拿 `csrfToken ?? ''` 送出去，后端会以 403「request is not allowed」拒掉，
+ * 而错误信息里看不出缺的是令牌——2026-08-15 就是这么坏的。
+ */
+async function csrf() {
+  if (!auth.csrfToken) await auth.loadCsrf()
+  if (!auth.csrfToken) throw new Error('无法取得写入保护令牌')
+  return auth.csrfToken
+}
+
+async function saveFavorite() {
+  const name = favoriteName.value.trim()
+  if (!name) {
+    ElMessage.warning('给这组席位起个名字')
+    return
+  }
+  if (!selected.value.length) {
+    ElMessage.warning('先选几个席位')
+    return
+  }
+  savingFavorite.value = true
+  try {
+    const { data } = await createSeatFavorite({ name, members: selected.value }, await csrf())
+    favorites.value = [data, ...favorites.value]
+    favoriteName.value = ''
+    ElMessage.success(`已收藏「${data.name}」`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '收藏失败')
+  } finally {
+    savingFavorite.value = false
+  }
+}
+
+function applyFavorite(favorite: SeatFavorite) {
+  // 整组替换，不是并集：他点的是「换成这一组」。并进去会悄悄超过十家上限，
+  // 而且他分不清哪几家是刚点进来的。
+  selected.value = [...favorite.members]
+}
+
+async function removeFavorite(favorite: SeatFavorite) {
+  try {
+    await ElMessageBox.confirm(`删掉收藏「${favorite.name}」？`, '确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return // 点了取消
+  }
+  try {
+    await deleteSeatFavorite(favorite.id, await csrf())
+    favorites.value = favorites.value.filter((item) => item.id !== favorite.id)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '删除失败')
+  }
+}
+
+/** 席位持仓：每家一段。接口一次只认一家，勾了几家就并发取几份。 */
+interface MemberRows {
+  member: string
+  rows: SeatPositionRow[]
+}
+const memberRows = ref<MemberRows[]>([])
 
 async function loadPositions() {
   loadingPositions.value = true
   try {
-    const { data } = await getSeatPositions({
-      member: member.value || undefined,
+    // 先取一次名录与可选日期。不带 member 时接口给的是全市场那天的行，我们只要
+    // 它捎带的 members / available_dates / trade_date 三样元数据。
+    const { data: meta } = await getSeatPositions({
       tradeDate: tradeDate.value || undefined
     })
-    members.value = data.members
-    availableDates.value = data.available_dates
-    rows.value = data.rows
-    if (data.trade_date) tradeDate.value = data.trade_date
-    // 没选会员，或记住的那个已经不在名录里（机构改名、退市、数据源换写法），
-    // 都退回名录第一个——否则页面停在一张永远空的表上，看不出是「没数据」还是「坏了」。
-    const missing = Boolean(member.value) && !data.members.includes(member.value)
-    if ((!member.value || missing) && data.members.length) {
-      if (missing) ElMessage.info(`上次选的「${member.value}」已不在名录，改为 ${data.members[0]}`)
-      member.value = data.members[0]
-      await loadPositions()
+    members.value = meta.members
+    availableDates.value = meta.available_dates
+    if (meta.trade_date) tradeDate.value = meta.trade_date
+
+    // 记住的那几家可能已经不在名录里（机构改名、退市、数据源换写法）。剔掉不认识的，
+    // 一家不剩就退回名录第一个——否则页面停在一张永远空的表上，看不出是「没数据」
+    // 还是「坏了」。
+    const known = new Set(meta.members)
+    const gone = selected.value.filter((name) => !known.has(name))
+    if (gone.length) {
+      ElMessage.info(`「${gone.join('、')}」已不在名录，已从所选中移除`)
+      selected.value = selected.value.filter((name) => known.has(name))
     }
+    if (!selected.value.length && meta.members.length) {
+      selected.value = [meta.members[0]]
+    }
+
+    // 并发取各家的持仓。上限十家，十个请求对自用面板是可接受的代价，换来的是
+    // 后端契约一行不动。
+    const fetched = await Promise.all(
+      selected.value.map(async (name) => {
+        const { data } = await getSeatPositions({
+          member: name,
+          tradeDate: tradeDate.value || undefined
+        })
+        return { member: name, rows: data.rows }
+      })
+    )
+    memberRows.value = fetched
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '席位持仓读取失败')
-    rows.value = []
+    memberRows.value = []
   } finally {
     loadingPositions.value = false
   }
 }
 
 async function loadBuilding() {
-  if (!member.value || !buildingInstrument.value) {
+  if (!selected.value.length || !buildingInstrument.value) {
     days.value = []
     buildingContracts.value = []
     return
   }
   loadingBuilding.value = true
   try {
-    const { data } = await getSeatBuilding(
-      buildingInstrument.value,
-      member.value,
-      buildingContract.value || undefined
-    )
+    const { data } = await getSeatNetPosition({
+      instrument: buildingInstrument.value,
+      members: selected.value,
+      contract: buildingContract.value || undefined
+    })
     multiplier.value = data.price_multiplier
     days.value = data.days
     buildingContracts.value = data.contracts
     priceSeriesKind.value = data.price_series_kind
     // 上次记住的合约可能已经到期了——期货合约会到期，这是常态不是异常。
-    // contracts 是该席位在这个品种上历史持有过的全部合约，不在里面就没有可看的
-    // 东西，退回合约汇总。留在那里只会显示一张空表，看上去像数据坏了。
+    // contracts 是所选席位在这个品种上历史持有过的全部合约（取并集），不在里面
+    // 就没有可看的东西，退回合约汇总。留在那里只会显示一张空表，看上去像数据坏了。
     if (buildingContract.value && !data.contracts.includes(buildingContract.value)) {
       buildingContract.value = '' // 触发 watch 重新取一次汇总档
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '建仓过程读取失败')
+    ElMessage.error(error instanceof Error ? error.message : '净持仓读取失败')
     days.value = []
   } finally {
     loadingBuilding.value = false
@@ -170,45 +314,58 @@ async function loadVarietyNames() {
 onMounted(() => {
   if (route.query.tab === 'building') tab.value = 'building'
   loadVarietyNames()
+  loadFavorites()
   loadPositions()
 })
-watch([member, tradeDate], () => {
-  loadPositions()
-  if (tab.value === 'building') loadBuilding()
-})
+// deep 是必须的：多选框改的是数组内容，浅比较看不出来。
+// loadPositions 里会剔掉已不在名录的那几家，那次写回会再触发一轮——第二轮
+// 没有可剔的了，到此为止，不会打转。
+watch(
+  [selected, tradeDate],
+  () => {
+    loadPositions()
+    if (tab.value === 'building') loadBuilding()
+  },
+  { deep: true }
+)
 watch(tab, (value) => {
   router.replace({ query: { ...route.query, tab: value } })
   if (value === 'building') loadBuilding()
 })
 watch([buildingInstrument, buildingContract], () => loadBuilding())
 
-/** 该会员当天持有的品种，用于「筛选商品显示」。 */
+/** 所选那几家当天持有的品种（并集），用于「筛选商品显示」。 */
 const instruments = computed(() =>
-  [...new Set(rows.value.map((row) => row.instrument))].sort()
+  [...new Set(memberRows.value.flatMap((entry) => entry.rows.map((row) => row.instrument)))].sort()
 )
 
 /**
- * 建仓过程的品种选项：该席位**历史上持有过的全部品种**。
+ * 净持仓的品种选项：所选席位**历史上持有过的全部品种**，取并集。
  *
- * 不能只列「所选日期当天在榜」的——建仓过程是历史序列,不受所选交易日限制。
- * 高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的建仓过程明明都在
+ * 不能只列「所选日期当天在榜」的——净持仓是历史序列,不受所选交易日限制。
+ * 高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的持仓序列明明都在
  * (运营者当日报的 bug)。历史列表取不到时(接口瞬断)退回当天在榜 + 已选,
  * 宁可少列不可空白。
+ *
+ * 取并集而不是交集：某个品种只有其中一家持有过，只列交集会让它整个消失，而
+ * 那一家在这个品种上的持仓是实实在在要看的。
  */
 const memberInstruments = ref<string[]>([])
 watch(
-  member,
-  async (name) => {
+  selected,
+  async (names) => {
     memberInstruments.value = []
-    if (!name) return
+    if (!names.length) return
     try {
-      const { data } = await getSeatMemberInstruments(name)
-      memberInstruments.value = data.instruments
+      const lists = await Promise.all(
+        names.map(async (name) => (await getSeatMemberInstruments(name)).data.instruments)
+      )
+      memberInstruments.value = [...new Set(lists.flat())]
     } catch {
       // 退回旧口径,不打断页面。
     }
   },
-  { immediate: true }
+  { immediate: true, deep: true }
 )
 const buildingInstrumentOptions = computed(() => {
   const list = new Set([...memberInstruments.value, ...instruments.value])
@@ -237,10 +394,10 @@ interface InstrumentBlock {
 
 // 增减量三态（未知 / 无行 / 真值）与吸收律见 src/seatChange.ts，那里有测试盯着。
 
-const blocks = computed<InstrumentBlock[]>(() => {
+function buildBlocks(rows: SeatPositionRow[]): InstrumentBlock[] {
   const wanted = new Set(instrumentFilter.value)
   const byInstrument = new Map<string, Map<string, ContractLine>>()
-  for (const row of rows.value) {
+  for (const row of rows) {
     if (row.is_variety_total || !row.contract) continue
     if (wanted.size && !wanted.has(row.instrument)) continue
     if (row.rank_type === 'volume') continue
@@ -286,7 +443,20 @@ const blocks = computed<InstrumentBlock[]>(() => {
       }
     })
     .sort((a, b) => a.instrument.localeCompare(b.instrument))
-})
+}
+
+/**
+ * 席位持仓：每家一段，段首写家名。
+ *
+ * 不合并成一张表——榜单的「名次」与「增减量」是逐家公布的，加起来没有意义。
+ * 要看合计去净持仓子页，那边本来就是干这个的。
+ */
+const memberBlocks = computed(() =>
+  memberRows.value.map((entry) => ({
+    member: entry.member,
+    blocks: buildBlocks(entry.rows)
+  }))
+)
 
 function openBuilding(instrument: string, contract?: string) {
   buildingInstrument.value = instrument
@@ -297,7 +467,7 @@ function openBuilding(instrument: string, contract?: string) {
 const signed = signedChange
 const fmt = (value: number) => value.toLocaleString('zh-CN')
 
-// —— 建仓过程的三联图 ——
+// —— 净持仓的四联图 ——
 const dates = computed(() => days.value.map((day) => day.trade_date))
 // 掉榜且反推不出的日子按 0 画(2026-08-16 运营者拍板:折线不留缺口,回测
 // 口径同引擎的「掉榜=不在场」)。**0 只进这条展示曲线**:掉榜底色标注、
@@ -340,26 +510,34 @@ const hasCandles = computed(() => candles.value.some((item) => item !== '-'))
 /** 成本不完整的天数。汇总档看的是均价覆盖了多少手，不是「有没有一个 cost 字段」。 */
 const gapDays = computed(() =>
   days.value.filter((day) =>
-    day.legs
-      ? Number(day.legs.long_cost_lots) < Number(day.legs.long_lots)
-        || Number(day.legs.short_cost_lots) < Number(day.legs.short_lots)
-      : day.cost === null
+    Number(day.long_cost_lots) < Number(day.long_lots)
+    || Number(day.short_cost_lots) < Number(day.short_lots)
   ).length
 )
 
 // —— 掉榜区间 ——
 //
-// 交易所只发前 20 名。该席位掉出榜单的那些天，官方文件里没有他这一行——那是
-// 「不知道」，不是「零」。曲线在这里必须断开（connectNulls: false 已经做到），
-// 但光断开看不出是缺数据还是真平仓，所以把这些天用底色圈出来并写明原因。
+// 交易所只发前 20 名。某家掉出榜单的那些天，官方文件里没有他这一行——那是
+// 「不知道」，不是「零」。合计里少了他，曲线上那道台阶看起来却像是减仓，
+// 所以把这些天用底色圈出来并写明原因。
+//
+// 多选之后判据从「净持仓是 null」换成「有几家没算进来」：合计接口给的净持仓
+// 永远是个数（在榜那几家的和），少算了谁记在 `missing_members` 里。只勾一家时
+// 两者等价——那家掉榜，`missing_members` 就是他自己。
 const offBoardDays = computed(
-  () => days.value.filter((day) => day.net_position === null).length
+  () => days.value.filter((day) => day.missing_members.length > 0).length
+)
+const inferredDays = computed(
+  () => days.value.filter((day) => day.inferred_members.length > 0).length
 )
 
 // 区间合并在 offBoard.ts 里，那边有测试：差一格就会把回榜那天也涂成空白。
 const bands = computed(() =>
   offBoardBands(
-    days.value.map((day) => ({ trade_date: day.trade_date, known: day.net_position !== null }))
+    days.value.map((day) => ({
+      trade_date: day.trade_date,
+      known: day.missing_members.length === 0
+    }))
   )
 )
 
@@ -373,7 +551,10 @@ function withAlpha(hex: string, alpha: number) {
 // itemStyle 挂在段首元素上——ECharts markArea 按段首取样式。
 const inferredBands = computed(() =>
   offBoardBands(
-    days.value.map((day) => ({ trade_date: day.trade_date, known: !day.inferred }))
+    days.value.map((day) => ({
+      trade_date: day.trade_date,
+      known: day.inferred_members.length === 0
+    }))
   ).map(
     ([start, end]): Band => [
       { ...start, itemStyle: { color: withAlpha(chartTokens().accent, 0.07) } },
@@ -418,36 +599,48 @@ function tooltipBody(index: number, head: string[] = []) {
   const tokens = chartTokens()
   const parts = [`<div style="margin-bottom:4px"><b>${day.trade_date}</b></div>`, ...head]
 
-  if (day.legs) {
-    // 品种汇总：合约按净方向分两组。净多的那几个是「多单」，净空的是「空单」，
-    // 两者相减才是净持仓——这是运营者定的口径。
-    const long = Number(day.legs.long_lots)
-    const short = Number(day.legs.short_lots)
-    if (long > 0) {
-      parts.push(row('多单', lots(long), tokens.up))
-      parts.push(row('　净持仓成本（推算）',
-        legCost(day.legs.long_cost, day.legs.long_cost_lots, day.legs.long_lots)))
-    }
-    if (short > 0) {
-      parts.push(row('空单', lots(short), tokens.down))
-      parts.push(row('　净持仓成本（推算）',
-        legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)))
-    }
+  // 合约按净方向分两组：净多的那几个是「多单」，净空的是「空单」，两者相减才是
+  // 净持仓——这是运营者定的口径。选了单合约时同一套照跑：那时只有一条腿有手数。
+  // 手数紧跟自己那条腿的成本，不要两个手数并排再两个成本并排（那样眼睛得在四个
+  // 数之间来回配对，运营者 2026-08-18 指出过）。
+  const long = Number(day.long_lots)
+  const short = Number(day.short_lots)
+  if (long > 0) {
+    parts.push(row('多单', lots(long), tokens.up))
+    parts.push(row('　净持仓成本（推算）', legCost(day.long_cost, day.long_cost_lots, day.long_lots)))
+  }
+  if (short > 0) {
+    parts.push(row('空单', lots(short), tokens.down))
+    parts.push(
+      row('　净持仓成本（推算）', legCost(day.short_cost, day.short_cost_lots, day.short_lots))
+    )
   }
 
-  const net = num(day.net_position)
-  if (day.inferred) {
-    parts.push(row('数据口径', '推算持仓 · 实际未上榜(由回榜日增减倒推)', chartTokens().accent))
+  const net = Number(day.net_position)
+  parts.push(
+    row(
+      '合计净持仓',
+      lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
+      net === 0 ? undefined : net > 0 ? tokens.up : tokens.down
+    )
+  )
+  parts.push(row('计入席位', `${day.counted_members.length} 家`))
+  // 掉榜与反推都要逐个点名。只说「少了一家」，看的人不知道少的是不是他最在意的那家。
+  if (day.inferred_members.length) {
+    parts.push(
+      row(
+        '按反推计入',
+        `<span style="color:${tokens.accent}">${day.inferred_members.join('、')}（实际未上榜，数字由回榜日倒推）</span>`
+      )
+    )
   }
-  if (net === null) {
-    parts.push(row('净持仓', '掉出前 20 · 按 0 计入(实际低于当日榜单门槛)'))
-  } else {
-    parts.push(row('净持仓', lots(Math.abs(net)) + (net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'),
-      net === 0 ? undefined : net > 0 ? tokens.up : tokens.down))
-  }
-  // 单合约档的成本。汇总档已经在上面按两腿分别列过了。
-  if (!day.legs) {
-    parts.push(row('净持仓成本（推算）', day.cost === null ? '不可知' : price(Number(day.cost))))
+  if (day.missing_members.length) {
+    parts.push(
+      row(
+        '当日掉榜',
+        `<span style="color:${tokens.accent}">${day.missing_members.join('、')}（未计入）</span>`
+      )
+    )
   }
 
   // 「估计」二字不能省：这是由公开持仓与结算价推出来的，不是他的对账单。
@@ -469,37 +662,32 @@ function tooltipBody(index: number, head: string[] = []) {
  * 现在什么情况」。**不含盈亏**：他明确说了盈利不用显示在这里。
  */
 const latest = computed(() => {
-  const day = [...days.value].reverse().find((item) => item.net_position !== null)
+  const day = days.value[days.value.length - 1]
   if (!day) return null
   const net = Number(day.net_position)
-  const parts: Array<{ text: string; tone?: 'up' | 'down' }> = []
-  if (day.legs) {
-    const long = Number(day.legs.long_lots)
-    const short = Number(day.legs.short_lots)
-    if (long > 0) {
-      parts.push({ text: `多单 ${lots(long)}`, tone: 'up' })
-      parts.push({
-        text: `均价 ${legCost(day.legs.long_cost, day.legs.long_cost_lots, day.legs.long_lots)}`
-      })
-    }
-    if (short > 0) {
-      parts.push({ text: `空单 ${lots(short)}`, tone: 'down' })
-      parts.push({
-        text: `均价 ${legCost(day.legs.short_cost, day.legs.short_cost_lots, day.legs.short_lots)}`
-      })
-    }
+  const parts: Array<{ text: string; tone?: 'up' | 'down' | 'warn' }> = []
+  const long = Number(day.long_lots)
+  const short = Number(day.short_lots)
+  // 手数紧跟自己那条腿的成本。净持仓是个**差**，单看它说不出持仓结构：
+  // 净 2,415 可能是「多 2,436 空 21」，也可能是「多 5,000 空 2,585」。
+  if (long > 0) {
+    parts.push({ text: `多单 ${lots(long)}`, tone: 'up' })
+    parts.push({ text: `均价 ${legCost(day.long_cost, day.long_cost_lots, day.long_lots)}` })
   }
-  if (day.inferred) {
-    parts.push({ text: '推算持仓 · 实际未上榜(由回榜日增减倒推)' })
+  if (short > 0) {
+    parts.push({ text: `空单 ${lots(short)}`, tone: 'down' })
+    parts.push({ text: `均价 ${legCost(day.short_cost, day.short_cost_lots, day.short_lots)}` })
   }
   parts.push({
     text: `净持仓 ${lots(Math.abs(net))}${net === 0 ? '' : net > 0 ? '（净多）' : '（净空）'}`,
     tone: net === 0 ? undefined : net > 0 ? 'up' : 'down'
   })
-  if (!day.legs) {
-    parts.push({
-      text: `净持仓成本（推算） ${day.cost === null ? '不可知' : price(Number(day.cost))}`
-    })
+  parts.push({ text: `计入 ${day.counted_members.length} 家` })
+  if (day.inferred_members.length) {
+    parts.push({ text: `${day.inferred_members.join('、')} 未上榜，按回榜反推计入`, tone: 'warn' })
+  }
+  if (day.missing_members.length) {
+    parts.push({ text: `${day.missing_members.join('、')} 当日掉榜，未计入`, tone: 'warn' })
   }
   return { date: day.trade_date, parts }
 })
@@ -743,19 +931,24 @@ const cumulativeTotal = computed(() => {
   <section class="seats">
     <header class="page-head">
       <h1>席位</h1>
-      <p>选一个会员和一个交易日，两个子页共用这组选择。</p>
+      <p>选几个会员和一个交易日，两个子页共用这组选择。</p>
     </header>
 
     <el-card shadow="never" class="shared">
       <div class="control-row">
         <el-select
-          v-model="member"
-          style="width: 220px"
+          v-model="selected"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
           filterable
-          placeholder="选择席位"
+          :filter-method="(value: string) => (memberQuery = value)"
+          :multiple-limit="MAX_MEMBERS"
+          style="width: 320px"
+          :placeholder="`选择席位（最多 ${MAX_MEMBERS} 家）`"
           :disabled="loadingPositions"
         >
-          <el-option v-for="name in members" :key="name" :label="name" :value="name" />
+          <el-option v-for="name in filteredMembers" :key="name" :label="name" :value="name" />
         </el-select>
         <el-date-picker
           v-model="tradeDate"
@@ -768,41 +961,66 @@ const cumulativeTotal = computed(() => {
           :disabled="loadingPositions || !availableDates.length"
         />
       </div>
-      <!-- 「建仓过程」这个档已撤(2026-08-18 运营者拍板):净持仓页把它的四张图
-           全做了,还多了多席位叠加与收藏。带 ?tab=building 的旧链接仍能打开
-           (下面的面板还在),只是不再从这里进——等验收完再清代码。
-           两个子页的入口并排放:一个按钮孤零零地立着不像可切换的东西。 -->
+      <!-- 收藏的是「这一组席位」。盯的常常是固定的那几家，每次进来重勾五家是
+           纯粹的重复劳动。点收藏是**整组替换**，不是并进去。 -->
+      <div class="favorites">
+        <el-input
+          v-model="favoriteName"
+          placeholder="给这组席位起个名字"
+          style="width: 200px"
+          :disabled="savingFavorite"
+          @keyup.enter="saveFavorite"
+        />
+        <el-button :loading="savingFavorite" @click="saveFavorite">收藏当前这组</el-button>
+        <el-tag
+          v-for="favorite in favorites"
+          :key="favorite.id"
+          closable
+          class="favorite-tag"
+          @click="applyFavorite(favorite)"
+          @close="removeFavorite(favorite)"
+        >
+          {{ favorite.name }}（{{ favorite.members.length }} 家）
+        </el-tag>
+      </div>
+
       <div class="tabs">
         <el-radio-group v-model="tab">
           <el-radio-button value="positions">席位持仓</el-radio-button>
+          <el-radio-button value="building">净持仓</el-radio-button>
         </el-radio-group>
-        <el-button @click="router.push('/seats/net-position')">净持仓</el-button>
       </div>
     </el-card>
 
+    <!-- 席位持仓按家分段：榜单的「名次」与「增减量」是逐家公布的，加起来没有
+         意义，所以勾了几家就列几段，不合并。要看合计去净持仓子页。 -->
     <template v-if="tab === 'positions'">
-      <el-card shadow="never">
+      <!-- 筛选器只出一次：它是对所有分段生效的一个条件，每段各放一个会让人
+           以为可以逐家分别筛。 -->
+      <el-card shadow="never" class="filter-card">
+        <el-select
+          v-model="instrumentFilter"
+          multiple
+          collapse-tags
+          clearable
+          placeholder="筛选商品显示"
+          style="width: 260px"
+        >
+          <el-option
+            v-for="code in instruments"
+            :key="code"
+            :label="varietyLabel(code)"
+            :value="code"
+          />
+        </el-select>
+      </el-card>
+      <el-card v-for="entry in memberBlocks" :key="entry.member" shadow="never">
         <template #header>
           <div class="panel-head">
-            <h2>{{ tradeDate }} {{ member }} 席位持仓</h2>
-            <el-select
-              v-model="instrumentFilter"
-              multiple
-              collapse-tags
-              clearable
-              placeholder="筛选商品显示"
-              style="width: 260px"
-            >
-              <el-option
-                v-for="code in instruments"
-                :key="code"
-                :label="varietyLabel(code)"
-                :value="code"
-              />
-            </el-select>
+            <h2>{{ tradeDate }} {{ entry.member }} 席位持仓</h2>
           </div>
         </template>
-        <el-empty v-if="!blocks.length" description="这一天该席位没有持仓" />
+        <el-empty v-if="!entry.blocks.length" description="这一天该席位没有持仓" />
         <table v-else class="positions">
           <thead>
             <tr>
@@ -814,7 +1032,7 @@ const cumulativeTotal = computed(() => {
             </tr>
           </thead>
           <tbody>
-            <template v-for="block in blocks" :key="block.instrument">
+            <template v-for="block in entry.blocks" :key="block.instrument">
               <tr v-for="(line, index) in block.contracts" :key="line.contract">
                 <td v-if="index === 0" :rowspan="block.contracts.length" class="instrument">
                   {{ varietyLabel(block.instrument) }}
@@ -825,7 +1043,7 @@ const cumulativeTotal = computed(() => {
                   </div>
                   <div class="change">{{ signed(block.netChange) }}</div>
                   <el-button size="small" @click="openBuilding(block.instrument)">
-                    品种汇总建仓过程
+                    品种汇总净持仓
                   </el-button>
                 </td>
                 <td class="contract">
@@ -841,7 +1059,7 @@ const cumulativeTotal = computed(() => {
                     size="small"
                     @click="openBuilding(block.instrument, line.contract)"
                   >
-                    建仓过程
+                    净持仓
                   </el-button>
                 </td>
                 <td class="figure">
@@ -899,8 +1117,12 @@ const cumulativeTotal = computed(() => {
             其中 <strong>{{ gapDays }}</strong> 天成本不可知（掉出前 20 或当日无结算价），图上断开显示。
           </template>
         </p>
+        <p v-if="selected.length > 1" class="note">
+          这几家是<strong>加总</strong>看的：{{ selected.join('、') }} 共
+          {{ selected.length }} 家，逐家逐合约各自算完再相加。想单看某一家，上面只勾他一个。
+        </p>
         <p v-if="!buildingContract" class="note">
-          合约汇总把该席位在这个品种<strong>各个合约上的持仓逐一算完再相加</strong>：净多的那些
+          合约汇总把所选席位在这个品种<strong>各个合约上的持仓逐一算完再相加</strong>：净多的那些
           合约合成「多单」、净空的合成「空单」，两者相减才是净持仓，均价各按手数加权。
           小窗里能看到这三个数。
           <br />
@@ -911,14 +1133,18 @@ const cumulativeTotal = computed(() => {
         <p v-if="offBoardDays" class="note off-board">
           <span class="swatch" aria-hidden="true"></span>
           <span>
-            <strong>{{ offBoardDays }}</strong> 天该席位掉出交易所前 20 榜，
-            <strong>持仓未知</strong>——不是清仓。交易所只公布前 20 名，那些天文件里没有他这一行。
-            图上以此底色标出并断开曲线；成本与累计盈亏在这几天原地保留，回榜后接着算。
+            <strong>{{ offBoardDays }}</strong> 天至少有一家掉出交易所前 20 榜，
+            <strong>持仓未知</strong>——不是清仓。交易所只公布前 20 名，那些天文件里没有他这一行，
+            合计里也就少算了他。图上以此底色标出；成本与累计盈亏在这几天原地保留，回榜后接着算。
           </span>
+        </p>
+        <p v-if="inferredDays" class="note muted">
+          另有 <strong>{{ inferredDays }}</strong> 天至少有一家实际没上榜，持仓由回榜日的增减
+          倒推得出，已计入合计（图上底色更淡的那几段）。
         </p>
       </el-card>
 
-      <el-empty v-if="!loadingBuilding && !days.length" description="选一个品种，或该席位在此品种上没有持仓" />
+      <el-empty v-if="!loadingBuilding && !days.length" description="选一个品种，或所选席位在此品种上没有持仓" />
       <template v-else>
         <el-card shadow="never">
           <!-- 原来叫「行情与成本线」。成本线已按运营者要求从图上撤掉（数字进小窗），
@@ -930,7 +1156,7 @@ const cumulativeTotal = computed(() => {
               <span v-if="priceSeriesNote" class="series-note">{{ priceSeriesNote }}</span>
             </div>
           </template>
-          <SpreadChart v-if="hasCandles" :option="priceOption" :height="320" export-name="建仓过程-行情" />
+          <SpreadChart v-if="hasCandles" :option="priceOption" :height="320" export-name="净持仓-行情" />
           <el-alert
             v-else
             type="info"
@@ -954,11 +1180,11 @@ const cumulativeTotal = computed(() => {
               </div>
             </div>
           </template>
-          <SpreadChart :option="netOption" :height="300" export-name="建仓过程-净持仓" />
+          <SpreadChart :option="netOption" :height="300" export-name="净持仓-合计" />
         </el-card>
         <el-card shadow="never">
           <template #header><h2>当日盈亏</h2></template>
-          <SpreadChart :option="pnlOption" :height="300" export-name="建仓过程-当日盈亏" />
+          <SpreadChart :option="pnlOption" :height="300" export-name="净持仓-当日盈亏" />
         </el-card>
         <el-card shadow="never">
           <template #header>
@@ -970,7 +1196,7 @@ const cumulativeTotal = computed(() => {
               </span>
             </h2>
           </template>
-          <SpreadChart :option="cumulativeOption" :height="300" export-name="建仓过程-累计盈亏" />
+          <SpreadChart :option="cumulativeOption" :height="300" export-name="净持仓-累计盈亏" />
           <p class="note">
             当日盈亏的逐日累加。当日盈亏不可知的那几天（掉出前 20 或当日无结算价）按 0 计入，
             累计线不断开——断开会看起来像仓位平了。所以这是<strong>已知部分</strong>的累计。
@@ -1037,6 +1263,25 @@ const cumulativeTotal = computed(() => {
   align-items: center;
   gap: 10px;
 }
+.favorites {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 收藏是拿来点的，光标要说明这件事——标签默认不像可点。 */
+.favorite-tag {
+  cursor: pointer;
+}
+/* 筛选器自成一行，与下面各家的分段卡片拉开一点。 */
+.filter-card {
+  margin-bottom: 12px;
+}
+/* 推算日的说明比掉榜弱一档：掉榜是「少算了」，推算是「算了，但数是倒推的」。 */
+.note.muted {
+  color: var(--tv-text-muted);
+}
 .panel-head {
   display: flex;
   align-items: center;
@@ -1068,6 +1313,9 @@ const cumulativeTotal = computed(() => {
   color: var(--tv-up);
   font-weight: 600;
   margin-left: 0;
+}
+.latest .warn {
+  color: var(--tv-warn);
 }
 .latest .down {
   color: var(--tv-down);
