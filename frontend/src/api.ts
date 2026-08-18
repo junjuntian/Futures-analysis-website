@@ -319,6 +319,16 @@ export interface NetPositionDay {
   missing_members: string[]
   /** 当天按回榜反推值计入合计的席位：实际未上榜，数字是倒推的。 */
   inferred_members: string[]
+  /** 当日盈亏 =（今结算 − 昨结算）× 昨净持仓 × 点值，逐「席位×合约」各算各的再相加。
+   * 掉榜或无结算价的那天为 null：那天赚了多少不知道，不是零。 */
+  daily_pnl: string | null
+  /** 当日盈亏的逐日累加。不可知的天按 0 计入，累计线不断开。 */
+  cumulative_pnl: string
+  /** 净多那几条腿的加权成本（推算）；`long_cost_lots` 是它覆盖到的手数。 */
+  long_cost: string | null
+  long_cost_lots: string
+  short_cost: string | null
+  short_cost_lots: string
 }
 
 export interface SeatNetPositionResponse {

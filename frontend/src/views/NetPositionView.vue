@@ -262,12 +262,37 @@ const incompleteDays = computed(
   () => days.value.filter((day) => day.missing_members.length > 0).length
 )
 
+/** 金额按万/亿收敛,否则纵轴挤满零看不清量级(与建仓过程同一套)。 */
+function money(value: number) {
+  const abs = Math.abs(value)
+  if (abs >= 1e8) return `${(value / 1e8).toFixed(2)} 亿`
+  if (abs >= 1e4) return `${(value / 1e4).toFixed(0)} 万`
+  return value.toFixed(0)
+}
+
+/** 盈亏柱:正红负绿,国内看盘的惯例。 */
+function pnlBars(values: Array<number | null>) {
+  const tokens = chartTokens()
+  return values.map((value) => ({
+    value,
+    itemStyle: { color: (value ?? 0) >= 0 ? tokens.up : tokens.down }
+  }))
+}
+
 const lots = (value: number) => `${value.toLocaleString('zh-CN')} 手`
 const price = (value: number) => value.toFixed(2)
 
 function row(label: string, value: string, color?: string) {
   const painted = color ? `<span style="color:${color};font-weight:600">${value}</span>` : value
   return `<div style="display:flex;gap:12px;justify-content:space-between"><span>${label}</span>${painted}</div>`
+}
+
+/** 该腿的均价。覆盖不全时说明覆盖了多少手——与建仓过程同一条口径。 */
+function legCost(cost: string | null, costLots: string, allLots: string) {
+  if (cost === null) return '成本不可知'
+  const covered = Number(costLots)
+  const total = Number(allLots)
+  return covered < total ? `${price(Number(cost))}（覆盖 ${lots(covered)}）` : price(Number(cost))
 }
 
 function tooltipBody(index: number, head: string[] = []) {
@@ -289,6 +314,13 @@ function tooltipBody(index: number, head: string[] = []) {
       net === 0 ? undefined : net > 0 ? tokens.up : tokens.down
     )
   )
+  // 成本与建仓过程同口径:覆盖不全时说明覆盖了多少手,不让人当成全部持仓的成本。
+  if (long > 0 && day.long_cost !== null) {
+    parts.push(row('　净多成本（推算）', legCost(day.long_cost, day.long_cost_lots, day.long_lots)))
+  }
+  if (short > 0 && day.short_cost !== null) {
+    parts.push(row('　净空成本（推算）', legCost(day.short_cost, day.short_cost_lots, day.short_lots)))
+  }
   parts.push(row('计入席位', `${day.counted_members.length} 家`))
   // 掉榜必须逐个点名。只说「少了一家」，看的人不知道少的是不是他最在意的那家。
   if (day.inferred_members.length) {
@@ -398,6 +430,61 @@ const priceOption = computed<EChartsOption>(() => {
   }
 })
 
+const pnlSeries = computed(() =>
+  days.value.map((day) => (day.daily_pnl === null ? null : Number(day.daily_pnl)))
+)
+const cumulativeSeries = computed(() => days.value.map((day) => Number(day.cumulative_pnl)))
+const cumulativeTotal = computed(() => {
+  const last = cumulativeSeries.value.at(-1)
+  return last ?? 0
+})
+
+/**
+ * 「当日盈亏」图专用小窗:**第一行必须是当日那个数**。
+ *
+ * 建仓过程页踩过的坑(2026-08-18):三张图共用一份小窗内容,悬停在当日盈亏的柱子上
+ * 读到的却是累计盈利,图名与数字对不上。这页从一开始就分开。
+ */
+const dailyPnlTooltip = {
+  trigger: 'axis' as const,
+  formatter: (params: unknown) => {
+    const index = axisIndex(params)
+    if (index === null) return ''
+    const day = days.value[index]
+    const tokens = chartTokens()
+    const value = day?.daily_pnl === null || day === undefined ? null : Number(day.daily_pnl)
+    const head =
+      value === null
+        ? [row('当日盈亏', '不可知（有席位掉榜或当日无结算价）')]
+        : [
+            row(
+              '当日盈亏',
+              `${value >= 0 ? '+' : '−'}${money(Math.abs(value))}`,
+              value >= 0 ? tokens.up : tokens.down
+            )
+          ]
+    return tooltipBody(index, head)
+  }
+}
+
+const cumulativeTooltip = {
+  trigger: 'axis' as const,
+  formatter: (params: unknown) => {
+    const index = axisIndex(params)
+    if (index === null) return ''
+    const day = days.value[index]
+    const tokens = chartTokens()
+    const value = day ? Number(day.cumulative_pnl) : 0
+    return tooltipBody(index, [
+      row(
+        '估计累计盈亏',
+        `${value >= 0 ? '+' : '−'}${money(Math.abs(value))}`,
+        value >= 0 ? tokens.up : tokens.down
+      )
+    ])
+  }
+}
+
 const netOption = computed<EChartsOption>(() => {
   const tokens = chartTokens()
   return {
@@ -431,6 +518,62 @@ const netOption = computed<EChartsOption>(() => {
           data: [{ yAxis: 0 }],
           label: { show: false }
         },
+        markArea: incompleteMark.value
+      }
+    ]
+  }
+})
+
+const pnlOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...dailyPnlTooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { formatter: money, color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: '当日盈亏',
+        type: 'bar' as const,
+        data: pnlBars(pnlSeries.value),
+        markArea: incompleteMark.value
+      }
+    ]
+  }
+})
+
+const cumulativeOption = computed<EChartsOption>(() => {
+  const tokens = chartTokens()
+  return {
+    grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
+    dataZoom: zoom.value,
+    tooltip: { ...cumulativeTooltip, ...tooltipStyle() },
+    xAxis: {
+      type: 'category' as const,
+      data: dates.value,
+      axisLabel: { hideOverlap: true, color: tokens.axisLabel },
+      axisLine: { lineStyle: { color: tokens.axisLine } }
+    },
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { formatter: money, color: tokens.axisLabel },
+      splitLine: { lineStyle: { color: tokens.splitLine } }
+    },
+    series: [
+      {
+        name: '累计盈亏',
+        type: 'bar' as const,
+        data: pnlBars(cumulativeSeries.value),
         markArea: incompleteMark.value
       }
     ]
@@ -607,6 +750,47 @@ const priceSeriesNote = computed(() => {
         <SpreadChart :option="netOption" :height="320" group="net-position" export-name="净持仓-合计" />
         <p v-if="incompleteDays" class="note warn">
           这段区间里有 {{ incompleteDays }} 天至少有一家掉出前二十，合计少算了那几家（图上底色标出）。
+        </p>
+      </el-card>
+
+      <el-card shadow="never">
+        <template #header><h2>当日盈亏</h2></template>
+        <SpreadChart
+          :option="pnlOption"
+          :height="300"
+          group="net-position"
+          export-name="净持仓-当日盈亏"
+        />
+        <p class="note">
+          当日盈亏 =（今结算 − 昨结算）× 昨净持仓 × 点值，
+          <strong>逐「席位 × 合约」各算各的再相加</strong>——与建仓过程同一套成本引擎，
+          不是拿合计持仓乘一个合成价。有席位掉榜或当日无结算价的那天为空（那天赚了多少
+          不知道，不是零），图上底色标出。
+        </p>
+      </el-card>
+
+      <el-card shadow="never">
+        <template #header>
+          <div class="panel-head">
+            <h2>累计盈亏</h2>
+            <div class="latest">
+              <span :class="cumulativeTotal >= 0 ? 'up' : 'down'">
+                {{ cumulativeTotal >= 0 ? '累计盈利' : '累计亏损' }}
+                {{ money(Math.abs(cumulativeTotal)) }}
+              </span>
+            </div>
+          </div>
+        </template>
+        <SpreadChart
+          :option="cumulativeOption"
+          :height="300"
+          group="net-position"
+          export-name="净持仓-累计盈亏"
+        />
+        <p class="note">
+          当日盈亏的逐日累加。不可知的那几天按 0 计入、累计线不断开——断掉会让人以为
+          仓位平了。<strong>「估计」二字不能省</strong>：这是由公开持仓与结算价推出来的，
+          不是谁的对账单。
         </p>
       </el-card>
     </template>

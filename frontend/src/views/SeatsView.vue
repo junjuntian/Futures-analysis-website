@@ -770,7 +770,9 @@ const cumulativeTotal = computed(() => {
       </div>
       <el-radio-group v-model="tab" class="tabs">
         <el-radio-button value="positions">席位持仓</el-radio-button>
-        <el-radio-button value="building">建仓过程</el-radio-button>
+        <!-- 「建仓过程」这个档已撤(2026-08-18 运营者拍板):净持仓页把它的四张图
+             全做了,还多了多席位叠加与收藏。带 ?tab=building 的旧链接仍能打开
+             (下面的面板还在),只是不再从这里进——等验收完再清代码。 -->
       </el-radio-group>
     </el-card>
 

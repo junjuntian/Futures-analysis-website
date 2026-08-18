@@ -95,7 +95,8 @@ function handleCommand(command: string) {
             <span>席位</span>
           </template>
           <el-menu-item index="/seats?tab=positions">席位持仓</el-menu-item>
-          <el-menu-item index="/seats?tab=building">建仓过程</el-menu-item>
+          <!-- 「建仓过程」入口已撤(2026-08-18):净持仓页覆盖了它的全部内容,
+               还多了多席位叠加与收藏。页内代码暂留,待运营者验收后清理。 -->
           <el-menu-item index="/seats/net-position">净持仓</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/smart-money-view">

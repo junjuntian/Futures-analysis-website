@@ -2600,6 +2600,9 @@ pub struct SeatNetPositionRow {
     pub short_position: String,
     /// 该日该合约的持仓来自回榜反推:实际未上榜,数字由回榜日增减倒推。
     pub inferred: bool,
+    /// 该合约当日结算价。盈亏用它算——收盘价在无成交日是 0(DEC-073),
+    /// 结算价才是当日代表价。没有则那天的盈亏不可知。
+    pub settlement: Option<String>,
 }
 
 /// 净持仓页的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
@@ -2618,20 +2621,34 @@ fn seat_net_positions_sql() -> String {
                 and rank_type in ('long', 'short')
                 and ($4::text is null or contract = $4)
               order by trade_date, contract, rank_type, {member_key}, {source_rank}, source
+         ),
+         px as (
+             -- 每个合约每天一个结算价:盈亏要用它算(收盘价在无成交日是 0,
+             -- 结算价才是当日代表价,DEC-073)。多源同样先按可信度收敛成一行。
+             select distinct on (contract, trade_date)
+                    contract, trade_date, settlement_price
+               from price_history
+              where workspace_id = $1 and instrument = $2
+                and settlement_price is not null and settlement_price > 0
+                and ($4::text is null or contract = $4)
+              order by contract, trade_date, {price_rank}, source
          )
-         select member_key, contract, trade_date,
-                sum(case when rank_type = 'long' then quantity else 0 end)::text
+         select p.member_key, p.contract, p.trade_date,
+                sum(case when p.rank_type = 'long' then p.quantity else 0 end)::text
                     as long_position,
-                sum(case when rank_type = 'short' then quantity else 0 end)::text
+                sum(case when p.rank_type = 'short' then p.quantity else 0 end)::text
                     as short_position,
                 -- 任一腿来自回榜反推即标推算:那天他实际未上榜,数字是倒推的
                 -- (运营者 2026-08-17:所有席位的推算持仓都要打标)。
-                bool_or(source = 'reboard_inferred') as inferred
-           from picked
-          group by member_key, contract, trade_date
-          order by trade_date, member_key, contract",
+                bool_or(p.source = 'reboard_inferred') as inferred,
+                max(px.settlement_price)::text as settlement
+           from picked p
+           left join px on px.contract = p.contract and px.trade_date = p.trade_date
+          group by p.member_key, p.contract, p.trade_date
+          order by p.trade_date, p.member_key, p.contract",
         member_key = member_key_sql(),
         source_rank = SEAT_SOURCE_RANK,
+        price_rank = PRICE_SOURCE_RANK,
     )
 }
 
@@ -2674,6 +2691,7 @@ pub async fn load_seat_net_positions(
             long_position: row.get("long_position"),
             short_position: row.get("short_position"),
             inferred: row.get("inferred"),
+            settlement: row.get("settlement"),
         })
         .collect())
 }

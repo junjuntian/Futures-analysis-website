@@ -1204,6 +1204,17 @@ pub struct NetPositionDayItem {
     pub missing_members: Vec<String>,
     /// 当天按**回榜反推值**计入合计的席位:他们实际未上榜,数字是倒推的。
     pub inferred_members: Vec<String>,
+    /// 当日盈亏 =(今结算 − 昨结算)× 昨净持仓 × 点值,**逐「席位×合约」各算各的
+    /// 再相加**(与建仓过程同一套 `build_variety_series`,不另起一套口径)。
+    /// 掉榜或无结算价的那天为空:那天赚了多少不知道,不是零。
+    pub daily_pnl: Option<String>,
+    /// 自序列开头至今的当日盈亏累计。不可知的天按 0 计入,累计线不断开。
+    pub cumulative_pnl: String,
+    /// 净多那几条腿的加权成本(推算),覆盖手数见 `long_cost_lots`。
+    pub long_cost: Option<String>,
+    pub long_cost_lots: String,
+    pub short_cost: Option<String>,
+    pub short_cost_lots: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1333,6 +1344,46 @@ pub async fn query_seat_net_position(
                     .insert(row.member_key.clone());
             }
         }
+        // 盈亏与成本:**每个「席位 × 合约」各自走一遍成本引擎再按日归并**。
+        //
+        // 分组维度是这里唯一与建仓过程不同的地方(那边是「合约」),算法本身
+        // 一行不改地复用 `build_variety_series`——掉榜那天不贡献手数、成本不可知
+        // 的合约照样计手数但不进均价、累计线不因不可知而断开,这些口径都已经在
+        // 那套逻辑里验证过。另起一套只会让两个页面的盈亏迟早对不上。
+        // 没有点值就不算盈亏:宁可少一条曲线,也不要一条乘错倍数的曲线
+        // (与建仓过程同一条纪律)。
+        let pnl_factor: Decimal = database::spread_analytics::instrument_price_multiplier(
+            &state.auth.pool,
+            context.workspace_id(),
+            &instrument,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Decimal::ZERO);
+
+        let mut by_seat_contract: std::collections::BTreeMap<(String, String), Vec<DailyPosition>> =
+            std::collections::BTreeMap::new();
+        for observation in &rows {
+            let long = parse_decimal(&observation.long_position);
+            let short = parse_decimal(&observation.short_position);
+            by_seat_contract
+                .entry((observation.member_key.clone(), observation.contract.clone()))
+                .or_default()
+                .push(DailyPosition {
+                    trade_date: observation.trade_date,
+                    net_position: Some(long - short),
+                    settlement: observation.settlement.as_deref().map(parse_decimal),
+                });
+        }
+        let per_series: Vec<Vec<DailyPosition>> = by_seat_contract.into_values().collect();
+        let pnl_by_date: HashMap<Date, domain::seat_cost::VarietyDay> =
+            build_variety_series(&per_series, pnl_factor)
+                .into_iter()
+                .map(|day| (day.trade_date, day))
+                .collect();
+
         let observations: Vec<SeatContractDay> = rows
             .into_iter()
             .map(|row| SeatContractDay {
@@ -1347,6 +1398,7 @@ pub async fn query_seat_net_position(
             .into_iter()
             .map(|day| {
                 let candle = candle_by_date.get(&day.trade_date);
+                let pnl = pnl_by_date.get(&day.trade_date);
                 NetPositionDayItem {
                     trade_date: day.trade_date.to_string(),
                     open_price: candle.map(|c| c.open_price.clone()),
@@ -1362,6 +1414,24 @@ pub async fn query_seat_net_position(
                         .get(&day.trade_date)
                         .map(|set| set.iter().cloned().collect())
                         .unwrap_or_default(),
+                    daily_pnl: pnl
+                        .and_then(|p| p.daily_pnl)
+                        .map(|v| v.round_dp(2).to_string()),
+                    cumulative_pnl: pnl
+                        .map(|p| p.cumulative_pnl.round_dp(2).to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    long_cost: pnl
+                        .and_then(|p| p.long_cost)
+                        .map(|v| v.round_dp(2).to_string()),
+                    long_cost_lots: pnl
+                        .map(|p| p.long_cost_lots.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    short_cost: pnl
+                        .and_then(|p| p.short_cost)
+                        .map(|v| v.round_dp(2).to_string()),
+                    short_cost_lots: pnl
+                        .map(|p| p.short_cost_lots.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
                 }
             })
             .collect();
