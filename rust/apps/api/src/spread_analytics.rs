@@ -3854,6 +3854,7 @@ const TURN_BAND: f64 = 0.03;
 ///   深回撤对它纯粹让利,浅至 5%;
 /// - FG-SA 跨品种回归快,逐年留一 6/6 选 5~8%,深档代价惨重(20% 档 −29.7%);
 /// - LH 与 FG 跨期相邻档正负翻转、逐年选择不稳,挑了就是过拟合,维持 10%。
+///
 /// 与采集 SQL turn_crosses 的分档(compute-spread-monitor.sql)同值,改一处必须
 /// 同批改另一处并重跑重算。
 fn turn_retreat(instrument_1: &str, instrument_2: &str) -> f64 {
