@@ -192,11 +192,21 @@ function tone(value: string | null) {
   return number > 0 ? 'up' : number < 0 ? 'down' : ''
 }
 
-/** 合计行那一格：今比昨是加仓还是减仓。运营者那张表在这里放的就是「加/减」。 */
+/**
+ * 合计行那一格：今比昨是加仓还是减仓。运营者那张表在这里放的就是「加/减」。
+ *
+ * **按持仓量的绝对值比,不是按净持仓的代数差**(2026-08-18 运营者指出)。
+ * 空头的净持仓是负数:从 −10,621 变到 −7,143,代数差是 +3,478 看着像「加」,
+ * 实际是空单**减了** 3,478 手。加减说的是「这家的仓位变大还是变小」,
+ * 与他站在哪一边无关。
+ *
+ * 翻向那天(净持仓变号)按绝对值比仍然成立:多 2,000 翻成空 5,000,
+ * |−5000| > |2000| 报「加」——他确实把仓位做大了,只是换了方向。
+ */
 function moveLabel(row: ReportSeatRow, side: 'gold' | 'silver') {
   const cell = row[side]
   if (cell.net === null || cell.previous_net === null) return '—'
-  const delta = Number(cell.net) - Number(cell.previous_net)
+  const delta = Math.abs(Number(cell.net)) - Math.abs(Number(cell.previous_net))
   if (delta === 0) return '平'
   return delta > 0 ? '加' : '减'
 }

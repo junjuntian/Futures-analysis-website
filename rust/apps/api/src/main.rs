@@ -226,6 +226,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // 报告表后台预热(DEC-078):它的筹码列要跑十几秒的成本推算,缓存又在
+    // **本进程内存**里——外部进程算完写不进来,所以只能由服务自己定时算。
+    // 放在 --warm-spread-cache 之后:那条路径是一次性 CLI,起个后台循环没意义。
+    spread_analytics::spawn_report_warmer(spread_state.clone());
+
     let app = router(state, spread_state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     axum::serve(listener, app)

@@ -768,12 +768,16 @@ const cumulativeTotal = computed(() => {
           :disabled="loadingPositions || !availableDates.length"
         />
       </div>
-      <el-radio-group v-model="tab" class="tabs">
-        <el-radio-button value="positions">席位持仓</el-radio-button>
-        <!-- 「建仓过程」这个档已撤(2026-08-18 运营者拍板):净持仓页把它的四张图
-             全做了,还多了多席位叠加与收藏。带 ?tab=building 的旧链接仍能打开
-             (下面的面板还在),只是不再从这里进——等验收完再清代码。 -->
-      </el-radio-group>
+      <!-- 「建仓过程」这个档已撤(2026-08-18 运营者拍板):净持仓页把它的四张图
+           全做了,还多了多席位叠加与收藏。带 ?tab=building 的旧链接仍能打开
+           (下面的面板还在),只是不再从这里进——等验收完再清代码。
+           两个子页的入口并排放:一个按钮孤零零地立着不像可切换的东西。 -->
+      <div class="tabs">
+        <el-radio-group v-model="tab">
+          <el-radio-button value="positions">席位持仓</el-radio-button>
+        </el-radio-group>
+        <el-button @click="router.push('/seats/net-position')">净持仓</el-button>
+      </div>
     </el-card>
 
     <template v-if="tab === 'positions'">
@@ -1029,6 +1033,9 @@ const cumulativeTotal = computed(() => {
 }
 .tabs {
   margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .panel-head {
   display: flex;

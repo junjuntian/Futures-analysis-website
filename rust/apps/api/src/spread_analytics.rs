@@ -53,9 +53,79 @@ pub struct SpreadAnalyticsState {
 /// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日)。
 type ReportCache = Arc<tokio::sync::RwLock<HashMap<(Uuid, Date), (Instant, serde_json::Value)>>>;
 
-/// 报告表缓存有效期。数据一天只在盘后两轮采集时变,15 分钟是"补采落库后
-/// 多久能在页面看到"的上限,不是精度要求。
-const REPORT_CACHE_TTL: Duration = Duration::from_secs(900);
+/// 报告表缓存有效期。
+///
+/// **2026-08-18 由 15 分钟改为 6 小时,并配后台预热**(运营者:「过一会打开就要
+/// 转半天」)。15 分钟的 TTL 意味着只要隔一会儿再开就必然撞上重算——那十几秒
+/// 每天要吃很多遍。数据一天只在三轮采集时变,6 小时不会让人看到隔夜的旧数据;
+/// 真正保证新鲜的是下面那个后台任务:它在采集时刻之后主动重算,把缓存刷成
+/// 最新的,用户命中的永远是算好的。
+const REPORT_CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
+
+/// 后台预热的巡检间隔。它只在「缓存缺失或已超过 `REPORT_REFRESH_AGE`」时才真的
+/// 重算,所以间隔短一点不等于多花 CPU。
+const REPORT_WARM_INTERVAL: Duration = Duration::from_secs(300);
+
+/// 缓存超过这个年龄就由后台重算。取 25 分钟:三轮采集(16:00/17:30/21:30 北京)
+/// 之后最多 25 分钟,页面上就是新数的了,而空闲时段一小时也就重算两次。
+const REPORT_REFRESH_AGE: Duration = Duration::from_secs(1500);
+
+/// 报告表后台预热:让「打开就是算好的」成为常态。
+///
+/// 为什么放在 API 进程里而不是像价差预热那样做成一条 cron:**报告表的缓存在
+/// 进程内存里**,外部进程(compose run 起的临时容器)算完写进的是它自己的内存,
+/// 对正在服务的这个进程毫无影响。要么把缓存落库,要么就由这个进程自己算——
+/// 单人面板选后者,省一张表和一次失效设计。
+///
+/// 失败只记日志不重试:下一轮巡检自然会再试,而报告表算不出来时页面仍能按
+/// 原路径实时算(只是慢),不该因为预热失败就让服务起不来。
+pub fn spawn_report_warmer(state: Arc<SpreadAnalyticsState>) {
+    tokio::spawn(async move {
+        // 启动后先等一会:让迁移、健康检查、首批请求先过去,别一上来就占十几秒 CPU。
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        loop {
+            if let Err(error) = warm_latest_report(&state).await {
+                tracing::warn!(%error, "report warm failed; will retry next tick");
+            }
+            tokio::time::sleep(REPORT_WARM_INTERVAL).await;
+        }
+    });
+}
+
+async fn warm_latest_report(state: &Arc<SpreadAnalyticsState>) -> anyhow::Result<()> {
+    // 单人面板只有一个工作区;真有多个也该每个都预热,所以照实遍历。
+    let workspaces: Vec<Uuid> = sqlx::query_scalar("select id from workspaces")
+        .fetch_all(&state.auth.pool)
+        .await?;
+    for workspace in workspaces {
+        let Some(trade_date) =
+            database::spread_analytics::seat_trade_dates(&state.auth.pool, workspace, None, 1)
+                .await?
+                .into_iter()
+                .next()
+        else {
+            continue; // 这个工作区还没有席位数据,没什么可预热的
+        };
+        let fresh = state
+            .report_cache
+            .read()
+            .await
+            .get(&(workspace, trade_date))
+            .is_some_and(|(cached_at, _)| cached_at.elapsed() < REPORT_REFRESH_AGE);
+        if fresh {
+            continue;
+        }
+        let started = Instant::now();
+        compute_overview_report(state, workspace, trade_date, Uuid::now_v7())
+            .await
+            .map_err(|_| anyhow::anyhow!("compute_overview_report failed"))?;
+        tracing::info!(
+            %workspace, %trade_date, elapsed_ms = started.elapsed().as_millis(),
+            "report cache warmed"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SpreadErrorBody {
@@ -1795,6 +1865,21 @@ pub async fn query_overview_report(
         return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
     }
 
+    let value = compute_overview_report(&state, workspace, trade_date, request_id).await?;
+    Ok(Json(ApiResponse::new(value, request_id)).into_response())
+}
+
+/// 算一份报告表并写进缓存。**handler 与后台预热共用同一条路径**——
+/// 预热要是走另一套代码,两边迟早算出不一样的东西。
+///
+/// 十几秒的成本推算就发生在这里(七家席位 × 金银 × 全历史),
+/// 所以它必须只被缓存未命中的那一次调用。
+async fn compute_overview_report(
+    state: &Arc<SpreadAnalyticsState>,
+    workspace: Uuid,
+    trade_date: Date,
+    request_id: Uuid,
+) -> Result<serde_json::Value, SpreadApiError> {
     let stored = database::spread_analytics::load_report_seat_groups(&state.auth.pool, workspace)
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
@@ -1988,7 +2073,7 @@ pub async fn query_overview_report(
         .write()
         .await
         .insert((workspace, trade_date), (Instant::now(), value.clone()));
-    Ok(Json(ApiResponse::new(value, request_id)).into_response())
+    Ok(value)
 }
 
 #[utoipa::path(
