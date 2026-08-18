@@ -14,7 +14,7 @@ import {
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
 import { chartTokens, sliderStyle, tooltipStyle } from '../chartTheme'
-import { offBoardBands } from '../offBoard'
+import { offBoardBands, type Band } from '../offBoard'
 import { searchHit } from '../pinyin'
 import { lastYearStartIndex } from '../spreadCharts'
 import { useAuthStore } from '../stores/auth'
@@ -251,13 +251,39 @@ const bands = computed(() =>
     }))
   )
 )
+/**
+ * 推算日的底色带：与掉榜带同一套机械，颜色更淡以示「有数，但数是倒推的」。
+ *
+ * 掉榜带说的是「这几天少算了几家」，推算带说的是「这几天算进去了，但那家其实
+ * 没上榜，数字是拿回榜日的增减倒推的」——两件事，看的人有权分得清。建仓过程页
+ * 早就是两条带并存，净持仓页原来只有掉榜那条，于是 K 线照画、持仓照连，
+ * 反推日和实测日在图上长得一模一样。
+ *
+ * itemStyle 挂在段首元素上——ECharts markArea 按段首取样式。
+ */
+const inferredBands = computed(() =>
+  offBoardBands(
+    days.value.map((day) => ({
+      trade_date: day.trade_date,
+      known: day.inferred_members.length === 0
+    }))
+  ).map(
+    ([start, end]): Band => [
+      { ...start, itemStyle: { color: `${chartTokens().accent}12` } },
+      end
+    ]
+  )
+)
 const incompleteMark = computed(() => ({
   silent: true,
   // 掉榜底色：强调色加 16% 透明度（0x29），跟随主题。
   itemStyle: { color: `${chartTokens().accent}29` },
   label: { show: false },
-  data: bands.value
+  data: [...bands.value, ...inferredBands.value]
 }))
+const inferredDays = computed(
+  () => days.value.filter((day) => day.inferred_members.length > 0).length
+)
 const incompleteDays = computed(
   () => days.value.filter((day) => day.missing_members.length > 0).length
 )
@@ -581,14 +607,30 @@ const cumulativeOption = computed<EChartsOption>(() => {
 })
 
 /** 最新一天的摘要，常驻在标题旁——不必悬停就知道现在什么情况。 */
+// 常驻摘要与小窗同一套数：把鼠标移开也该看得见多空手数与两腿成本。
+// 只有合计净持仓一个数是不够的——净 2,415 手可能是「多 2,436 空 21」，
+// 也可能是「多 5,000 空 2,585」，两者的持仓结构与成本完全不是一回事。
 const latest = computed(() => {
   const day = days.value[days.value.length - 1]
   if (!day) return null
   const net = Number(day.net_position)
+  const long = Number(day.long_lots)
+  const short = Number(day.short_lots)
   return {
     date: day.trade_date,
     net,
+    long,
+    short,
+    longCost:
+      long > 0 && day.long_cost !== null
+        ? legCost(day.long_cost, day.long_cost_lots, day.long_lots)
+        : null,
+    shortCost:
+      short > 0 && day.short_cost !== null
+        ? legCost(day.short_cost, day.short_cost_lots, day.short_lots)
+        : null,
     counted: day.counted_members.length,
+    inferred: day.inferred_members,
     missing: day.missing_members
   }
 })
@@ -740,7 +782,18 @@ const priceSeriesNote = computed(() => {
                   latest.net === 0 ? '' : latest.net > 0 ? '（净多）' : '（净空）'
                 }}
               </span>
+              <span v-if="latest.long > 0" class="up">多 {{ lots(latest.long) }}</span>
+              <span v-if="latest.short > 0" class="down">空 {{ lots(latest.short) }}</span>
+              <span v-if="latest.longCost" class="latest-cost">
+                净多成本 {{ latest.longCost }}
+              </span>
+              <span v-if="latest.shortCost" class="latest-cost">
+                净空成本 {{ latest.shortCost }}
+              </span>
               <span>计入 {{ latest.counted }} 家</span>
+              <span v-if="latest.inferred.length" class="warn">
+                {{ latest.inferred.join('、') }} 未上榜，按回榜反推计入
+              </span>
               <span v-if="latest.missing.length" class="warn">
                 {{ latest.missing.join('、') }} 当日掉榜，未计入
               </span>
@@ -750,6 +803,9 @@ const priceSeriesNote = computed(() => {
         <SpreadChart :option="netOption" :height="320" group="net-position" export-name="净持仓-合计" />
         <p v-if="incompleteDays" class="note warn">
           这段区间里有 {{ incompleteDays }} 天至少有一家掉出前二十，合计少算了那几家（图上底色标出）。
+        </p>
+        <p v-if="inferredDays" class="note muted">
+          另有 {{ inferredDays }} 天至少有一家实际没上榜，持仓由回榜日的增减倒推得出，已计入合计（图上底色更淡的那几段）。
         </p>
       </el-card>
 
@@ -882,5 +938,9 @@ const priceSeriesNote = computed(() => {
 .latest .down {
   color: var(--tv-down);
   font-weight: 600;
+}
+/* 成本是背景数字，不跟多空抢视线：手数用涨跌色，成本走正文色。 */
+.latest-cost {
+  color: var(--tv-text);
 }
 </style>

@@ -18,7 +18,18 @@ function response(data: unknown) {
   } as Response
 }
 
-/** 8-4 那天国泰掉出了前二十：他没有行，合计里少了他。 */
+/**
+ * 三天各演一种数据状态：
+ *
+ * - 8-3 全员在榜，是干净的基准日；
+ * - 8-4 国泰掉出前二十且推不出来，他那天没有行，合计里少了他；
+ * - 8-5 国泰又没上榜，但这次由回榜日的增减反推出来了，计进了合计——
+ *   这天的数不是实测的，界面得说清楚，不能和 8-3 长成一个样。
+ *
+ * mock 按 `NetPositionDay` 补齐字段。缺字段不是「测试写简单点」，是让组件在
+ * 渲染期读到 undefined：`inferred_members.length` 就这么炸过一轮 unhandled error，
+ * 74 个断言全绿而进程退 1。
+ */
 const DAYS = [
   {
     trade_date: '2026-08-03',
@@ -30,7 +41,14 @@ const DAYS = [
     long_lots: '1200',
     short_lots: '0',
     counted_members: ['中信期货', '国泰君安'],
-    missing_members: []
+    missing_members: [],
+    inferred_members: [],
+    daily_pnl: null,
+    cumulative_pnl: '0',
+    long_cost: '898.50',
+    long_cost_lots: '1200',
+    short_cost: null,
+    short_cost_lots: '0'
   },
   {
     trade_date: '2026-08-04',
@@ -42,7 +60,33 @@ const DAYS = [
     long_lots: '800',
     short_lots: '0',
     counted_members: ['中信期货'],
-    missing_members: ['国泰君安']
+    missing_members: ['国泰君安'],
+    inferred_members: [],
+    daily_pnl: null,
+    cumulative_pnl: '0',
+    long_cost: '901.20',
+    long_cost_lots: '800',
+    short_cost: null,
+    short_cost_lots: '0'
+  },
+  {
+    trade_date: '2026-08-05',
+    open_price: '912',
+    high_price: '920',
+    low_price: '908',
+    close_price: '918',
+    net_position: '1150',
+    long_lots: '1200',
+    short_lots: '50',
+    counted_members: ['中信期货', '国泰君安'],
+    missing_members: [],
+    inferred_members: ['国泰君安'],
+    daily_pnl: '480000',
+    cumulative_pnl: '480000',
+    long_cost: '903.40',
+    long_cost_lots: '1200',
+    short_cost: '917.10',
+    short_cost_lots: '50'
   }
 ]
 
@@ -112,6 +156,24 @@ describe('NetPositionView', () => {
     // 合计从 1200 掉到 800 是因为少算了一家，不是他减了仓——页面必须点名。
     expect(text).toContain('国泰君安')
     expect(text).toContain('掉榜')
+    wrapper.unmount()
+  })
+
+  it('常驻摘要带多空手数与两腿成本，反推日单独点名', async () => {
+    localStorage.setItem('netPosition.instrument', 'AU')
+    localStorage.setItem('netPosition.members', '中信期货,国泰君安')
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const text = wrapper.text()
+    // 只给一个「净 1,150 手」是不够的：它可能是「多 1,200 空 50」，也可能是
+    // 「多 5,000 空 3,850」，两者的持仓结构与成本完全不是一回事。
+    expect(text).toContain('多 1,200 手')
+    expect(text).toContain('空 50 手')
+    expect(text).toContain('净多成本 903.40')
+    expect(text).toContain('净空成本 917.10')
+    // 最后一天那个数是倒推来的，摘要里必须写明，不能和实测日长成一个样。
+    expect(text).toContain('按回榜反推计入')
     wrapper.unmount()
   })
 

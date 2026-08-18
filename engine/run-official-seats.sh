@@ -112,4 +112,32 @@ select 'seat 今日官方行' as k, count(*) from seat_history
 union all
 select 'seat 残留 akshare 行', count(*) from seat_history where source='akshare_v1';
 EOF
+
+# 反推掉榜席位（DEC-064）——必须在官方席位入库之后再跑一次。
+#
+# 反推也挂在 collector 里（16:00 / 17:30），但那时上期所与郑商所当天的席位行
+# 还没入库——本脚本 16:25 / 17:55 才写。而反推的唯一依据是**回榜日的增减量**，
+# 拿不到回榜行就整段推不出来，于是官方源品种的反推永远滞后一整轮。
+#
+# 2026-08-18 实测坐实：大商所（席位由 collector 自采）反推已到 08-17，上期所与
+# 郑商所停在 08-14。高盛 08-17 掉榜、08-18 回榜，报告表走的是读时反推，算得出
+# 2334 手；净持仓页读库里的反推行，那天就是一片空白。同一个数字两个页面对不上，
+# 差别只在这条时序。
+#
+# 补跑一次即可。SQL 自己是幂等的（先删本次窗口内自己写过的行再重算），与
+# collector 那趟重复执行没有副作用。
+INFER_OFFBOARD=""
+if [ -r /var/lib/futures-platform/deployments/stable.env ]; then
+  # shellcheck disable=SC1091
+  . /var/lib/futures-platform/deployments/stable.env
+  INFER_OFFBOARD="${previous_release_dir:-}/deploy/collector/infer-offboard-seats.sql"
+fi
+if [ -n "$INFER_OFFBOARD" ] && [ -r "$INFER_OFFBOARD" ]; then
+  echo "[official-seats] 反推掉榜席位"
+  docker exec -i "$PG" psql -U futures_app -d futures_platform \
+    -v ON_ERROR_STOP=1 -v window_days=7 < "$INFER_OFFBOARD"
+else
+  echo "[official-seats] INFER_OFFBOARD_SKIPPED ${INFER_OFFBOARD:-<stable.env 不可读>}" >&2
+fi
+
 echo "[official-seats] 完成"
