@@ -100,7 +100,9 @@ select a.workspace_id, a.instrument, a.contract, a.mm, a.yy,
    and a.yy = b.yy and a.mm = b.mm;
 
 -- 当年：该合约对自身的全部历史，原始最低/最高。
--- 不足 60 天的组合直接不监控——「五天的历史极值」不是极值。
+-- 不足 30 天的组合直接不监控——「五天的历史极值」不是极值。
+-- (原为 60 天;2026-08-18 运营者拍板降到 30:生猪 2705 系组合上市 58 天还进不了
+-- 监控,等待成本高于年轻区间的噪音成本。30 天仍挡得住上市头几周的假极值。)
 -- 每个组合的完整价差序列，以及**截至当日**的滚动最低/最高。
 --
 -- 滚动，不是全期极值。这张表是给「触发留记录」用的：要回答「8 月 12 日那天页面上
@@ -148,7 +150,7 @@ select w.*,
                              order by y.trade_date
                              rows between 19 preceding and current row) pair_pos_lo20
   from (select x.*,
-               case when x.hi > x.lo and x.days >= 60
+               case when x.hi > x.lo and x.days >= 30
                     then (x.now - x.lo) / (x.hi - x.lo) end pair_pos
           from (select workspace_id, c1, c2, trade_date, v now,
                        min(v) over w lo,
@@ -158,14 +160,14 @@ select w.*,
                 window w as (partition by workspace_id, c1, c2 order by trade_date
                              rows between unbounded preceding and current row)) x) y) z) w;
 
--- 只保留窗口内、且到那天为止已积累够 60 天的行。
--- 60 天的门槛也按当日算：一个组合在它上市第 30 天时，「历史极值」确实还没有意义。
+-- 只保留窗口内、且到那天为止已积累够 30 天的行(2026-08-18 由 60 降,见上)。
+-- 门槛按当日算：一个组合在它上市第 10 天时,「历史极值」确实还没有意义。
 --
 -- **窗口比要写入的多留 7 天**：历年轨的前一日位置也得算出来才能判段首日，而历年轨
 -- 是只对保留下来的行算的。7 天覆盖得住周末与长假。多出来的行在最后 insert 时按
 -- `:window_days` 过滤掉，不会写进表。
 delete from pair_stat
- where days < 60
+ where days < 30
     or trade_date < current_date - ((:window_days + 7) || ' days')::interval;
 
 create index pair_stat_key on pair_stat (workspace_id, c1, c2, trade_date);
