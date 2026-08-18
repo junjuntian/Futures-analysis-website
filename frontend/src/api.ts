@@ -580,6 +580,20 @@ export function saveOverviewReportLevels(
   )
 }
 
+/** 写/清一条套利月份模板的产业备注。note 传空串即删除。 */
+export function saveSpreadTemplateNote(
+  request: {
+    instrument_1: string
+    month_1: number
+    instrument_2: string
+    month_2: number
+    note: string
+  },
+  csrfToken: string
+): Promise<void> {
+  return putNoContent('/api/v1/spread-analytics/monitor/template-note', request, csrfToken)
+}
+
 export function saveOverviewReportSeatGroups(
   groups: ReportSeatGroup[],
   csrfToken: string
@@ -653,6 +667,9 @@ export interface SpreadMonitorItem {
   turn_crosses: number | null
   /** 距可交易窗口止点的剩余交易日（周内日近似）。≤15 = 交割红线，<40 = 衰减区。 */
   days_left: number | null
+  /** 该月份模板的手工产业备注（DEC-069）。跟月份走不跟具体合约走，
+   * JD2609/2701 与 JD2709/2801 共享「09-01」一条。没写过为 null。 */
+  note: string | null
 }
 
 export interface SpreadMonitorResponse {

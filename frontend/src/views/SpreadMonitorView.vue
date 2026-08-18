@@ -6,10 +6,12 @@ import { ElMessage } from 'element-plus'
 import {
   getSpreadMonitor,
   getSpreadVarieties,
+  saveSpreadTemplateNote,
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
 import { driftTone, isChoppy, isDecayZone, isQualified, isRedLine, points, revertPct, revertTone } from '../revert'
+import { useAuthStore } from '../stores/auth'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
 // 后端 MONITOR_THRESHOLD_DEFAULT 有完整的量测表与选 5% 的理由。
@@ -207,6 +209,64 @@ function signedSpread(text: string) {
   return value > 0 ? `+${value.toLocaleString('zh-CN')}` : value.toLocaleString('zh-CN')
 }
 
+// —— 手工产业备注(DEC-069):统计说「历年数字怎么说」,备注说「为什么」——
+// 运营者从直播/盖楼学来的品种级知识(夏天的煤不能空、纯碱低库存是逼空窗口…)。
+// 备注挂在**月份模板**上:JD2609−JD2701 和 JD2709−JD2801 共享同一条「09-01」。
+const auth = useAuthStore()
+const noteDialogOpen = ref(false)
+const noteDraft = ref('')
+const noteSaving = ref(false)
+const noteTarget = ref<SpreadMonitorItem | null>(null)
+
+function templateName(item: SpreadMonitorItem) {
+  const m1 = item.contract_1.slice(-2)
+  const m2 = item.contract_2.slice(-2)
+  return item.is_cross_variety
+    ? `${label(item.instrument_1)}${m1} − ${label(item.instrument_2)}${m2}`
+    : `${label(item.instrument_1)} ${m1}-${m2}`
+}
+
+function openNoteEditor(item: SpreadMonitorItem) {
+  noteTarget.value = item
+  noteDraft.value = item.note ?? ''
+  noteDialogOpen.value = true
+}
+
+async function saveNote() {
+  const item = noteTarget.value
+  if (!item) return
+  noteSaving.value = true
+  try {
+    if (!auth.csrfToken) await auth.loadCsrf()
+    if (!auth.csrfToken) throw new Error('无法取得写入保护令牌')
+    const note = noteDraft.value.trim()
+    await saveSpreadTemplateNote(
+      {
+        instrument_1: item.instrument_1,
+        month_1: Number(item.contract_1.slice(-2)),
+        instrument_2: item.instrument_2,
+        month_2: Number(item.contract_2.slice(-2)),
+        note
+      },
+      auth.csrfToken
+    )
+    // 同一模板可能对应表里好几行(JD 09-01 有多个年份对),本地全刷一遍,
+    // 不用整页重查。
+    const key = (x: SpreadMonitorItem) =>
+      `${x.instrument_1}|${x.contract_1.slice(-2)}|${x.instrument_2}|${x.contract_2.slice(-2)}`
+    const target = key(item)
+    for (const row of items.value) {
+      if (key(row) === target) row.note = note || null
+    }
+    noteDialogOpen.value = false
+    ElMessage.success(note ? '备注已保存' : '备注已清空')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '备注保存失败')
+  } finally {
+    noteSaving.value = false
+  }
+}
+
 // 带着这一组合约跳到自由价差页，那边会自动填好并查出来（见 applyDeepLink）。
 // 传品种**代码**不传中文名：中文名在 product_instrument_scope 里可改，
 // 拿会变的东西做链接参数迟早对不上。
@@ -375,7 +435,9 @@ function openDetail(item: SpreadMonitorItem) {
               </el-tag>
               <el-tooltip v-if="item.turn" :content="TURN_HINT" placement="top">
                 <el-tag type="warning" effect="light" size="small">
-                  已拐头{{ item.alert ? '' : item.turn === 'high' ? ' · 高位' : ' · 低位' }}
+                  <!-- 方向永远带上:LH2611−LH2705 出现过「高位报警 + 低位拐头」并存,
+                       省掉后缀会让人把低位拐头读成高位的。 -->
+                  已拐头{{ item.turn === 'high' ? ' · 高位' : ' · 低位' }}
                 </el-tag>
               </el-tooltip>
               <el-tooltip v-if="isChoppy(item.turn_crosses)" :content="CHOPPY_HINT" placement="top">
@@ -420,7 +482,14 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
             <div v-else class="revert absent">历年无可比样本</div>
 
-            <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
+            <div v-if="item.note" class="note" @click="openNoteEditor(item)">
+              📝 {{ item.note }}
+            </div>
+
+            <div class="row-actions">
+              <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
+              <el-button v-if="!item.note" link size="small" @click="openNoteEditor(item)">备注</el-button>
+            </div>
           </div>
         </article>
       </div>
@@ -458,11 +527,41 @@ function openDetail(item: SpreadMonitorItem) {
             </div>
           </div>
           <div class="tail">
-            <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
+            <div v-if="item.note" class="note" @click="openNoteEditor(item)">
+              📝 {{ item.note }}
+            </div>
+            <div class="row-actions">
+              <el-button link type="primary" size="small" @click="openDetail(item)">看价差走势</el-button>
+              <el-button v-if="!item.note" link size="small" @click="openNoteEditor(item)">备注</el-button>
+            </div>
           </div>
         </article>
       </div>
     </template>
+
+    <el-dialog
+      v-model="noteDialogOpen"
+      :title="noteTarget ? `产业备注 · ${templateName(noteTarget)}` : '产业备注'"
+      width="480px"
+    >
+      <p class="note-hint">
+        写给这个<strong>月份模板</strong>的品种知识,所有年份的同月组合共用一条
+        (比如 JD 09-01 的备注,明年的 JD2709−JD2801 也会看到)。
+        清空后保存即删除。
+      </p>
+      <el-input
+        v-model="noteDraft"
+        type="textarea"
+        :rows="5"
+        maxlength="2000"
+        show-word-limit
+        placeholder="例:夏天的煤不能做空(安监停产);12 月焦煤交割量大于 1 月"
+      />
+      <template #footer>
+        <el-button @click="noteDialogOpen = false">取消</el-button>
+        <el-button type="primary" :loading="noteSaving" @click="saveNote">保存</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -663,6 +762,34 @@ function openDetail(item: SpreadMonitorItem) {
   flex-direction: column;
   align-items: flex-end;
   gap: 6px;
+}
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 手工产业备注:统计旁边的「为什么」。整块可点进编辑。 */
+.note {
+  max-width: 300px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tv-text-secondary);
+  background: color-mix(in srgb, var(--tv-warn) 8%, transparent);
+  border-left: 2px solid var(--tv-warn);
+  border-radius: 4px;
+  padding: 4px 8px;
+  text-align: left;
+  white-space: pre-wrap;
+  cursor: pointer;
+}
+.note:hover {
+  background: color-mix(in srgb, var(--tv-warn) 14%, transparent);
+}
+.note-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--tv-text-secondary);
 }
 
 /* 页头的提醒段：贴到极值不等于会回归。 */

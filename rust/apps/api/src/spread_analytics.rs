@@ -742,6 +742,60 @@ pub struct SeatBuildingResponse {
     pub days: Vec<BuildingDayItem>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SaveTemplateNoteRequest {
+    pub instrument_1: String,
+    pub month_1: i32,
+    pub instrument_2: String,
+    pub month_2: i32,
+    /// 空串 = 删除该模板的备注。
+    pub note: String,
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/spread-analytics/monitor/template-note",
+    security(("session_cookie" = [])),
+    responses((status = 204), (status = 400), (status = 401), (status = 403))
+)]
+pub async fn save_template_note(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Json(request): Json<SaveTemplateNoteRequest>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = write_context(
+        &state,
+        &headers,
+        Permission::ManageOverviewReport,
+        request_id,
+    )
+    .await?;
+    let ok_inst =
+        |s: &str| !s.is_empty() && s.len() <= 2 && s.chars().all(|c| c.is_ascii_uppercase());
+    let note = request.note.trim();
+    if !ok_inst(&request.instrument_1)
+        || !ok_inst(&request.instrument_2)
+        || !(1..=12).contains(&request.month_1)
+        || !(1..=12).contains(&request.month_2)
+        || note.chars().count() > 2000
+    {
+        return Err(SpreadApiError::Validation("invalid_note", request_id));
+    }
+    database::spread_analytics::save_template_note(
+        &state.auth.pool,
+        context.workspace_id(),
+        &request.instrument_1,
+        request.month_1,
+        &request.instrument_2,
+        request.month_2,
+        note,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MemberInstrumentsQuery {
     pub member: String,
@@ -3688,6 +3742,9 @@ pub struct SpreadMonitorItem {
     /// 距该组合可交易窗口止点(先到期腿散户最后交易日)的剩余交易日,周内日近似。
     /// 界面按《体系》红线(≤15 清仓/压制进场)与数据实证的衰减区(<40)分档提示。
     pub days_left: Option<i32>,
+    /// 该**月份模板**的手工产业备注(DEC-069):运营者手填的品种级知识,
+    /// 跟月份走不跟具体合约走(JD2609/2701 与 JD2709/2801 共享「09-01」一条)。
+    pub note: Option<String>,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -4033,9 +4090,29 @@ pub async fn query_spread_monitor(
     .await
     .map_err(|_| SpreadApiError::Internal(request_id))?;
 
+    let notes =
+        database::spread_analytics::load_template_notes(&state.auth.pool, context.workspace_id())
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let note_map: std::collections::HashMap<(String, i32, String, i32), String> = notes
+        .into_iter()
+        .map(|(i1, m1, i2, m2, note)| ((i1, m1, i2, m2), note))
+        .collect();
+    let month_of = |contract: &str| -> Option<i32> {
+        contract
+            .get(contract.len().saturating_sub(2)..)
+            .and_then(|mm| mm.parse::<i32>().ok())
+    };
+
     let items: Vec<SpreadMonitorItem> = rows
         .into_iter()
         .map(|row| {
+            let note = match (month_of(&row.contract_1), month_of(&row.contract_2)) {
+                (Some(m1), Some(m2)) => note_map
+                    .get(&(row.instrument_1.clone(), m1, row.instrument_2.clone(), m2))
+                    .cloned(),
+                _ => None,
+            };
             let pair = monitor_track(
                 Some(row.pair_low),
                 Some(row.pair_high),
@@ -4126,6 +4203,7 @@ pub async fn query_spread_monitor(
                 is_new_turn,
                 turn_crosses,
                 days_left,
+                note,
             }
         })
         .collect();

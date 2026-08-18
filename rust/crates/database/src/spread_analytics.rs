@@ -1585,14 +1585,19 @@ mod tests {
     /// Every table this module deletes from, including the ones reached by
     /// `on delete cascade` from a table it deletes directly. A cascade is still
     /// a delete on the referencing table and is refused without the privilege.
-    const DELETE_TARGETS: [&str; 6] = [
+    const DELETE_TARGETS: [&str; 7] = [
         "spread_provider_cache",
         "spread_provider_failures",
         "spread_provider_series",
         "spread_provider_observations",
         "spread_window_segments",
         "spread_favorites",
+        "spread_template_notes",
     ];
+    /// 手工产业备注表的建表迁移(DEC-069)。清空备注走的是 delete,
+    /// 所以它也要进 grant 核对。
+    const TEMPLATE_NOTES_MIGRATION: &str =
+        include_str!("../../../migrations/202608180001_spread_template_notes.sql");
 
     #[test]
     fn every_table_this_module_deletes_from_is_granted_delete_to_the_runtime_role() {
@@ -1620,7 +1625,7 @@ mod tests {
             );
         }
 
-        let grants = format!("{MIGRATION}\n{RETENTION_GRANTS}");
+        let grants = format!("{MIGRATION}\n{RETENTION_GRANTS}\n{TEMPLATE_NOTES_MIGRATION}");
         for table in DELETE_TARGETS {
             let granted = grants.lines().any(|line| {
                 let line = line.trim();
@@ -2218,6 +2223,81 @@ const PRICE_SOURCE_RANK: &str = "case
 /// 变——高盛 2026-08-17 掉出金榜,黄金就从下拉里消失了,而他 691 天的建仓过程明明
 /// 都在(运营者当日报的 bug)。反推行不计入:一个品种若只有反推行,说明真行从未
 /// 出现过,那是不可能的,防御性排除而已。
+/// 全部模板备注,一次取回(单人面板,总量个位数到几十条)。
+pub async fn load_template_notes(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<(String, i32, String, i32, String)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query(
+        "select instrument_1, month_1, instrument_2, month_2, note
+           from spread_template_notes where workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("instrument_1"),
+                row.get("month_1"),
+                row.get("instrument_2"),
+                row.get("month_2"),
+                row.get("note"),
+            )
+        })
+        .collect())
+}
+
+/// 写一条模板备注;note 为空 = 删除(清空即撤,不留空行)。
+pub async fn save_template_note(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument_1: &str,
+    month_1: i32,
+    instrument_2: &str,
+    month_2: i32,
+    note: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    if note.is_empty() {
+        sqlx::query(
+            "delete from spread_template_notes
+              where workspace_id = $1 and instrument_1 = $2 and month_1 = $3
+                and instrument_2 = $4 and month_2 = $5",
+        )
+        .bind(workspace_id)
+        .bind(instrument_1)
+        .bind(month_1)
+        .bind(instrument_2)
+        .bind(month_2)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        sqlx::query(
+            "insert into spread_template_notes
+                 (workspace_id, instrument_1, month_1, instrument_2, month_2, note)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (workspace_id, instrument_1, month_1, instrument_2, month_2)
+             do update set note = excluded.note, updated_at = now()",
+        )
+        .bind(workspace_id)
+        .bind(instrument_1)
+        .bind(month_1)
+        .bind(instrument_2)
+        .bind(month_2)
+        .bind(note)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn load_member_instruments(
     pool: &PgPool,
     workspace_id: Uuid,
