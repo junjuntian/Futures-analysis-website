@@ -1,5 +1,19 @@
 # 最新交接状态
 
+- **🎉 DEC-070 回撤档分品种 + ⚡只认首次 + 历史信号已上线(2026-08-18,生产=
+  `172b9ce`,deploy 32097154938)**:分档=**JM/AP 20%、JD 5%、FG-SA 8%、其余 10%**
+  (全量回测+逐年留一;机制:回撤线在位置刻度上,JM 位置日抖动全场最高 6.4pp 要
+  深线;JD 唯一早进不受罚要浅线)。⚡ 只在本轮首次穿线亮(前端 turn_crosses===1,
+  零迁移),复亮只挂 ⚠。监控加「历史信号」勾选框(API history=true 一次取回全部
+  快照日,只列历来 ⚡ 行,新日期在前)。API `turn_retreat()` 与采集 SQL lateral
+  分档表互指同值。**部署后已用发布 bundle 重算 45 天,分档实证生效**(JM2609-2705
+  位置 0.857 新档不算拐头/LH 仍 10%/FG-SA 8%,null 列 0)。
+  **⚠️ 本次踩坑必读:qh 的 `/opt/futures-platform` 是旧 git 检出,里面的
+  compute-spread-monitor.sql 是老版(无 hi20/crosses 列)——我先拿它重算,把 45 天
+  的新列全刷成 NULL,再用正确路径重算才修复。手动重算的唯一正确来源=
+  `. /var/lib/futures-platform/deployments/stable.env && $previous_release_dir/deploy/collector/...`;
+  旧检出只有 load/ 目录被采集脚本用作 CSV 落盘,代码一律不从那取。**
+
 - **🎉 DEC-069 手工产业备注 + 拐头标带方向已上线(2026-08-18,生产=`fe46f71`,deploy
   32092371199;两份交易文档因子化第二批 ④)**:新表 `spread_template_notes`,键是
   **月份模板**`(品种1,月1,品种2,月2)`——产业知识跟月份走,JD2609−JD2701 与
