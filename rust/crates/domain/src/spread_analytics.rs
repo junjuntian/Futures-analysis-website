@@ -625,27 +625,46 @@ fn build_seasonal(points: &[ContinuousPoint], segments: &[WindowSegment]) -> Sea
             .insert(key, (point.trade_date, point.value));
     }
     let anchor_ordinal = anchor.as_deref().map(month_day_ordinal).unwrap_or(1);
-    let mut axis: Vec<_> = axis_keys.into_iter().collect();
-    axis.sort_by_key(|key| {
-        let ordinal = month_day_ordinal(key);
+    let wrapped = |ordinal: u16| {
         if ordinal >= anchor_ordinal {
             ordinal - anchor_ordinal
         } else {
             366 + ordinal - anchor_ordinal
         }
-    });
+    };
+    let mut axis: Vec<_> = axis_keys.into_iter().collect();
+    axis.sort_by_key(|key| wrapped(month_day_ordinal(key)));
+    // 日历轴按**窗口止点的月-日**封顶——与价差走势同一条截取规则(运营者
+    // 2026-08-18 报的 bug:鸡蛋 09-10 走势图截到 8/31,叠年图却排满整年到 10/28)。
+    // 根因:老年份的窗口起点比当前年早(有的年份 9 月中两腿就都挂牌了),那些
+    // 「窗口开头」的点在以当前年起点锚定的轴上被绕到末端,看起来像是数据越过了
+    // 止点。止点取各段窗口止点里离锚点最远的那个:各年止点只差在周末错位
+    // (8/29 与 8/31 之别),取最远的不会误伤任何一年的合法尾部。
+    if let Some(end_distance) = segments
+        .iter()
+        .filter_map(|segment| segment.window_end)
+        .map(|end| wrapped(month_day_ordinal(&month_day(end))))
+        .max()
+    {
+        axis.retain(|key| wrapped(month_day_ordinal(key)) <= end_distance);
+    }
     let years = grouped
         .into_iter()
         .map(|(year, values)| {
-            let dates: Vec<_> = values.values().map(|(date, _)| *date).collect();
+            // 样本数按**轴上真正画出来的点**算:被封顶剪掉的键不算样本,否则
+            // missing_count 会算成负逻辑(轴外的点计入样本、轴内的空位计缺失)。
+            let dates: Vec<_> = axis
+                .iter()
+                .filter_map(|key| values.get(key).map(|(date, _)| *date))
+                .collect();
             SeasonalYearSeries {
                 year,
                 values: axis
                     .iter()
                     .map(|key| values.get(key).map(|(_, value)| *value))
                     .collect(),
-                sample_count: count_u32(values.len()),
-                missing_count: count_u32(axis.len().saturating_sub(values.len())),
+                sample_count: count_u32(dates.len()),
+                missing_count: count_u32(axis.len().saturating_sub(dates.len())),
                 segment_nos: segments_by_year.remove(&year).unwrap_or_default(),
                 rule_version: DEFAULT_RULE_VERSION.to_string(),
                 sample_start: dates.iter().min().copied(),
@@ -890,6 +909,75 @@ mod tests {
         let position = |key: &str| result.seasonal.axis.iter().position(|k| k == key);
         assert!(position("01-16") < position("01-19"));
         assert!(position("01-19") < position("08-28"));
+    }
+
+    #[test]
+    fn the_seasonal_axis_stops_at_the_window_end_month_day() {
+        // 运营者 2026-08-18 报的 bug(鸡蛋 09-10 实例):走势图按散户窗口截到
+        // 8/31,叠年图却排满整年到 10/28。根因是老年份的窗口起点比当前年早,
+        // 那些「窗口开头」的点在以当前年起点锚定的轴上被绕到末端——看起来像
+        // 数据越过了止点。规则必须与走势图同一条:轴到窗口止点的月-日为止。
+        let mut contracts = HashMap::new();
+        // 2025 年这对:窗口起点早(9 月中旬两腿都已挂牌),止点 8 月末。
+        contracts.insert(
+            "JD2509".into(),
+            contract("JD2509", 2025, 9, date!(2025 - 08 - 29)),
+        );
+        contracts.insert(
+            "JD2510".into(),
+            contract("JD2510", 2025, 10, date!(2025 - 09 - 30)),
+        );
+        // 2026 年这对:窗口起点晚(10 月底),止点 8/31。
+        contracts.insert(
+            "JD2609".into(),
+            contract("JD2609", 2026, 9, date!(2026 - 08 - 31)),
+        );
+        contracts.insert(
+            "JD2610".into(),
+            contract("JD2610", 2026, 10, date!(2026 - 09 - 30)),
+        );
+        let result = calculate_windowed_analytics(
+            &[
+                // 2025 段的窗口开头:9/15、10/20 —— 合法在窗,但月-日晚于止点 8/31。
+                point(date!(2024 - 09 - 15), -100.0, "JD2509", "JD2510"),
+                point(date!(2024 - 10 - 20), -80.0, "JD2509", "JD2510"),
+                point(date!(2025 - 06 - 02), 150.0, "JD2509", "JD2510"),
+                point(date!(2025 - 08 - 29), 200.0, "JD2509", "JD2510"),
+                // 2026 段:10/29 开窗。
+                point(date!(2025 - 10 - 29), 160.0, "JD2609", "JD2610"),
+                point(date!(2026 - 06 - 01), 260.0, "JD2609", "JD2610"),
+                point(date!(2026 - 08 - 31), 300.0, "JD2609", "JD2610"),
+            ],
+            &contracts,
+            None,
+        )
+        .unwrap();
+        // 轴:10/29 起,08/31 止;2025 年 9/15、10/20 那两个「早开窗」的键被剪掉,
+        // 不再吊在轴的末端。
+        assert_eq!(
+            result.seasonal.axis.first().map(String::as_str),
+            Some("10-29")
+        );
+        assert_eq!(
+            result.seasonal.axis.last().map(String::as_str),
+            Some("08-31")
+        );
+        assert!(
+            !result
+                .seasonal
+                .axis
+                .iter()
+                .any(|k| k == "09-15" || k == "10-20")
+        );
+        // 样本数按轴上真正画出来的点算:2025 年只剩 06-02 与 08-29 两个点。
+        let y2025 = result
+            .seasonal
+            .years
+            .iter()
+            .find(|y| y.year == 2025)
+            .expect("2025 在列");
+        assert_eq!(y2025.sample_count, 2);
+        assert_eq!(y2025.sample_start, Some(date!(2025 - 06 - 02)));
     }
 
     #[test]
