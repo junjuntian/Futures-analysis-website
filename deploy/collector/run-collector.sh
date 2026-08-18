@@ -246,6 +246,43 @@ else
   echo "INFER_OFFBOARD_SKIPPED missing $INFER_OFFBOARD" >&2
 fi
 
+# 现货价与基差(DEC-074)。生意社数据经 akshare,跑在 collector 镜像里。
+#
+# 排在套利监控之前只是让日志顺序好读:基差与监控快照互不依赖(监控读期货价,
+# 基差自己一张表)。回看 8 天与官方席位同一个理由——某天晚间没跑成,第二天
+# 能自动补上,不必人工回填。
+#
+# **失败不阻断后面的步骤**:基差是背景信息,拿不到不该让监控快照也跟着不跑。
+SPOT_BASIS_FETCH="$previous_release_dir/deploy/collector/fetch-spot-basis.py"
+SPOT_BASIS_LOAD="$previous_release_dir/deploy/collector/load-spot-basis.sql"
+if [ -r "$SPOT_BASIS_FETCH" ] && [ -r "$SPOT_BASIS_LOAD" ]; then
+  rm -f /opt/futures-platform/load/spot_basis.csv
+  # 走 compose run(与上面新浪那步同一套写法):镜像标签由 compose 文件决定,
+  # 不用在脚本里另外拼一个镜像引用。
+  if "${COMPOSE[@]}" run --rm --no-deps \
+       -v "$SPOT_BASIS_FETCH":/tmp/fetch-spot-basis.py:ro \
+       -v /opt/futures-platform/load:/tmp/load \
+       --entrypoint python collector /tmp/fetch-spot-basis.py \
+       --out /tmp/load/spot_basis.csv \
+       --since "$(date -u -d '8 days ago' +%Y%m%d)" \
+       --date "$(date -u +%Y%m%d)"; then
+    if [ -s /opt/futures-platform/load/spot_basis.csv ]; then
+      postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+      docker cp /opt/futures-platform/load/spot_basis.csv "$postgres_id":/tmp/spot_basis.csv
+      "${COMPOSE[@]}" exec -T postgres \
+        psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
+        -v csv_path=/tmp/spot_basis.csv < "$SPOT_BASIS_LOAD" \
+        || echo "SPOT_BASIS_LOAD_FAILED 装载没成功，基差今天不前进" >&2
+    else
+      echo "SPOT_BASIS_NO_CSV 采集没写出文件，跳过装载" >&2
+    fi
+  else
+    echo "SPOT_BASIS_FETCH_FAILED 基差今天不前进，后面的步骤照常" >&2
+  fi
+else
+  echo "SPOT_BASIS_SKIPPED missing $SPOT_BASIS_FETCH or $SPOT_BASIS_LOAD" >&2
+fi
+
 # 套利监控快照。必须排在投影之后：它读的是 price_history，而那张表由投影填。
 # 生产实测约 77 秒（瓶颈是历年百分位那一步，见 SQL 里的注释）。
 # window_days=3 只重算最近三天：日更只需覆盖新落库的一两天，兜一点补采余量。
