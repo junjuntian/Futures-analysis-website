@@ -9,13 +9,21 @@
 # 北京次日凌晨 05:30。本文件若配 CRON_TZ 会同样漂移八小时。
 #
 # 顺序是硬要求(北京时间对照):
+#   08:00 UTC = 16:00 北京  collector 采集(抢早一轮)
+#   08:25 UTC = 16:25 北京  官方席位增量(本文件,抢早一轮)
+#   08:40 UTC = 16:40 北京  机构资金引擎(抢早一轮)
 #   09:30 UTC = 17:30 北京  collector 采集
 #   09:55 UTC = 17:55 北京  官方席位增量(本文件)
 #   10:10 UTC = 18:10 北京  机构资金引擎
 # 引擎读的是席位表,跑在本文件之前就会算在旧数据上。
 #
+# 16:xx 那三轮是 2026-08-18 加出来的抢早轮,**不是把原有时刻挪早**:交易所的
+# 持仓排名通常 15:30~16:30 才陆续发布,16:25 能不能拿全没验证过。官方席位是
+# 增量 upsert,采到就早到,没采到由 17:55 那轮补齐。
+#
 # 这套 cron 与 futures-smart-money.cron 长期只存在于服务器上、靠手工安装,
 # 2026-08-13 迁新机时才发现「换机器要记得重装」这件事没有任何东西保证。
 # 现在随发布包下发。
+25 8 * * 1-5 root /usr/local/sbin/run-official-seats >>/var/log/futures-official-seats.log 2>&1
 55 9 * * 1-5 root /usr/local/sbin/run-official-seats >>/var/log/futures-official-seats.log 2>&1
 55 13 * * 1-5 root /usr/local/sbin/run-official-seats >>/var/log/futures-official-seats.log 2>&1

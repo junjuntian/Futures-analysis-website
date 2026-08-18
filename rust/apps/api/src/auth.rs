@@ -111,8 +111,16 @@ impl AuthConfig {
             public_origin,
             bootstrap_token,
             bootstrap_token_file,
-            absolute_session_ttl: Duration::days(7),
-            idle_session_ttl: Duration::hours(4),
+            // 会话时长(2026-08-18 运营者拍板:30 天登录一次)。
+            //
+            // 每天都要重登的元凶是**闲置 4 小时**那条,不是绝对期限:盘后看一眼、
+            // 隔天再开就已经超时。这是单人自用面板,唯一使用者是运营者本人,
+            // 「频繁重登」的安全收益接近零、摩擦却是每天一次——两条都放到 30 天。
+            //
+            // 仍然保留的防线:会话可在设置页逐个吊销、每用户最多 5 个会话、
+            // 密码改动使旧会话失效。要收紧就改这两个常量,不必动别处。
+            absolute_session_ttl: Duration::days(30),
+            idle_session_ttl: Duration::days(30),
             max_sessions_per_user: 5,
             argon2_memory_kib: 64 * 1024,
             argon2_iterations: 3,

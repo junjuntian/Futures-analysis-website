@@ -7,11 +7,19 @@
 # 机器 TZ 是 UTC，写 UTC 是唯一不依赖 cron 实现细节的写法。
 #
 # 北京时间对照（UTC+8，以下时刻均不跨日）：
+#   08:00 UTC = 16:00 北京  抢早一轮（2026-08-18 运营者要求「16 点就开始采」）
 #   09:30 UTC = 17:30 北京  日盘收盘后，交易所已发布当日榜单
 #   13:30 UTC = 21:30 北京  兜底一次，补上第一趟时尚未发布的交易所
 #   15:00 UTC = 23:00 北京  价差预热，此时没人在看页面
 #
-# 星期用 1-5：09:30/13:30/15:00 UTC 与北京同日，不存在日界漂移。
+# **16:00 这一轮是加出来的，不是把 17:30 挪早**。日盘 15:00 收盘，但各交易所的
+# 结算与持仓排名通常 15:30~16:30 才陆续发布，16:00 能不能采全没人验证过。采集是
+# 幂等 upsert，多跑一轮无害：采到就早看到一个半小时，没采到（或只采到一部分）也
+# 有 17:30 那轮把它补齐。**观察几天日志，确认 16:00 稳定采全之后再决定要不要撤掉
+# 17:30 那轮**——先撤后验就是拿每天的数据完整性赌一个没验证过的假设。
+#
+# 星期用 1-5：08:00/09:30/13:30/15:00 UTC 与北京同日，不存在日界漂移。
+0 8 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
 30 9 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
 30 13 * * 1-5 root /usr/local/sbin/run-futures-collector >>/var/log/futures-collector.log 2>&1
 # Spread warming runs after the evening collection, when the upstream has
