@@ -99,6 +99,27 @@ select a.workspace_id, a.instrument, a.contract, a.mm, a.yy,
  where a.instrument = 'FG' and b.instrument = 'SA'
    and a.yy = b.yy and a.mm = b.mm;
 
+-- 历年实例(DEC-071):把当前每个模板(品种+月份对+年差)按同样口径往回展开,
+-- **只收已到期的**——先到期腿的交割月已经开始,散户窗口早关了。这样历史信号
+-- 视图能看到 JD2509-JD2601 这类过期组合的当年 ⚡,而「当前挂牌且有量」的主力
+-- 圈定门对现役组合原样生效(未到期的年轻实例不进来,免得绕过持仓量前 6 的门)。
+-- 过期实例只在大窗口全量重算时产出行;日更窗口内它们没有数据,零成本。
+insert into combo
+select k.workspace_id, k.i1, l1.contract, k.m1, l1.yy,
+       k.i2, l2.contract, k.m2, l2.yy, k.is_cross
+  from (select distinct workspace_id, i1, m1, i2, m2, y2 - y1 yoff, is_cross
+          from combo) k
+  join (select distinct workspace_id, instrument, contract, mm, yy from legs) l1
+    on l1.workspace_id = k.workspace_id and l1.instrument = k.i1 and l1.mm = k.m1
+  join (select distinct workspace_id, instrument, contract, mm, yy from legs) l2
+    on l2.workspace_id = k.workspace_id and l2.instrument = k.i2 and l2.mm = k.m2
+   and l2.yy = l1.yy + k.yoff
+ where least(make_date(2000 + l1.yy, k.m1, 1), make_date(2000 + l2.yy, k.m2, 1))
+       <= current_date
+   and not exists (select 1 from combo c
+                    where c.workspace_id = k.workspace_id
+                      and c.c1 = l1.contract and c.c2 = l2.contract);
+
 -- 当年：该合约对自身的全部历史，原始最低/最高。
 -- 不足 30 天的组合直接不监控——「五天的历史极值」不是极值。
 -- (原为 60 天;2026-08-18 运营者拍板降到 30:生猪 2705 系组合上市 58 天还进不了

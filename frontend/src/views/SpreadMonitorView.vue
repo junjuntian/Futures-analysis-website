@@ -165,6 +165,19 @@ const quiet = computed(() =>
   historyMode.value ? [] : filtered.value.filter((item) => !item.alert && !item.turn)
 )
 const historyDays = computed(() => new Set(fired.value.map((item) => item.trade_date)).size)
+
+// 历史信号翻页(仿机构资金的历史信号列表):跨年全量有几百笔,一页 20 笔。
+// 当前模式不翻页——当天的列表本来就该一眼看全。
+const HISTORY_PAGE_SIZE = 20
+const historyPage = ref(1)
+watch([historyMode, varietyFilter, direction], () => {
+  historyPage.value = 1
+})
+const pagedFired = computed(() => {
+  if (!historyMode.value) return fired.value
+  const start = (historyPage.value - 1) * HISTORY_PAGE_SIZE
+  return fired.value.slice(start, start + HISTORY_PAGE_SIZE)
+})
 const highCount = computed(() => fired.value.filter((item) => item.alert === 'high').length)
 const lowCount = computed(() => fired.value.filter((item) => item.alert === 'low').length)
 const newCount = computed(() => fired.value.filter((item) => item.is_new_alert).length)
@@ -367,7 +380,7 @@ function openDetail(item: SpreadMonitorItem) {
         <el-checkbox v-model="onlyNew" border :disabled="historyMode">仅新触发</el-checkbox>
         <el-checkbox v-model="onlyEntry" border :disabled="historyMode">仅进场日</el-checkbox>
         <el-tooltip
-          content="一次列出全部快照日的 ⚡ 进场信号(覆盖当前监控组合的整个可交易历史),不用逐个日期点选。已到期换掉的旧组合不在内。"
+          content="一次列出历年全部 ⚡ 进场信号(同月份模板的历年组合都在内,过期组合带灰标),新日期在前,可翻页。"
           placement="top"
         >
           <el-checkbox v-model="historyMode" border>历史信号</el-checkbox>
@@ -403,7 +416,7 @@ function openDetail(item: SpreadMonitorItem) {
       />
       <div class="rows" v-loading="loading">
         <article
-          v-for="item in fired"
+          v-for="item in pagedFired"
           :key="item.trade_date + item.contract_1 + item.contract_2"
           class="row"
           :class="(item.alert ?? item.turn) === 'high' ? 'fired-high' : 'fired-low'"
@@ -449,6 +462,9 @@ function openDetail(item: SpreadMonitorItem) {
 
           <div class="tail">
             <div class="state-tags">
+              <el-tag v-if="item.expired" type="info" effect="plain" size="small">
+                已过期
+              </el-tag>
               <el-tooltip v-if="isRedLine(item.days_left)" :content="REDLINE_HINT" placement="top">
                 <span class="badge-redline">临近交割 · 剩 {{ item.days_left }} 日</span>
               </el-tooltip>
@@ -530,6 +546,15 @@ function openDetail(item: SpreadMonitorItem) {
           </div>
         </article>
       </div>
+
+      <el-pagination
+        v-if="historyMode && fired.length > HISTORY_PAGE_SIZE"
+        v-model:current-page="historyPage"
+        :page-size="HISTORY_PAGE_SIZE"
+        :total="fired.length"
+        layout="prev, pager, next, total"
+        class="history-pager"
+      />
 
       <h2 class="group-label" v-if="quiet.length">
         未触发
@@ -804,6 +829,10 @@ function openDetail(item: SpreadMonitorItem) {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+.history-pager {
+  margin: 4px 0 20px;
+  justify-content: center;
 }
 /* 手工产业备注:统计旁边的「为什么」。整块可点进编辑。 */
 .note {

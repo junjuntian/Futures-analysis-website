@@ -3777,6 +3777,9 @@ pub struct SpreadMonitorItem {
     /// 该**月份模板**的手工产业备注(DEC-069):运营者手填的品种级知识,
     /// 跟月份走不跟具体合约走(JD2609/2701 与 JD2709/2801 共享「09-01」一条)。
     pub note: Option<String>,
+    /// 组合已到期(先到期腿的散户窗口在最新快照日之前已关):历史信号里的
+    /// 过期组合打灰标(DEC-071)。按最新快照日判而不是墙钟,结果可复现。
+    pub expired: bool,
 }
 
 /// 该月份组合模板在**可交易窗口**内、按日历位置对齐的历年表现。
@@ -4177,6 +4180,9 @@ pub async fn query_spread_monitor(
             .and_then(|mm| mm.parse::<i32>().ok())
     };
 
+    // 过期判定的基准日 = 这批行里最新的快照日(不是墙钟,结果可复现)。
+    let latest_snapshot = rows.iter().map(|row| row.trade_date).max();
+
     let items: Vec<SpreadMonitorItem> = rows
         .into_iter()
         .map(|row| {
@@ -4216,6 +4222,9 @@ pub async fn query_spread_monitor(
                 && has_prev
                 && combined_alert_at(prev_pair, prev_years, threshold).is_none();
 
+            let expired = latest_snapshot.is_some_and(|day| {
+                days_to_window_end(&row.contract_1, &row.contract_2, day) == Some(0)
+            });
             let retreat = turn_retreat(&row.instrument_1, &row.instrument_2);
             let turn = monitor_turn(
                 track_position(&pair),
@@ -4279,6 +4288,7 @@ pub async fn query_spread_monitor(
                 turn_crosses,
                 days_left,
                 note,
+                expired,
             }
         })
         .collect();

@@ -670,6 +670,8 @@ export interface SpreadMonitorItem {
   /** 该月份模板的手工产业备注（DEC-069）。跟月份走不跟具体合约走，
    * JD2609/2701 与 JD2709/2801 共享「09-01」一条。没写过为 null。 */
   note: string | null
+  /** 组合已到期（先到期腿的散户窗口在最新快照日前已关）。历史信号里打灰标。 */
+  expired: boolean
 }
 
 export interface SpreadMonitorResponse {
