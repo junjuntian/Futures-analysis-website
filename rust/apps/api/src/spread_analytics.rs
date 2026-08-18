@@ -4283,7 +4283,21 @@ pub async fn query_spread_monitor(
         })
         .collect();
 
+    // as_of 在过滤前算:历史模式下 items 只剩进场候选行,拿它的 max 会把
+    // 「最新快照」显示成最后一次进场的日子。
     let as_of = items.iter().map(|item| item.trade_date.clone()).max();
+
+    // 历史视图只回传进场候选行(今天刚穿线且是本轮首次):快照回填到组合整个
+    // 生命周期后全量行有上万,整包返回太重。资格与红线的最终判定仍在前端
+    // isEntry 一处,这里只做粗筛,不产生第二份口径。
+    let items: Vec<SpreadMonitorItem> = if query.history.unwrap_or(false) {
+        items
+            .into_iter()
+            .filter(|item| item.is_new_turn && item.turn_crosses == Some(1))
+            .collect()
+    } else {
+        items
+    };
 
     Ok(Json(ApiResponse::new(
         SpreadMonitorResponse {

@@ -367,7 +367,7 @@ function openDetail(item: SpreadMonitorItem) {
         <el-checkbox v-model="onlyNew" border :disabled="historyMode">仅新触发</el-checkbox>
         <el-checkbox v-model="onlyEntry" border :disabled="historyMode">仅进场日</el-checkbox>
         <el-tooltip
-          content="一次列出全部快照日的 ⚡ 进场信号,不用逐个日期点选。"
+          content="一次列出全部快照日的 ⚡ 进场信号(覆盖当前监控组合的整个可交易历史),不用逐个日期点选。已到期换掉的旧组合不在内。"
           placement="top"
         >
           <el-checkbox v-model="historyMode" border>历史信号</el-checkbox>
