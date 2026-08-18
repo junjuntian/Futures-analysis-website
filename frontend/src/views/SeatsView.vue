@@ -451,7 +451,8 @@ function tooltipBody(index: number, head: string[] = []) {
   }
 
   // 「估计」二字不能省：这是由公开持仓与结算价推出来的，不是他的对账单。
-  // 当日盈亏运营者明确说不用，只留累计。
+  // 这里只放累计：当日那个数由「当日盈亏」图自己的小窗放在第一行（dailyPnlTooltip），
+  // 免得在当日盈亏的柱子上悬停却只读到累计（2026-08-18 运营者指出的口径错配）。
   const cumulative = num(day.cumulative_pnl)
   if (cumulative !== null) {
     parts.push(row('估计累计盈利',
@@ -532,6 +533,35 @@ const tooltip = {
   formatter: (params: unknown) => {
     const index = axisIndex(params)
     return index === null ? '' : tooltipBody(index)
+  }
+}
+
+/**
+ * 「当日盈亏」图专用的小窗:**第一行必须是当日那个数**。
+ *
+ * 三张图共用同一个小窗内容时,悬停在当日盈亏的柱子上读到的却是「估计累计盈利」
+ * ——图名与数字对不上,运营者 2026-08-18 就是这么发现的。共用小窗省事,但代价是
+ * 用户在哪张图上,就应该先看到那张图画的东西。
+ */
+const dailyPnlTooltip = {
+  trigger: 'axis' as const,
+  formatter: (params: unknown) => {
+    const index = axisIndex(params)
+    if (index === null) return ''
+    const day = days.value[index]
+    const tokens = chartTokens()
+    const value = day ? num(day.daily_pnl) : null
+    const head =
+      value === null
+        ? [row('当日盈亏', '不可知（掉出前 20 或当日无结算价）')]
+        : [
+            row(
+              '当日盈亏',
+              `${value >= 0 ? '+' : '−'}${money(Math.abs(value))}`,
+              value >= 0 ? tokens.up : tokens.down
+            )
+          ]
+    return tooltipBody(index, head)
   }
 }
 
@@ -664,7 +694,7 @@ const pnlOption = computed<EChartsOption>(() => {
   return {
     grid: { left: 72, right: 24, top: 16, bottom: GRID_BOTTOM },
     dataZoom: zoom.value,
-    tooltip: { ...tooltip, ...tooltipStyle() },
+    tooltip: { ...dailyPnlTooltip, ...tooltipStyle() },
     xAxis: {
       type: 'category' as const,
       data: dates.value,
