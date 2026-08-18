@@ -40,37 +40,37 @@ use uuid::Uuid;
 pub struct SpreadAnalyticsState {
     pub auth: Arc<AuthState>,
     pub provider: Arc<dyn SpreadSeriesProvider>,
-    /// 总览报告表响应缓存,键=(工作区, 交易日),值=(写入时刻, 已序列化响应)。
+    /// 总览报告表响应缓存,键=(工作区, 交易日),值=(**数据版本**, 已序列化响应)。
     ///
     /// 报告表下半的筹码列每次要对七家席位×金银跑全历史成本推算(实测十几秒,
-    /// 这是"与席位页同引擎、不落表"设计的物理成本)。2026-08-16 运营者拍板
-    /// 方案 A:15 分钟 TTL 缓存——每天首开慢一次,其后毫秒级;晚间补采落库
-    /// 最多 15 分钟内可见。写端点(压力位/席位组)保存后整体失效。缓存的是
-    /// serde_json::Value 而不是响应结构体,免去给整棵响应类型树加 Clone。
+    /// 这是"与席位页同引擎、不落表"设计的物理成本)。
+    ///
+    /// **失效由数据变化驱动,不由时间驱动**(2026-08-18 运营者纠正):
+    /// 原先 15 分钟 TTL,意味着隔一会儿再打开就必然撞上重算,而空闲时段又在
+    /// 反复重算一模一样的东西。现在缓存里存下算这份时的
+    /// `report_data_version`(该交易日席位与行情的最近装载时刻),命中判断只比
+    /// 版本:**数据没变就一直用这份,不管过了多久**;采集写了新数,版本一变,
+    /// 后台预热(3 分钟内)就把它算好,用户命中的仍是算好的。
+    ///
+    /// 手工改的东西(压力位、席位组)不体现在数据版本里,由写端点保存后
+    /// `.clear()` 整体失效兜住。缓存的是 serde_json::Value 而不是响应结构体,
+    /// 免去给整棵响应类型树加 Clone。
     pub report_cache: ReportCache,
 }
 
-/// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日)。
-type ReportCache = Arc<tokio::sync::RwLock<HashMap<(Uuid, Date), (Instant, serde_json::Value)>>>;
+/// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日),
+/// 值=(算这份时的数据版本, 已序列化响应)。版本见 `report_data_version`。
+type ReportCache =
+    Arc<tokio::sync::RwLock<HashMap<(Uuid, Date), (Option<OffsetDateTime>, serde_json::Value)>>>;
 
-/// 报告表缓存有效期。
-///
-/// **2026-08-18 由 15 分钟改为 6 小时,并配后台预热**(运营者:「过一会打开就要
-/// 转半天」)。15 分钟的 TTL 意味着只要隔一会儿再开就必然撞上重算——那十几秒
-/// 每天要吃很多遍。数据一天只在三轮采集时变,6 小时不会让人看到隔夜的旧数据;
-/// 真正保证新鲜的是下面那个后台任务:它在采集时刻之后主动重算,把缓存刷成
-/// 最新的,用户命中的永远是算好的。
-const REPORT_CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
-
-/// 后台预热的巡检间隔。它只在「缓存缺失或已超过 `REPORT_REFRESH_AGE`」时才真的
-/// 重算,所以间隔短一点不等于多花 CPU。
-const REPORT_WARM_INTERVAL: Duration = Duration::from_secs(300);
-
-/// 缓存超过这个年龄就由后台重算。取 25 分钟:三轮采集(16:00/17:30/21:30 北京)
-/// 之后最多 25 分钟,页面上就是新数的了,而空闲时段一小时也就重算两次。
-const REPORT_REFRESH_AGE: Duration = Duration::from_secs(1500);
+/// 后台预热的巡检间隔。每次只做一条 `report_data_version` 轻查询,
+/// **版本没变就什么都不做**——所以间隔短不等于费 CPU。
+const REPORT_WARM_INTERVAL: Duration = Duration::from_secs(180);
 
 /// 报告表后台预热:让「打开就是算好的」成为常态。
+///
+/// 它做的事很窄:每 3 分钟查一次数据版本,**变了才算**。所以采集落库之后
+/// 最多 3 分钟,页面上就是算好的新数;数据没动的时段它一次重算都不做。
 ///
 /// 为什么放在 API 进程里而不是像价差预热那样做成一条 cron:**报告表的缓存在
 /// 进程内存里**,外部进程(compose run 起的临时容器)算完写进的是它自己的内存,
@@ -106,17 +106,23 @@ async fn warm_latest_report(state: &Arc<SpreadAnalyticsState>) -> anyhow::Result
         else {
             continue; // 这个工作区还没有席位数据,没什么可预热的
         };
-        let fresh = state
+        let version = database::spread_analytics::report_data_version(
+            &state.auth.pool,
+            workspace,
+            trade_date,
+        )
+        .await?;
+        let current = state
             .report_cache
             .read()
             .await
             .get(&(workspace, trade_date))
-            .is_some_and(|(cached_at, _)| cached_at.elapsed() < REPORT_REFRESH_AGE);
-        if fresh {
-            continue;
+            .is_some_and(|(cached_version, _)| *cached_version == version);
+        if current {
+            continue; // 数据没动过,这份缓存还是对的
         }
         let started = Instant::now();
-        compute_overview_report(state, workspace, trade_date, Uuid::now_v7())
+        compute_overview_report(state, workspace, trade_date, version, Uuid::now_v7())
             .await
             .map_err(|_| anyhow::anyhow!("compute_overview_report failed"))?;
         tracing::info!(
@@ -1854,18 +1860,24 @@ pub async fn query_overview_report(
             .ok_or(SpreadApiError::Internal(request_id))?,
     };
 
-    // 缓存命中直接返回(设计与失效语义见 report_cache 字段注释)。
-    if let Some((cached_at, value)) = state
+    // **数据没变就一直用这份**(设计见 report_cache 字段注释与 DEC-078)。
+    // 版本查询是一条按 (workspace, trade_date) 走索引的 max,毫秒级;
+    // 真正贵的是它保护的那十几秒成本推算。
+    let version =
+        database::spread_analytics::report_data_version(&state.auth.pool, workspace, trade_date)
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+    if let Some((cached_version, value)) = state
         .report_cache
         .read()
         .await
         .get(&(workspace, trade_date))
-        && cached_at.elapsed() < REPORT_CACHE_TTL
+        && *cached_version == version
     {
         return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
     }
 
-    let value = compute_overview_report(&state, workspace, trade_date, request_id).await?;
+    let value = compute_overview_report(&state, workspace, trade_date, version, request_id).await?;
     Ok(Json(ApiResponse::new(value, request_id)).into_response())
 }
 
@@ -1878,6 +1890,7 @@ async fn compute_overview_report(
     state: &Arc<SpreadAnalyticsState>,
     workspace: Uuid,
     trade_date: Date,
+    version: Option<OffsetDateTime>,
     request_id: Uuid,
 ) -> Result<serde_json::Value, SpreadApiError> {
     let stored = database::spread_analytics::load_report_seat_groups(&state.auth.pool, workspace)
@@ -2072,7 +2085,7 @@ async fn compute_overview_report(
         .report_cache
         .write()
         .await
-        .insert((workspace, trade_date), (Instant::now(), value.clone()));
+        .insert((workspace, trade_date), (version, value.clone()));
     Ok(value)
 }
 

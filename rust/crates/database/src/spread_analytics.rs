@@ -2318,6 +2318,43 @@ pub async fn load_spot_basis(
         .collect())
 }
 
+/// 报告表所依赖数据的「版本」:该交易日席位与行情最近一次被装载触碰的时刻。
+///
+/// 用它做缓存键,报告表就只在**数据真的变过**之后才重算——按时间过期的做法在
+/// 空闲时段会反复重算一模一样的东西,到点又必然让人撞上那十几秒(运营者
+/// 2026-08-18 指出这一点)。
+///
+/// 取 `updated_at` 不是 `loaded_at`:后者自 2026-08-16 起固定为「首次到达时刻」、
+/// upsert 不再刷新(见迁移 202608160001),晚间补采改了数也不会动它——拿它当
+/// 版本号会漏掉补采。`updated_at` 则是 insert/upsert 都刷新的「最近触碰时刻」,
+/// 正是这里要的语义。
+///
+/// 只看**该交易日**的行:采集写的就是当天(补采回看几天也会落在自己的 trade_date
+/// 上,那些日子的报告表另有各自的缓存键)。全表 max 要扫六百万行,不值当。
+/// 存量行的 `updated_at` 为 null(加列前入库),`max` 会忽略它们——那些日子的
+/// 数据早已不再变化,版本恒为 null 也就恒定命中,正合适。
+pub async fn report_data_version(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    trade_date: Date,
+) -> Result<Option<OffsetDateTime>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let version: Option<OffsetDateTime> = sqlx::query_scalar(
+        "select greatest(
+                  (select max(updated_at) from seat_history
+                    where workspace_id = $1 and trade_date = $2),
+                  (select max(updated_at) from price_history
+                    where workspace_id = $1 and trade_date = $2))",
+    )
+    .bind(workspace_id)
+    .bind(trade_date)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(version)
+}
+
 /// 全部模板备注,一次取回(单人面板,总量个位数到几十条)。
 pub async fn load_template_notes(
     pool: &PgPool,
