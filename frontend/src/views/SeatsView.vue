@@ -925,6 +925,19 @@ const cumulativeTotal = computed(() => {
   return last === undefined || last === null ? null : last
 })
 
+/**
+ * 最新一天的当日盈亏，常驻在「当日盈亏」标题旁——与累计那张图同一个待遇。
+ *
+ * 取的是**序列最后一天**，不是「最后一个有值的天」：累计线可以跳过不可知的天
+ * 接着算（那条线本来就是已知部分的累加），但「今天赚了多少」跳过去就成了
+ * 拿前几天的数冒充今天。最后一天不可知就如实说不可知。
+ */
+const latestDailyPnl = computed(() => {
+  if (!days.value.length) return null
+  const value = num(days.value[days.value.length - 1].daily_pnl)
+  return { known: value !== null, value: value ?? 0 }
+})
+
 </script>
 
 <template>
@@ -1195,7 +1208,23 @@ const cumulativeTotal = computed(() => {
           />
         </el-card>
         <el-card shadow="never">
-          <template #header><h2>当日盈亏</h2></template>
+          <template #header>
+            <h2>
+              当日盈亏
+              <span
+                v-if="latestDailyPnl"
+                :class="
+                  latestDailyPnl.known ? (latestDailyPnl.value >= 0 ? 'up' : 'down') : 'muted'
+                "
+              >
+                <template v-if="!latestDailyPnl.known">当日不可知</template>
+                <template v-else>
+                  {{ latestDailyPnl.value >= 0 ? '当日盈利' : '当日亏损' }}
+                  {{ money(Math.abs(latestDailyPnl.value)) }}
+                </template>
+              </span>
+            </h2>
+          </template>
           <SpreadChart
             :option="pnlOption"
             :height="300"
@@ -1251,6 +1280,12 @@ const cumulativeTotal = computed(() => {
 }
 .down {
   color: var(--tv-down);
+  font-weight: 600;
+  margin-left: 8px;
+}
+/* 标题旁的「当日不可知」：与 .up/.down 同一位置，但不是盈亏，走弱化色。 */
+h2 .muted {
+  color: var(--tv-text-muted);
   font-weight: 600;
   margin-left: 8px;
 }
