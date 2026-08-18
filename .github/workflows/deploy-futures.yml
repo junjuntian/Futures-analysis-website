@@ -271,6 +271,7 @@ jobs:
             rust/migrations/202608180001_spread_template_notes.sql \
             rust/migrations/202608180002_widen_years_position_sane.sql \
             rust/migrations/202608180003_spot_basis_history.sql \
+            rust/migrations/202608180004_restore_years_position_guard.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline

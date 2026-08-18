@@ -1365,19 +1365,25 @@ mod tests {
         // 历年轨的 sane 护栏必须容得下真实的极端观测(AP2111-AP2112 在 2021-11-04
         // prev_years_position=-12.26,首轮历年回填被 ±10 拦死);当年轨恒在 [0,1],
         // 它的 ±10 护栏保持原样,放宽的只能是历年侧。
-        let widen = include_str!("../../../migrations/202608180002_widen_years_position_sane.sql");
+        // 202608180002 曾把历年侧放宽到 ±100,理由是「−8020 是真实观测」——那其实是
+        // 收盘价 0 造成的脏数据(DEC-073)。根因修掉、全量重算后实际值域是
+        // −2.85~5.01,202608180004 已把护栏收回 ±10。两个迁移都必须可重跑。
+        for sql in [
+            include_str!("../../../migrations/202608180002_widen_years_position_sane.sql"),
+            include_str!("../../../migrations/202608180004_restore_years_position_guard.sql"),
+        ] {
+            assert!(
+                sql.matches("drop constraint if exists").count() == 2,
+                "替换两条约束都要先 drop if exists 才能重跑"
+            );
+        }
+        let restored =
+            include_str!("../../../migrations/202608180004_restore_years_position_guard.sql");
         assert!(
-            widen.matches("drop constraint if exists").count() == 2,
-            "替换两条约束都要先 drop if exists 才能重跑"
-        );
-        assert!(
-            widen.contains("prev_pair_position >= -10"),
-            "当年轨前值的护栏不许跟着放宽"
-        );
-        assert!(
-            widen.contains("prev_years_position >= -100")
-                && widen.contains("years_position >= -100"),
-            "历年侧两处都要放宽到 ±100"
+            restored.contains("years_position >= -10")
+                && restored.contains("prev_years_position >= -10")
+                && !restored.contains("-100"),
+            "护栏必须收回 ±10,不许留 ±100 的残迹"
         );
     }
 
