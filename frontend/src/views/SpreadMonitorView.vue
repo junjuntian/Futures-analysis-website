@@ -8,7 +8,8 @@ import {
   getSpreadVarieties,
   saveSpreadTemplateNote,
   type SpreadMonitorItem,
-  type SpreadMonitorTrack
+  type SpreadMonitorTrack,
+  type SpreadShelf
 } from '../api'
 import {
   driftTone,
@@ -222,6 +223,38 @@ const TURN_HINT =
   '位置刻度上,焦煤位置日抖动全场最高要深线,鸡蛋季节趋势强早进不受罚要浅线）。' +
   '分层规则的进场信号：报警只是机会出现，拐头才是上车点——全样本回放里报警当天' +
   '就进持到底中位为负，等拐头才转正。'
+/** 平台位阶梯里挑出止损与目标(DEC-095)。角色是后端按交易侧派好的,这里只取。 */
+function stopShelf(item: SpreadMonitorItem) {
+  return item.shelves?.find((s) => s.role === 'stop') ?? null
+}
+/** 目标按「离现价最近」排,第一个就是第一目标。 */
+function targetShelves(item: SpreadMonitorItem) {
+  return (item.shelves ?? [])
+    .filter((s) => s.role === 'target')
+    .sort((a, b) => Math.abs(Number(a.offset)) - Math.abs(Number(b.offset)))
+}
+/** 档位跨了几十点时显示区间,不报一个假精度的均值。 */
+function shelfLabel(s: SpreadShelf) {
+  const span = Math.abs(Number(s.hi) - Number(s.lo))
+  return span >= 30 ? `${s.lo}~${s.hi}` : s.level
+}
+function offsetText(s: SpreadShelf) {
+  const v = Number(s.offset)
+  return `${v > 0 ? '上方' : '下方'} ${Math.abs(v)} 点`
+}
+
+const SHELF_HINT =
+  '平台位 = 价差自己走出来的横盘转折位(收盘是前后各 3 个交易日里的极值,' +
+  '50 点内并成一档)。触碰回合 = 收盘落在该档 ±25 点内的独立回合数。' +
+  '**最近三个交易日的转折还不算数**——它要等 3 天才确认,不然历史行会带上未来信息。'
+
+const REACH_HINT =
+  '到达概率 = 历史上从同样远近(距离 ÷ σ√剩余交易日)的处境出发,在窗口止点前' +
+  '摸到过这个距离的比例,14.4 万个观测。**它不含方向判断**:上下两侧用同一条曲线,' +
+  '方向由「日线收盘突破平台位」那条规矩定。**逐年离散很大**:同样的距离,' +
+  '2014 年只有 17%、2019 年有 53%,长期中位 42%。逐品种/逐方向的版本样本外崩了' +
+  '(那是行情漂移不是品种特性),所以合并掉了。'
+
 const CONFLICT_HINT =
   '两条轨在讲相反的故事:一条说该做多价差,另一条说该做空价差。' +
   '上面的徽标与统计一律按**拐头侧**(要做的那笔)给,下面单列出另一侧供对照。' +
@@ -654,6 +687,50 @@ function openDetail(item: SpreadMonitorItem) {
                 <span class="pctile flow-tip">背景参考,非进场信号</span>
               </div>
             </el-tooltip>
+
+            <!-- 平台位(DEC-095)。摘要常驻一行,完整阶梯折起来——每行挂 8 档会把
+                 整页压垮。用 <details> 是零 JS,与 admin 那批列设置同一个做法。 -->
+            <details v-if="item.shelves && item.shelves.length" class="shelf">
+              <summary>
+                <span class="k">平台位</span>
+                <template v-if="stopShelf(item)">
+                  <span class="chip stop">止损 {{ shelfLabel(stopShelf(item)!) }}</span>
+                </template>
+                <template v-for="(t, i) in targetShelves(item).slice(0, 2)" :key="t.level">
+                  <span class="chip target">
+                    {{ i === 0 ? '第一目标' : '再看' }} {{ shelfLabel(t) }}
+                    <em v-if="t.reach_pct !== null">{{ t.reach_pct.toFixed(0) }}%</em>
+                  </span>
+                </template>
+                <span class="more">展开 {{ item.shelves.length }} 档</span>
+              </summary>
+
+              <div class="ladder">
+                <div
+                  v-for="s in item.shelves"
+                  :key="s.level"
+                  class="rung"
+                  :class="{ above: Number(s.offset) > 0 }"
+                >
+                  <span class="lvl">{{ shelfLabel(s) }}</span>
+                  <span class="meta">
+                    触碰 <b>{{ s.touches }}</b> 回合 · {{ offsetText(s) }}
+                    <em v-if="s.role === 'stop'" class="chip stop">止损</em>
+                    <em v-else-if="s.role === 'target'" class="chip target">卖点</em>
+                  </span>
+                  <span class="pct">
+                    <template v-if="s.reach_pct !== null">{{ s.reach_pct.toFixed(0) }}%</template>
+                    <template v-else>—</template>
+                  </span>
+                </div>
+                <p class="shelf-rule">
+                  <b>日线收盘突破一档,才往下一档看</b>;反方向收盘站上最近那一档就止损。
+                  <el-tooltip :content="SHELF_HINT" placement="top"><span class="q">档位怎么来的</span></el-tooltip>
+                  <el-tooltip :content="REACH_HINT" placement="top"><span class="q">概率怎么来的</span></el-tooltip>
+                  概率是<b>长期频率</b>(同样距离逐年 17%~53%),且<b>不含方向判断</b>。
+                </p>
+              </div>
+            </details>
 
             <div v-if="item.note" class="note" @click="openNoteEditor(item)">
               📝 {{ item.note }}
@@ -1134,6 +1211,40 @@ function openDetail(item: SpreadMonitorItem) {
   line-height: 1;
   cursor: help;
 }
+
+/* 平台位(DEC-095)。摘要一行常驻,阶梯折叠。
+   注意折叠元素 height:0 时 padding/border 仍占位,所以收起态不给它们。 */
+.shelf { margin-top: 6px; font-size: 12px; }
+.shelf > summary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  justify-content: flex-end; cursor: pointer; list-style: none;
+}
+.shelf > summary::-webkit-details-marker { display: none; }
+.shelf > summary .k { color: var(--tv-text-muted); }
+.shelf > summary .more { color: var(--tv-text-muted); text-decoration: underline dotted; }
+.shelf[open] > summary .more::after { content: ' ▲'; }
+.shelf:not([open]) > summary .more::after { content: ' ▼'; }
+.shelf .chip {
+  padding: 1px 7px; border-radius: 3px; font-style: normal; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.shelf .chip.stop { color: var(--tv-warn, #d98e00); border: 1px solid currentColor; }
+.shelf .chip.target { color: var(--tv-accent, #2563d9); border: 1px solid currentColor; }
+.shelf .chip em { font-style: normal; font-weight: 600; margin-left: 3px; }
+.shelf .ladder { margin-top: 6px; border-top: 1px solid var(--tv-border, #e3e8ee); padding-top: 6px; }
+.shelf .rung {
+  display: grid; grid-template-columns: 84px 1fr 44px; gap: 8px;
+  align-items: center; padding: 3px 0;
+}
+.shelf .rung .lvl { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.shelf .rung.above .lvl { color: var(--tv-text-secondary); }
+.shelf .rung .meta { color: var(--tv-text-muted); display: flex; gap: 6px; align-items: center; }
+.shelf .rung .meta b { color: var(--tv-text-secondary); font-weight: 600; }
+.shelf .rung .pct { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.shelf .shelf-rule {
+  margin: 6px 0 0; color: var(--tv-text-muted); line-height: 1.7; text-align: left;
+}
+.shelf .q { text-decoration: underline dotted; cursor: help; margin: 0 6px; }
 
 /* 另一侧统计:比主统计再弱一档,它是对照不是结论。 */
 .revert.alt {

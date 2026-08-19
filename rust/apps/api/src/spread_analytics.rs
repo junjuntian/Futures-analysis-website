@@ -3548,6 +3548,66 @@ mod monitor_tests {
     }
 
     #[test]
+    fn the_shelf_ladder_marks_the_stop_on_the_far_side() {
+        // LH2611−LH2705 @2026-08-19 的真实档位(库里跑出来的),现价差 −935。
+        // 做空价差(high):下方全是目标,**上方最近的一档 −885 是止损**。
+        let raw = r#"[
+            {"level":-885,"lo":-885,"hi":-885,"touches":2},
+            {"level":-1117,"lo":-1155,"hi":-1080,"touches":3},
+            {"level":-1355,"lo":-1355,"hi":-1355,"touches":3},
+            {"level":-1640,"lo":-1640,"hi":-1640,"touches":1}
+        ]"#;
+        let out = build_shelves(Some(raw), Some(-935.0), Some(94.4), Some(52), Some("high"));
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].level, "-885");
+        assert_eq!(out[0].offset, "50");
+        assert_eq!(out[0].role, "stop");
+        // 下方三档都是卖点侧,且离得越远概率越低。
+        assert_eq!(out[1].role, "target");
+        assert_eq!(out[3].role, "target");
+        let p1 = out[1].reach_pct.expect("有 σ 与剩余天数就该有概率");
+        let p3 = out[3].reach_pct.expect("同上");
+        assert!(p1 > p3, "越远的档概率必须越低:{p1} vs {p3}");
+        // 做多价差时角色整个翻过来:上方是目标,下方最近的一档是止损。
+        let up = build_shelves(Some(raw), Some(-935.0), Some(94.4), Some(52), Some("low"));
+        assert_eq!(up[0].role, "target");
+        assert_eq!(up[1].role, "stop");
+        assert_eq!(up[2].role, "");
+    }
+
+    #[test]
+    fn shelves_survive_a_missing_sigma_and_an_old_row() {
+        // 没有 σ 就没有 z 和概率,但档位与触碰次数照给——它们是库里的事实。
+        let raw = r#"[{"level":-1355,"lo":-1355,"hi":-1355,"touches":3}]"#;
+        let out = build_shelves(Some(raw), Some(-935.0), None, Some(52), Some("high"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].touches, 3);
+        assert!(out[0].z.is_none() && out[0].reach_pct.is_none());
+        // 旧行(这一列还没算过)与坏 JSON 都给空数组,不 panic。
+        assert!(build_shelves(None, Some(-935.0), Some(94.4), Some(52), Some("high")).is_empty());
+        assert!(build_shelves(Some("坏的"), Some(-935.0), Some(94.4), Some(52), None).is_empty());
+        // 没有交易侧就不派角色——那种行没有一笔要做的交易。
+        let no_side = build_shelves(Some(raw), Some(-935.0), Some(94.4), Some(52), None);
+        assert_eq!(no_side[0].role, "");
+    }
+
+    #[test]
+    fn the_reach_curve_falls_with_distance_and_never_extrapolates() {
+        for days in [10, 30, 60, 120] {
+            let mut prev = 101.0;
+            for step in 0..=40 {
+                let z = f64::from(step) * 0.1;
+                let p = reach_pct(z, days).expect("z ≥ 0 一定有值");
+                assert!(p <= prev, "剩余 {days} 日、z={z} 处概率不单调:{p} > {prev}");
+                prev = p;
+            }
+            // 超出格子取末端,不外推——外推没有依据。
+            assert_eq!(reach_pct(3.0, days), reach_pct(9.9, days));
+        }
+        assert!(reach_pct(-0.1, 30).is_none());
+    }
+
+    #[test]
     fn the_traded_side_is_the_turn_side_not_the_alert_side() {
         // JM2612−JM2705 @2026-08-06 的真实形态:历年轨 3.6% 报**低位**,
         // 当年轨自 100% 退到 70.8% 拐**高位**。⚡ 是拐头给的,统计就得给高位侧
@@ -4059,6 +4119,10 @@ pub struct SpreadMonitorItem {
     /// 当年轨自顶部拐头 → 做空价差)。界面必须把它显示出来:DEC-088 那个 BUG 的
     /// 本质就是只显示了其中一侧,让人以为只有一笔交易可做。
     pub revert_alt: Option<SpreadRevertStats>,
+    /// 平台位阶梯(DEC-095):价差自己走出来的横盘转折位,按档位从高到低。
+    /// 运营者下单看的就是它——「收盘突破平台位,才能继续往下看」。
+    /// 空数组 = 那天还没算出档位(序列太短,或旧行没有这一列)。
+    pub shelves: Vec<SpreadShelf>,
     /// "high" / "low" / null —— **已拐头**：近 20 个交易日内当年轨曾进 3% 报警带，
     /// 且当前已自极值回撤超过区间宽度的 10%（= 位置退到 0.90 以下 / 0.10 以上）。
     ///
@@ -4372,6 +4436,157 @@ fn combined_alert_at(
         .map(|(_, alert)| alert)
 }
 
+/// 到达概率曲线(DEC-095)。**合并品种与方向**的经验生存函数:
+/// `P(能走到 z 个 σ√T 之外)` = 历史上从同样远近的处境出发,在窗口止点前摸到过的比例。
+///
+/// 为什么合并:逐品种、逐方向的版本**样本外崩了**(焦煤 25%→48%、生猪 69%→52%),
+/// 那些差异是那段行情往哪边走了(=漂移),不是品种特性。合并之后按剩余期分桶,
+/// 样本外差 ≤2.6 个点(14.4 万个观测)。
+///
+/// **固化成常量、不每晚重算**:这是研究结论,应当随代码评审一起变,不该因为多了
+/// 一天数据就让页面上的数字无声漂移。重估要跑 `research/run_shelf_prob.py`。
+///
+/// **它不知道方向**:上下两侧用同一条曲线。方向由「日线收盘突破平台位」那条规矩定。
+/// **逐年离散很大**:z=1.0 长期 42%,最低 17%(2014)、最高 53%(2019)——界面必须写出来。
+const REACH_CURVE: [&[f64]; 4] = [
+    // 剩余 5~20 个交易日,样本 18,848
+    &[
+        84.2, 78.4, 72.8, 67.3, 62.2, 57.3, 52.9, 48.6, 44.6, 40.8, 37.6, 34.7, 32.2, 29.7, 27.6,
+        25.5, 23.5, 21.6, 20.1, 18.5, 17.2, 16.0, 15.0, 13.9, 13.0, 12.1, 11.4, 10.7, 9.9, 9.3,
+        8.6,
+    ],
+    // 剩余 21~40 个交易日,样本 23,410
+    &[
+        91.4, 85.5, 79.9, 74.3, 68.7, 63.6, 59.0, 54.5, 50.5, 46.8, 43.4, 40.1, 36.9, 34.3, 31.8,
+        29.6, 27.4, 25.6, 23.7, 22.1, 20.7, 19.2, 17.9, 16.7, 15.5, 14.5, 13.5, 12.6, 11.8, 11.1,
+        10.3,
+    ],
+    // 剩余 41~80 个交易日,样本 43,902
+    &[
+        95.3, 89.9, 83.5, 77.1, 71.0, 65.4, 60.4, 56.0, 51.9, 47.9, 44.3, 41.1, 37.9, 35.4, 33.1,
+        30.9, 28.9, 27.0, 25.3, 23.7, 22.1, 20.6, 19.4, 18.1, 17.1, 15.9, 14.9, 14.0, 13.1, 12.3,
+        11.6,
+    ],
+    // 剩余 >80 个交易日,样本 57,542
+    &[
+        97.5, 91.9, 84.4, 75.9, 68.2, 61.1, 55.0, 50.0, 45.6, 41.7, 38.3, 35.1, 32.4, 30.1, 28.0,
+        26.3, 24.6, 22.9, 21.3, 19.9, 18.5, 17.1, 16.0, 15.0, 14.0, 13.1, 12.3, 11.5, 10.9, 10.2,
+        9.5,
+    ],
+];
+
+/// 把库里存的平台位事实,配上读时才知道的东西:相对现价的偏移、z、到达概率、
+/// 以及这一行要做的那笔交易下它是卖点还是止损。
+///
+/// 角色按 `trade_side` 定(DEC-088 的同一个侧别):做空价差(high)时下方是目标、
+/// **上方最近的一档是止损**;做多价差(low)反过来。没有交易侧就不给角色——
+/// 那种行本来就没有一笔要做的交易。
+fn build_shelves(
+    raw: Option<&str>,
+    spread: Option<f64>,
+    sigma: Option<f64>,
+    days_left: Option<i32>,
+    trade_side: Option<&str>,
+) -> Vec<SpreadShelf> {
+    let (Some(raw), Some(spread)) = (raw, spread) else {
+        return Vec::new();
+    };
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Vec::new();
+    };
+    let scale = match (sigma, days_left) {
+        (Some(s), Some(d)) if s > 0.0 && d > 0 => Some(s * f64::from(d).sqrt()),
+        _ => None,
+    };
+    let num = |v: &serde_json::Value, k: &str| -> Option<f64> {
+        v.get(k).and_then(|x| match x {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(t) => t.parse().ok(),
+            _ => None,
+        })
+    };
+    let mut out: Vec<SpreadShelf> = items
+        .iter()
+        .filter_map(|v| {
+            let level = num(v, "level")?;
+            let offset = level - spread;
+            let z = scale.map(|s| (offset.abs() / s * 100.0).round() / 100.0);
+            Some(SpreadShelf {
+                level: format!("{}", level.round() as i64),
+                lo: format!("{}", num(v, "lo").unwrap_or(level).round() as i64),
+                hi: format!("{}", num(v, "hi").unwrap_or(level).round() as i64),
+                touches: v
+                    .get("touches")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+                offset: format!("{}", offset.round() as i64),
+                z: z.map(|x| format!("{x:.2}")),
+                reach_pct: z.zip(days_left).and_then(|(x, d)| reach_pct(x, d)),
+                role: String::new(),
+            })
+        })
+        .collect();
+    // 按档位从高到低,库里已经是这个序,这里不依赖它。
+    out.sort_by(|a, b| {
+        b.level
+            .parse::<i64>()
+            .unwrap_or(0)
+            .cmp(&a.level.parse::<i64>().unwrap_or(0))
+    });
+    let Some(side) = trade_side else {
+        return out;
+    };
+    // 目标在交易方向那一侧;止损取**反方向最近的一档**——与运营者的规矩对称:
+    // 「日线收盘突破平台位,就会前往下一个平台」,反过来突破就是止损。
+    let target_above = side == "low";
+    let mut stop_taken = false;
+    let iter: Box<dyn Iterator<Item = &mut SpreadShelf>> = if target_above {
+        Box::new(out.iter_mut()) // 止损在下方:从高到低,最先遇到的下方档最近
+    } else {
+        Box::new(out.iter_mut().rev()) // 止损在上方:从低到高
+    };
+    for sh in iter {
+        let off: i64 = sh.offset.parse().unwrap_or(0);
+        if off == 0 {
+            continue;
+        }
+        let above = off > 0;
+        if above == target_above {
+            sh.role = "target".to_string();
+        } else if !stop_taken {
+            sh.role = "stop".to_string();
+            stop_taken = true;
+        }
+    }
+    out
+}
+
+fn reach_bucket(days_left: i32) -> usize {
+    match days_left {
+        ..=20 => 0,
+        21..=40 => 1,
+        41..=80 => 2,
+        _ => 3,
+    }
+}
+
+/// 曲线上按 0.1 的格子线性插值。z 超出格子就取末端——外推没有依据。
+fn reach_pct(z: f64, days_left: i32) -> Option<f64> {
+    if !z.is_finite() || z < 0.0 {
+        return None;
+    }
+    let curve = REACH_CURVE[reach_bucket(days_left)];
+    let last = curve.len() - 1;
+    let x = (z / 0.1).min(last as f64);
+    let i = x.floor() as usize;
+    let p = if i >= last {
+        curve[last]
+    } else {
+        curve[i] + (curve[i + 1] - curve[i]) * (x - i as f64)
+    };
+    Some((p * 10.0).round() / 10.0)
+}
+
 /// 这一行**要做的那笔交易**在哪一侧 —— 拐头侧优先(DEC-088)。
 ///
 /// ⚡ 进场由拐头触发,所以资格、统计、方向文案都必须锚在拐头侧。原实现是
@@ -4391,6 +4606,31 @@ fn combined_alert(
         years.and_then(track_position),
         threshold,
     )
+}
+
+/// 平台位阶梯里的一档(DEC-095)。
+///
+/// 档位、区间、触碰回合是**库里存的事实**;偏移、z、到达概率、卖点/止损全部**读时算**
+/// ——与报警/拐头/合格同一条纪律(存事实不存结论)。
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SpreadShelf {
+    /// 档位(该档并入的转折位均值)。
+    pub level: String,
+    /// 并档区间的两端。链式合并会让几个转折位并出一个跨几十点的档,
+    /// 只报均值是假精度,所以两端一起给出来。
+    pub lo: String,
+    pub hi: String,
+    /// 收盘落在该档 ±25 点内的**独立回合数**(连续日算一回合)。
+    pub touches: i64,
+    /// 相对现价差的点数。**正 = 在上方**。
+    pub offset: String,
+    /// 距离 ÷ (σ√剩余交易日)。没有 σ 或剩余天数时为空。
+    pub z: Option<String>,
+    /// 到达概率(%),来自固化的合并曲线。**不含方向判断**,逐年离散很大。
+    pub reach_pct: Option<f64>,
+    /// `"target"`(卖点侧)/ `"stop"`(反方向最近的一档)/ `""`。
+    /// 按这一行要做的那笔交易定:做空价差时下方是目标、上方最近的一档是止损。
+    pub role: String,
 }
 
 /// 组装同侧的历年统计。样本为 0(或整块缺失)时返回 None —— 界面不显示这一块，
@@ -4675,6 +4915,15 @@ pub async fn query_spread_monitor(
             let revert = trade_side.and_then(stats_for);
             // 另一侧只在**两侧方向相反**时给:这正是上面那个 BUG 的现场,藏起来就是
             // 藏证据。方向一致时给它只会让页面多出一串同义数字。
+            let shelves = build_shelves(
+                row.shelves.as_deref(),
+                row.spread.parse::<f64>().ok(),
+                row.spread_sigma
+                    .as_deref()
+                    .and_then(|v| v.parse::<f64>().ok()),
+                days_left,
+                trade_side,
+            );
             let revert_alt = match (alert, turn) {
                 (Some(a), Some(t)) if a != t => stats_for(a),
                 _ => None,
@@ -4694,6 +4943,7 @@ pub async fn query_spread_monitor(
                 is_new_alert,
                 revert,
                 revert_alt,
+                shelves,
                 turn: turn.map(str::to_string),
                 is_new_turn,
                 turn_crosses,

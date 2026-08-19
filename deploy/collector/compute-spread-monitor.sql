@@ -220,6 +220,91 @@ select w.*,
                        else 0.10
                      end as line) r) w;
 
+-- ---------------------------------------------------------------------------
+-- 平台位(DEC-095):价差自己走出来的横盘转折位。运营者下单看的就是它,
+-- 而页面此前只有区间位置/分位/回归统计,完全没有这一维。
+--
+-- 口径与它们的来历(参数是拿运营者点名的 −1355 试出来的,不是拍的):
+--   · 转折位 = 收盘价差是**前后各 3 个交易日**里的极值。±5/±7 会把 −1355 弄丢,
+--     ±2 会把 −1150/−1155/−1160/−1170 拆成四档。
+--   · **必须要求整窗 7 行**(cnt = 7):序列两端窗口不全,会造出假转折。
+--   · **因果**:t 处的判定要到 t+3 才成立,所以 as_of 那天只能看到 rn+3 ≤ rn_asof
+--     的转折位。不加这一条,历史行就带着未来信息——与 pair_series 那段注释同一个
+--     道理。代价是最近三天的转折位当天不算数,界面要写「待确认」。
+--   · 50 点内并成一档,**存 lo/hi 区间不存单点**:链式合并会让 −1080/−1115/−1155
+--     并出一个跨 75 点的档,只报均值 −1117 是假精度。
+--   · 触碰回合 = 收盘落在该档 ±25 点内的独立回合(连续日算一回合)。
+--   · 序列用 pair_series(**完整价差历史**),不是写入窗口那一段。
+-- 距离、到达概率、哪一档是卖点/止损**全部读时算**,这里只存事实。
+-- ---------------------------------------------------------------------------
+
+create temp table ps_rn as
+select workspace_id, c1, c2, trade_date, v,
+       row_number() over (partition by workspace_id, c1, c2 order by trade_date) rn
+  from pair_series;
+create index ps_rn_key on ps_rn (workspace_id, c1, c2, trade_date);
+analyze ps_rn;
+
+create temp table pivots as
+select workspace_id, c1, c2, rn, v
+  from (select *, max(v) over w mx, min(v) over w mn, count(*) over w cnt
+          from ps_rn
+        window w as (partition by workspace_id, c1, c2 order by trade_date
+                     rows between 3 preceding and 3 following)) t
+ where cnt = 7 and (v = mx or v = mn);
+
+-- 只给要写库的那些行算(多留 7 天与上面同一个理由)。
+create temp table shelf_asof as
+select workspace_id, c1, c2, trade_date as_of, rn rn_asof
+  from ps_rn
+ where trade_date >= current_date - ((:window_days + 7) || ' days')::interval;
+create index shelf_asof_key on shelf_asof (workspace_id, c1, c2, as_of);
+analyze shelf_asof;
+
+create temp table shelf as
+select workspace_id, c1, c2, as_of,
+       min(lvl) lo, max(lvl) hi, round(avg(lvl))::numeric lvl
+  from (select *, sum(g) over (partition by workspace_id, c1, c2, as_of
+                               order by lvl desc rows unbounded preceding) grp
+          from (select v.*,
+                       case when lag(lvl) over (partition by workspace_id, c1, c2, as_of
+                                                order by lvl desc) - lvl > 50
+                            then 1 else 0 end g
+                  from (select distinct a.workspace_id, a.c1, a.c2, a.as_of, p.v lvl
+                          from shelf_asof a
+                          join pivots p on p.workspace_id = a.workspace_id
+                                       and p.c1 = a.c1 and p.c2 = a.c2
+                                       and p.rn + 3 <= a.rn_asof) v) t) u
+ group by workspace_id, c1, c2, as_of, grp;
+
+create temp table shelf_touch as
+select workspace_id, c1, c2, as_of, lo, hi, lvl,
+       count(*) filter (where near and not prev_near) touches
+  from (select s.workspace_id, s.c1, s.c2, s.as_of, s.lo, s.hi, s.lvl, p.trade_date,
+               abs(p.v - s.lvl) <= 25 near,
+               lag(abs(p.v - s.lvl) <= 25, 1, false)
+                 over (partition by s.workspace_id, s.c1, s.c2, s.as_of, s.lvl
+                       order by p.trade_date) prev_near
+          from shelf s
+          join ps_rn p on p.workspace_id = s.workspace_id and p.c1 = s.c1 and p.c2 = s.c2
+                      and p.trade_date <= s.as_of) x
+ group by workspace_id, c1, c2, as_of, lo, hi, lvl;
+
+create temp table shelf_json as
+select workspace_id, c1, c2, as_of,
+       jsonb_agg(jsonb_build_object('level', lvl, 'lo', lo, 'hi', hi, 'touches', touches)
+                 order by lvl desc) shelves
+  from shelf_touch group by workspace_id, c1, c2, as_of;
+
+-- 日波动:近 20 个交易日价差日变动的样本标准差。读时用来算「距离 ÷ σ√剩余天数」。
+create temp table shelf_sigma as
+select workspace_id, c1, c2, trade_date as_of,
+       stddev_samp(dv) over (partition by workspace_id, c1, c2 order by trade_date
+                             rows between 19 preceding and current row) sigma
+  from (select workspace_id, c1, c2, trade_date,
+               v - lag(v) over (partition by workspace_id, c1, c2 order by trade_date) dv
+          from ps_rn) t;
+
 -- 只保留窗口内、且到那天为止已积累够 30 天的行(2026-08-18 由 60 降,见上)。
 -- 门槛按当日算：一个组合在它上市第 10 天时,「历史极值」确实还没有意义。
 --
@@ -472,7 +557,8 @@ insert into spread_monitor_daily (
     revert_high_hit, revert_high_n, revert_high_move, revert_high_drift,
     revert_high_mae, revert_high_mae_max, revert_high_days,
     revert_low_hit, revert_low_n, revert_low_move, revert_low_drift,
-    revert_low_mae, revert_low_mae_max, revert_low_days)
+    revert_low_mae, revert_low_mae_max, revert_low_days,
+    shelves, spread_sigma)
 select gen_random_uuid(), s.workspace_id, s.trade_date,
        k.i1, k.c1, k.i2, k.c2, k.is_cross, s.now,
        s.days, s.lo, s.hi, s.pair_pos,
@@ -483,11 +569,16 @@ select gen_random_uuid(), s.workspace_id, s.trade_date,
        r.high_hit, r.high_n, r.high_move, r.high_drift,
        r.high_mae, r.high_mae_max, r.high_days,
        r.low_hit, r.low_n, r.low_move, r.low_drift,
-       r.low_mae, r.low_mae_max, r.low_days
+       r.low_mae, r.low_mae_max, r.low_days,
+       sj.shelves, nullif(sg.sigma, 0)
   from snap s
   join combo k on k.workspace_id = s.workspace_id and k.c1 = s.c1 and k.c2 = s.c2
   left join revert_wide r on r.cur_c1 = s.c1 and r.cur_c2 = s.c2
                          and r.cur_date = s.trade_date
+  left join shelf_json sj on sj.workspace_id = s.workspace_id and sj.c1 = s.c1
+                         and sj.c2 = s.c2 and sj.as_of = s.trade_date
+  left join shelf_sigma sg on sg.workspace_id = s.workspace_id and sg.c1 = s.c1
+                          and sg.c2 = s.c2 and sg.as_of = s.trade_date
  where s.trade_date >= current_date - (:window_days || ' days')::interval
 on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     spread = excluded.spread,
@@ -497,6 +588,8 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     years_high = excluded.years_high, years_position = excluded.years_position,
     prev_pair_position = excluded.prev_pair_position,
     prev_years_position = excluded.prev_years_position,
+    shelves = excluded.shelves,
+    spread_sigma = excluded.spread_sigma,
     pair_pos_hi20 = excluded.pair_pos_hi20,
     pair_pos_lo20 = excluded.pair_pos_lo20,
     turn_crosses_high_20 = excluded.turn_crosses_high_20,

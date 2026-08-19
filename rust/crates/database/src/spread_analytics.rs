@@ -1328,6 +1328,8 @@ mod tests {
             "revert_low_move",
             "revert_low_drift",
             "revert_low_days",
+            "shelves",
+            "spread_sigma",
         ] {
             assert!(
                 MONITOR_COLUMNS.contains(column),
@@ -3686,6 +3688,11 @@ pub struct SpreadMonitorRow {
     pub revert_low_mae: Option<String>,
     pub revert_low_mae_max: Option<String>,
     pub revert_low_days: Option<i32>,
+    /// 平台位(DEC-095):`[{"level","lo","hi","touches"}, ...]`,按档位从高到低。
+    /// 存的是事实——距离、到达概率、哪一档是卖点/止损全部读时算。
+    pub shelves: Option<String>,
+    /// 近 20 个交易日价差日变动的样本标准差,读时算「距离 ÷ σ√剩余天数」用。
+    pub spread_sigma: Option<String>,
 }
 
 /// 两条查询共用的列清单。写成常量是因为它出现在两处 SQL 里，而 `monitor_row`
@@ -3702,7 +3709,8 @@ const MONITOR_COLUMNS: &str = "trade_date, instrument_1, contract_1, instrument_
             revert_high_mae_max::text, revert_high_days,
             revert_low_hit, revert_low_n, revert_low_move::text,
             revert_low_drift::text, revert_low_mae::text,
-            revert_low_mae_max::text, revert_low_days";
+            revert_low_mae_max::text, revert_low_days,
+            shelves::text, spread_sigma::text";
 
 /// 监控页的当前快照：**每组组合各取自己最新的那一条**。
 ///
@@ -3846,5 +3854,7 @@ fn monitor_row(row: sqlx::postgres::PgRow) -> SpreadMonitorRow {
         revert_low_mae: row.get("revert_low_mae"),
         revert_low_mae_max: row.get("revert_low_mae_max"),
         revert_low_days: row.get("revert_low_days"),
+        shelves: row.get("shelves"),
+        spread_sigma: row.get("spread_sigma"),
     }
 }

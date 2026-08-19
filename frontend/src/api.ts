@@ -679,6 +679,25 @@ export interface SpreadRevertStats {
   days: number | null
 }
 
+/** 平台位阶梯里的一档(DEC-095)。档位/区间/触碰是库里的事实,
+ *  偏移、z、到达概率、卖点/止损是读时算的。 */
+export interface SpreadShelf {
+  level: string
+  /** 并档区间两端。链式合并会并出跨几十点的档,只报均值是假精度。 */
+  lo: string
+  hi: string
+  /** 收盘落在该档 ±25 点内的独立回合数。 */
+  touches: number
+  /** 相对现价差的点数,**正 = 在上方**。 */
+  offset: string
+  /** 距离 ÷ (σ√剩余交易日)。 */
+  z: string | null
+  /** 到达概率(%)。**不含方向判断**,逐年离散很大(z=1 时 17%~53%)。 */
+  reach_pct: number | null
+  /** 'target' | 'stop' | ''。 */
+  role: string
+}
+
 export interface SpreadMonitorItem {
   trade_date: string
   instrument_1: string
@@ -697,6 +716,8 @@ export interface SpreadMonitorItem {
    * —— ⚡ 由拐头触发，资格与方向就得锚在同一侧。`side` 即交易方向:
    * 'high' = 做空价差，'low' = 做多价差。 */
   revert: SpreadRevertStats | null
+  /** 平台位阶梯(DEC-095),按档位从高到低。空数组 = 那天还没算出档位。 */
+  shelves: SpreadShelf[]
   /** 报警侧与拐头侧**方向相反**时，另一侧(报警侧)的统计；一致时为 null。
    * 有值 = 这一行的两条轨在讲相反的故事，界面必须摊开给人看。 */
   revert_alt: SpreadRevertStats | null
