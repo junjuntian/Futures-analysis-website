@@ -640,6 +640,54 @@ def edge_split(sig: pd.DataFrame, mkt: pd.DataFrame,
             "gap_share_pct": round(100 * mg / m1, 0) if m1 else None}
 
 
+def risk_flags(strat: dict, closed: list, daily: pd.Series) -> list[dict]:
+    """页面顶部那条醒目风险标识的素材(运营者 2026-08-19 要求)。
+
+    **门槛写死、数字实算,不针对某个品种定制。**生猪现在一条都不触发,玻璃纯碱
+    各触发几条——这是它们自己的数字说的,不是我挑出来贴上去的。哪天玻璃真的变好了,
+    条目会自己消失;哪天生猪变差了,它自己会挂上来。
+
+    五个门槛,每一个都有它自己的意思:
+      夏普 < 1.0   —— 一年赚的抵不上一年的波动;
+      回撤 ≥ 25%   —— 单次回撤超过四分之一,多数人拿不住;
+      胜率 < 50%   —— 不到一半的交易赚钱,全靠少数几笔大赢撑着;
+      t 值 < 2.0   —— 单笔均值在统计上分不出与 0 的差别,**等于还没验证**;
+      亏损年 ≥ 1/4 —— 四年里有一年是亏的,不是偶发。
+    """
+    if not closed:
+        return []
+    r = np.array([t["ret_pct"] for t in closed])
+    out = []
+    sh = strat.get("sharpe")
+    if sh is not None and sh < 1.0:
+        out.append({"key": "sharpe",
+                    "text": f"**夏普只有 {sh:.2f}** —— 一年赚到的抵不上一年的波动。"})
+    dd = strat.get("max_dd_pct")
+    if dd is not None and dd <= -25:
+        out.append({"key": "drawdown",
+                    "text": f"**最大回撤 {dd:.1f}%** —— 中途要扛得住净值腰斩级别的下跌。"})
+    win = 100 * float((r > 0).mean())
+    if win < 50:
+        out.append({"key": "winrate",
+                    "text": f"**胜率 {win:.1f}%,不到一半** —— 收益靠少数几笔大赢撑着,"
+                            "连亏很多笔是常态。"})
+    if len(r) >= 10 and r.std(ddof=1) > 0:
+        t = float(r.mean() / (r.std(ddof=1) / np.sqrt(len(r))))
+        if t < 2.0:
+            out.append({"key": "significance",
+                        "text": f"**单笔均值的 t 值只有 {t:.2f}(<2)** —— 统计上分不出它"
+                                f"与 0 的差别,{len(r)} 笔样本还**没有证明这条策略成立**。"})
+    if len(daily):
+        eq = (1 + daily).cumprod()
+        yr = eq.resample("YE").last() / eq.resample("YE").last().shift(1) - 1
+        yr = yr.dropna()
+        neg = int((yr < 0).sum())
+        if len(yr) >= 4 and neg * 4 >= len(yr):
+            out.append({"key": "negative_years",
+                        "text": f"**{len(yr)} 年里有 {neg} 年是亏的** —— 亏损年不是偶发。"})
+    return out
+
+
 def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
     """边界说明。**凡是数字都从实参算**,不许写死——参数一改文案就会对不上。"""
     shorts = [t for t in closed if t["side"] == "short"]
@@ -873,6 +921,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 硬编码在这里,关掉做多支路后就成了错的——同一个事实两处维护,必栽。
         "caveats": _caveats(_perf(strat_daily), _perf(bench_daily), closed),
         "edge_split": SPLIT.get("v"),
+        # 顶部醒目风险条(运营者 2026-08-19 要求)。门槛写死、数字实算,
+        # 品种自己够不上门槛就没有条目——不是按品种硬编码的。
+        "risk_flags": risk_flags(_perf(strat_daily), closed, strat_daily),
     }
 
 

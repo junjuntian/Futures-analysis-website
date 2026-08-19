@@ -102,6 +102,9 @@ interface HogPayload {
   rules: { reselect_months: number; group_k: number; enter: number; stop: number;
            max_hold: number; sig_win: number; long_enabled: boolean
            exit_before_delivery?: number } & Record<string, unknown>
+  /** 顶部风险条。门槛写死在引擎里、数字实算,够不上门槛就是空数组
+   *  ——生猪现在 0 条,玻璃 3 条,纯碱 5 条。可选:旧 JSON 没有这个字段。 */
+  risk_flags?: Array<{ key: string; text: string }>
   /** 当前主力离散户可交易窗口止点还有多远。窗口止点 = 交割月前月最后一个工作日。
    *  **可选**:前端先于引擎上线,当晚引擎跑过之前线上 JSON 还是上一版没有这个字段,
    *  写成必填会让整页白掉。 */
@@ -217,6 +220,16 @@ const deliveryClass = computed(() => {
   return d.days_left <= d.limit * 2 ? 'near' : ''
 })
 
+/** 把引擎文案里的 **加粗** 转成 <b>。只认这一种记法,其余字符先转义——
+ *  文案来自我们自己的引擎,但转义是习惯,别给 v-html 开后门。 */
+function mdBold(text: string): string {
+  const safe = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  return safe.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+}
+
 const exitText = computed(() => {
   const r = data.value?.stats.exit_reasons ?? {}
   const parts = Object.entries(r).map(([k, v]) => `${k} ${v} 笔`)
@@ -285,6 +298,21 @@ const bySide = computed(() => {
       跟随机构合计资金流向,每日收盘后自动计算。数据日期 <b>{{ data.data_date }}</b> ·
       计算于 {{ data.computed_at }}
     </p>
+
+    <!-- 风险条(运营者 2026-08-19 要求)。**摆在收益数字前面**——放在下面等于没放。
+         条目由引擎按写死的门槛实算,不是按品种硬编码:哪天这个品种真变好了,
+         条目会自己消失。 -->
+    <div v-if="data.risk_flags && data.risk_flags.length" class="risk-banner">
+      <div class="risk-head">
+        ⚠ 这条曲线不好拿住 —— 先看完这{{ data.risk_flags.length }}条再看收益
+      </div>
+      <ul>
+        <li v-for="f in data.risk_flags" :key="f.key" v-html="mdBold(f.text)"></li>
+      </ul>
+      <div class="risk-foot">
+        仓位按<b>最大回撤</b>定,不是按累计收益定。收益口径见页尾「边界说明」。
+      </div>
+    </div>
 
     <!-- 持仓状态条。空仓不渲染,与金银页同一条规矩。 -->
     <div v-if="data.position" class="symbol-strip">
@@ -645,7 +673,8 @@ const bySide = computed(() => {
         <div class="card wide">
           <h3>必须知道的边界</h3>
           <ul class="caveats">
-            <li v-for="(c, i) in data.caveats" :key="i" v-text="c" />
+            <!-- 引擎的文案用 **加粗** 记法,原来 v-text 把星号原样印了出来。 -->
+            <li v-for="(c, i) in data.caveats" :key="i" v-html="mdBold(c)" />
           </ul>
         </div>
       </div>
@@ -698,6 +727,19 @@ const bySide = computed(() => {
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
 .reselect-note { margin: 0 0 8px; font-size: 12px; color: var(--tv-text-secondary); }
+/* 风险条:警示橙描边 + 浅底。不用红绿——那是涨跌语义,借过来会被读成方向。 */
+.risk-banner {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--tv-warn, #d98e00);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tv-warn, #d98e00) 8%, transparent);
+}
+.risk-head { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.risk-banner ul { margin: 0; padding-left: 18px; }
+.risk-banner li { font-size: 13px; line-height: 1.75; }
+.risk-foot { margin-top: 6px; font-size: 12px; color: var(--tv-text-secondary); }
 /* 交割倒计时:撞线是纪律不是行情,用警示色不用涨跌红绿。 */
 .kv .v.near { color: var(--tv-warn, #d98e00); }
 .kv .v.must { color: var(--tv-warn, #d98e00); font-weight: 700; }

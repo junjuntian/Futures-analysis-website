@@ -99,6 +99,34 @@ function stubFetch(payload: unknown = PAYLOAD, ok = true) {
 describe('生猪机构资金', () => {
   beforeEach(() => stubFetch())
 
+  it('够不上风险门槛的品种不挂风险条', async () => {
+    // 生猪现在 0 条(夏普 2.23、回撤 −6.8%、胜率 61.1%、t=2.52)。
+    // 门槛写死在引擎里、数字实算——不是按品种硬编码,所以这里也不能按品种断言。
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).not.toContain('这条曲线不好拿住')
+  })
+
+  it('风险条摆在收益数字前面 —— 放在下面等于没放', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      risk_flags: [
+        { key: 'sharpe', text: '**夏普只有 0.61** —— 一年赚到的抵不上一年的波动。' },
+        { key: 'drawdown', text: '**最大回撤 -43.1%** —— 中途要扛得住净值腰斩级别的下跌。' }
+      ]
+    })
+    const w = mount(HogMoney, { props: { instrument: 'FG' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('这条曲线不好拿住')
+    expect(t).toContain('夏普只有 0.61')
+    // 位置:必须出现在「累计」那块数字之前
+    expect(t.indexOf('这条曲线不好拿住')).toBeLessThan(t.indexOf('累计'))
+    // **加粗** 要变成真的 <b>,不能把星号原样印出来
+    expect(w.html()).toContain('<b>夏普只有 0.61</b>')
+    expect(w.find('.risk-banner').text()).not.toContain('**')
+  })
+
   it('状态条给出主力还能拿几个交易日', async () => {
     // 运营者 2026-08-19:「我是散户,玻璃 2609 合约 8.31 之前需要离场,
     // 要提前 10 个交易日」。2026-08-14 玻璃主力还是 FG2609、只剩 11 个交易日,
