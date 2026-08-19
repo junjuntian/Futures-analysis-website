@@ -15,8 +15,7 @@ from pathlib import Path
 import numpy as np, pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-import run_fgsa_planc as P      # noqa: E402  研究侧独立实现
-import run_lh_compare_v2 as C   # noqa: E402  生猪那套
+import run_roll_fix as R       # noqa: E402  研究侧独立实现(DEC-096 之后的口径)
 
 ENGINE = Path(__file__).resolve().parents[1] / "engine" / "hog_money.py"
 OUT = Path(tempfile.gettempdir()) / "flow_parity"
@@ -36,23 +35,28 @@ def engine_all() -> dict:
             for c, f in files.items()}
 
 
-# 各品种的做多开关必须与 engine VARIETIES 一致 —— 对拍要复刻的是**线上那一条**,
-# 不是「研究侧觉得该怎么跑」。玻璃纯碱双向,生猪/鸡蛋/焦煤只做空。
-SHORT_ONLY = {"LH": True, "JD": True, "JM": True, "FG": False, "SA": False}
-
-
 def research(code: str) -> pd.DataFrame:
-    if code == "LH":
-        return C.backtest(C.rz_res, C.rz, C.mr).rename(columns={"原因": "出场原因"})
-    mr, pz, rz, _ = P.prep(code)
-    rz_res = rz.where(np.sign(pz) == np.sign(rz))
-    return P.bt(rz_res, rz, mr, short_only=SHORT_ONLY[code], long_needs_dip=False)
+    """研究侧独立实现:`run_roll_fix` 的 hold_contract 口径(DEC-096)。
+
+    DEC-096 之前对拍的是 run_lh_compare_v2 / run_fgsa_planc,它们跟着主力走。
+    持仓改成留在自己的合约之后,那两个实现已经不是线上那一条了,再拿它们对拍
+    就是拿旧口径给新口径背书 —— 门禁会一直绿,但什么都没守住。
+    """
+    mkt, sig, rdf, op, st = R.prep(code)
+    tr, _ = R.replay_variant(code, mkt, sig, rdf, op, st, "hold_contract")
+    if not tr:
+        return pd.DataFrame(columns=["进场", "方向", "收益%"])
+    return pd.DataFrame([{
+        "进场": pd.Timestamp(t["entry_date"]),
+        "方向": "多" if t["side"] == "long" else "空",
+        "收益%": t["ret_pct"],
+    } for t in tr])
 
 
 def main():
     eng = engine_all()
     ok = True
-    for code in ("LH", "FG", "SA", "JD", "JM"):
+    for code in ("LH", "JD", "JM", "FG", "SA"):
         e, r = eng[code], research(code)
         head = f"{code}: 引擎 {len(e)} 笔 / 研究 {len(r)} 笔"
         if len(e) != len(r):
