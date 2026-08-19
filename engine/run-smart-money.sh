@@ -63,7 +63,7 @@ fi
 if [ -f "$ROOT/hog_money.py" ]; then
   echo "[flow] 计算生猪/玻璃/纯碱信号…"
   if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
-    for f in hog_signals.json fg_signals.json sa_signals.json; do
+    for f in hog_signals.json fg_signals.json sa_signals.json pair_fgsa.json; do
       if [ -s "$TMP/$f" ]; then
         cp "$TMP/$f" "$WEB/$f.new"
         mv "$WEB/$f.new" "$WEB/$f"

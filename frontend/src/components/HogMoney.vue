@@ -97,7 +97,17 @@ interface HogPayload {
     exit_reasons: Record<string, number>
   }
   rules: { reselect_months: number; group_k: number; enter: number; stop: number;
-           max_hold: number; sig_win: number; long_enabled: boolean } & Record<string, unknown>
+           max_hold: number; sig_win: number; long_enabled: boolean
+           exit_before_delivery?: number } & Record<string, unknown>
+  /** 当前主力离散户可交易窗口止点还有多远。窗口止点 = 交割月前月最后一个工作日。
+   *  **可选**:前端先于引擎上线,当晚引擎跑过之前线上 JSON 还是上一版没有这个字段,
+   *  写成必填会让整页白掉。 */
+  delivery?: {
+    window_end: string
+    days_left: number
+    limit: number
+    must_exit: boolean
+  }
   /** 与「躺着满仓做空」的同口径对比。不给基准,看的人会把熊市 beta 当成策略的本事。 */
   compare: {
     strategy: { cum_pct: number; sharpe: number | null; max_dd_pct: number }
@@ -195,6 +205,15 @@ const reselectText = computed(() => {
   return m === 12 ? '每年' : m === 1 ? '每月' : `每 ${m} 个月`
 })
 /** 「N 笔全部由 反向/止损 触发」——原因和笔数都是数出来的。 */
+/** 交割倒计时的颜色档:撞线红、还剩不到两倍门槛的黄、其余不上色。
+ *  门槛来自 payload,不写死 —— 规则改了文案与配色要跟着改。 */
+const deliveryClass = computed(() => {
+  const d = data.value?.delivery
+  if (!d) return ''
+  if (d.must_exit) return 'must'
+  return d.days_left <= d.limit * 2 ? 'near' : ''
+})
+
 const exitText = computed(() => {
   const r = data.value?.stats.exit_reasons ?? {}
   const parts = Object.entries(r).map(([k, v]) => `${k} ${v} 笔`)
@@ -310,6 +329,15 @@ const bySide = computed(() => {
           </div>
           <div v-else class="big gray">无持仓</div>
           <div class="kv"><span class="k">现价</span><span class="v">{{ fmt(data.price) }} · {{ data.contract }}</span></div>
+          <!-- 交割倒计时(2026-08-19 运营者要求)。2026-08-14 玻璃主力还是 FG2609、
+               只剩 11 个交易日,页面对此只字不提 —— 差一天就撞线。 -->
+          <div class="kv" v-if="data.delivery">
+            <span class="k">可持有</span>
+            <span class="v" :class="deliveryClass">
+              还剩 {{ data.delivery.days_left }} 个交易日
+              <template v-if="data.delivery.must_exit"> · 必须平仓</template>
+            </span>
+          </div>
           <template v-if="data.position">
             <div class="kv"><span class="k">进场</span>
               <span class="v">{{ data.position.entry_date }} @ {{ fmt(data.position.entry_px) }}
@@ -572,7 +600,9 @@ const bySide = computed(() => {
             </li>
             <li><b>出场</b>:**散户反向信号翻向** / 硬止损
               {{ (data.rules.stop * 100).toFixed(0) }}% / 持满
-              {{ data.rules.max_hold }} 个交易日。出场只看散户那一路,不要求共振
+              {{ data.rules.max_hold }} 个交易日<template v-if="data.rules.exit_before_delivery">
+              / **主力进入交割窗口前 {{ data.rules.exit_before_delivery }} 个交易日
+              强制平仓**(散户纪律,这段时间也不进场)</template>。出场只看散户那一路,不要求共振
               ——否则聪明钱一转向就把仓位锁死在里面。<br>
               <span class="hint">{{ exitText }}</span></li>
             <li><b>计价</b>:主力合约,**换月日用新合约自己的前一日结算价**。生猪各合约相对
@@ -651,6 +681,9 @@ const bySide = computed(() => {
 .kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; gap: 10px; }
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+/* 交割倒计时:撞线是纪律不是行情,用警示色不用涨跌红绿。 */
+.kv .v.near { color: var(--tv-warn, #d98e00); }
+.kv .v.must { color: var(--tv-warn, #d98e00); font-weight: 700; }
 .note { font-size: 12px; color: var(--tv-text-muted); margin: 10px 0 0; line-height: 1.6; }
 .hint { font-size: 12px; color: var(--tv-text-muted); }
 /* 成本挨在手数后面,弱一档:它是补充信息,手数与增减才是这张卡的主角 */

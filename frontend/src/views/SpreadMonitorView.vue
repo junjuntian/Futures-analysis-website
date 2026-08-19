@@ -10,7 +10,17 @@ import {
   type SpreadMonitorItem,
   type SpreadMonitorTrack
 } from '../api'
-import { driftTone, isChoppy, isDecayZone, isQualified, isRedLine, points, revertPct, revertTone } from '../revert'
+import {
+  driftTone,
+  isChoppy,
+  isDecayZone,
+  isQualified,
+  isRedLine,
+  points,
+  revertPct,
+  revertTone,
+  tradeDirection
+} from '../revert'
 import { useAuthStore } from '../stores/auth'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
@@ -78,6 +88,7 @@ async function load() {
 onMounted(() => {
   void loadVarietyNames()
   void load()
+  void loadFundFlow()
 })
 watch([threshold, tradeDate, historyMode], () => void load())
 
@@ -211,9 +222,59 @@ const TURN_HINT =
   '位置刻度上,焦煤位置日抖动全场最高要深线,鸡蛋季节趋势强早进不受罚要浅线）。' +
   '分层规则的进场信号：报警只是机会出现，拐头才是上车点——全样本回放里报警当天' +
   '就进持到底中位为负，等拐头才转正。'
+const CONFLICT_HINT =
+  '两条轨在讲相反的故事:一条说该做多价差,另一条说该做空价差。' +
+  '上面的徽标与统计一律按**拐头侧**(要做的那笔)给,下面单列出另一侧供对照。' +
+  'DEC-088 之前只显示其中一侧,合格标判的是 A 方向、进场标指的是 B 方向,' +
+  '叠在一起会放行一笔没有统计支持的交易。两侧打架时降档或放过。'
+
 const QUALIFIED_HINT =
   '历年触及率 ≥80% 且「持到期」为正。留一法回放：合格的报警段持到底中位 +29% 区间，' +
   '不合格的 −26%。不合格的行没有徽标——没有徽标就是「别做」。'
+
+/**
+ * FG-SA 相对资金流向(DEC-087)。引擎按日写静态 JSON,这里只读不算。
+ *
+ * 为什么挂在这个页面:这条信号预测的是 **FG−SA 价差**的方向,而套利监控本来就
+ * 盯着这个组合——它此前只看价差位置与历史分位,没有「资金在往哪边调」这一维。
+ * 取不到就不显示,不影响页面主体。
+ */
+interface FundFlow {
+  z: number
+  direction: string
+  note: string
+  data_date: string
+}
+const fundFlow = ref<FundFlow | null>(null)
+
+/** 只认玻璃×纯碱这一个跨品种组合——信号是为它算的,别挂到别的行上去。 */
+function isFgSa(item: SpreadMonitorItem): boolean {
+  if (!item.is_cross_variety) return false
+  return [item.instrument_1, item.instrument_2].sort().join('-') === 'FG-SA'
+}
+
+/** 把「玻璃相对更强」翻成这一行自己的走扩/收窄。
+ *
+ * z 的符号只说明**玻璃相对纯碱**的强弱,而行里的价差是「腿1 − 腿2」——
+ * 只有腿1 是 FG 时,玻璃更强才等于价差走扩。现在建组的 SQL 恒定 a=FG、b=SA,
+ * 但把这个前提写死在文案里,哪天腿序变了就会**反着显示而不报错**。 */
+function fundFlowFor(item: SpreadMonitorItem) {
+  const z = fundFlow.value?.z ?? 0
+  const widen = z > 0 === (item.instrument_1 === 'FG')
+  return {
+    widen,
+    text: `${z > 0 ? '玻璃' : '纯碱'}更强 · 价差倾向${widen ? '走扩' : '收窄'}`
+  }
+}
+
+async function loadFundFlow() {
+  try {
+    const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
+    if (res.ok) fundFlow.value = await res.json()
+  } catch {
+    // 背景信息取不到就不显示,页面主体照常
+  }
+}
 
 const BASIS_HINT =
   '现货价与主力基差(生意社数据,DEC-074)。基差 = 现货 − 主力期货:为正是期货' +
@@ -339,7 +400,8 @@ function openDetail(item: SpreadMonitorItem) {
         剩余时间越长「曾经回归」越容易达成，所以别只看那个百分比——
         <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
         三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
-        就是信号日（次日执行），带它的行排在最上面；仓位按「风险预留」那个点数算:
+        就是信号日（次日执行），带它的行排在最上面，<strong>方向就写在标上</strong>——
+        「做空价差」= 卖腿1买腿2，「做多价差」= 买腿1卖腿2；仓位按「风险预留」那个点数算:
         可承受亏损 ÷ (风险预留 × 点值) = 手数;浮亏到「补仓参考」是历年常态,不是逻辑坏了。
         <strong>剩余 ≤15 交易日进交割红线</strong>,⚡ 压制、持仓清掉;16~39 日是衰减区,降档。
         「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态；
@@ -481,8 +543,10 @@ function openDetail(item: SpreadMonitorItem) {
               >
                 <span class="badge-decay">衰减区 · 剩 {{ item.days_left }} 日</span>
               </el-tooltip>
-              <el-tooltip v-if="isEntry(item)" :content="ENTRY_HINT" placement="top">
-                <span class="badge-entry">⚡ 进场</span>
+              <el-tooltip v-if="isEntry(item) && item.revert" :content="ENTRY_HINT" placement="top">
+                <!-- 方向必须写在标上(DEC-088):这个标此前只说「进场」,不说做多还是
+                     做空,而它旁边的「✓ 合格」当时判的可能是反方向。 -->
+                <span class="badge-entry">⚡ 进场 · {{ tradeDirection(item.revert) }}价差</span>
               </el-tooltip>
               <el-tag
                 v-if="item.alert"
@@ -502,12 +566,15 @@ function openDetail(item: SpreadMonitorItem) {
               <el-tooltip v-if="isChoppy(item.turn_crosses)" :content="CHOPPY_HINT" placement="top">
                 <span class="badge-choppy">⚠ 信号差 ×{{ item.turn_crosses }}</span>
               </el-tooltip>
+              <el-tooltip v-if="item.revert_alt" :content="CONFLICT_HINT" placement="top">
+                <span class="badge-choppy">⚠ 两侧方向相反</span>
+              </el-tooltip>
               <el-tooltip
                 v-if="item.revert && isQualified(item.revert)"
                 :content="QUALIFIED_HINT"
                 placement="top"
               >
-                <span class="badge-q">✓ 合格</span>
+                <span class="badge-q">✓ 合格 · {{ tradeDirection(item.revert) }}价差</span>
               </el-tooltip>
             </div>
 
@@ -541,6 +608,23 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
             <div v-else class="revert absent">历年无可比样本</div>
 
+            <!-- 另一侧(DEC-088)。只在两侧方向相反时出现——藏起来正是那个 BUG 的做法。 -->
+            <el-tooltip v-if="item.revert_alt" :content="CONFLICT_HINT" placement="top">
+              <div class="revert alt">
+                <span class="basis">
+                  另一侧 · {{ tradeDirection(item.revert_alt) }}价差
+                  {{ item.revert_alt.hit }}/{{ item.revert_alt.n }} 年曾回归
+                  <template v-if="points(item.revert_alt.drift_points)">
+                    · 持到期
+                    <em :class="driftTone(item.revert_alt.drift_points)">
+                      {{ points(item.revert_alt.drift_points) }}
+                    </em>
+                    点
+                  </template>
+                </span>
+              </div>
+            </el-tooltip>
+
             <el-tooltip v-if="item.basis" :content="BASIS_HINT" placement="top">
               <div class="basis">
                 <span class="k">{{ label(item.basis.instrument) }}现货</span>
@@ -554,6 +638,20 @@ function openDetail(item: SpreadMonitorItem) {
                 <span class="pctile" v-if="item.basis.percentile !== null">
                   历年 {{ (Number(item.basis.percentile) * 100).toFixed(0) }}% 位
                 </span>
+              </div>
+            </el-tooltip>
+
+            <!-- FG-SA 的资金流向背景(DEC-087)。只挂在玻璃×纯碱这一个跨品种组合上:
+                 这条信号预测的正是 FG−SA 价差的方向,而它是本平台唯一在监控的
+                 跨品种组合。与基差同一性质——**背景,不是交易信号**。 -->
+            <el-tooltip v-if="fundFlow && isFgSa(item)" :content="fundFlow.note" placement="top">
+              <div class="basis fund">
+                <span class="k">资金流向</span>
+                <span class="v" :class="fundFlowFor(item).widen ? 'disc' : 'prem'">
+                  {{ fundFlowFor(item).text }}
+                </span>
+                <span class="pctile">强度 {{ fundFlow.z.toFixed(2) }}</span>
+                <span class="pctile flow-tip">背景参考,非进场信号</span>
               </div>
             </el-tooltip>
 
@@ -899,6 +997,14 @@ function openDetail(item: SpreadMonitorItem) {
 .basis .pctile {
   color: var(--tv-text-muted);
 }
+/* 资金流向条与基差条同一档(都是背景),叠在一起时留一点行距区分层次。
+   颜色沿用涨跌两色:这里的「涨跌」指价差本身走扩/收窄,与基差同义,不是好坏。 */
+.basis.fund {
+  margin-top: 2px;
+}
+.basis .flow-tip {
+  opacity: 0.75;
+}
 .note-hint {
   margin: 0 0 10px;
   font-size: 12px;
@@ -1029,6 +1135,11 @@ function openDetail(item: SpreadMonitorItem) {
   cursor: help;
 }
 
+/* 另一侧统计:比主统计再弱一档,它是对照不是结论。 */
+.revert.alt {
+  margin-top: 2px;
+  opacity: 0.8;
+}
 /* 历史回归率。同样避开红绿：这是个概率，不是价格方向。
    强弱只用主色与灰色的深浅区分。 */
 .revert {

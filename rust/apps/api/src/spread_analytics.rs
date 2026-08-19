@@ -3548,6 +3548,23 @@ mod monitor_tests {
     }
 
     #[test]
+    fn the_traded_side_is_the_turn_side_not_the_alert_side() {
+        // JM2612−JM2705 @2026-08-06 的真实形态:历年轨 3.6% 报**低位**,
+        // 当年轨自 100% 退到 70.8% 拐**高位**。⚡ 是拐头给的,统计就得给高位侧
+        // ——高位侧持到期 −45,判不合格,⚡ 该灭。原实现给低位侧(持到期 +45)
+        // 直接放行了一笔做空,而其后两周价差涨了 83.5 点。
+        assert_eq!(trade_side(Some("low"), Some("high")), Some("high"));
+        assert_eq!(trade_side(Some("high"), Some("low")), Some("low"));
+        // 两侧一致时谁优先都一样
+        assert_eq!(trade_side(Some("high"), Some("high")), Some("high"));
+        // 只报警没拐头:机会出现但没到上车点,按报警侧给数字,不会有 ⚡
+        assert_eq!(trade_side(Some("low"), None), Some("low"));
+        // 只拐头没报警:拐头行多半已退出报警带,这正是该看数字的时候
+        assert_eq!(trade_side(None, Some("high")), Some("high"));
+        assert_eq!(trade_side(None, None), None);
+    }
+
+    #[test]
     fn no_alert_anywhere_means_no_alert() {
         let pair = track(0.5, 0.10);
         let years = track(0.42, 0.10);
@@ -3797,16 +3814,28 @@ mod monitor_tests {
     }
 
     #[test]
-    fn a_crash_through_both_bands_picks_the_side_with_more_margin() {
-        // 20 日内从上带砸到 0.05:高位侧余量 0.85,低位侧不足 —— 报高位拐头。
+    fn a_crash_through_both_bands_picks_the_side_that_just_crossed() {
+        // 20 日内从上带砸到 0.05:低位侧还没退够(0.05 < 0.10),只有高位侧成立。
         assert_eq!(
             monitor_turn(Some(0.05), Some(1.0), Some(0.05), 0.10),
             Some("high")
         );
-        // 停在正中央,两侧都够格时也要有确定的答案,不许随机。
+        // 停在正中央,两侧余量相等 —— 也要有确定的答案,不许随机。
         assert_eq!(
             monitor_turn(Some(0.50), Some(1.0), Some(0.0), 0.10),
             Some("high")
+        );
+        // LH2611−LH2705 @2026-08-19 的真实形态:位置 0.865,20 日内两带都摸过。
+        // 离高位线 0.035(昨天还在 1.0,今天刚穿下来)、离低位线 0.765(那波做多
+        // 已经走完 715 点)—— 报**高位**。取「更远」会报低位,把走完的机会当信号。
+        assert_eq!(
+            monitor_turn(Some(0.865), Some(1.0), Some(0.0), 0.10),
+            Some("high")
+        );
+        // 镜像:刚从底部弹上来一点,该报低位。
+        assert_eq!(
+            monitor_turn(Some(0.135), Some(1.0), Some(0.0), 0.10),
+            Some("low")
         );
     }
 
@@ -4019,8 +4048,17 @@ pub struct SpreadMonitorItem {
     /// 前一日位置缺失(该组合的第一天、或前一日没有快照)时为 false —— 判不了就
     /// 不打标记，宁可漏标也不假报。
     pub is_new_alert: bool,
-    /// 未触发、且未拐头时为空；否则给出报警侧（或拐头侧）的历年统计，样本不足也为空。
+    /// 未触发、且未拐头时为空；否则给出**这一行要做的那笔交易**那一侧的历年统计,
+    /// 样本不足也为空。侧别 = 拐头侧优先、其次报警侧(DEC-088):⚡ 由拐头触发,
+    /// 资格就必须用拐头侧的数字判,否则会拿 A 方向的成绩给 B 方向发通行证。
+    /// `side` 同时就是交易方向:"high" = 做空价差,"low" = 做多价差。
     pub revert: Option<SpreadRevertStats>,
+    /// **报警侧与拐头侧相反时**,另一侧(报警侧)的统计。方向一致时为空。
+    ///
+    /// 存在即意味着这一行的两条轨在讲相反的故事(例:历年轨贴底 → 做多价差,
+    /// 当年轨自顶部拐头 → 做空价差)。界面必须把它显示出来:DEC-088 那个 BUG 的
+    /// 本质就是只显示了其中一侧,让人以为只有一笔交易可做。
+    pub revert_alt: Option<SpreadRevertStats>,
     /// "high" / "low" / null —— **已拐头**：近 20 个交易日内当年轨曾进 3% 报警带，
     /// 且当前已自极值回撤超过区间宽度的 10%（= 位置退到 0.90 以下 / 0.10 以上）。
     ///
@@ -4173,7 +4211,8 @@ fn turn_retreat(instrument_1: &str, instrument_2: &str) -> f64 {
 /// 「自极值回撤区间的 X%」等价于「位置退 X 个百分点」:报警时价差贴着滚动
 /// 极值,极值就是区间端点,(端点 − 当前) / 区间宽 = 1 − 位置。所以不需要另存
 /// 极值,只需要近 20 日位置的 max/min(迁移 202608170004)。X 按品种定,见
-/// `turn_retreat`。两侧同时满足(20 日内从上带砸穿到下带)取离自家门槛更远的一侧。
+/// `turn_retreat`。两侧同时满足(20 日内既摸过上带又摸过下带)取**离自家门槛更近**
+/// 的一侧 —— 那是刚穿线的、还能进的那一侧(DEC-088)。
 fn monitor_turn(
     pos: Option<f64>,
     hi20: Option<f64>,
@@ -4186,7 +4225,17 @@ fn monitor_turn(
     match (high, low) {
         (true, false) => Some("high"),
         (false, true) => Some("low"),
-        (true, true) => Some(if (1.0 - retreat - pos) >= (pos - retreat) {
+        // 两侧同时成立 = 20 日内既摸过上带又摸过下带。取**刚穿线的那一侧**,
+        // 也就是离自己门槛**更近**的一侧(DEC-088,2026-08-19 修正方向)。
+        //
+        // 原来取的是「离门槛更远」,想的是「退得更多 = 拐得更实」,但退得多恰恰
+        // 说明那一侧的回归**已经走完了**,不是能进的场。
+        // 实例 LH2611−LH2705 @2026-08-19:位置 0.865,离高位线 0.90 只有 0.035
+        // (08-18 还在 1.0,今天刚穿下来),离低位线 0.10 有 0.765(20 日前创的新低,
+        // 那波做多价差已经走了 715 点)。原实现报「低位」,把一个走完的机会当成
+        // 当前信号,还顺带把统计切到低位侧(持到期 −635)判成不合格 —— 而高位侧
+        // 是 5/5、持到期 +635,本该亮 ⚡ 做空。
+        (true, true) => Some(if (1.0 - retreat - pos) <= (pos - retreat) {
             "high"
         } else {
             "low"
@@ -4321,6 +4370,15 @@ fn combined_alert_at(
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, alert)| alert)
+}
+
+/// 这一行**要做的那笔交易**在哪一侧 —— 拐头侧优先(DEC-088)。
+///
+/// ⚡ 进场由拐头触发,所以资格、统计、方向文案都必须锚在拐头侧。原实现是
+/// `alert.or(turn)`,两侧相反时会拿报警侧的成绩给拐头侧的交易发通行证。
+/// 没拐头只报警的行按报警侧:那是「机会出现、还没到上车点」,本来就没有 ⚡。
+fn trade_side(alert: Option<&'static str>, turn: Option<&'static str>) -> Option<&'static str> {
+    turn.or(alert)
 }
 
 fn combined_alert(
@@ -4574,10 +4632,8 @@ pub async fn query_spread_monitor(
             };
 
             // 计数是 Copy、点数是短字符串 clone 一下，都不会妨碍下面把 row 的其余
-            // 字段移走。统计与阈值无关，所以这里不再挑档位；报警侧优先，没报警但
-            // 已拐头的行按拐头侧给——拐头行多半已退出报警带，不给统计的话,恰恰是
-            // 该看数字的时候页面一片空白。
-            let revert = alert.or(turn).and_then(|side| {
+            // 字段移走。统计与阈值无关，所以这里不再挑档位。
+            let stats_for = |side: &'static str| {
                 if side == "high" {
                     revert_stats(
                         side,
@@ -4601,7 +4657,28 @@ pub async fn query_spread_monitor(
                         row.revert_low_days,
                     )
                 }
-            });
+            };
+
+            // **拐头侧优先**(DEC-088,2026-08-19 修 BUG)。原来是 `alert.or(turn)`,
+            // 想的是「报警侧更贴近当下」;但 ⚡ 进场是**拐头**触发的,资格却拿报警侧
+            // 的统计去判——两侧相反时,合格标说的是 A 方向,进场标说的是 B 方向,
+            // 乘在一起就放行了一笔没有任何统计支持的交易。
+            //
+            // 实例 JM2612−JM2705 @2026-08-06:历年轨 3.6% 报低位、当年轨自 100% 退到
+            // 70.8% 拐头报高位。显示的是低位侧(13/13、持到期 +45,合格),⚡ 指的却是
+            // 高位侧(做空),而高位侧持到期 −45 本该判不合格。此后两周价差从 −155 走到
+            // −71.5,涨 83.5 点——做空方向反了。
+            //
+            // 没拐头只报警的行仍按报警侧给统计:那是「机会出现、还没到上车点」,
+            // 本来就不该有 ⚡,给统计是为了让人提前看数字。
+            let trade_side = trade_side(alert, turn);
+            let revert = trade_side.and_then(stats_for);
+            // 另一侧只在**两侧方向相反**时给:这正是上面那个 BUG 的现场,藏起来就是
+            // 藏证据。方向一致时给它只会让页面多出一串同义数字。
+            let revert_alt = match (alert, turn) {
+                (Some(a), Some(t)) if a != t => stats_for(a),
+                _ => None,
+            };
 
             SpreadMonitorItem {
                 trade_date: row.trade_date.to_string(),
@@ -4616,6 +4693,7 @@ pub async fn query_spread_monitor(
                 alert: alert.map(str::to_string),
                 is_new_alert,
                 revert,
+                revert_alt,
                 turn: turn.map(str::to_string),
                 is_new_turn,
                 turn_crosses,

@@ -58,7 +58,8 @@ const PAYLOAD = {
     short_trades: 1, long_trades: 1, exit_reasons: { 反向: 1, 止损: 1 }
   },
   rules: { enter: 1, stop: 0.06, reselect_months: 12, group_k: 5, max_hold: 40,
-           sig_win: 5, long_enabled: false },
+           sig_win: 5, long_enabled: false, exit_before_delivery: 10 },
+  delivery: { window_end: '2026-10-30', days_left: 53, limit: 10, must_exit: false },
   compare: {
     strategy: { cum_pct: 86.5, sharpe: 1.96, max_dd_pct: -8.6 },
     benchmark: { cum_pct: 99.2, sharpe: 1.65, max_dd_pct: -14.8 },
@@ -97,6 +98,34 @@ function stubFetch(payload: unknown = PAYLOAD, ok = true) {
 
 describe('生猪机构资金', () => {
   beforeEach(() => stubFetch())
+
+  it('状态条给出主力还能拿几个交易日', async () => {
+    // 运营者 2026-08-19:「我是散户,玻璃 2609 合约 8.31 之前需要离场,
+    // 要提前 10 个交易日」。2026-08-14 玻璃主力还是 FG2609、只剩 11 个交易日,
+    // 而页面当时对此只字不提 —— 差一天就撞线。
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('还剩 53 个交易日')
+    expect(w.text()).not.toContain('必须平仓')
+  })
+
+  it('撞线那天必须写「必须平仓」,不能只把数字染个色', async () => {
+    stubFetch({ ...PAYLOAD, delivery: { window_end: '2026-08-31', days_left: 10, limit: 10, must_exit: true } })
+    const w = mount(HogMoney, { props: { instrument: 'FG' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('必须平仓')
+  })
+
+  it('引擎还没跑过的旧 JSON 没有这个字段,页面照常渲染', async () => {
+    // 前端先于引擎上线:当晚引擎跑过之前线上还是上一版 JSON。
+    // 写成必填会让整页白掉,这一条就是防这个。
+    const { delivery: _drop, ...older } = PAYLOAD as Record<string, unknown>
+    stubFetch(older)
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('生猪')
+    expect(w.text()).not.toContain('还剩')
+  })
 
   it('读引擎产出的 JSON 并渲染当前状态', async () => {
     const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })

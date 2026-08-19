@@ -689,8 +689,13 @@ export interface SpreadMonitorItem {
   /** 今天触发、前一交易日按同一阈值不触发 —— 刚进极值。持续触发的段为 false，
    * 前一日位置缺失时也为 false(判不了就不标)。 */
   is_new_alert: boolean
-  /** 未触发且未拐头、或样本不足时为 null。报警侧优先，否则按拐头侧。 */
+  /** 未触发且未拐头、或样本不足时为 null。**拐头侧优先**，否则按报警侧(DEC-088)
+   * —— ⚡ 由拐头触发，资格与方向就得锚在同一侧。`side` 即交易方向:
+   * 'high' = 做空价差，'low' = 做多价差。 */
   revert: SpreadRevertStats | null
+  /** 报警侧与拐头侧**方向相反**时，另一侧(报警侧)的统计；一致时为 null。
+   * 有值 = 这一行的两条轨在讲相反的故事，界面必须摊开给人看。 */
+  revert_alt: SpreadRevertStats | null
   /** 'high' | 'low' | null —— 已拐头：近 20 个交易日内当年轨曾进 3% 报警带，
    * 且当前已自极值回撤超过区间宽度的 10%。分层规则的进场信号（DEC-063）。 */
   turn: string | null

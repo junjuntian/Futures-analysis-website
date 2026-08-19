@@ -49,6 +49,9 @@ CN_TZ = timezone(timedelta(hours=8))
 # 当前正在跑的品种(由 run_one 设置)。build_payload 要用它填品种名与单位。
 CURRENT: dict = {}
 
+# 各品种算好的信号表,供 FG-SA 配对信号复用(别再重算一遍)。
+SIG_CACHE: dict = {}
+
 RULES = {
     # —— 席位组 ——
     "group_k": 5,            # Phase 1:3/5/8 里 5 在三个训练截点上都最好
@@ -72,6 +75,14 @@ RULES = {
     "exit_z": 0.0,
     "stop": 0.06,            # 4/6/8/10% 相邻档同向,不敏感
     "max_hold": 40,          # 20/30/40/60 相邻档同向
+    # **散户交割纪律**(2026-08-19 运营者要求):主力合约进入「窗口止点前 10 个
+    # 交易日」就强制平仓,并且**这段时间也不许进场**——不然平了立刻又开,天天空转。
+    # 窗口止点 = 交割月前月最后一个非周末日,与套利监控 `days_to_window_end` 同口径。
+    # 运营者的原话与算例:「我是散户,玻璃 2609 合约 8.31 之前需要离场,
+    # 要提前 10 个交易日,8.18 之前要离场」——FG2609 止点 2026-08-31,
+    # 倒数第 10 个交易日(含当日)正是 08-18。
+    # 这不是调出来的参数,是纪律,别拿回测去优化它。
+    "exit_before_delivery": 10,
     # **做多支路默认关闭**(2026-08-19 运营者拍板)。三条依据:
     #   ① 一年选人口径下多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),
     #      还贡献了全表最差的 −7.4%;关掉后夏普 1.96 → 2.39。
@@ -251,6 +262,33 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def window_end(contract: str) -> pd.Timestamp:
+    """散户可交易窗口的止点 = **交割月前月最后一个非周末日**。
+
+    与套利监控 `last_weekday_before_delivery` / `days_to_window_end` 同口径,
+    两个模块对「散户还能拿多久」必须给同一个答案。
+    节假日不查表:止点只用来卡纪律,±1~2 天的误差不影响「提前 10 个交易日走」。
+    """
+    raw = "".join(ch for ch in str(contract) if ch.isdigit())
+    yy, mm = 2000 + int(raw[:2]), int(raw[2:])
+    d = pd.Timestamp(year=yy, month=mm, day=1) - pd.Timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= pd.Timedelta(days=1)
+    return d
+
+
+def days_to_window_end(contract: str, today: pd.Timestamp) -> int:
+    """从**次日**起到窗口止点(含)的工作日数。已过止点给 0。
+
+    从次日起算是因为信号是盘后出的:今天判「剩 10 天」,平仓动作发生在明天。
+    """
+    end = window_end(contract)
+    if end <= today:
+        return 0
+    return int(np.busday_count((today + pd.Timedelta(days=1)).date(),
+                               (end + pd.Timedelta(days=1)).date()))
+
+
 def main_series(price: pd.DataFrame) -> pd.DataFrame:
     """主力合约与它的逐日收益。**换月日用新主力自己的前一日结算价。**
 
@@ -279,6 +317,8 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
         rows.append((d, c, s, ret))
     out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret"]).set_index("trade_date")
     out["past"] = out["settle"].pct_change(RULES["dip_win"])
+    # 每天的主力离自己的窗口止点还有几个交易日 —— 散户交割纪律靠它卡。
+    out["dleft"] = [days_to_window_end(c, d) for c, d in zip(out["main"], out.index)]
     return out
 
 
@@ -388,8 +428,12 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
         if side != 0:
             cum = (1 + cum) * (1 + side * (r if np.isfinite(r) else 0)) - 1
         reason = None
+        near_delivery = mkt["dleft"].get(d, 99) <= RULES["exit_before_delivery"]
         if side != 0:
-            if cum <= -RULES["stop"]:
+            # 交割纪律排在最前:它不是择时判断,是「不能再拿了」。
+            if near_delivery:
+                reason = "临近交割"
+            elif cum <= -RULES["stop"]:
                 reason = "止损"
             elif i - entry_i >= RULES["max_hold"]:
                 reason = "持满"
@@ -412,6 +456,11 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
             })
             side, cum = 0, 0.0
         ze = z_in.get(d, np.nan)          # 进场判断用这一路(方案 C 下已含共振过滤)
+        # 交割窗口内不进场:只挡不进,不改信号本身——换月之后主力是新合约,
+        # 剩余天数一下子回到 90 多天,信号还在的话照常能进。
+        if side == 0 and near_delivery:
+            pos.iloc[i] = 0
+            continue
         if side == 0 and np.isfinite(ze):
             want = 0
             z = ze
@@ -598,6 +647,15 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "state": state,
         "contract": str(mkt["main"].get(d)),
         "price": _f(mkt["settle"].get(d)),
+        # 散户交割纪律的当前读数(2026-08-19 运营者要求)。界面要能一眼看出
+        # 「这个主力还能拿几天」——2026-08-14 玻璃主力还是 FG2609,只剩 11 个
+        # 交易日,差一天就撞线,而页面当时对此只字不提。
+        "delivery": {
+            "window_end": window_end(mkt["main"].get(d)).strftime("%Y-%m-%d"),
+            "days_left": int(mkt["dleft"].get(d, 0)),
+            "limit": RULES["exit_before_delivery"],
+            "must_exit": bool(mkt["dleft"].get(d, 99) <= RULES["exit_before_delivery"]),
+        },
         "signal": {
             "z": None if not np.isfinite(z) else round(float(z), 2),
             "enter": RULES["enter"],
@@ -643,6 +701,64 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     }
 
 
+# ---------------------------------------------------------------- FG-SA 配对
+
+def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
+    """玻璃与纯碱的**相对**资金流向,预测 FG−SA 价差的走向。
+
+    为什么单独做这一条:研究阶段发现,两品种流向之**差**比它们各自的绝对流向
+    更有信息量(全样本 t=+5.43,比 FG 单品种 +2.96、SA 单品种 +4.41 都高),
+    而平台的套利监控本来就盯着 FG-SA 这个组合——它现在只看价差位置与历史分位,
+    没有「资金在往哪边调」这一维。
+
+    口径:两品种各自取 alpha 前 5 席位的合计净持仓 5 日变化,**各自**减均值除标准差
+    之后相减。必须各自标准化再减:两个品种的持仓量级差一倍以上,直接相减等于让
+    量级大的那个说了算。
+
+    信号为正 = 玻璃这边资金相对更强 → 价差(FG−SA)倾向走扩。
+    """
+    need = ("FG", "SA")
+    if any(c not in cache for c in need):
+        print("[pair] FG/SA 未都跑成,跳过配对信号", file=sys.stderr)
+        return None
+    zs = {}
+    for c in need:
+        chg = cache[c]["chg"]
+        zs[c] = (chg - chg.rolling(RULES["z_win"], min_periods=60).mean()) /                 chg.rolling(RULES["z_win"], min_periods=60).std()
+    joined = pd.concat([zs["FG"].rename("fg"), zs["SA"].rename("sa")], axis=1).dropna()
+    if joined.empty:
+        return None
+    d = joined.index[-1]
+    z = float(joined["fg"].iloc[-1] - joined["sa"].iloc[-1])
+    payload = {
+        "pair": "FG-SA",
+        "data_date": d.strftime("%Y-%m-%d"),
+        "computed_at": datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "z": round(z, 2),
+        "fg_z": round(float(joined["fg"].iloc[-1]), 2),
+        "sa_z": round(float(joined["sa"].iloc[-1]), 2),
+        "direction": "widen" if z > 0 else ("narrow" if z < 0 else "flat"),
+        "note": "玻璃与纯碱的**相对**资金流向。正=玻璃这边资金相对更强,价差(FG−SA)"
+                "倾向走扩;负=倾向收窄。**这是背景不是交易信号**——它预测的是价差方向,"
+                "不含进出场与仓位。",
+        "evidence": "全样本偏相关 +0.140(t=+5.43,N=1480),比 FG 单品种 +2.96、"
+                    "SA 单品种 +4.41 都高;逐年 6 正 1 负;滚动样本外四个截点 "
+                    "+3.31/+0.76/+4.74/+1.77 全正无反向;五档两端差 114 元/吨。",
+        "caveats": [
+            "**2026 年是负的**(t=−1.16,不显著)——当下正处在这个信号的哑火年份。",
+            "五档里中间档不单调,它能分辨两端、说不清中间。",
+            "预测的是**价差方向**,不是某一条腿的方向,也没有出场规则。",
+        ],
+    }
+    out = out_dir / "pair_fgsa.json"
+    tmp = out.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(out)
+    print(f"[pair] {payload['data_date']} 写出 {out}  z={payload['z']} "
+          f"({'走扩' if z > 0 else '收窄'})")
+    return payload
+
+
 def run_one(code: str, src: str, out_dir: Path) -> dict | None:
     """跑一个品种。失败只告警不抛——一个品种挂了不该拖垮其余两个。"""
     global CURRENT
@@ -668,6 +784,7 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None
+    SIG_CACHE[code] = sig
 
     out_path = out_dir / v["out"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -698,6 +815,12 @@ def main():
             continue
         if run_one(code, src, out_dir) is not None:
             ok += 1
+    # FG-SA 配对信号:两个品种都跑成了才算。失败只告警,不影响单品种产物。
+    if {"FG", "SA"} <= set(SIG_CACHE):
+        try:
+            pair_fgsa(SIG_CACHE, out_dir)
+        except Exception as e:                  # noqa: BLE001
+            print(f"[pair] 配对信号失败,保留上一版:{e}", file=sys.stderr)
     print(f"[flow] 完成 {ok}/{len(codes)} 个品种")
     if ok == 0:
         sys.exit(1)

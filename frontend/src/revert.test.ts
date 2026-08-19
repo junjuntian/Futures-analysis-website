@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { driftTone, isChoppy, isDecayZone, isQualified, isRedLine, points, revertPct, revertTone } from './revert'
+import {
+  driftTone,
+  isChoppy,
+  isDecayZone,
+  isQualified,
+  isRedLine,
+  points,
+  revertPct,
+  revertTone,
+  tradeDirection
+} from './revert'
 import type { SpreadRevertStats } from './api'
 
 function stats(rate: string, hit = 1, n = 2): SpreadRevertStats {
@@ -143,5 +153,25 @@ describe('交割红线与衰减区', () => {
   it('剩余天数未知时两者都不判 —— 判不了就不标', () => {
     expect(isRedLine(null)).toBe(false)
     expect(isDecayZone(null)).toBe(false)
+  })
+})
+
+describe('tradeDirection', () => {
+  it('高位侧是做空价差、低位侧是做多价差', () => {
+    // 价差贴顶赌它往下 = 卖腿1买腿2;贴底赌它往上 = 买腿1卖腿2。
+    expect(tradeDirection({ ...stats('1'), side: 'high' })).toBe('做空')
+    expect(tradeDirection({ ...stats('1'), side: 'low' })).toBe('做多')
+  })
+
+  it('JM2612−JM2705 @2026-08-06:合格标与进场标必须指同一个方向', () => {
+    // 那天报警侧是低位(持到期 +45,合格)、拐头侧是高位(持到期 −45)。
+    // 修好之后统计跟拐头侧走,两个标都念「做空」,而做空侧判不合格 —— ⚡ 该灭。
+    const turnSide = { ...stats('1', 13, 13), side: 'high', drift_points: '-45' }
+    expect(tradeDirection(turnSide)).toBe('做空')
+    expect(isQualified(turnSide)).toBe(false)
+    // 反向那侧(界面单列出来对照)确实是笔合格的做多 —— 事后价差涨了 83.5 点。
+    const altSide = { ...stats('1', 13, 13), side: 'low', drift_points: '45' }
+    expect(tradeDirection(altSide)).toBe('做多')
+    expect(isQualified(altSide)).toBe(true)
   })
 })
