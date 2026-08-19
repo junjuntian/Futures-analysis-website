@@ -57,35 +57,62 @@ def retail_signal(dates):
 def backtest(z_entry, z_exit, mr, enter=1.0, hold=40, stop=0.06, cost=0.0005,
              short_only=True):
     """**进场与出场用同一路信号**(z_entry/z_exit 传同一个就是纯单信号)。"""
-    idx = mr.index; trades=[]; side=0; ei=None; cum=0.0
+    # 成交口径:信号日收盘出信号,**次日开盘成交**(DEC-090),与引擎同口径。
+    idx = mr.index; op = mr["open"]; ro = mr["ret_open"]; o2c = mr["o2c"]
+    trades=[]; side=0; ei=None; v=1.0; cum=0.0
+
+    def fill(k):
+        if k+1 >= len(idx): return np.nan
+        return float(op.iloc[k+1]) if np.isfinite(op.iloc[k+1]) else np.nan
+
     for i, d in enumerate(idx):
         ze, zx = z_entry.get(d, np.nan), z_exit.get(d, np.nan)
-        r = mr["ret"].get(d, np.nan)
-        if side != 0: cum = (1+cum)*(1+side*(r if np.isfinite(r) else 0))-1
-        reason=None
         if side != 0:
+            if i >= ei+2:
+                rr = ro.iloc[i]; v *= 1 + side*(rr if np.isfinite(rr) else 0.0)
+            cc = o2c.iloc[i]
+            cum = v*(1 + side*(cc if np.isfinite(cc) else 0.0)) - 1 if i > ei else 0.0
+        reason=None
+        if side != 0 and i > ei:
             if cum <= -stop: reason="止损"
             elif i-ei >= hold: reason="持满"
             elif np.isfinite(zx) and side*zx <= -enter: reason="反向"
+        if reason and not np.isfinite(fill(i)): reason=None
         if reason:
+            rn = ro.iloc[i+1]
+            booked = v*(1 + side*(rn if np.isfinite(rn) else 0.0)) - 1
             trades.append({"进场":idx[ei],"出场":d,"方向":"多" if side>0 else "空",
-                           "收益%":(cum-2*cost)*100,"持有":i-ei,"原因":reason})
-            side, cum = 0, 0.0
-        if side == 0 and np.isfinite(ze):
+                           "收益%":(booked-2*cost)*100,"持有":i-ei,"原因":reason})
+            side, v, cum = 0, 1.0, 0.0
+        if side == 0 and np.isfinite(ze) and np.isfinite(fill(i)):
             want = -1 if ze <= -enter else (0 if short_only else (1 if ze >= enter else 0))
-            if want: side, ei, cum = want, i, 0.0
+            if want: side, ei, v, cum = want, i, 1.0, 0.0
     return pd.DataFrame(trades)
+
+
+def daily_series(tr, mr, cost=0.0005):
+    """逐日净值,与 engine/hog_money.py 的 replay 同构:持仓区间 [open_{i+1},
+    open_{j+1}] 吃 ret_open[i+2..j+1],成本记在两个成交日上。这样它连乘起来
+    **恒等于**逐笔记账 —— 以前这里用 `pos×结算价收益` 另算一条,和逐笔对不上。"""
+    idx = mr.index; ro = mr["ret_open"].fillna(0.0).to_numpy()
+    loc = {d: i for i, d in enumerate(idx)}
+    d = pd.Series(0.0, index=idx)
+    for _, t in tr.iterrows():
+        i0, j0 = loc[t["进场"]], loc[t["出场"]]
+        sd = 1.0 if t["方向"] == "多" else -1.0
+        for k in range(i0+2, j0+2):
+            if k < len(idx): d.iloc[k] = sd*ro[k]
+        if i0+1 < len(idx): d.iloc[i0+1] -= cost
+        if j0+1 < len(idx): d.iloc[j0+1] -= cost
+    return d
 
 
 def perf(tr, mr, label, cost=0.0005):
     if tr.empty: print(f"  {label:24s} 无交易"); return
-    pos = pd.Series(0.0, index=mr.index)
-    for _, t in tr.iterrows():
-        pos.loc[mr.loc[t["进场"]:t["出场"]].index[1:]] = 1.0 if t["方向"]=="多" else -1.0
-    daily = pos*mr["ret"].fillna(0) - pos.diff().abs().fillna(0)*cost
+    daily = daily_series(tr, mr, cost)
     eq=(1+daily).cumprod(); dd=(eq/eq.cummax()-1).min()
     sh=daily.mean()/daily.std()*np.sqrt(242) if daily.std()>0 else np.nan
-    gross=(np.prod(1+tr["收益%"]/100)-1)*100
+    gross=(np.prod(1+(tr["收益%"]+2*cost*100)/100)-1)*100
     print(f"  {label:24s} {len(tr):2d}笔 毛{gross:+7.1f}% 净{(eq.iloc[-1]-1)*100:+7.1f}% "
           f"胜率{(tr['收益%']>0).mean()*100:5.1f}% 均值{tr['收益%'].mean():+5.2f}% "
           f"回撤{dd*100:6.1f}% 夏普{sh:5.2f}")
@@ -95,7 +122,7 @@ mr = mr_all[mr_all.index >= PROD_START]
 pz = rolling_group_signal(mr.index)
 tr_prod = backtest(pz, pz, mr)
 perf(tr_prod, mr, "复刻生产引擎")
-print("  生产页面实际显示:21 笔 毛 +83.5% 净 +79.7% 胜率 71.4% 回撤 -9.4% 夏普 2.39")
+print("  (口径已于 DEC-090 改为次日开盘成交,这一行是**旧口径**的历史记录,别拿来对账)")
 print("  ↑ 对得上才说明复刻没问题,下面的比较才算数")
 
 print("\n=== 1. 同一时间轴(2023-08 起)对比,各用各的信号进出场 ===")

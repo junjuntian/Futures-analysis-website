@@ -23,12 +23,12 @@
 
 **只做空**——做多支路默认关闭,理由见 RULES["long_enabled"]。
 
-回测证据(2023-08~2026-08,一年选人 + 只做空):
+回测证据(2023-08~2026-08,一年选人 + 只做空 + **次日开盘成交**,DEC-090):
   恒定满仓做空基准 +99.2%/夏普 1.65/回撤 −14.8%
-  本引擎            +79.7%/夏普 2.39/回撤  −9.4%,21 笔胜率 71.4%、最差 −3.8%
+  本引擎            +79.8%/夏普 2.23/回撤  −6.8%,18 笔胜率 61.1%
 
-**必须正视的一件事:绝对收益没跑赢基准**(+79.7% vs +99.2%)。这三年是单边熊市,
-躺着满仓做空本身就有 +99% 复利。策略赢的是夏普(2.39 vs 1.65)与回撤(−9.4% vs
+**必须正视的一件事:绝对收益没跑赢基准**(+79.8% vs +99.2%)。这三年是单边熊市,
+躺着满仓做空本身就有 +99% 复利。策略赢的是夏普(2.23 vs 1.65)与回撤(−6.8% vs
 −14.8%),以及**趋势反转时会退出而不是硬扛**——而后者在样本内无法验证(没有牛市)。
 界面上必须摆出这个对比(payload 的 `compare`),不然看的人会把熊市 beta 当成本事。
 """
@@ -51,6 +51,8 @@ CURRENT: dict = {}
 
 # 各品种算好的信号表,供 FG-SA 配对信号复用(别再重算一遍)。
 SIG_CACHE: dict = {}
+
+COST = 0.0005            # 单边手续费+滑点。逐日净值在成交那两天各扣一次。
 
 RULES = {
     # —— 席位组 ——
@@ -119,9 +121,9 @@ RULES = {
     # 反过来主张切换,是运营者从界面数字对不上把错误揪出来的)。
     #
     # 正确对比(同一时间轴 2023-08 起、各用各的信号进出场,与生产页面对拍过):
-    #   现有主信号 21 笔 净 +79.7%/胜率 71.4%/回撤 −9.4%/夏普 2.39
-    #   散户反向   21 笔 净 +91.4%/胜率 76.2%/回撤 −6.8%/夏普 2.42
-    #   共振进场   18 笔 净 +88.4%/胜率 72.2%/回撤 −4.1%/夏普 2.80
+    #   现有主信号 21 笔 净 +66.7%/胜率 61.9%/回撤 −12.0%/夏普 1.79
+    #   散户反向   21 笔 净 +73.8%/胜率 57.1%/回撤  −8.0%/夏普 1.74
+    #   共振进场   18 笔 净 +79.8%/胜率 61.1%/回撤  −6.8%/夏普 2.23
     # **单笔均值差的 t 只有 0.22 / 0.49,在 21 笔样本上分不出高下。**
     #
     # 所以它的定位是**独立的第二意见**(与主信号相关 0.59),不是「更好的信号」:
@@ -131,9 +133,9 @@ RULES = {
     #   进场:聪明钱流向与散户反向流向同号(共振)且散户反向 z ≤ −enter
     #   出场:散户反向信号翻到 +enter(反向)/ 硬止损 / 持满
     # 同一时间轴(2023-08 起)三个方案:
-    #   现有主信号 21 笔 净 +79.7%/胜率 71.4%/回撤 −9.4%/夏普 2.39
-    #   散户反向   21 笔 净 +91.4%/胜率 76.2%/回撤 −6.8%/夏普 2.42
-    #   **方案 C** 18 笔 净 +88.4%/胜率 72.2%/回撤 **−4.1%**/夏普 **2.80**
+    #   现有主信号 21 笔 净 +66.7%/胜率 61.9%/回撤 −12.0%/夏普 1.79
+    #   散户反向   21 笔 净 +73.8%/胜率 57.1%/回撤  −8.0%/夏普 1.74
+    #   **方案 C** 18 笔 净 +79.8%/胜率 61.1%/回撤 **−6.8%**/夏普 **2.23**
     # **必须如实记住:三者单笔均值差的 t 只有 0.22~0.49,统计上分不出高下。**
     # 选 C 是运营者的判断(回撤最小、夏普最高),不是数据证明它更优——
     # 别在后续文档里把它写成「实测最优」。
@@ -142,7 +144,7 @@ RULES = {
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
 # 生猪只做空(它样本里只有单边熊市,做多支路逐笔累计 −1.5%),而玻璃纯碱双向明显
-# 更好(FG 双向夏普 1.63 vs 只做空 1.04;SA 2.02 vs 1.52),因为它们跨了完整周期、
+# 更好(FG 双向夏普 0.58 vs 只做空 0.21;SA 0.78 vs 0.56),因为它们跨了完整周期、
 # 做多支路有真实机会。这条差异是实测出来的,不是设计出来的。
 VARIETIES = {
     "LH": {
@@ -151,25 +153,26 @@ VARIETIES = {
         "long_enabled": False,          # DEC-084:多头 15 笔逐笔累计 −1.5%,关掉
         "long_needs_dip": True,   # 做多已关,这条用不上;留 True 是生猪原口径
         "out": "hog_signals.json",
-        "backtest": "18 笔 净 +88.4%/胜率 72.2%/回撤 −4.1%/夏普 2.80(2023-08 起)",
+        "backtest": "18 笔 净 +79.8%/胜率 61.1%/回撤 −6.8%/夏普 2.23(2023-08 起)",
     },
     "FG": {
         "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
         "replay_start": "2013-01-01",   # 郑商所席位 2012-12 起,留一个月预热
         "long_enabled": True,
-        # 实测带 dip 反而差:206 笔 +4264%/夏普 1.63 → 157 笔 +1225%/1.27
+        # 实测带 dip 反而差:207 笔 夏普 0.58 → 158 笔 0.40(DEC-090 新口径)
         "long_needs_dip": False,
         "out": "fg_signals.json",
-        "backtest": "206 笔 净 +4264%/胜率 56.8%/回撤 −19.4%/夏普 1.63(2013-01 起)",
+        "backtest": "207 笔 净 +385%/胜率 51.7%/回撤 −43.1%/夏普 0.61(2013-01 起)",
     },
     "SA": {
         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
         "replay_start": "2020-06-01",   # 席位 2019-12 起,留半年预热
         "long_enabled": True,
-        # 实测带 dip 少三分之一收益:100 笔 +1522% → 84 笔 +1034%
+        # 带 dip 的夏普几乎一样(0.78 vs 0.75)但**回撤好很多**(−40.1% vs −53.3%),
+        # DEC-090 换成次日开盘成交之后才显出来。这一条值得复议,现状是维持不带 dip。
         "long_needs_dip": False,
         "out": "sa_signals.json",
-        "backtest": "100 笔 净 +1522%/胜率 64.0%/回撤 −23.6%/夏普 2.02(2020-06 起)",
+        "backtest": "101 笔 净 +244%/胜率 46.5%/回撤 −53.3%/夏普 0.80(2020-06 起)",
     },
 }
 
@@ -307,6 +310,10 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
         main.append(cur)
 
     px = price.set_index(["contract", "trade_date"])["settle"].sort_index()
+    # 开盘价:成交口径改成「次日开盘」之后它才是真正的成交价(DEC-090)。
+    # 郑商所对无成交合约会写 0(DEC-073),按缺失处理,别当成真价格。
+    po = (price.assign(_o=price["open_price"].replace(0, np.nan))
+               .set_index(["contract", "trade_date"])["_o"].sort_index())
     rows = []
     for d, c in zip(dates, main):
         s = px.get((c, d), np.nan)
@@ -314,8 +321,17 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
         earlier = hist[hist.index < d]
         prev = earlier.iloc[-1] if len(earlier) else np.nan
         ret = s / prev - 1.0 if (np.isfinite(s) and np.isfinite(prev) and prev > 0) else np.nan
-        rows.append((d, c, s, ret))
-    out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret"]).set_index("trade_date")
+        o = po.get((c, d), np.nan)
+        oh = po.loc[c] if c in po.index.get_level_values(0) else pd.Series(dtype=float)
+        oe = oh[oh.index < d]
+        oprev = oe.iloc[-1] if len(oe) else np.nan
+        # 开→开:换月日照样用**新合约自己的**前一日开盘价,与结算价那条同一纪律。
+        ret_o = o / oprev - 1.0 if (np.isfinite(o) and np.isfinite(oprev) and oprev > 0) else np.nan
+        # 开→结算:同日同合约,天然安全。用来算「持仓到今天收盘的浮盈」。
+        o2c = s / o - 1.0 if (np.isfinite(s) and np.isfinite(o) and o > 0) else np.nan
+        rows.append((d, c, s, ret, o, ret_o, o2c))
+    out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret",
+                                      "open", "ret_open", "o2c"]).set_index("trade_date")
     out["past"] = out["settle"].pct_change(RULES["dip_win"])
     # 每天的主力离自己的窗口止点还有几个交易日 —— 散户交割纪律靠它卡。
     out["dleft"] = [days_to_window_end(c, d) for c, d in zip(out["main"], out.index)]
@@ -414,22 +430,56 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
 
 def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
            retail: pd.DataFrame | None = None) -> tuple[list[dict], pd.Series]:
-    """全量回放历史信号。与 research/run_lh_phase2.py 的 backtest_discrete 同口径。
+    """全量回放历史信号。
 
-    T+1:今日收盘算出的信号,吃的是明日收益——日内不可能按今日结算价成交。
+    **成交口径:信号日收盘出信号,次日开盘成交**(DEC-090,2026-08-19 运营者拍板)。
+
+    为什么不能按信号日结算价成交:席位持仓排名是**收盘之后**才公布的——大商所约
+    15:30-16:00、郑商所约 16:26,我们自己的采集就是 16:00 与 17:30 两轮。拿 16:26
+    才拿到的数据去按 15:00 的结算价成交,是做不到的。生猪没有夜盘,次日开盘是它
+    唯一能成交的时点;玻璃纯碱有夜盘,现实比这条口径还好一点,这里取保守的。
+
+    这不是小修:实测按结算价成交玻璃 +5247%、纯碱 +1691%,换成次日开盘分别只剩
+    +402% 和 +311%(毛)。**收益几乎全部集中在信号后的第一天**,而那一天恰恰是
+    拿不到的。改这条之前页面上的数字是拿不到的数字。
+
+    计价三条线,都逐合约、都不跨合约相除:
+      ret_open  开→开,持仓期间的净值就走这条(成交价到成交价);
+      o2c       同日开→结算,只用来算「持到今天收盘的浮盈」——止损要判的是
+                **今天收盘时已知的**浮亏,不能用明天的开盘价去判今天该不该止损;
+      ret       结→结,只留给对比栏和别的口径用。
     """
     idx = mkt.index
     z_in, z_out = entry_exit_signals(sig, retail)
-    trades, side, entry_i, cum = [], 0, None, 0.0
+    op = mkt["open"]
+    ro = mkt["ret_open"]
+    o2c = mkt["o2c"]
+    trades, side, entry_i = [], 0, None
+    v = 1.0            # 从进场成交价(open_{entry_i+1})到**今日开盘**的净值,已含方向
+    cum = 0.0          # 到**今日收盘**的浮盈,止损/记账都看它
     pos = pd.Series(0.0, index=idx)
+    # 逐日净值在回放结束后统一构造(见函数末尾):走**开→开**这条时钟,因为成交
+    # 就在开盘,这样它连乘起来**恒等于**逐笔记账。以前是在 build_payload 里用
+    # pos.shift(1)×结算价收益**另算**一条,两条对不上也没人会发现——夏普和回撤
+    # 描述的是另一个策略。函数末尾有断言钉住这条恒等式。
+
+    def _fill(k: int) -> float:
+        """第 k 个信号日对应的成交价 = 次日开盘。越界或缺失给 nan。"""
+        if k + 1 >= len(idx):
+            return np.nan
+        return float(op.iloc[k + 1]) if np.isfinite(op.iloc[k + 1]) else np.nan
+
     for i, d in enumerate(idx):
         z = z_out.get(d, np.nan)          # 出场判断用这一路
-        r = mkt["ret"].get(d, np.nan)
         if side != 0:
-            cum = (1 + cum) * (1 + side * (r if np.isfinite(r) else 0)) - 1
+            if i >= entry_i + 2:          # 进场成交在 entry_i+1 的开盘,从 +2 起才有开→开
+                r = ro.iloc[i]
+                v *= 1 + side * (r if np.isfinite(r) else 0.0)
+            c = o2c.iloc[i]
+            cum = v * (1 + side * (c if np.isfinite(c) else 0.0)) - 1 if i > entry_i else 0.0
         reason = None
         near_delivery = mkt["dleft"].get(d, 99) <= RULES["exit_before_delivery"]
-        if side != 0:
+        if side != 0 and i > entry_i:
             # 交割纪律排在最前:它不是择时判断,是「不能再拿了」。
             if near_delivery:
                 reason = "临近交割"
@@ -441,27 +491,36 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 reason = "反向"
             elif np.isfinite(z) and abs(z) <= RULES["exit_z"] and side * z <= 0:
                 reason = "消退"
+        # 平不掉就不算平:出场也要有次日开盘价才能成交,最后一天出的信号只能挂着。
+        if reason and not np.isfinite(_fill(i)):
+            reason = None
         if reason:
             e = idx[entry_i]
+            rn = ro.iloc[i + 1]
+            booked = v * (1 + side * (rn if np.isfinite(rn) else 0.0)) - 1
             trades.append({
                 "side": "short" if side < 0 else "long",
                 "entry_date": e.strftime("%Y-%m-%d"),
                 "exit_date": d.strftime("%Y-%m-%d"),
-                "entry_px": _f(mkt["settle"].get(e)),
-                "exit_px": _f(mkt["settle"].get(d)),
+                # 价格写的是**成交价**(次日开盘),不是信号日结算价——
+                # 界面上「进场价」必须是能成交的那个数。
+                "entry_px": _f(_fill(entry_i)),
+                "exit_px": _f(_fill(i)),
                 "contract": str(mkt["main"].get(e)),
-                "ret_pct": round(cum * 100, 2),
+                "ret_pct": round(booked * 100, 2),
                 "hold_days": i - entry_i,
                 "exit_reason": reason,
+                "_i": entry_i, "_j": i,
             })
-            side, cum = 0, 0.0
+            side, v, cum = 0, 1.0, 0.0
         ze = z_in.get(d, np.nan)          # 进场判断用这一路(方案 C 下已含共振过滤)
         # 交割窗口内不进场:只挡不进,不改信号本身——换月之后主力是新合约,
         # 剩余天数一下子回到 90 多天,信号还在的话照常能进。
         if side == 0 and near_delivery:
             pos.iloc[i] = 0
             continue
-        if side == 0 and np.isfinite(ze):
+        # 没有次日开盘价就进不了场(最后一天的信号、或缺开盘价的日子)。
+        if side == 0 and np.isfinite(ze) and np.isfinite(_fill(i)):
             want = 0
             z = ze
             if z <= -RULES["enter"]:
@@ -471,20 +530,57 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 if (not RULES["long_needs_dip"]) or (np.isfinite(p) and p < 0):
                     want = 1
             if want != 0:
-                side, entry_i, cum = want, i, 0.0
+                side, entry_i, v, cum = want, i, 1.0, 0.0
         pos.iloc[i] = side
-    # 尚未平仓的那笔单独带出来(界面要显示"持有中")
+    # 尚未平仓的那笔单独带出来(界面要显示"持有中")。它按最新**结算价**估值,
+    # 与已平仓那些按成交价记账不同——浮盈本来就是估值,不是成交结果。
     if side != 0:
         e = idx[entry_i]
         trades.append({
             "side": "short" if side < 0 else "long",
             "entry_date": e.strftime("%Y-%m-%d"), "exit_date": None,
-            "entry_px": _f(mkt["settle"].get(e)), "exit_px": None,
+            "entry_px": _f(_fill(entry_i)), "exit_px": None,
             "contract": str(mkt["main"].get(e)),
             "ret_pct": round(cum * 100, 2), "hold_days": len(idx) - 1 - entry_i,
-            "exit_reason": None,
+            "exit_reason": None, "_i": entry_i, "_j": None,
         })
-    return trades, pos
+
+    # ---- 逐日净值 ----
+    # 持仓区间是 [进场成交, 出场成交] = [open_{i+1}, open_{j+1}],所以吃到的开→开
+    # 收益是 ret_open[i+2 .. j+1]。成本按单边各扣一次,记在两个成交日上。
+    daily = pd.Series(0.0, index=idx)
+    ro_f = ro.fillna(0.0).to_numpy()
+    for t in trades:
+        i0, j0 = t["_i"], t["_j"]
+        sd = 1 if t["side"] == "long" else -1
+        last = (j0 + 1) if j0 is not None else len(idx) - 1
+        for k in range(i0 + 2, last + 1):
+            daily.iloc[k] = sd * ro_f[k]
+        if i0 + 1 < len(idx):
+            daily.iloc[i0 + 1] -= COST
+        if j0 is not None and j0 + 1 < len(idx):
+            daily.iloc[j0 + 1] -= COST
+    # 恒等式自检:**只拿已平仓那些**,逐日连乘必须等于逐笔连乘(都不含成本)。
+    # 持有中那笔要排除:它的浮盈盯的是最新结算价,而逐日走到最新开盘,两边口径
+    # 本来就差半天——把它算进来会造出一个假的不一致。
+    # 这条错**不会报错**,只会让夏普和回撤描述另一个策略,所以必须断言。
+    closed = [t for t in trades if t["_j"] is not None]
+    if closed:
+        by_trade = float(np.prod([1 + t["ret_pct"] / 100 for t in closed]))
+        gross = pd.Series(0.0, index=idx)
+        for t in closed:
+            sd = 1 if t["side"] == "long" else -1
+            for k in range(t["_i"] + 2, t["_j"] + 2):
+                gross.iloc[k] = sd * ro_f[k]
+        by_day = float((1 + gross).prod())
+        if abs(by_trade - by_day) > max(0.01, 0.01 * abs(by_trade)):
+            raise AssertionError(
+                f"逐日净值与逐笔记账对不上:逐笔 {(by_trade-1)*100:+.1f}% / "
+                f"逐日 {(by_day-1)*100:+.1f}%")
+    for t in trades:
+        t.pop("_i", None)
+        t.pop("_j", None)
+    return trades, pos, daily
 
 
 def _f(v):
@@ -499,7 +595,8 @@ def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
         out.append(
             "**做多支路已关闭**:回测里多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),"
             "关掉后夏普 1.96 → 2.39。机构减空时策略平仓观望,不是继续扛空单。"
-            "(这三个数是关闭前那一版的回测结论,留作依据。)")
+            "(**这三个数是按结算价成交那一版算的**,DEC-090 改口径后没有重算;"
+            "留作当时的决策依据,不要拿它和现在页面上的数字比。)")
     out.append(
         "**「机构真转多」也不是买入信号**:样本里它出现过 14 天(集中在 2025-07),"
         "之后 20 日主力仍平均跌 1.18%,最好一次只有 +0.61%。但那 14 天全挤在一个"
@@ -516,7 +613,12 @@ def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
         f"{bench['cum_pct']:+.1f}%)。策略赢的是回撤({strat['max_dd_pct']:+.1f}% vs "
         f"{bench['max_dd_pct']:+.1f}%)与夏普({strat['sharpe']} vs {bench['sharpe']}),"
         "以及趋势反转时会跟着退出——后者样本内无法验证。")
-    out.append("回测按结算价成交、T+1 执行,未模拟涨跌停与流动性冲击。")
+    out.append(
+        "**成交口径:信号日收盘出信号,次日开盘成交**(DEC-090)。席位持仓排名是"
+        "收盘后才公布的(大商所约 15:30-16:00、郑商所约 16:26),按信号日结算价"
+        "成交做不到。这条口径下的数字比原来低很多——玻璃从 +5247% 降到 +436%(毛)"
+        "——因为收益几乎全部集中在信号后第一天,而那一天恰恰是拿不到的。"
+        "未模拟涨跌停与流动性冲击。")
     return out
 
 
@@ -554,7 +656,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
     rdf, rhave = retail_series(seat, mkt.index)
-    trades, pos = replay(sig, mkt, rdf)
+    trades, pos, daily = replay(sig, mkt, rdf)
     open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
     closed = [t for t in trades if t["exit_date"]]
 
@@ -634,9 +736,11 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     # 与「躺着满仓做空」的对比。**这一栏必须摆在界面上**:三年单边熊市里,
     # 什么都不做地持有空单本身就有 +99% 的复利收益,不给基准,看的人会把
     # 策略的累计收益当成本事。策略真正赢的是夏普与回撤,不是绝对收益。
-    strat_daily = (pos.shift(1).fillna(0) * mkt["ret"]
-                   - pos.shift(1).fillna(0).diff().abs().fillna(0) * 0.0005)
-    bench_daily = -mkt["ret"]
+    # 逐日净值直接用 replay 产出的那条(DEC-090):它按结算价盯市、成交那两天算半天,
+    # 连乘起来与逐笔记账完全相等。以前是在这里用 pos.shift(1)×结算价收益**另算**
+    # 一条,两条对不上也没人会发现——夏普和回撤描述的是另一个策略。
+    strat_daily = daily
+    bench_daily = -mkt["ret"].fillna(0)
     return {
         "instrument": CURRENT["code"],
         "name": CURRENT["name"],

@@ -44,35 +44,59 @@ def bt(z_in, z_out, mr, enter=1.0, hold=40, stop=0.06, cost=0.0005, short_only=T
        long_needs_dip=False):
     # long_needs_dip 是生猪时代的遗留(Phase 0:跌×减空是唯一正格子),
     # 对玻璃纯碱从没验过。引擎默认带着它,所以这里要能开关才对得上。
+    # 成交口径:信号日收盘出信号,**次日开盘成交**(DEC-090)。席位数据收盘后
+    # 才公布,按信号日结算价成交做不到。净值走开→开,止损判的是今天收盘已知的
+    # 浮亏(开→开累计 × 当日开→结算)。与 engine/hog_money.py 的 replay 同口径。
     past = mr["settle"].pct_change(20)
-    idx = mr.index; trades=[]; side=0; ei=None; cum=0.0
+    idx = mr.index; op = mr["open"]; ro = mr["ret_open"]; o2c = mr["o2c"]
+    trades=[]; side=0; ei=None; v=1.0; cum=0.0
+
+    def fill(k):
+        if k+1 >= len(idx): return np.nan
+        return float(op.iloc[k+1]) if np.isfinite(op.iloc[k+1]) else np.nan
+
     for i, d in enumerate(idx):
-        ze, zx, r = z_in.get(d, np.nan), z_out.get(d, np.nan), mr["ret"].get(d, np.nan)
-        if side != 0: cum = (1+cum)*(1+side*(r if np.isfinite(r) else 0))-1
-        reason=None
+        ze, zx = z_in.get(d, np.nan), z_out.get(d, np.nan)
         if side != 0:
+            if i >= ei+2:
+                rr = ro.iloc[i]; v *= 1 + side*(rr if np.isfinite(rr) else 0.0)
+            cc = o2c.iloc[i]
+            cum = v*(1 + side*(cc if np.isfinite(cc) else 0.0)) - 1 if i > ei else 0.0
+        reason=None
+        if side != 0 and i > ei:
             if cum <= -stop: reason="止损"
             elif i-ei >= hold: reason="持满"
             elif np.isfinite(zx) and side*zx <= -enter: reason="反向"
+        if reason and not np.isfinite(fill(i)): reason=None
         if reason:
+            rn = ro.iloc[i+1]
+            booked = v*(1 + side*(rn if np.isfinite(rn) else 0.0)) - 1
             trades.append({"进场":idx[ei],"出场":d,"方向":"多" if side>0 else "空",
-                           "收益%":(cum-2*cost)*100,"持有":i-ei}); side, cum = 0, 0.0
-        if side == 0 and np.isfinite(ze):
+                           "收益%":(booked-2*cost)*100,"持有":i-ei})
+            side, v, cum = 0, 1.0, 0.0
+        if side == 0 and np.isfinite(ze) and np.isfinite(fill(i)):
             want = -1 if ze <= -enter else 0
             if ze >= enter and not short_only:
                 pv = past.get(d, float("nan"))
                 if (not long_needs_dip) or (np.isfinite(pv) and pv < 0):
                     want = 1
-            if want: side, ei, cum = want, i, 0.0
+            if want: side, ei, v, cum = want, i, 1.0, 0.0
     return pd.DataFrame(trades)
 
 
 def rep(tr, mr, label, cost=0.0005):
     if tr.empty: print(f"  {label:22s} 无交易"); return
-    pos = pd.Series(0.0, index=mr.index)
+    # 与引擎同构的逐日净值(开→开、成本记在成交日),连乘恒等于逐笔。
+    idx = mr.index; ro = mr["ret_open"].fillna(0.0).to_numpy()
+    loc = {d: i for i, d in enumerate(idx)}
+    daily = pd.Series(0.0, index=idx)
     for _, t in tr.iterrows():
-        pos.loc[mr.loc[t["进场"]:t["出场"]].index[1:]] = 1.0 if t["方向"]=="多" else -1.0
-    daily = pos*mr["ret"].fillna(0) - pos.diff().abs().fillna(0)*cost
+        i0, j0 = loc[t["进场"]], loc[t["出场"]]
+        sd = 1.0 if t["方向"] == "多" else -1.0
+        for k in range(i0+2, j0+2):
+            if k < len(idx): daily.iloc[k] = sd*ro[k]
+        if i0+1 < len(idx): daily.iloc[i0+1] -= cost
+        if j0+1 < len(idx): daily.iloc[j0+1] -= cost
     eq=(1+daily).cumprod(); dd=(eq/eq.cummax()-1).min()
     sh=daily.mean()/daily.std()*np.sqrt(242) if daily.std()>0 else np.nan
     n_long=(tr["方向"]=="多").sum()

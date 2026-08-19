@@ -49,8 +49,11 @@ def main_returns(price: pd.DataFrame) -> pd.DataFrame:
     """
     mc = L.main_contract(price)
     px = price.set_index(["contract", "trade_date"])["settle"].sort_index()
+    # 开盘价三列:成交口径已改为「次日开盘」(DEC-090),与 engine/hog_money.py
+    # 的 main_series 必须逐列同口径,否则对拍抓不到分叉。
+    po = (price.assign(_o=price["open_price"].replace(0, np.nan))
+               .set_index(["contract", "trade_date"])["_o"].sort_index())
     rows = []
-    prev_by_c = {}
     for d, c in zip(mc["trade_date"], mc["main"]):
         s = px.get((c, d), np.nan)
         # 该合约自己的上一交易日结算价
@@ -58,9 +61,15 @@ def main_returns(price: pd.DataFrame) -> pd.DataFrame:
         earlier = hist[hist.index < d]
         prev = earlier.iloc[-1] if len(earlier) else np.nan
         ret = s / prev - 1.0 if (np.isfinite(s) and np.isfinite(prev) and prev > 0) else np.nan
-        rows.append((d, c, s, ret))
-        prev_by_c[c] = s
-    out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret"]).set_index("trade_date")
+        o = po.get((c, d), np.nan)
+        oh = po.loc[c] if c in po.index.get_level_values(0) else pd.Series(dtype=float)
+        oe = oh[oh.index < d]
+        oprev = oe.iloc[-1] if len(oe) else np.nan
+        ret_o = o / oprev - 1.0 if (np.isfinite(o) and np.isfinite(oprev) and oprev > 0) else np.nan
+        o2c = s / o - 1.0 if (np.isfinite(s) and np.isfinite(o) and o > 0) else np.nan
+        rows.append((d, c, s, ret, o, ret_o, o2c))
+    out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret",
+                                      "open", "ret_open", "o2c"]).set_index("trade_date")
     return out
 
 
