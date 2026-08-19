@@ -126,3 +126,53 @@ for label, base in [("现有引擎", "prod"), ("共振", "res"), ("与", "and")]
         o = R.stats(short_only(m), mr, "", quiet=True)
         row += f"{o['累计%']:>+11.1f}%" if o else f"{'—':>12s}"
     print(row)
+
+# ---------------------------------------------------------------- ⑦
+# 运营者质疑「只展示不交易那这界面有什么意义」——质疑成立,当时用了双标:
+# 现有信号在同一时间轴上也只有 23 笔、样本 3 年,却因为「已上线」被网开一面。
+# 所以重新评估:让共振参与交易的话,用什么形态、最坏能坏到哪。
+print("\n⑦ 让共振参与交易:几种形态与各自的最坏情况")
+
+def combo_daily(masks_sides, weights):
+    """多路信号并行,各占一份仓位。返回逐日净值序列。"""
+    total = pd.Series(0.0, index=mr.index)
+    for (mask, side_s), w in zip(masks_sides, weights):
+        tr = bt(mask, side_s)
+        pos = pd.Series(0.0, index=mr.index)
+        for _, t in tr.iterrows():
+            pos.loc[mr.loc[t["进场"]:t["出场"]].index[1:]] = 1.0 if t["方向"] == "多" else -1.0
+        total += w * (pos * mr["ret"].fillna(0) - pos.diff().abs().fillna(0) * 0.0005)
+    return total
+
+def report(daily, label):
+    eq = (1 + daily).cumprod()
+    dd = (eq / eq.cummax() - 1).min()
+    sh = daily.mean() / daily.std() * np.sqrt(242) if daily.std() > 0 else np.nan
+    # 最坏 20 日:滚动窗口里最差的一段,看「运气不好时能有多难受」
+    roll = (1 + daily).rolling(20).apply(np.prod, raw=True) - 1
+    print(f"  {label:26s} 累计{(eq.iloc[-1]-1)*100:+7.1f}%  夏普{sh:5.2f}  "
+          f"最大回撤{dd*100:6.1f}%  最差20日{roll.min()*100:+6.1f}%")
+
+SHORT = pd.Series(-1.0, index=mr.index)
+prod_mask = pz <= -1
+res_mask = (rz <= -1) & res
+report(combo_daily([(prod_mask, SHORT)], [1.0]), "A 只用现有(生产在跑)")
+report(combo_daily([(res_mask, SHORT)], [1.0]), "B 只用共振")
+report(combo_daily([(prod_mask, SHORT), (res_mask, SHORT)], [0.5, 0.5]), "C 各半仓并行")
+report(combo_daily([(prod_mask, SHORT), (res_mask, SHORT)], [0.3, 0.7]), "D 三七开(共振为主)")
+report(combo_daily([((prod_mask | res_mask), SHORT)], [1.0]), "E 任一触发(满仓)")
+
+print("\n⑧ 压力测试:假如共振信号从此完全失效(收益归零),各方案还剩什么")
+print("   算法:把共振那一路的收益强制置零,只留现有信号那一路")
+for label, w in [("C 各半仓", (0.5, 0.5)), ("D 三七开", (0.3, 0.7))]:
+    d = combo_daily([(prod_mask, SHORT)], [w[0]])
+    eq = (1 + d).cumprod()
+    print(f"  {label:12s} 共振归零后仅剩 {(eq.iloc[-1]-1)*100:+6.1f}%"
+          f"(现有信号满仓是 {((1+combo_daily([(prod_mask,SHORT)],[1.0])).cumprod().iloc[-1]-1)*100:+.1f}%)")
+print("  → 半仓/三七开的代价:共振若失效,现有那路的收益也被仓位打了折")
+
+print("\n⑨ 反过来:假如现有信号从此失效")
+for label, w in [("C 各半仓", 0.5), ("D 三七开", 0.7)]:
+    d = combo_daily([(res_mask, SHORT)], [w])
+    eq = (1 + d).cumprod()
+    print(f"  {label:12s} 现有归零后仅剩 {(eq.iloc[-1]-1)*100:+6.1f}%")
