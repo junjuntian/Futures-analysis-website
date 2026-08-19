@@ -33,7 +33,8 @@ SEAT_SOURCE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
 PRICE_SOURCE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina_v1": 3}
 
 # 各品种点值,与库里 instruments.price_multiplier 一致。加品种时在这里补一行。
-MULTIPLIERS = {"LH": 16.0, "FG": 20.0, "SA": 20.0, "JD": 10.0, "JM": 60.0}
+MULTIPLIERS = {"LH": 16.0, "FG": 20.0, "SA": 20.0, "JD": 10.0, "JM": 60.0,
+               "AU": 1000.0, "AG": 15.0}
 MULTIPLIER = MULTIPLIERS["LH"]   # 兼容老脚本(run_lh_* 直接引它)
 
 
