@@ -1471,28 +1471,25 @@ h2 .muted {
 }
 
 /* 逐家那一排，在合计摘要下面。整排比合计淡一档——合计是主角，这排是它的拆解。
-   每家自成一块并用竖线隔开，不然五家的十几个数糊成一条，看不出哪个数是谁的。
 
-   靠右与合计那排对齐：合计被 panel-head 的 space-between 推到了右边，这排要是
-   从卡片最左边起头，两排就错开半个屏幕，看着不像一组数（运营者 2026-08-19 指出）。 */
+   用 grid 而不是 flex-wrap：**换行后各家要在列上对齐**。先前用 flex + 竖线分隔，
+   分隔线是靠 `.member-leg + .member-leg` 的左内边距撑出来的，换到第二行的那家
+   （永安期货）在行首却照样带着这段内边距，比上一行行首（国泰君安）缩进一截
+   （运营者 2026-08-19 指出）。改成等宽列之后，第 n 家与第 n+列数 家天然同列，
+   竖线也就不需要了——列间距本身就是分隔。 */
 .member-legs {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 4px 24px;
   margin-top: 8px;
   font-size: 12px;
   color: var(--tv-text-muted);
 }
 .member-leg {
-  display: inline-flex;
+  display: flex;
   align-items: baseline;
   gap: 6px;
   white-space: nowrap;
-}
-.member-leg + .member-leg {
-  border-left: 1px solid var(--tv-border);
-  padding-left: 18px;
 }
 .member-leg b {
   color: var(--tv-text-secondary);
