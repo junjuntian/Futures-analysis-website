@@ -1471,10 +1471,14 @@ h2 .muted {
 }
 
 /* 逐家那一排，在合计摘要下面。整排比合计淡一档——合计是主角，这排是它的拆解。
-   每家自成一块并用竖线隔开，不然五家的十几个数糊成一条，看不出哪个数是谁的。 */
+   每家自成一块并用竖线隔开，不然五家的十几个数糊成一条，看不出哪个数是谁的。
+
+   靠右与合计那排对齐：合计被 panel-head 的 space-between 推到了右边，这排要是
+   从卡片最左边起头，两排就错开半个屏幕，看着不像一组数（运营者 2026-08-19 指出）。 */
 .member-legs {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px 18px;
   margin-top: 8px;
   font-size: 12px;
