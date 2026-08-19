@@ -11,16 +11,19 @@
  * 「等机构转多就转向」的策略意图,但没有数据背书,不能让它看起来和空头一样可信。
  */
 import { computed, onMounted, ref } from 'vue'
-import { getSeatNetPosition, type MemberLeg as SeatCost } from '../api'
+import { getSeatNetPosition, type MemberLeg as SeatCost,
+  type FlowCode
+} from '../api'
 
 /**
  * 一个品种一份 JSON,由引擎按品种各写各的(失败也各自隔离)。
  * 组件只负责渲染,规则差异全在 payload 里——**不要在这里按品种写 if**:
  * 生猪只做空、玻璃纯碱双向,这类差异是引擎实测定的,前端硬编码一份迟早对不上。
  */
-const props = defineProps<{ instrument: 'LH' | 'FG' | 'SA' }>()
-const FILES: Record<string, string> = {
-  LH: 'hog_signals.json', FG: 'fg_signals.json', SA: 'sa_signals.json'
+const props = defineProps<{ instrument: FlowCode }>()
+const FILES: Record<FlowCode, string> = {
+  LH: 'hog_signals.json', FG: 'fg_signals.json', SA: 'sa_signals.json',
+  JD: 'jd_signals.json', JM: 'jm_signals.json'
 }
 
 interface MemberLeg {

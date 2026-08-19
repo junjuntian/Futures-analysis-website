@@ -10,7 +10,9 @@ from run_flow_skill import seat_alpha
 from run_lh_phase2 import main_returns
 
 RETAIL = ["东方财富", "平安期货", "徽商期货"]
-STARTS = {"FG": pd.Timestamp("2013-01-01"), "SA": pd.Timestamp("2020-06-01")}
+# 与 engine/hog_money.py 的 VARIETIES[code]["replay_start"] 必须一致,不然对拍必错。
+STARTS = {"FG": pd.Timestamp("2013-01-01"), "SA": pd.Timestamp("2020-06-01"),
+          "JD": pd.Timestamp("2023-08-11"), "JM": pd.Timestamp("2023-08-11")}
 
 
 def prep(code):

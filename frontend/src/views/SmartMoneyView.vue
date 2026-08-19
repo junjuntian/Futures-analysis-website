@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import HogMoney from '../components/HogMoney.vue'
+import type { FlowCode } from '../api'
 
 // 机构资金信号页。数据由信号引擎每日盘后生成(nginx 静态服务的
 // /smart-money/signals.json),本页只负责在平台内渲染,不做任何计算。
@@ -112,9 +113,18 @@ const tab = ref<'today' | 'history' | 'weights' | 'rules'>('today')
 // 跨两个市场的),拆开看没有意义;生猪是另一套完全不同的信号,单独一个。
 // 记在本地:运营者盯哪个品种通常是稳定的,每次进来重选一遍是重复劳动。
 const VARIETY_KEY = 'smart-money.variety'
-type Variety = 'GOLD' | 'LH' | 'FG' | 'SA'
+type Variety = 'GOLD' | FlowCode
 const variety = ref<Variety>(readVariety())
-const FLOW_VARIETIES: Variety[] = ['LH', 'FG', 'SA']
+/** 合计流向品种。**加品种只改这一行**——按钮由它渲染,不再逐个写死。
+ *  金银共用一套信号(金银比/配对/跑路警报都是跨两市场的),所以不在这里。 */
+const FLOW: Array<{ code: FlowCode; label: string }> = [
+  { code: 'LH', label: '生猪' },
+  { code: 'JD', label: '鸡蛋' },
+  { code: 'JM', label: '焦煤' },
+  { code: 'FG', label: '玻璃' },
+  { code: 'SA', label: '纯碱' }
+]
+const FLOW_VARIETIES: Variety[] = FLOW.map((v) => v.code)
 function readVariety(): Variety {
   try {
     const v = localStorage.getItem(VARIETY_KEY) as Variety | null
@@ -259,21 +269,20 @@ onMounted(async () => {
       <button class="variety" :class="{ on: variety === 'GOLD' }" @click="pickVariety('GOLD')">
         黄金白银
       </button>
-      <button class="variety" :class="{ on: variety === 'LH' }" @click="pickVariety('LH')">
-        生猪
-      </button>
-      <button class="variety" :class="{ on: variety === 'FG' }" @click="pickVariety('FG')">
-        玻璃
-      </button>
-      <button class="variety" :class="{ on: variety === 'SA' }" @click="pickVariety('SA')">
-        纯碱
+      <button
+        v-for="v in FLOW"
+        :key="v.code"
+        class="variety"
+        :class="{ on: variety === v.code }"
+        @click="pickVariety(v.code)"
+      >
+        {{ v.label }}
       </button>
     </div>
 
-    <!-- 三个合计流向品种共用一个组件:规则差异全在各自的 payload 里,
+    <!-- 合计流向品种共用一个组件:规则差异全在各自的 payload 里,
          组件不按品种写分支。key 让切换品种时重新挂载、重新取数。 -->
-    <HogMoney v-if="variety !== 'GOLD'" :key="variety"
-              :instrument="variety as 'LH' | 'FG' | 'SA'" />
+    <HogMoney v-if="variety !== 'GOLD'" :key="variety" :instrument="variety" />
 
     <template v-else>
     <p v-if="data" class="sub">

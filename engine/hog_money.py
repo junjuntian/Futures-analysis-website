@@ -144,6 +144,15 @@ RULES = {
 }
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
+#
+# 2026-08-19 加鸡蛋/焦煤时的实测(方案 C、次日开盘成交、只列夏普与 t):
+#   生猪 只做空 2.23/t+2.52  双向 1.58/t+2.05      → 关做多
+#   鸡蛋 只做空 1.04/t+1.08  双向 0.52/t+0.55      → 关做多,**但信号本身没验出来**
+#   焦煤 只做空 1.11/t+2.61  双向 0.85/t+1.51      → 关做多
+# 三个大商所品种一致指向「关做多」。**别把这读成三个独立证据**:它们共用
+# 2023-08~2026-08 这同一段行情(对这几个品种基本是熊/震荡),只能算一次观察。
+# 而且这是**在同一份要报告成绩的样本上做的选择**,属于样本内选择(见 DEC-090)。
+#
 # 生猪只做空(它样本里只有单边熊市,做多支路逐笔累计 −1.5%),而玻璃纯碱双向明显
 # 更好(FG 双向夏普 0.58 vs 只做空 0.21;SA 0.78 vs 0.56),因为它们跨了完整周期、
 # 做多支路有真实机会。这条差异是实测出来的,不是设计出来的。
@@ -174,6 +183,29 @@ VARIETIES = {
         "long_needs_dip": False,
         "out": "sa_signals.json",
         "backtest": "101 笔 净 +244%/胜率 46.5%/回撤 −53.3%/夏普 0.80(2020-06 起)",
+    },
+    # 鸡蛋、焦煤(2026-08-19 加)。两者的席位数据与生猪同一个起点 2023-08-11
+    # (大商所),所以样本同样只有三年——**开关一律按各自的数据实测,不许照抄生猪**。
+    "JD": {
+        "name": "鸡蛋 JD", "unit": "元/500千克", "multiplier": 10.0,
+        "replay_start": "2023-08-11",   # 大商所席位数据起点
+        # 做多关:开着 13 笔 夏普 1.04 → 26 笔 0.52,回撤 −13.6% → −23.8%。
+        "long_enabled": False,
+        "long_needs_dip": True,         # 做多已关,用不上;与生猪同口径留着
+        "out": "jd_signals.json",
+        # **这个品种的信号没验出来**:t=1.08、胜率 38.5%、只有 13 笔。
+        # 页面靠 risk_flags 自己会挂「胜率不到一半」「t<2 等于还没验证」两条。
+        "backtest": "13 笔 净 +33.8%/胜率 38.5%/回撤 −13.6%/夏普 1.04(2023-08 起,t=1.08 不显著)",
+    },
+    "JM": {
+        "name": "焦煤 JM", "unit": "元/吨", "multiplier": 60.0,
+        "replay_start": "2023-08-11",
+        # 做多关:开着 22 笔 夏普 1.11 → 45 笔 0.85,回撤 −14.7% → −38.6%,
+        # t 从 +2.61 掉到 +1.51。三个大商所品种(生猪/鸡蛋/焦煤)一致指向关做多。
+        "long_enabled": False,
+        "long_needs_dip": True,
+        "out": "jm_signals.json",
+        "backtest": "22 笔 净 +89.7%/胜率 68.2%/回撤 −14.7%/夏普 1.11(2023-08 起,t=+2.61)",
     },
 }
 
@@ -640,15 +672,17 @@ def edge_split(sig: pd.DataFrame, mkt: pd.DataFrame,
             "gap_share_pct": round(100 * mg / m1, 0) if m1 else None}
 
 
-def risk_flags(strat: dict, closed: list, daily: pd.Series) -> list[dict]:
+def risk_flags(strat: dict, closed: list, daily: pd.Series,
+               bench: dict | None = None) -> list[dict]:
     """页面顶部那条醒目风险标识的素材(运营者 2026-08-19 要求)。
 
     **门槛写死、数字实算,不针对某个品种定制。**生猪现在一条都不触发,玻璃纯碱
     各触发几条——这是它们自己的数字说的,不是我挑出来贴上去的。哪天玻璃真的变好了,
     条目会自己消失;哪天生猪变差了,它自己会挂上来。
 
-    五个门槛,每一个都有它自己的意思:
+    六个门槛,每一个都有它自己的意思:
       夏普 < 1.0   —— 一年赚的抵不上一年的波动;
+      夏普 ≤ 基准  —— **风险调整后还不如躺着满仓做空**,这个信号等于白做;
       回撤 ≥ 25%   —— 单次回撤超过四分之一,多数人拿不住;
       胜率 < 50%   —— 不到一半的交易赚钱,全靠少数几笔大赢撑着;
       t 值 < 2.0   —— 单笔均值在统计上分不出与 0 的差别,**等于还没验证**;
@@ -662,6 +696,11 @@ def risk_flags(strat: dict, closed: list, daily: pd.Series) -> list[dict]:
     if sh is not None and sh < 1.0:
         out.append({"key": "sharpe",
                     "text": f"**夏普只有 {sh:.2f}** —— 一年赚到的抵不上一年的波动。"})
+    bsh = (bench or {}).get("sharpe")
+    if sh is not None and bsh is not None and sh <= bsh:
+        out.append({"key": "vs_benchmark",
+                    "text": f"**风险调整后还不如躺着满仓做空**(夏普 {sh:.2f} vs 基准 "
+                            f"{bsh:.2f})—— 这个信号本身没有带来好处。"})
     dd = strat.get("max_dd_pct")
     if dd is not None and dd <= -25:
         out.append({"key": "drawdown",
@@ -923,7 +962,8 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "edge_split": SPLIT.get("v"),
         # 顶部醒目风险条(运营者 2026-08-19 要求)。门槛写死、数字实算,
         # 品种自己够不上门槛就没有条目——不是按品种硬编码的。
-        "risk_flags": risk_flags(_perf(strat_daily), closed, strat_daily),
+        "risk_flags": risk_flags(_perf(strat_daily), closed, strat_daily,
+                                 _perf(bench_daily)),
     }
 
 

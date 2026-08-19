@@ -77,6 +77,16 @@ describe('SmartMoneyView 历史信号分页', () => {
     return wrapper
   }
 
+  it('品种按钮由 FLOW 列表渲染,加品种只改那一行', async () => {
+    // 2026-08-19 加鸡蛋/焦煤时把四个写死的按钮改成 v-for。这条钉住的是
+    // 「按钮数量 = 合计流向品种数 + 金银」,以后再加品种不改模板也不会漏。
+    const wrapper = mount(SmartMoneyView, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const labels = wrapper.findAll('.variety').map((b) => b.text())
+    expect(labels).toEqual(['黄金白银', '生猪', '鸡蛋', '焦煤', '玻璃', '纯碱'])
+    wrapper.unmount()
+  })
+
   it('默认每页 20 条，总数报的是全量而不是这一页', async () => {
     const wrapper = await openHistory()
     expect(bodyRows(wrapper)).toBe(20)

@@ -23,9 +23,9 @@ mkdir -p "$TMP" "$WEB"
 
 echo "[smart-money] $(date '+%F %T') 导出数据…"
 # LH 与 AU/AG 一起导:生猪引擎读同样的两张表,只是品种不同。
-# AU/AG 给金银引擎;LH/FG/SA 给合计流向引擎。都读同样的两张表,只是品种不同。
+# AU/AG 给金银引擎;LH/FG/SA/JD/JM 给合计流向引擎。都读同样的两张表,只是品种不同。
 # 加品种时**这里和 FLOW_CODES 要一起改**——只改一边不报错,只是那个品种没数据。
-for INST in AU AG LH FG SA; do
+for INST in AU AG LH FG SA JD JM; do
   low=$(echo "$INST" | tr 'A-Z' 'a-z')
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
     "\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,volume,open_interest,source from price_history where instrument='$INST') to '/tmp/${low}_price.csv' with (format csv, header true)"
@@ -61,9 +61,9 @@ fi
 # 隔离——它们挂了不该让金银信号跟着不更新,所以这一段不带 set -e 的传染性,
 # 失败只告警并保留上一版 JSON。引擎内部也按品种各跑各的:一个品种挂了不影响其余。
 if [ -f "$ROOT/hog_money.py" ]; then
-  echo "[flow] 计算生猪/玻璃/纯碱信号…"
-  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
-    for f in hog_signals.json fg_signals.json sa_signals.json pair_fgsa.json; do
+  echo "[flow] 计算生猪/玻璃/纯碱/鸡蛋/焦煤信号…"
+  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
+    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json pair_fgsa.json; do
       if [ -s "$TMP/$f" ]; then
         cp "$TMP/$f" "$WEB/$f.new"
         mv "$WEB/$f.new" "$WEB/$f"

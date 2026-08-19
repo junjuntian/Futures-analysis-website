@@ -657,6 +657,10 @@ export interface SpreadMonitorTrack {
  *
  * **单看 rate 会骗人**,所以三个数一起给:剩余期一长 rate 就趋近 100%;
  * JD2612/JD2701 的 rate 是 100% 而 drift 中位 −166 点,方向是反的。 */
+/** 机构资金里走「合计流向」这套信号的品种。**加品种改这一处**,
+ *  组件与视图都从这里取,不各写一份 union。金银是另一套信号,不在里面。 */
+export type FlowCode = 'LH' | 'FG' | 'SA' | 'JD' | 'JM'
+
 export interface SpreadRevertStats {
   side: string
   /** 曾经触及回归的年数 / 样本年数。不设年数门槛，薄不薄由界面写出来。 */

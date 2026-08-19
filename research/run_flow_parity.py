@@ -25,12 +25,20 @@ OUT = Path(tempfile.gettempdir()) / "flow_parity"
 def engine_all() -> dict:
     env = dict(os.environ)
     env.update({"ENGINE_SOURCE": "csv", "CSV_DIR": str(Path(__file__).parent / "data"),
-                "FLOW_OUT_DIR": str(OUT), "PYTHONIOENCODING": "utf-8"})
+                "FLOW_OUT_DIR": str(OUT), "PYTHONIOENCODING": "utf-8",
+                # 不给的话引擎按默认只跑 LH,FG,SA,新品种的产物根本不存在
+                "FLOW_CODES": "LH,FG,SA,JD,JM"})
     subprocess.run([sys.executable, str(ENGINE)], check=True, env=env,
                    capture_output=True, text=True, encoding="utf-8")
-    files = {"LH": "hog_signals.json", "FG": "fg_signals.json", "SA": "sa_signals.json"}
+    files = {"LH": "hog_signals.json", "FG": "fg_signals.json", "SA": "sa_signals.json",
+             "JD": "jd_signals.json", "JM": "jm_signals.json"}
     return {c: pd.DataFrame(json.loads((OUT / f).read_text(encoding="utf-8"))["history"])
             for c, f in files.items()}
+
+
+# 各品种的做多开关必须与 engine VARIETIES 一致 —— 对拍要复刻的是**线上那一条**,
+# 不是「研究侧觉得该怎么跑」。玻璃纯碱双向,生猪/鸡蛋/焦煤只做空。
+SHORT_ONLY = {"LH": True, "JD": True, "JM": True, "FG": False, "SA": False}
 
 
 def research(code: str) -> pd.DataFrame:
@@ -38,13 +46,13 @@ def research(code: str) -> pd.DataFrame:
         return C.backtest(C.rz_res, C.rz, C.mr).rename(columns={"原因": "出场原因"})
     mr, pz, rz, _ = P.prep(code)
     rz_res = rz.where(np.sign(pz) == np.sign(rz))
-    return P.bt(rz_res, rz, mr, short_only=False, long_needs_dip=False)
+    return P.bt(rz_res, rz, mr, short_only=SHORT_ONLY[code], long_needs_dip=False)
 
 
 def main():
     eng = engine_all()
     ok = True
-    for code in ("LH", "FG", "SA"):
+    for code in ("LH", "FG", "SA", "JD", "JM"):
         e, r = eng[code], research(code)
         head = f"{code}: 引擎 {len(e)} 笔 / 研究 {len(r)} 笔"
         if len(e) != len(r):
