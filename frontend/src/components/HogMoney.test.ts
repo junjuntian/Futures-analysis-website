@@ -30,6 +30,15 @@ const PAYLOAD = {
     net: -16953, side: 'net_short' as const, just_flipped_long: false,
     long_enabled: false, long_signal_now: false
   },
+  retail: {
+    members: [
+      { member: '东方财富', net: 3591, change: -4386, on_board: true },
+      { member: '平安期货', net: 1486, change: -269, on_board: true },
+      { member: '徽商期货', net: 1862, change: -2319, on_board: true }
+    ],
+    net: 6939, change: -6974, z: 1.11, resonate: true, trades: false,
+    note: '散户三家长期站多头、长期亏钱,故反向取用。当前只作展示,不参与进出场。'
+  },
   members: [
     { member: '国泰君安', net: -11413, change: 3472, on_board: true },
     { member: '东证期货', net: -2533, change: -120, on_board: true },
@@ -225,6 +234,30 @@ describe('生猪机构资金', () => {
     expect(t).toContain('当日未上榜')
     // 成本是哪个合约上的,必须说清——生猪各合约价差最大 49%
     expect(t).toContain('LH2611 这一个合约')
+    w.unmount()
+  })
+
+  it('散户反向维度要显示,并标出与机构是共振还是背离', async () => {
+    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('散户反向')
+    expect(t).toContain('与机构共振')
+    expect(t).toContain('散户在减多')      // z=+1.11 → 反向看涨
+    expect(t).toContain('6,939')           // 三家合计净多
+    expect(t).toContain('东方财富')
+    // 它还没参与交易,这句必须在——否则会被当成可执行信号
+    expect(t).toContain('不参与进出场')
+    w.unmount()
+  })
+
+  it('与机构背离时要如实标出', async () => {
+    stubFetch({ ...PAYLOAD, retail: { ...PAYLOAD.retail, resonate: false, z: -0.8 } })
+    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('与机构背离')
+    expect(t).toContain('散户在加多')      // z 为负 → 反向看跌
     w.unmount()
   })
 

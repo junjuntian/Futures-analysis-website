@@ -90,6 +90,20 @@ RULES = {
               "上海东证": "东证期货", "国投安信": "国投期货",
               "国投安信期货": "国投期货", "申银万国": "申万期货",
               "格林大华期货": "格林大华", "格林期货": "格林大华"},
+    # —— 散户反向维度(2026-08-19 加,DEC-085)——
+    # 这三家是运营者定的:在多个品种上长期站多头、长期亏钱的席位。
+    # 判据是**散户天然站多头**——一致净空的是套保席位(为交割锁价、不在乎盈亏),
+    # 运营者据此点名剔除了格林大华(生猪上净空 2,499 手)。
+    # 名单**跨品种固定、不逐品种重选**:这正是它相对「找聪明钱」的优势所在——
+    # 没有挑人的过拟合,新品种可直接套用。加人反而变差(实测四家不如三家)。
+    "retail_seed": ["东方财富", "平安期货", "徽商期货"],
+    # 共振 = 聪明钱流向与散户反向流向同号。实测(样本外 2024-01 起,只做空):
+    #   现有主信号 23 笔 +39.8%/胜率 52.2%/回撤 −10.9%/夏普 1.73
+    #   共振      22 笔 +74.2%/胜率 68.2%/回撤  −5.7%/夏普 2.57
+    # **但当前只做展示,不参与进出场**:22 笔、2.6 年撑不起推翻已上线的规则,
+    # 且散户名单的最终三家是运营者看过全样本后从六家候选里挑的,有轻微选择偏差。
+    # 等实盘观察一段再决定要不要让它主导(DEC-085 记了这个待办)。
+    "resonance_trades": False,
     "multiplier": 16.0,      # LH 合约点值
     "replay_start": "2023-08-11",   # 大商所席位数据起点,再往前没有席位
 }
@@ -376,6 +390,21 @@ def _perf(daily: pd.Series) -> dict:
 
 # ---------------------------------------------------------------- 产物
 
+def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """散户三家的合计净持仓、变化,以及**反向**信号的无量纲强度。
+
+    反向:散户加多(净持仓上升)对应看跌,所以信号取负号。名单固定不重选。
+    """
+    have = [m for m in RULES["retail_seed"] if m in set(seat["member_key"])]
+    if len(have) < 2:
+        return pd.DataFrame(index=dates, columns=["net", "chg", "rz"], dtype=float), have
+    s = (seat[seat["member_key"].isin(have)]
+         .groupby("trade_date")["net"].sum().sort_index().reindex(dates))
+    chg = s.diff(RULES["sig_win"])
+    rz = -(chg - chg.rolling(RULES["z_win"], min_periods=60).mean()) /          chg.rolling(RULES["z_win"], min_periods=60).std()
+    return pd.DataFrame({"net": s, "chg": chg, "rz": rz}), have
+
+
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list) -> dict:
     d = mkt.index[-1]
@@ -384,9 +413,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
     closed = [t for t in trades if t["exit_date"]]
 
+    prev_d = mkt.index[-1 - RULES["sig_win"]] if len(mkt) > RULES["sig_win"] else None
     grp = list(groups.get(d) or ())
     today = seat[(seat["trade_date"] == d) & (seat["member_key"].isin(grp))]
-    prev_d = mkt.index[-1 - RULES["sig_win"]] if len(mkt) > RULES["sig_win"] else None
     prev = seat[(seat["trade_date"] == prev_d) & (seat["member_key"].isin(grp))] if prev_d is not None else None
     members = []
     for m in grp:
@@ -398,6 +427,39 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "change": None if not np.isfinite(was) else round(now - was),
             "on_board": bool(len(today[today["member_key"] == m])),
         })
+
+    # —— 散户反向维度(展示用,不参与进出场,见 RULES["resonance_trades"])——
+    rdf, rhave = retail_series(seat, mkt.index)
+    r_now = rdf.loc[d] if d in rdf.index else None
+    rz_now = float(r_now["rz"]) if r_now is not None and np.isfinite(r_now.get("rz", np.nan)) else None
+    # 共振 = 聪明钱流向与散户反向流向同号。两者都以「正=看涨」为约定:
+    # 聪明钱用 chg 本身(净持仓增加=减空/加多),散户已在 retail_series 里取过负号。
+    smart_now = sig["chg"].get(d, np.nan)
+    resonate = bool(rz_now is not None and np.isfinite(smart_now)
+                    and np.sign(smart_now) == np.sign(rz_now))
+    rmembers = []
+    for m in rhave:
+        cur = seat[(seat["trade_date"] == d) & (seat["member_key"] == m)]["net"].sum()
+        prev_row = seat[(seat["trade_date"] == prev_d) & (seat["member_key"] == m)]             if prev_d is not None else None
+        was = prev_row["net"].sum() if prev_row is not None and len(prev_row) else np.nan
+        rmembers.append({"member": m, "net": int(round(cur)),
+                         "change": None if not np.isfinite(was) else int(round(cur - was)),
+                         "on_board": bool(len(seat[(seat["trade_date"] == d)
+                                                   & (seat["member_key"] == m)]))})
+    retail_state = {
+        "members": rmembers,
+        "net": None if r_now is None or not np.isfinite(r_now.get("net", np.nan))
+               else int(r_now["net"]),
+        "change": None if r_now is None or not np.isfinite(r_now.get("chg", np.nan))
+                  else int(r_now["chg"]),
+        "z": None if rz_now is None else round(rz_now, 2),
+        # z 为正 = 散户在减多/加空 → 反向看涨;为负 = 散户在加多 → 反向看跌
+        "resonate": resonate,
+        "trades": RULES["resonance_trades"],
+        "note": "散户三家长期站多头、长期亏钱,故反向取用。"
+                "名单跨品种固定、不逐品种重选(实测加人反而变差)。"
+                "**当前只作展示,不参与进出场**——22 笔、2.6 年样本还不足以推翻已上线的规则。",
+    }
 
     state = "观察中"
     if open_trade:
@@ -451,6 +513,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         },
         "position": open_trade,
         "institution": institution,
+        "retail": retail_state,
         "members": members,
         "group_log": log[-8:],
         "history": closed,

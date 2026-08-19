@@ -58,6 +58,21 @@ interface HogPayload {
     long_enabled: boolean
     long_signal_now: boolean
   }
+  /**
+   * 散户反向维度(DEC-085)。这三家在多个品种上长期站多头、长期亏钱,所以反向取用。
+   * **当前只作展示,不参与进出场**——样本还不足以推翻已上线的规则。
+   */
+  retail: {
+    members: MemberLeg[]
+    net: number | null
+    change: number | null
+    /** 反向信号强度。正=散户在减多(反向看涨),负=散户在加多(反向看跌)。 */
+    z: number | null
+    /** 与机构流向是否同号。实测共振时信号明显更强,背离时基本消失。 */
+    resonate: boolean
+    trades: boolean
+    note: string
+  }
   members: MemberLeg[]
   group_log: Array<{ date: string; members: string[]; alpha: Record<string, number> }>
   history: HogTrade[]
@@ -357,6 +372,45 @@ const bySide = computed(() => {
         </div>
       </div>
 
+      <!-- 散户反向:与机构流向并列的第二个维度。它们经常指相反方向,
+           所以摆在一起看才有意义——共振时信号最强,背离时基本没信息。 -->
+      <div class="cards">
+        <div class="card">
+          <h3>
+            散户反向
+            <span class="badge" :class="data.retail.resonate ? 'ok' : 'warn'">
+              {{ data.retail.resonate ? '与机构共振' : '与机构背离' }}
+            </span>
+          </h3>
+          <div class="meter">
+            <div class="meter-bar">
+              <div class="meter-fill" :class="(data.retail.z ?? 0) > 0 ? 'red' : 'green'"
+                   :style="{ width: `${Math.min(Math.abs(data.retail.z ?? 0), 2) / 2 * 100}%` }" />
+            </div>
+            <div class="meter-label">
+              <span>{{ (data.retail.z ?? 0) > 0 ? '散户在减多 → 反向看涨' : '散户在加多 → 反向看跌' }}</span>
+              <b>{{ fmt(data.retail.z, 2) }}</b>
+            </div>
+          </div>
+          <div class="kv"><span class="k">三家合计净持仓</span>
+            <span class="v" :class="(data.retail.net ?? 0) > 0 ? 'red' : 'green'">
+              {{ fmt(data.retail.net) }} 手</span></div>
+          <div class="kv"><span class="k">{{ data.signal.win }} 日变化</span>
+            <span class="v" :class="pnlClass(-(data.retail.change ?? 0))">{{ fmt(data.retail.change) }} 手</span></div>
+          <div v-for="m in data.retail.members" :key="m.member" class="kv">
+            <span class="k">　{{ m.member }}</span>
+            <span class="v">
+              <template v-if="m.on_board">{{ fmt(m.net) }} 手
+                <span v-if="m.change !== null" :class="pnlClass(-m.change)">
+                  ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})</span>
+              </template>
+              <span v-else class="gray">当日未上榜</span>
+            </span>
+          </div>
+          <p class="note">{{ data.retail.note }}</p>
+        </div>
+      </div>
+
       <!-- 这三种提示都必须在首屏,不能藏进策略方案页 -->
       <div v-if="data.institution.just_flipped_long" class="caveat-box flip">
         <b>机构合计净持仓刚转为净多。</b>
@@ -505,6 +559,14 @@ const bySide = computed(() => {
               <span class="hint">{{ exitText }}</span></li>
             <li><b>计价</b>:主力合约,**换月日用新合约自己的前一日结算价**。生猪各合约相对
               主力偏离最大 49%,跨合约相除得到的是价差不是收益。</li>
+            <li><b>散户反向(第二维度,当前只看不做)</b>:三家长期站多头、长期亏钱的席位
+              (东方财富、平安期货、徽商期货),把它们的持仓变化反过来用。
+              名单**跨品种固定、不逐品种重选**——这正是它相对「找聪明钱」的好处:
+              没有挑人的过拟合。<br>
+              <span class="hint">实测(样本外 2024-01 起,只做空):现有主信号 23 笔
+              +39.8%/胜率 52.2%/回撤 −10.9%;共振 22 笔 +74.2%/胜率 68.2%/回撤 −5.7%。
+              **但它还没参与进出场**——22 笔、2.6 年撑不起推翻已上线的规则,
+              且名单最终三家是看过全样本后挑的,有轻微选择偏差。先看一段实盘。</span></li>
           </ol>
         </div>
         <div class="card wide">
