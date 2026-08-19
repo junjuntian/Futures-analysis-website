@@ -13,6 +13,16 @@
 import { computed, onMounted, ref } from 'vue'
 import { getSeatNetPosition, type MemberLeg as SeatCost } from '../api'
 
+/**
+ * 一个品种一份 JSON,由引擎按品种各写各的(失败也各自隔离)。
+ * 组件只负责渲染,规则差异全在 payload 里——**不要在这里按品种写 if**:
+ * 生猪只做空、玻璃纯碱双向,这类差异是引擎实测定的,前端硬编码一份迟早对不上。
+ */
+const props = defineProps<{ instrument: 'LH' | 'FG' | 'SA' }>()
+const FILES: Record<string, string> = {
+  LH: 'hog_signals.json', FG: 'fg_signals.json', SA: 'sa_signals.json'
+}
+
 interface MemberLeg {
   member: string
   net: number
@@ -118,18 +128,18 @@ const costs = ref<Record<string, SeatCost>>({})
 onMounted(async () => {
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
-    const res = await fetch(`/smart-money/hog_signals.json?t=${Date.now()}`)
+    const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
     if (!res.ok) throw new Error(`读取失败 ${res.status}`)
     data.value = await res.json()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '读取生猪信号失败'
+    error.value = e instanceof Error ? e.message : '读取信号数据失败'
     return
   }
   const p = data.value
   if (!p?.members.length || !p.contract) return
   try {
     const { data: net } = await getSeatNetPosition({
-      instrument: 'LH',
+      instrument: props.instrument,
       members: p.members.map((m) => m.member),
       contract: p.contract
     })
@@ -246,7 +256,7 @@ const bySide = computed(() => {
 
 <template>
   <div v-if="error" class="err">{{ error }}</div>
-  <div v-else-if="!data" class="loading">正在读取生猪信号数据…</div>
+  <div v-else-if="!data" class="loading">正在读取信号数据…</div>
 
   <template v-else>
     <p class="sub">
@@ -551,10 +561,14 @@ const bySide = computed(() => {
               散户反向 z ≤ −{{ data.signal.enter }} 时做空。两路都要求已过预热期
               ——聪明钱那路的标准化需要 60 个交易日,没预热完不参与判断。
               <template v-if="!data.institution.long_enabled">
-                <b>做多支路已关闭</b>——多头 15 笔逐笔累计 −1.5%、均值 −0.02%,
-                关掉后夏普 1.96 → 2.39。机构减空时平仓观望,不反手做多。
+                <b>本品种做多支路已关闭</b>——生猪回测里多头 15 笔逐笔累计 −1.5%、
+                均值 −0.02%(抛硬币),关掉后夏普 1.96 → 2.39。散户减多时平仓观望,
+                不反手做多。<br>
+                <span class="hint">玻璃、纯碱**不关**:它们跨了完整周期、做多支路有真实
+                机会(FG 双向夏普 1.63 vs 只做空 1.04)。同一套规则换个品种要重新验,
+                不能照抄。</span>
               </template>
-              <template v-else>z ≥ {{ data.signal.enter }} 且过去 20 日是跌的时候做多。</template>
+              <template v-else>z ≥ {{ data.signal.enter }} 时做多(本品种双向)。</template>
             </li>
             <li><b>出场</b>:**散户反向信号翻向** / 硬止损
               {{ (data.rules.stop * 100).toFixed(0) }}% / 持满

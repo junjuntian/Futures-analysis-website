@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -44,6 +45,9 @@ import numpy as np
 import pandas as pd
 
 CN_TZ = timezone(timedelta(hours=8))
+
+# 当前正在跑的品种(由 run_one 设置)。build_payload 要用它填品种名与单位。
+CURRENT: dict = {}
 
 RULES = {
     # —— 席位组 ——
@@ -78,8 +82,8 @@ RULES = {
     # **页面仍然显示机构转多状态**(见 payload 的 institution),只是不进场。
     # 那 14 天全挤在一个窗口里,实质是 1 个事件,只能说「没有证据支持」,
     # 不能说「证明必亏」——生猪真走出熊市、样本攒够了再议。
-    "long_enabled": False,
-    # 做多真要开启时才用得上:Phase 0 双分档里「跌 × 机构减空」是全表唯一
+    # long_enabled / multiplier / replay_start 由 use() 按品种注入,见 VARIETIES。
+    # 做多开启时才用得上:Phase 0 双分档里「跌 × 机构减空」是全表唯一
     # 正格子(+0.30%),「涨 × 减空」是 −1.97%。
     "long_needs_dip": True,
     "dip_win": 20,
@@ -123,9 +127,54 @@ RULES = {
     # 选 C 是运营者的判断(回撤最小、夏普最高),不是数据证明它更优——
     # 别在后续文档里把它写成「实测最优」。
     "signal_source": "resonance",   # "flow"=原聪明钱单信号;"resonance"=方案 C
-    "multiplier": 16.0,      # LH 合约点值
-    "replay_start": "2023-08-11",   # 大商所席位数据起点,再往前没有席位
 }
+
+# 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
+# 生猪只做空(它样本里只有单边熊市,做多支路逐笔累计 −1.5%),而玻璃纯碱双向明显
+# 更好(FG 双向夏普 1.63 vs 只做空 1.04;SA 2.02 vs 1.52),因为它们跨了完整周期、
+# 做多支路有真实机会。这条差异是实测出来的,不是设计出来的。
+VARIETIES = {
+    "LH": {
+        "name": "生猪 LH", "unit": "元/吨", "multiplier": 16.0,
+        "replay_start": "2023-08-11",   # 大商所席位数据起点
+        "long_enabled": False,          # DEC-084:多头 15 笔逐笔累计 −1.5%,关掉
+        "long_needs_dip": True,   # 做多已关,这条用不上;留 True 是生猪原口径
+        "out": "hog_signals.json",
+        "backtest": "18 笔 净 +88.4%/胜率 72.2%/回撤 −4.1%/夏普 2.80(2023-08 起)",
+    },
+    "FG": {
+        "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
+        "replay_start": "2013-01-01",   # 郑商所席位 2012-12 起,留一个月预热
+        "long_enabled": True,
+        # 实测带 dip 反而差:206 笔 +4264%/夏普 1.63 → 157 笔 +1225%/1.27
+        "long_needs_dip": False,
+        "out": "fg_signals.json",
+        "backtest": "206 笔 净 +4264%/胜率 56.8%/回撤 −19.4%/夏普 1.63(2013-01 起)",
+    },
+    "SA": {
+        "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
+        "replay_start": "2020-06-01",   # 席位 2019-12 起,留半年预热
+        "long_enabled": True,
+        # 实测带 dip 少三分之一收益:100 笔 +1522% → 84 笔 +1034%
+        "long_needs_dip": False,
+        "out": "sa_signals.json",
+        "backtest": "100 笔 净 +1522%/胜率 64.0%/回撤 −23.6%/夏普 2.02(2020-06 起)",
+    },
+}
+
+
+def use(code: str) -> dict:
+    """把某个品种的参数并进 RULES 供本轮使用。返回该品种的配置。
+
+    引擎按品种逐个跑,每次跑之前调一次——RULES 里那些与品种相关的键
+    (点值、回放起点、做多开关)由它覆盖,其余规则三个品种共用。
+    """
+    v = VARIETIES[code]
+    RULES["multiplier"] = v["multiplier"]
+    RULES["replay_start"] = v["replay_start"]
+    RULES["long_enabled"] = v["long_enabled"]
+    RULES["long_needs_dip"] = v["long_needs_dip"]
+    return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
 PRICE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina_v1": 3}
@@ -138,7 +187,8 @@ def _rank(src: pd.Series, table: dict) -> pd.Series:
     return out.where(~src.str.contains("_official", na=False), 0).fillna(4)
 
 
-def load_from_pg(container: str, pg_user: str, pg_db: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_from_pg(code: str, container: str, pg_user: str,
+                 pg_db: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     def q(sql: str) -> pd.DataFrame:
         cmd = ["docker", "exec", "-i", container, "psql", "-U", pg_user, "-d", pg_db,
                "-A", "-F", "\t", "--no-align", "-c", sql]
@@ -150,13 +200,13 @@ def load_from_pg(container: str, pg_user: str, pg_db: str) -> tuple[pd.DataFrame
 
     price = q("select exchange,instrument,contract,trade_date,open_price,high_price,"
               "low_price,close_price,settlement_price,volume,open_interest,source "
-              "from price_history where instrument='LH'")
+              f"from price_history where instrument='{code}'")
     seat = q("select instrument,contract,is_variety_total,trade_date,rank_type,member,"
-             "quantity,change,source from seat_history where instrument='LH'")
+             f"quantity,change,source from seat_history where instrument='{code}'")
     return price, seat
 
 
-def load_from_csv(csv_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_from_csv(code: str, csv_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     def one(stem: str) -> pd.DataFrame:
         # 生产链路落的是 .csv(run-smart-money.sh 导出);研究目录存的是 .csv.gz。
         for name in (f"{stem}.csv", f"{stem}.csv.gz"):
@@ -164,7 +214,8 @@ def load_from_csv(csv_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
             if p.exists():
                 return pd.read_csv(p)
         raise FileNotFoundError(f"{csv_dir}/{stem}.csv[.gz] 都不存在")
-    return one("lh_price"), one("lh_seat")
+    low = code.lower()
+    return one(f"{low}_price"), one(f"{low}_seat")
 
 
 def clean_price(price: pd.DataFrame) -> pd.DataFrame:
@@ -538,9 +589,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                    - pos.shift(1).fillna(0).diff().abs().fillna(0) * 0.0005)
     bench_daily = -mkt["ret"]
     return {
-        "instrument": "LH",
-        "name": "生猪 LH",
-        "unit": "元/吨",
+        "instrument": CURRENT["code"],
+        "name": CURRENT["name"],
+        "unit": CURRENT["unit"],
         "multiplier": RULES["multiplier"],
         "data_date": d.strftime("%Y-%m-%d"),
         "computed_at": datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -592,35 +643,64 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     }
 
 
-def main():
-    src = os.environ.get("ENGINE_SOURCE", "pg")
-    out_path = Path(os.environ.get("HOG_OUT", "/opt/futures-platform/signals/hog_signals.json"))
-    if src == "csv":
-        price_raw, seat_raw = load_from_csv(Path(os.environ.get("CSV_DIR", "../research/data")))
-    else:
-        price_raw, seat_raw = load_from_pg(
-            os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
-            os.environ.get("PG_USER", "futures_app"),
-            os.environ.get("PG_DB", "futures_platform"))
+def run_one(code: str, src: str, out_dir: Path) -> dict | None:
+    """跑一个品种。失败只告警不抛——一个品种挂了不该拖垮其余两个。"""
+    global CURRENT
+    v = use(code)
+    CURRENT = {"code": code, **v}
+    try:
+        if src == "csv":
+            price_raw, seat_raw = load_from_csv(
+                code, Path(os.environ.get("CSV_DIR", "../research/data")))
+        else:
+            price_raw, seat_raw = load_from_pg(
+                code,
+                os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
+                os.environ.get("PG_USER", "futures_app"),
+                os.environ.get("PG_DB", "futures_platform"))
+        price = clean_price(price_raw)
+        seat = clean_seat(seat_raw)
+        mkt = main_series(price)
+        mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
+        groups, log = rolling_groups(seat, price, mkt.index)
+        sig = signal_series(seat, groups)
+        payload = build_payload(sig, mkt, seat, groups, log)
+    except Exception as e:                      # noqa: BLE001
+        print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
+        return None
 
-    price = clean_price(price_raw)
-    seat = clean_seat(seat_raw)
-    mkt = main_series(price)
-    mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
-    groups, log = rolling_groups(seat, price, mkt.index)
-    sig = signal_series(seat, groups)
-
-    payload = build_payload(sig, mkt, seat, groups, log)
+    out_path = out_dir / v["out"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(out_path)   # 原子替换,避免前端读到半截文件
-    s = payload["stats"]
-    print(f"[hog] {payload['data_date']} 写出 {out_path}")
+    st = payload["stats"]
+    print(f"[{code}] {payload['data_date']} 写出 {out_path}")
     print(f"  状态 {payload['state']} | z={payload['signal']['z']} | "
           f"席位组 {'、'.join(m['member'] for m in payload['members'])}")
-    print(f"  历史 {s['trades']} 笔(空 {s['short_trades']}/多 {s['long_trades']}),"
-          f"累计 {s['cum_pct']}%,胜率 {s['win_rate']}%")
+    print(f"  历史 {st['trades']} 笔(空 {st['short_trades']}/多 {st['long_trades']}),"
+          f"累计 {st['cum_pct']}%,胜率 {st['win_rate']}%")
+    return payload
+
+
+def main():
+    src = os.environ.get("ENGINE_SOURCE", "pg")
+    # HOG_OUT 保留兼容:老调用方传的是「生猪那个文件」的完整路径,取它的目录。
+    legacy = os.environ.get("HOG_OUT")
+    out_dir = (Path(legacy).parent if legacy
+               else Path(os.environ.get("FLOW_OUT_DIR", "/opt/futures-platform/signals")))
+    codes = [c.strip().upper() for c in
+             os.environ.get("FLOW_CODES", "LH,FG,SA").split(",") if c.strip()]
+    ok = 0
+    for code in codes:
+        if code not in VARIETIES:
+            print(f"[{code}] 未在 VARIETIES 里配置,跳过", file=sys.stderr)
+            continue
+        if run_one(code, src, out_dir) is not None:
+            ok += 1
+    print(f"[flow] 完成 {ok}/{len(codes)} 个品种")
+    if ok == 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

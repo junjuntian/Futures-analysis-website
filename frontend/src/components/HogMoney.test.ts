@@ -99,7 +99,7 @@ describe('生猪机构资金', () => {
   beforeEach(() => stubFetch())
 
   it('读引擎产出的 JSON 并渲染当前状态', async () => {
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const t = w.text()
     expect(t).toContain('生猪 LH')
@@ -113,7 +113,7 @@ describe('生猪机构资金', () => {
   it('做多持仓必须标注未验证——不能和空头信号看起来一样可信', async () => {
     // 回测里多头 15 笔累计仅 +4.5%,且样本期内机构一天都没转成净多。
     // 这条提示是运营者验收的硬要求,不是装饰。
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(w.text()).toContain('未验证')
     expect(w.find('.caveat-box').exists()).toBe(true)
@@ -124,7 +124,7 @@ describe('生猪机构资金', () => {
   it('跨过主力换月时,状态条的合约跟着现价走,并说明两个价格不可相减', async () => {
     // 进场在 LH2609 @10825,现价是 LH2611 的 12485,看着像涨 15%,实际 +5.23%。
     // 生猪各合约价差最大 49%,并排摆着不说明,就是在诱导人做减法。
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(w.find('.strip-name').text()).toContain('LH2611')
     const t = w.text()
@@ -135,7 +135,7 @@ describe('生猪机构资金', () => {
 
   it('空仓时不渲染状态条,也不出未验证提示', async () => {
     stubFetch({ ...PAYLOAD, state: '观察中', position: null })
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(w.find('.symbol-strip').exists()).toBe(false)
     expect(w.find('.caveat-box').exists()).toBe(false)
@@ -144,7 +144,7 @@ describe('生猪机构资金', () => {
   })
 
   it('历史页把多空分开统计,做多那栏挂未验证徽标', async () => {
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await w.findAll('.tab')[1].trigger('click')
     const t = w.text()
@@ -158,7 +158,7 @@ describe('生猪机构资金', () => {
   it('历史页必须摆出与「躺着做空」的对比', async () => {
     // 三年单边熊市里,什么都不做地持有空单本身就有 +99% 复利。不给基准,
     // 上面那个累计收益会被当成策略的本事(运营者 2026-08-19 正是问到这一点)。
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await w.findAll('.tab')[1].trigger('click')
     const t = w.find('.compare').text()
@@ -169,7 +169,7 @@ describe('生猪机构资金', () => {
   })
 
   it('翻页用 el-pagination,与金银历史信号一致', async () => {
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await w.findAll('.tab')[1].trigger('click')
     expect(w.findComponent({ name: 'ElPagination' }).exists()).toBe(true)
@@ -183,7 +183,7 @@ describe('生猪机构资金', () => {
       ...PAYLOAD, position: null, state: '观察中',
       institution: { ...PAYLOAD.institution, net: 4046, side: 'net_long', just_flipped_long: true }
     })
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const box = w.find('.caveat-box.flip')
     expect(box.exists()).toBe(true)
@@ -198,7 +198,7 @@ describe('生猪机构资金', () => {
       signal: { ...PAYLOAD.signal, z: 1.4 },
       institution: { ...PAYLOAD.institution, long_signal_now: true }
     })
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const t = w.find('.caveat-box').text()
     expect(t).toContain('做多支路是关闭的')
@@ -210,7 +210,7 @@ describe('生猪机构资金', () => {
   it('规则文案全部由 payload 生成,不写死', async () => {
     // 上一版把「每 3 个月」「36 笔」写进模板,引擎改成一年、做多关掉之后页面还在
     // 说旧数字,被运营者当场发现。这条盯住这类回归。
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await w.findAll('.tab')[3].trigger('click')
     const t = w.text()
@@ -224,7 +224,7 @@ describe('生猪机构资金', () => {
   })
 
   it('组内各家要显示当前主力合约上的持仓成本', async () => {
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await flushPromises()
     const t = w.text()
@@ -238,7 +238,7 @@ describe('生猪机构资金', () => {
   })
 
   it('散户反向维度要显示,并标出与机构是共振还是背离', async () => {
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const t = w.text()
     expect(t).toContain('散户反向')
@@ -253,7 +253,7 @@ describe('生猪机构资金', () => {
 
   it('与机构背离时要如实标出', async () => {
     stubFetch({ ...PAYLOAD, retail: { ...PAYLOAD.retail, resonate: false, z: -0.8 } })
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const t = w.text()
     expect(t).toContain('与机构背离')
@@ -265,7 +265,7 @@ describe('生猪机构资金', () => {
     // 三个候选单笔均值差的 t 只有 0.22~0.49,统计上分不出高下。
     // 选 C 是运营者的判断,页面必须如实这么说——把判断包装成「数据证明」是最容易
     // 犯的错,而且几个月后没人记得当初有没有证据。
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await w.findAll('.tab')[3].trigger('click')
     const t = w.text()
@@ -275,9 +275,31 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('按品种读各自的 JSON,不是写死生猪那个', async () => {
+    // 三个品种一份组件、三份 payload。写死文件名会让玻璃纯碱显示生猪的数据,
+    // 而且页面上一切正常、看不出错。
+    const seen: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString()
+      seen.push(url)
+      if (url.includes('/seats/net-position')) {
+        return { ok: true, status: 200, json: async () => NET_POSITION } as Response
+      }
+      return { ok: true, status: 200, json: async () => PAYLOAD } as Response
+    }))
+    const w = mount(HogMoney, { props: { instrument: 'FG' as const },
+                                global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(seen.some((u) => u.includes('fg_signals.json'))).toBe(true)
+    expect(seen.some((u) => u.includes('hog_signals.json'))).toBe(false)
+    // 持仓成本那一路也要按品种取,不能永远问生猪
+    expect(seen.some((u) => u.includes('/seats/net-position') && u.includes('FG'))).toBe(true)
+    w.unmount()
+  })
+
   it('取不到 JSON 时给出错误,而不是白屏', async () => {
     stubFetch(null, false)
-    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     expect(w.find('.err').exists()).toBe(true)
     w.unmount()
