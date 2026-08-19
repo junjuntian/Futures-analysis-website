@@ -85,6 +85,9 @@ interface HogPayload {
   }
   members: MemberLeg[]
   group_log: Array<{ date: string; members: string[]; alpha: Record<string, number> }>
+  /** 重选切点。`group_log` 只记**换人**,所以阵容连年不变时它会停在很早的日期,
+   *  看上去像「三年没重选过」。可选:旧 JSON 没有这个字段。 */
+  reselect?: { last: string | null; next: string | null; changed_at: string | null }
   history: HogTrade[]
   stats: {
     trades: number
@@ -557,7 +560,16 @@ const bySide = computed(() => {
     <template v-else-if="tab === 'group'">
       <div class="cards">
         <div class="card wide">
-          <h3>重选历史({{ reselectText }}一次)</h3>
+          <h3>换人历史({{ reselectText }}重选一次)</h3>
+          <!-- 只列**换人**那几次。阵容没变的年份不写一条,不加这句会被读成
+               「席位三年没更新」(运营者 2026-08-19 就是这么问的)。 -->
+          <p v-if="data.reselect?.last" class="reselect-note">
+            最近一次重选 <b>{{ data.reselect.last }}</b>
+            <template v-if="data.reselect.changed_at && data.reselect.changed_at < data.reselect.last">
+              · <b>阵容未变</b>(上次换人是 {{ data.reselect.changed_at }})
+            </template>
+            <template v-if="data.reselect.next">,下次 {{ data.reselect.next }}</template>
+          </p>
           <p class="note">
             括号里是该家截至重选时点的**择时收益**(亿元)——把「一直挂着同样大小的仓
             不动」能赚到的钱扣掉之后剩下的部分。按它选人,而不是按谁赚得多:
@@ -685,6 +697,7 @@ const bySide = computed(() => {
 .kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; gap: 10px; }
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+.reselect-note { margin: 0 0 8px; font-size: 12px; color: var(--tv-text-secondary); }
 /* 交割倒计时:撞线是纪律不是行情,用警示色不用涨跌红绿。 */
 .kv .v.near { color: var(--tv-warn, #d98e00); }
 .kv .v.must { color: var(--tv-warn, #d98e00); font-weight: 700; }

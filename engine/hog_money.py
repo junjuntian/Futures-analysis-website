@@ -53,6 +53,7 @@ CURRENT: dict = {}
 SIG_CACHE: dict = {}
 
 COST = 0.0005            # 单边手续费+滑点。逐日净值在成交那两天各扣一次。
+SPLIT: dict = {}         # 本轮品种的「跳空占比」,build_payload 算好给 _caveats 用
 
 RULES = {
     # —— 席位组 ——
@@ -366,8 +367,13 @@ def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp) -> pd.
 
 
 def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
-                   dates: pd.DatetimeIndex) -> tuple[pd.Series, list]:
-    """逐日生效的席位组,外加一份重选历史(界面要展示"什么时候换了谁")。"""
+                   dates: pd.DatetimeIndex) -> tuple[pd.Series, list, list]:
+    """逐日生效的席位组、**换人**历史、以及全部重选切点。
+
+    第三个返回值是 2026-08-19 加的:`log` 只在**阵容变了**的时候写一条,于是玻璃
+    自 2023-10 起三次重选都选中同一批人,界面上就只剩 2023 那条,运营者据此以为
+    「席位三年没更新」。切点单独给出来,界面才说得清「重选跑过、只是没换人」。
+    """
     start = dates.min() + pd.Timedelta(days=RULES["warmup_days"])
     cuts = pd.date_range(start, dates.max(), freq=f"{RULES['reselect_months']}MS")
     picks, log, cur = {}, [], None
@@ -385,7 +391,13 @@ def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
     for d in dates:
         valid = [c for c in cuts if c <= d]
         ser[d] = picks[valid[-1]] if valid else None
-    return ser, log
+    # 末尾补一个**未来**切点:界面要写「下次 X」。date_range 只走到数据末尾,
+    # 不补的话 next 永远是空的。
+    nxt = cuts[-1] + pd.DateOffset(months=RULES["reselect_months"]) if len(cuts) else None
+    out = [c.strftime("%Y-%m-%d") for c in cuts]
+    if nxt is not None:
+        out.append(nxt.strftime("%Y-%m-%d"))
+    return ser, log, out
 
 
 def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
@@ -587,6 +599,47 @@ def _f(v):
     return None if v is None or not np.isfinite(v) else round(float(v), 1)
 
 
+def edge_split(sig: pd.DataFrame, mkt: pd.DataFrame,
+               retail: pd.DataFrame | None) -> dict | None:
+    """信号后第一天的超额,有多少落在**拿不到的隔夜跳空**里。
+
+    2026-08-19 运营者问「散户反向明明是好的反向指标,为什么回撤这么大」,查出来的
+    根因就是这个:席位持仓排名 16:26 才公布,所有人同一时刻看到,价格在夜盘/次日
+    开盘一步跳过去。**指标是准的,准的那一段却结构性地拿不到。**
+
+    实测(2026-08-19):生猪 71%、玻璃 86%、纯碱 83% 的第一天超额都在跳空里。
+    剩下能吃到的日内部分只有 +0.07%~+0.14%,对玻纯 1.5% 量级的日波动就是噪音,
+    净值曲线因此又毛又深。这也解释了为什么生猪受影响最小——它跳空占比最低,
+    而且信号在 D+5~D+20 还有余温(+1.05%),不靠那一跳。
+
+    **别拿它当可优化的参数**:延迟 1/2/3/5 天进场全部更差(实测),躲不开。
+    """
+    z_in, _ = entry_exit_signals(sig, retail)
+    idx = mkt.index
+    ret = mkt["ret"].fillna(0).to_numpy()
+    o2c = mkt["o2c"].fillna(0).to_numpy()
+    settle, openp = mkt["settle"].to_numpy(), mkt["open"].to_numpy()
+    main_c = mkt["main"].to_numpy()
+    d1, gp, it = [], [], []
+    for i, d in enumerate(idx[:-1]):
+        z = z_in.get(d, np.nan)
+        if not np.isfinite(z) or abs(z) < RULES["enter"]:
+            continue
+        sd = float(np.sign(z))
+        d1.append(sd * ret[i + 1] * 100)
+        it.append(sd * o2c[i + 1] * 100)
+        # 换月日 settle 与 open 不是同一个合约,跳空无意义,跳过
+        if (main_c[i + 1] == main_c[i] and np.isfinite(openp[i + 1])
+                and np.isfinite(settle[i]) and settle[i] > 0):
+            gp.append(sd * (openp[i + 1] / settle[i] - 1) * 100)
+    if len(d1) < 30 or not gp:
+        return None
+    m1, mg, mi = float(np.mean(d1)), float(np.mean(gp)), float(np.mean(it))
+    return {"n": len(d1), "day1_pct": round(m1, 3), "gap_pct": round(mg, 3),
+            "intraday_pct": round(mi, 3),
+            "gap_share_pct": round(100 * mg / m1, 0) if m1 else None}
+
+
 def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
     """边界说明。**凡是数字都从实参算**,不许写死——参数一改文案就会对不上。"""
     shorts = [t for t in closed if t["side"] == "short"]
@@ -613,6 +666,15 @@ def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
         f"{bench['cum_pct']:+.1f}%)。策略赢的是回撤({strat['max_dd_pct']:+.1f}% vs "
         f"{bench['max_dd_pct']:+.1f}%)与夏普({strat['sharpe']} vs {bench['sharpe']}),"
         "以及趋势反转时会跟着退出——后者样本内无法验证。")
+    if SPLIT.get("v"):
+        e = SPLIT["v"]
+        out.append(
+            f"**这个信号准的那一段,大部分拿不到。**{e['n']} 次触发里,信号后第一天的"
+            f"平均超额是 {e['day1_pct']:+.2f}%,其中 **{e['gap_share_pct']:.0f}% 落在隔夜"
+            f"跳空**(信号日结算 → 次日开盘,{e['gap_pct']:+.2f}%),真正能吃到的日内只有"
+            f" {e['intraday_pct']:+.2f}%。席位排名 16:26 才公布,所有人同一时刻看到,"
+            "价格在夜盘/次日开盘一步跳过去。**指标是准的,不等于这段钱赚得到。**"
+            "延迟 1/2/3/5 天进场想躲开抢跑,实测全部更差。")
     out.append(
         "**成交口径:信号日收盘出信号,次日开盘成交**(DEC-090)。席位持仓排名是"
         "收盘后才公布的(大商所约 15:30-16:00、郑商所约 16:26),按信号日结算价"
@@ -651,7 +713,7 @@ def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
-                  groups: pd.Series, log: list) -> dict:
+                  groups: pd.Series, log: list, cuts: list | None = None) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
@@ -731,6 +793,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "long_signal_now": bool(np.isfinite(z) and z >= RULES["enter"]),
     }
 
+    SPLIT["v"] = edge_split(sig, mkt, rdf)
     wins = [t for t in closed if t["ret_pct"] > 0]
 
     # 与「躺着满仓做空」的对比。**这一栏必须摆在界面上**:三年单边熊市里,
@@ -775,6 +838,13 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "retail": retail_state,
         "members": members,
         "group_log": log[-8:],
+        # 重选切点(2026-08-19 加):`group_log` 只记**换人**,阵容没变就不写。
+        # 界面要能说「最近一次重选是哪天、换没换人」,否则看上去像三年没重选过。
+        "reselect": {
+            "last": next((c for c in reversed(cuts or []) if c <= d.strftime("%Y-%m-%d")), None),
+            "next": next((c for c in (cuts or []) if c > d.strftime("%Y-%m-%d")), None),
+            "changed_at": log[-1]["date"] if log else None,
+        },
         "history": closed,
         "stats": {
             "trades": len(closed),
@@ -802,6 +872,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 数字一律**由实际回测结果生成**,不写死。上一版把 "+86.5% vs +99.2%"
         # 硬编码在这里,关掉做多支路后就成了错的——同一个事实两处维护,必栽。
         "caveats": _caveats(_perf(strat_daily), _perf(bench_daily), closed),
+        "edge_split": SPLIT.get("v"),
     }
 
 
@@ -882,9 +953,9 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         seat = clean_seat(seat_raw)
         mkt = main_series(price)
         mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
-        groups, log = rolling_groups(seat, price, mkt.index)
+        groups, log, cuts = rolling_groups(seat, price, mkt.index)
         sig = signal_series(seat, groups)
-        payload = build_payload(sig, mkt, seat, groups, log)
+        payload = build_payload(sig, mkt, seat, groups, log, cuts)
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None
