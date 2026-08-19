@@ -4,6 +4,10 @@
 「同一个事实两处维护、只改了一处」就是这么栽的。所以每次改任一边,
 都要跑这个脚本,逐笔比日期、方向、收益。
 
+2026-08-19 这个脚本抓到过两次真分叉:①两边取席位数据一个用全量 seat、
+一个用与行情内连接后的 df;②引擎判共振用未标准化的 chg,导致在聪明钱信号
+尚未预热完成时就开仓(抢跑)。两次都是先发现「笔数对不上」才查出来的。
+
 引擎的 ret_pct 是**毛**收益,研究版扣了双边成本,所以收益比对时把成本加回去。
 """
 from __future__ import annotations
@@ -18,8 +22,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-import lhlib as L                      # noqa: E402
-import run_lh_phase2 as P2             # noqa: E402
+import run_lh_compare_v2 as C          # noqa: E402
 
 ENGINE = Path(__file__).resolve().parents[1] / "engine" / "hog_money.py"
 
@@ -38,19 +41,10 @@ def engine_trades() -> pd.DataFrame:
 
 
 def research_trades() -> pd.DataFrame:
-    price = L.load_price()
-    seat = L.load_seat()
-    df = seat.merge(price[["contract", "trade_date", "settle"]],
-                    on=["contract", "trade_date"], how="inner")
-    mr = P2.main_returns(price)
-    mr = mr[mr.index >= df["trade_date"].min()]
-    groups = P2.rolling_groups(df, mr.index)
-    z = P2.zscore(P2.signal_series(df, groups))
-    # 引擎的做多支路默认关闭(RULES["long_enabled"]=False),对拍要传同样的口径,
-    # 否则研究侧多出 15 笔做多,会报成假失败。
-    tr, _ = P2.backtest_discrete(z, mr["ret"], mr["settle"].pct_change(20),
-                                 long_enabled=False)
-    return tr
+    """研究侧的独立实现(run_lh_compare_v2),与引擎口径必须一致:
+    方案 C = 共振进场 / 散户出场 / 只做空 / 持满 40 / 止损 6%。"""
+    tr = C.backtest(C.rz_res, C.rz, C.mr)
+    return tr.rename(columns={"原因": "出场原因"})
 
 
 def main():
@@ -72,7 +66,7 @@ def main():
         rd, rx = r.loc[i, "进场"].strftime("%Y-%m-%d"), r.loc[i, "出场"].strftime("%Y-%m-%d")
         s_e, s_r = side_map[e.loc[i, "side"]], r.loc[i, "方向"]
         # 研究版扣了双边成本,加回去再比
-        gross_r = r.loc[i, "收益%"] + 2 * P2.COST_ONEWAY * 100
+        gross_r = r.loc[i, "收益%"] + 2 * 0.0005 * 100
         if ed != rd or xd != rx or s_e != s_r or abs(e.loc[i, "ret_pct"] - gross_r) > 0.02:
             bad += 1
             if bad <= 5:

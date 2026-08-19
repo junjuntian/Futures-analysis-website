@@ -261,6 +261,20 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('策略方案页要写明现行是方案 C,且不能把它说成「实测最优」', async () => {
+    // 三个候选单笔均值差的 t 只有 0.22~0.49,统计上分不出高下。
+    // 选 C 是运营者的判断,页面必须如实这么说——把判断包装成「数据证明」是最容易
+    // 犯的错,而且几个月后没人记得当初有没有证据。
+    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[3].trigger('click')
+    const t = w.text()
+    expect(t).toContain('共振')
+    expect(t).toContain('分不出高下')
+    expect(t).not.toContain('实测最优')
+    w.unmount()
+  })
+
   it('取不到 JSON 时给出错误,而不是白屏', async () => {
     stubFetch(null, false)
     const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })

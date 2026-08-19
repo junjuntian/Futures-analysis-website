@@ -39,14 +39,17 @@ def rolling_group_signal(dates, reselect_months=12, k=5, warmup=250):
         days = [d for d in dates if (lambda v: picks[v[-1]] if v else None)(
             [c for c in cuts if c <= d]) == grp]
         if not days: continue
-        s = df[df["member_key"].isin(list(grp))].groupby("trade_date")["net"].sum().sort_index()
+        # **用全量 seat 而不是与行情内连接后的 df**——席位持仓不依赖于当天有没有
+        # 对应合约的价格。2026-08-19 对拍时正是这里差出一笔(2024-05-17):
+        # 引擎用 seat,研究这边用了 df,少掉几行席位就让信号在边界上跨过了门槛。
+        s = seat[seat["member_key"].isin(list(grp))].groupby("trade_date")["net"].sum().sort_index()
         net.loc[days] = s.diff(5).reindex(days).values
     return net / net.rolling(120, min_periods=60).std()
 
 
 def retail_signal(dates):
-    have = [m for m in RETAIL if m in set(df["member_key"])]
-    s = df[df["member_key"].isin(have)].groupby("trade_date")["net"].sum().sort_index().reindex(dates)
+    have = [m for m in RETAIL if m in set(seat["member_key"])]
+    s = seat[seat["member_key"].isin(have)].groupby("trade_date")["net"].sum().sort_index().reindex(dates)
     chg = s.diff(5)
     return -(chg - chg.rolling(120, min_periods=60).mean()) / chg.rolling(120, min_periods=60).std()
 

@@ -112,7 +112,17 @@ RULES = {
     # 所以它的定位是**独立的第二意见**(与主信号相关 0.59),不是「更好的信号」:
     # 看两者一致还是背离,比看它自己的方向更有用。共振时回撤明显小一半
     # (−4.1% vs −9.4%),方向一致但尚不显著,值得继续观察。
-    "resonance_trades": False,
+    # 2026-08-19 运营者拍板改用**方案 C:共振进场 / 散户出场**(只做空)。
+    #   进场:聪明钱流向与散户反向流向同号(共振)且散户反向 z ≤ −enter
+    #   出场:散户反向信号翻到 +enter(反向)/ 硬止损 / 持满
+    # 同一时间轴(2023-08 起)三个方案:
+    #   现有主信号 21 笔 净 +79.7%/胜率 71.4%/回撤 −9.4%/夏普 2.39
+    #   散户反向   21 笔 净 +91.4%/胜率 76.2%/回撤 −6.8%/夏普 2.42
+    #   **方案 C** 18 笔 净 +88.4%/胜率 72.2%/回撤 **−4.1%**/夏普 **2.80**
+    # **必须如实记住:三者单笔均值差的 t 只有 0.22~0.49,统计上分不出高下。**
+    # 选 C 是运营者的判断(回撤最小、夏普最高),不是数据证明它更优——
+    # 别在后续文档里把它写成「实测最优」。
+    "signal_source": "resonance",   # "flow"=原聪明钱单信号;"resonance"=方案 C
     "multiplier": 16.0,      # LH 合约点值
     "replay_start": "2023-08-11",   # 大商所席位数据起点,再往前没有席位
 }
@@ -291,16 +301,38 @@ def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 回放
 
-def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> tuple[list[dict], pd.Series]:
+def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """按 RULES["signal_source"] 决定进场与出场各用哪一路信号。
+
+    两路都以「正=看涨」为约定:聪明钱用净持仓变化本身(增加=减空/加多),
+    散户那路在 retail_series 里已经取过负号。所以共振 = 两者同号。
+
+    方案 C 的进场用共振后的散户信号、出场只用散户信号——出场不要求共振,
+    否则聪明钱一转向就把仓位锁死在里面。
+    """
+    if RULES["signal_source"] != "resonance" or retail is None or retail.empty:
+        return sig["z"], sig["z"]
+    # 用**标准化后的 z** 判共振,不用原始 chg。
+    # chg 不需要预热,拿它判等于「聪明钱信号还没预热完成就先拿来用」——
+    # 2026-08-19 对拍时抓到:席位组 2024-05-01 首次生成,z 要 60 个交易日才有值,
+    # 而 chg 当天就有,于是 2024-05-17 凭一个尚不可用的信号开了一仓。
+    # np.sign(NaN) 是 NaN、NaN==NaN 为 False,所以改用 z 之后预热期自动不进场。
+    resonate = np.sign(sig["z"]) == np.sign(retail["rz"])
+    return retail["rz"].where(resonate), retail["rz"]
+
+
+def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
+           retail: pd.DataFrame | None = None) -> tuple[list[dict], pd.Series]:
     """全量回放历史信号。与 research/run_lh_phase2.py 的 backtest_discrete 同口径。
 
     T+1:今日收盘算出的信号,吃的是明日收益——日内不可能按今日结算价成交。
     """
     idx = mkt.index
+    z_in, z_out = entry_exit_signals(sig, retail)
     trades, side, entry_i, cum = [], 0, None, 0.0
     pos = pd.Series(0.0, index=idx)
     for i, d in enumerate(idx):
-        z = sig["z"].get(d, np.nan)
+        z = z_out.get(d, np.nan)          # 出场判断用这一路
         r = mkt["ret"].get(d, np.nan)
         if side != 0:
             cum = (1 + cum) * (1 + side * (r if np.isfinite(r) else 0)) - 1
@@ -328,8 +360,10 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> tuple[list[dict], pd.Series]
                 "exit_reason": reason,
             })
             side, cum = 0, 0.0
-        if side == 0 and np.isfinite(z):
+        ze = z_in.get(d, np.nan)          # 进场判断用这一路(方案 C 下已含共振过滤)
+        if side == 0 and np.isfinite(ze):
             want = 0
+            z = ze
             if z <= -RULES["enter"]:
                 want = -1
             elif z >= RULES["enter"] and RULES["long_enabled"]:
@@ -418,7 +452,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
-    trades, pos = replay(sig, mkt)
+    # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
+    rdf, rhave = retail_series(seat, mkt.index)
+    trades, pos = replay(sig, mkt, rdf)
     open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
     closed = [t for t in trades if t["exit_date"]]
 
@@ -437,8 +473,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "on_board": bool(len(today[today["member_key"] == m])),
         })
 
-    # —— 散户反向维度(展示用,不参与进出场,见 RULES["resonance_trades"])——
-    rdf, rhave = retail_series(seat, mkt.index)
+    # —— 散户反向维度 ——
     r_now = rdf.loc[d] if d in rdf.index else None
     rz_now = float(r_now["rz"]) if r_now is not None and np.isfinite(r_now.get("rz", np.nan)) else None
     # 共振 = 聪明钱流向与散户反向流向同号。两者都以「正=看涨」为约定:
@@ -464,11 +499,12 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "z": None if rz_now is None else round(rz_now, 2),
         # z 为正 = 散户在减多/加空 → 反向看涨;为负 = 散户在加多 → 反向看跌
         "resonate": resonate,
-        "trades": RULES["resonance_trades"],
+        "trades": RULES["signal_source"] == "resonance",
         "note": "散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
-                "**它不参与进出场,原因是与主信号表现相当而非它不够好**——"
-                "同期实测两者单笔均值差的 t 只有 0.22~0.49,21 笔样本上分不出高下。"
-                "它的用处是当**第二意见**:与主信号一致还是背离,比它自己的方向更有信息量。",
+                "**现行策略(方案 C)就是用它进出场**:与聪明钱共振时按它的方向进场,"
+                "它翻向时出场。选它是因为回撤最小(−4.1% vs 主信号 −9.4%)、夏普最高;"
+                "但要如实知道——三个候选方案单笔均值差的 t 只有 0.22~0.49,"
+                "**统计上分不出高下**,这是一个判断,不是数据证明的最优解。",
     }
 
     state = "观察中"

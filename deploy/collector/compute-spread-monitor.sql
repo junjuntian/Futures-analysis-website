@@ -427,6 +427,29 @@ select cur_c1, cur_c2, cur_date,
 
 analyze revert_wide;
 
+-- ---------------------------------------------------------------------------
+-- 数据完整性门(2026-08-19 加)。**必须在 delete 之前**。
+--
+-- 下面那句 delete 是无条件的:数据还没到齐时它照样先把窗口内的旧快照删光,
+-- 再用残缺数据重写。2026-08-19 抢早轮(16:00)首次运行就是这么坏的——
+-- 那时只有大商所到货(DCE 16:03,郑商所与上期所要等 16:26),于是当天只算出
+-- 鸡蛋一个品种,**而且把 08-17、08-18 两天完整的六品种快照一并重写成了五品种**。
+-- 页面上的表现是品种下拉里只剩「鸡蛋」,看不出是数据没到还是程序坏了。
+--
+-- 判据用「两个交易所都到了没有」而不是「品种数够不够」:监控范围横跨大商所
+-- (JD/LH/JM)与郑商所(AP/FG/SA),少任何一边算出来的都是残的;而品种数会因为
+-- 某个品种真的停牌而正常减少,拿它当判据会误伤。
+select (
+    count(distinct exchange) filter (where exchange in ('DCE', 'CZCE')) >= 2
+) as monitor_data_ok
+  from price_history
+ where trade_date = (select max(trade_date) from price_history
+                      where instrument in ('JD', 'LH', 'JM', 'AP', 'FG', 'SA'))
+   and instrument in ('JD', 'LH', 'JM', 'AP', 'FG', 'SA')
+\gset
+
+\if :monitor_data_ok
+
 -- 先清掉窗口内的旧快照，再重算。
 --
 -- 只做 upsert 是不够的：**监控范围变小时，upsert 不会删掉已经不该存在的行。**
@@ -493,6 +516,13 @@ on conflict (workspace_id, trade_date, contract_1, contract_2) do update set
     revert_low_mae_max = excluded.revert_low_mae_max,
     revert_low_days = excluded.revert_low_days,
     computed_at = now();
+
+\else
+\echo 'MONITOR_SKIPPED_INCOMPLETE 最新交易日只到了一个交易所，本轮不动快照'
+\echo '  (抢早轮 16:00 常态：大商所先到、郑商所与上期所约 16:26。'
+\echo '   保留上一版快照，等 17:30 那轮数据齐了再重算——不能先删后写残缺数据)'
+\endif
+
 
 commit;
 
