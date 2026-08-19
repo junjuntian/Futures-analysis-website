@@ -11,6 +11,7 @@
  * 「等机构转多就转向」的策略意图,但没有数据背书,不能让它看起来和空头一样可信。
  */
 import { computed, onMounted, ref } from 'vue'
+import { getSeatNetPosition, type MemberLeg as SeatCost } from '../api'
 
 interface MemberLeg {
   member: string
@@ -67,8 +68,11 @@ interface HogPayload {
     cum_pct: number | null
     short_trades: number
     long_trades: number
+    /** 出场原因分布。策略方案页那句「N 笔全部由 X 触发」由它生成,不写死。 */
+    exit_reasons: Record<string, number>
   }
-  rules: Record<string, unknown>
+  rules: { reselect_months: number; group_k: number; enter: number; stop: number;
+           max_hold: number; sig_win: number; long_enabled: boolean } & Record<string, unknown>
   /** 与「躺着满仓做空」的同口径对比。不给基准,看的人会把熊市 beta 当成策略的本事。 */
   compare: {
     strategy: { cum_pct: number; sharpe: number | null; max_dd_pct: number }
@@ -87,6 +91,15 @@ const page = ref(1)
 // 每页条数可改,所以不是常量。
 const pageSize = ref(20)
 
+/**
+ * 组内各家在**当前主力合约**上的持仓成本。
+ *
+ * 不在引擎里重算,直接走净持仓页那条接口(`seats/net-position`)——那套成本引擎
+ * 是 Rust 侧算的、有测试盯着,再用 Python 抄一遍就是同一个事实两处维护。
+ * 取不到不影响主页面:成本是锦上添花,信号才是主体。
+ */
+const costs = ref<Record<string, SeatCost>>({})
+
 onMounted(async () => {
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
@@ -95,8 +108,44 @@ onMounted(async () => {
     data.value = await res.json()
   } catch (e) {
     error.value = e instanceof Error ? e.message : '读取生猪信号失败'
+    return
+  }
+  const p = data.value
+  if (!p?.members.length || !p.contract) return
+  try {
+    const { data: net } = await getSeatNetPosition({
+      instrument: 'LH',
+      members: p.members.map((m) => m.member),
+      contract: p.contract
+    })
+    costs.value = Object.fromEntries(net.latest_members.map((m) => [m.member, m]))
+  } catch {
+    // 成本取不到就不显示这一列,页面照常用
   }
 })
+
+/**
+ * 某家在当前主力合约上的净持仓成本。
+ *
+ * 按它自己那条腿取:净空看空单成本、净多看多单成本。覆盖不全时标出覆盖手数
+ * ——那说明有合约的成本不可知(建仓当日无结算价、或数据起点之前就持有),
+ * 不能让人以为这个均价覆盖了全部持仓。
+ */
+function memberCost(name: string): string {
+  const c = costs.value[name]
+  if (!c) return '—'
+  if (c.missing) return '当日掉榜'
+  const short = Number(c.short_lots)
+  const long = Number(c.long_lots)
+  const [cost, lots, all] = short >= long
+    ? [c.short_cost, c.short_cost_lots, c.short_lots]
+    : [c.long_cost, c.long_cost_lots, c.long_lots]
+  if (cost === null) return '成本不可知'
+  const covered = Number(lots)
+  const total = Number(all)
+  const px = Number(cost).toFixed(0)
+  return covered < total ? `${px}(覆盖 ${fmt(covered)} 手)` : px
+}
 
 const fmt = (v: number | null | undefined, d = 0) =>
   v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toLocaleString('zh-CN', {
@@ -109,6 +158,26 @@ const pnlClass = (v: number | null | undefined) =>
   v === null || v === undefined ? '' : v > 0 ? 'red' : v < 0 ? 'green' : ''
 
 const sideText = (s: string) => (s === 'short' ? '做空' : '做多')
+
+/**
+ * 规则文案一律**由 payload 生成,不写死**。
+ *
+ * 上一版把「每 3 个月」「36 笔」直接写进模板,引擎参数改成一年、做多关掉之后,
+ * 页面还在说 3 个月和 36 笔——同一个事实两处维护,必然对不上(运营者当场发现)。
+ */
+const reselectText = computed(() => {
+  const m = data.value?.rules.reselect_months ?? 0
+  return m === 12 ? '每年' : m === 1 ? '每月' : `每 ${m} 个月`
+})
+/** 「N 笔全部由 反向/止损 触发」——原因和笔数都是数出来的。 */
+const exitText = computed(() => {
+  const r = data.value?.stats.exit_reasons ?? {}
+  const parts = Object.entries(r).map(([k, v]) => `${k} ${v} 笔`)
+  const all = Object.keys(r)
+  const unused = ['反向', '止损', '持满', '消退'].filter((x) => !all.includes(x))
+  const tail = unused.length ? `;${unused.join('、')}至今一次没触发过。` : '。'
+  return `实测 ${data.value?.stats.trades ?? 0} 笔的出场分布:${parts.join('、')}${tail}`
+})
 
 /**
  * 持仓是否跨越过主力换月。
@@ -275,11 +344,16 @@ const bySide = computed(() => {
                 <span v-if="m.change !== null" :class="pnlClass(m.change)">
                   ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})
                 </span>
+                <span class="cost">成本 {{ memberCost(m.member) }}</span>
               </template>
               <span v-else class="gray">当日未上榜</span>
             </span>
           </div>
-          <p class="note">席位组每 3 个月按历史择时收益重选一次,不是固定名单。</p>
+          <p class="note">
+            席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。
+            成本是**{{ data.contract }} 这一个合约**上的净持仓成本(推算),按结算价推
+            ——不是成交均价,我们看不到成交明细。
+          </p>
         </div>
       </div>
 
@@ -381,7 +455,9 @@ const bySide = computed(() => {
         />
       </div>
       <p class="note">
-        收益是**毛收益**,未扣手续费与滑点(回测按单边 0.05% 估算,36 笔合计约 3.6 个百分点)。
+        收益是**毛收益**,未扣手续费与滑点(回测按单边 0.05% 估算,{{ data.stats.trades }} 笔
+        合计约 {{ (data.stats.trades * 0.1).toFixed(1) }} 个百分点)。上面那张对比表里的
+        策略数字**是扣过成本的**,可以直接和基准比。
       </p>
     </template>
 
@@ -389,7 +465,7 @@ const bySide = computed(() => {
     <template v-else-if="tab === 'group'">
       <div class="cards">
         <div class="card wide">
-          <h3>重选历史(每 3 个月一次)</h3>
+          <h3>重选历史({{ reselectText }}一次)</h3>
           <p class="note">
             括号里是该家截至重选时点的**择时收益**(亿元)——把「一直挂着同样大小的仓
             不动」能赚到的钱扣掉之后剩下的部分。按它选人,而不是按谁赚得多:
@@ -411,8 +487,8 @@ const bySide = computed(() => {
         <div class="card wide">
           <h3>怎么算的</h3>
           <ol class="rules">
-            <li><b>选人</b>:每 3 个月,按截至当时的**择时收益**排序取前 5 家。只用当时
-              之前的数据,不看未来。</li>
+            <li><b>选人</b>:{{ reselectText }},按截至当时的**择时收益**排序取前
+              {{ data.rules.group_k }} 家。只用当时之前的数据,不看未来。</li>
             <li><b>信号</b>:这 5 家在**全品种合约上的合计净持仓**,取 {{ data.signal.win }} 日变化,
               再用滚动标准差无量纲化得到强度 z。<br>
               <span class="hint">为什么用品种合计而不是逐合约:实测 84.6% 的交易日里同日不同合约
@@ -424,8 +500,9 @@ const bySide = computed(() => {
               </template>
               <template v-else>z ≥ {{ data.signal.enter }} 且过去 20 日是跌的时候做多。</template>
             </li>
-            <li><b>出场</b>:反向信号 / 硬止损 6% / 持满 40 个交易日。<br>
-              <span class="hint">实测三年 36 笔全部由「反向」「持满」「止损」触发,消退条件一次没用上。</span></li>
+            <li><b>出场</b>:反向信号 / 硬止损 {{ (data.rules.stop * 100).toFixed(0) }}% /
+              持满 {{ data.rules.max_hold }} 个交易日。<br>
+              <span class="hint">{{ exitText }}</span></li>
             <li><b>计价</b>:主力合约,**换月日用新合约自己的前一日结算价**。生猪各合约相对
               主力偏离最大 49%,跨合约相除得到的是价差不是收益。</li>
           </ol>
@@ -487,6 +564,8 @@ const bySide = computed(() => {
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
 .note { font-size: 12px; color: var(--tv-text-muted); margin: 10px 0 0; line-height: 1.6; }
 .hint { font-size: 12px; color: var(--tv-text-muted); }
+/* 成本挨在手数后面,弱一档:它是补充信息,手数与增减才是这张卡的主角 */
+.cost { color: var(--tv-text-muted); margin-left: 8px; font-size: 12px; }
 
 .meter { margin-bottom: 10px; }
 .meter-bar { height: 8px; background: var(--tv-border); border-radius: 4px; overflow: hidden; }

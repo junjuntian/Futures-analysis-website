@@ -334,6 +334,35 @@ def _f(v):
     return None if v is None or not np.isfinite(v) else round(float(v), 1)
 
 
+def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
+    """边界说明。**凡是数字都从实参算**,不许写死——参数一改文案就会对不上。"""
+    shorts = [t for t in closed if t["side"] == "short"]
+    out = ["样本只有三年(2023-08 起,大商所席位数据起点),且**只有一种市况**——全程熊市。"]
+    if not RULES["long_enabled"]:
+        out.append(
+            "**做多支路已关闭**:回测里多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),"
+            "关掉后夏普 1.96 → 2.39。机构减空时策略平仓观望,不是继续扛空单。"
+            "(这三个数是关闭前那一版的回测结论,留作依据。)")
+    out.append(
+        "**「机构真转多」也不是买入信号**:样本里它出现过 14 天(集中在 2025-07),"
+        "之后 20 日主力仍平均跌 1.18%,最好一次只有 +0.61%。但那 14 天全挤在一个"
+        "窗口里,实质是 1 个事件——只能说没有证据支持,不能说证明必亏。")
+    if shorts:
+        wins = sum(1 for t in shorts if t["ret_pct"] > 0)
+        cum = (np.prod([1 + t["ret_pct"] / 100 for t in shorts]) - 1) * 100
+        worst = min(t["ret_pct"] for t in shorts)
+        out.append(f"空头信号有回测支撑:{len(shorts)} 笔 {cum:+.1f}%(毛),"
+                   f"胜率 {100 * wins / len(shorts):.1f}%,最差 {worst:+.1f}%。")
+    gap = "没跑赢" if strat["cum_pct"] < bench["cum_pct"] else "跑赢了"
+    out.append(
+        f"**绝对收益{gap}「躺着满仓做空」**({strat['cum_pct']:+.1f}% vs "
+        f"{bench['cum_pct']:+.1f}%)。策略赢的是回撤({strat['max_dd_pct']:+.1f}% vs "
+        f"{bench['max_dd_pct']:+.1f}%)与夏普({strat['sharpe']} vs {bench['sharpe']}),"
+        "以及趋势反转时会跟着退出——后者样本内无法验证。")
+    out.append("回测按结算价成交、T+1 执行,未模拟涨跌停与流动性冲击。")
+    return out
+
+
 def _perf(daily: pd.Series) -> dict:
     """一条日收益序列的累计/夏普/最大回撤。策略与基准共用,口径才对得上。"""
     dd = daily.fillna(0)
@@ -433,6 +462,11 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                        if closed else None,
             "short_trades": sum(1 for t in closed if t["side"] == "short"),
             "long_trades": sum(1 for t in closed if t["side"] == "long"),
+            # 出场原因分布:策略方案页那句「实测 N 笔全部由 X 触发」由它生成,
+            # 不写死——消退条件至今一次没触发过,但这是数出来的不是记住的。
+            "exit_reasons": {r: sum(1 for t in closed if t["exit_reason"] == r)
+                             for r in sorted({t["exit_reason"] for t in closed
+                                              if t["exit_reason"]})},
         },
         "compare": {
             "strategy": _perf(strat_daily),
@@ -443,18 +477,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         },
         "rules": {k: v for k, v in RULES.items() if k not in ("alias",)},
         # 界面必须把这句话摆出来,不能让人以为多头信号和空头一样可信。
-        "caveats": [
-            "样本只有三年(2023-08 起,大商所席位数据起点),且**只有一种市况**——全程熊市。",
-            "**做多支路已关闭**:回测里多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),"
-            "关掉后夏普 1.96 → 2.39。机构减空时策略平仓观望,不是继续扛空单。",
-            "**「机构真转多」也不是买入信号**:样本里它出现过 14 天(集中在 2025-07),"
-            "之后 20 日主力仍平均跌 1.18%,最好一次只有 +0.61%。但那 14 天全挤在一个"
-            "窗口里,实质是 1 个事件——只能说没有证据支持,不能说证明必亏。",
-            "空头信号有回测支撑:21 笔 +79.8%,胜率 71.4%,最差 −3.8%。",
-            "**绝对收益没跑赢「躺着满仓做空」**(+86.5% vs +99.2%)。策略赢的是回撤"
-            "(−8.6% vs −14.8%)与夏普,以及趋势反转时会跟着退出——后者样本内无法验证。",
-            "回测按结算价成交、T+1 执行,未模拟涨跌停与流动性冲击。",
-        ],
+        # 数字一律**由实际回测结果生成**,不写死。上一版把 "+86.5% vs +99.2%"
+        # 硬编码在这里,关掉做多支路后就成了错的——同一个事实两处维护,必栽。
+        "caveats": _caveats(_perf(strat_daily), _perf(bench_daily), closed),
     }
 
 

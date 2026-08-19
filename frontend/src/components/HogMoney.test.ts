@@ -46,9 +46,10 @@ const PAYLOAD = {
   ],
   stats: {
     trades: 2, win_rate: 50, avg_pct: -1.23, cum_pct: -2.7,
-    short_trades: 1, long_trades: 1
+    short_trades: 1, long_trades: 1, exit_reasons: { 反向: 1, 止损: 1 }
   },
-  rules: { enter: 1, stop: 0.06, reselect_months: 12 },
+  rules: { enter: 1, stop: 0.06, reselect_months: 12, group_k: 5, max_hold: 40,
+           sig_win: 5, long_enabled: false },
   compare: {
     strategy: { cum_pct: 86.5, sharpe: 1.96, max_dd_pct: -8.6 },
     benchmark: { cum_pct: 99.2, sharpe: 1.65, max_dd_pct: -14.8 },
@@ -58,10 +59,31 @@ const PAYLOAD = {
   caveats: ['样本只有三年,且只有一种市况——全程熊市。', '做多信号未经验证。']
 }
 
+/** 成本那一列走净持仓接口(Rust 侧的成本引擎),与信号 JSON 是两条路。 */
+const NET_POSITION = {
+  data: {
+    latest_members: [
+      { member: '国泰君安', long_lots: '0', long_cost: null, long_cost_lots: '0',
+        short_lots: '11413', short_cost: '12835.23', short_cost_lots: '11413',
+        missing: false, inferred: false },
+      { member: '东证期货', long_lots: '0', long_cost: null, long_cost_lots: '0',
+        short_lots: '2533', short_cost: '13074.92', short_cost_lots: '1200',
+        missing: false, inferred: false },
+      { member: '东吴期货', long_lots: '0', long_cost: null, long_cost_lots: '0',
+        short_lots: '0', short_cost: null, short_cost_lots: '0',
+        missing: true, inferred: false }
+    ]
+  },
+  meta: { request_id: 'r1' }
+}
+
 function stubFetch(payload: unknown = PAYLOAD, ok = true) {
-  vi.stubGlobal('fetch', vi.fn(async () => ({
-    ok, status: ok ? 200 : 404, json: async () => payload
-  } as Response)))
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (input.toString().includes('/seats/net-position')) {
+      return { ok: true, status: 200, json: async () => NET_POSITION } as Response
+    }
+    return { ok, status: ok ? 200 : 404, json: async () => payload } as Response
+  }))
 }
 
 describe('生猪机构资金', () => {
@@ -173,6 +195,36 @@ describe('生猪机构资金', () => {
     expect(t).toContain('做多支路是关闭的')
     // 「减空」不等于「转多」——机构此刻仍是净空,这句必须在
     expect(t).toContain('净空')
+    w.unmount()
+  })
+
+  it('规则文案全部由 payload 生成,不写死', async () => {
+    // 上一版把「每 3 个月」「36 笔」写进模板,引擎改成一年、做多关掉之后页面还在
+    // 说旧数字,被运营者当场发现。这条盯住这类回归。
+    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[3].trigger('click')
+    const t = w.text()
+    expect(t).toContain('每年')          // reselect_months=12
+    expect(t).not.toContain('每 3 个月')
+    expect(t).toContain('前 5 家')        // group_k
+    expect(t).toContain('持满 40 个交易日')
+    expect(t).toContain('反向 1 笔')      // 出场分布数出来的
+    expect(t).toContain('持满、消退至今一次没触发过')
+    w.unmount()
+  })
+
+  it('组内各家要显示当前主力合约上的持仓成本', async () => {
+    const w = mount(HogMoney, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('12835')                 // 国泰君安,覆盖完整
+    expect(t).toContain('13075(覆盖 1,200 手)')  // 东证,覆盖不全要标出来
+    // 东吴当日不在榜:整行就是「当日未上榜」,压根不该去取成本
+    expect(t).toContain('当日未上榜')
+    // 成本是哪个合约上的,必须说清——生猪各合约价差最大 49%
+    expect(t).toContain('LH2611 这一个合约')
     w.unmount()
   })
 
