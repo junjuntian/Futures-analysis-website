@@ -54,25 +54,27 @@ else
   exit 1
 fi
 
-# ---- 生猪:独立引擎、独立产物 ----
+# ---- 合计流向品种(生猪/玻璃/纯碱):独立引擎、每品种独立产物 ----
 # 与金银**刻意分开跑**:信号形态不同(合计流向 vs 逐家共振),两条链失败也各自
-# 隔离。生猪挂了不该让金银信号跟着不更新——所以这一段不带 set -e 的传染性,
-# 失败只告警并保留上一版 hog_signals.json。
+# 隔离——它们挂了不该让金银信号跟着不更新,所以这一段不带 set -e 的传染性,
+# 失败只告警并保留上一版 JSON。引擎内部也按品种各跑各的:一个品种挂了不影响其余。
 if [ -f "$ROOT/hog_money.py" ]; then
-  echo "[hog] 计算生猪信号…"
-  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e HOG_OUT=/work/tmp/hog_signals.json       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
-    if [ -s "$TMP/hog_signals.json" ]; then
-      cp "$TMP/hog_signals.json" "$WEB/hog_signals.json.new"
-      mv "$WEB/hog_signals.json.new" "$WEB/hog_signals.json"
-      echo "[hog] 已更新 $WEB/hog_signals.json"
-    else
-      echo "[hog] 引擎无输出,保留上一版 hog_signals.json" >&2
-    fi
+  echo "[flow] 计算生猪/玻璃/纯碱信号…"
+  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
+    for f in hog_signals.json fg_signals.json sa_signals.json; do
+      if [ -s "$TMP/$f" ]; then
+        cp "$TMP/$f" "$WEB/$f.new"
+        mv "$WEB/$f.new" "$WEB/$f"
+        echo "[flow] 已更新 $WEB/$f"
+      else
+        echo "[flow] $f 无输出,保留上一版" >&2
+      fi
+    done
   else
-    echo "[hog] 引擎失败,保留上一版 hog_signals.json(不影响金银)" >&2
+    echo "[flow] 引擎失败,保留上一版信号(不影响金银)" >&2
   fi
 else
-  echo "[hog] 未安装 hog_money.py,跳过生猪" >&2
+  echo "[flow] 未安装 hog_money.py,跳过" >&2
 fi
 
 rm -f "$TMP"/*.csv
