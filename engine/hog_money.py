@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""生猪(LH)机构资金引擎:合计流向跟随。
+
+**与金银引擎(smart_money.py)刻意分开的两个文件**,不是重复造轮子——两套信号
+形态根本不同,研究阶段用数据判过(research/REPORT_LH_PHASE1_v1.md):
+
+  - 金银:逐家席位算权重、多席位共振。生猪照搬这套会失败——单家席位的加减仓
+    事件整体胜率只有 50%(2026 年 44.7%),只有东证一家 t≈2.8 显著。
+  - 生猪:**八家合计的流向**,控制动量后偏相关 t=5.4~7.5,与金银核心因子同量级。
+  - 生猪还有两条金银没有的坑:各合约相对主力偏离最大 49%(金银不到 1%),
+    以及 84.6% 的交易日里同日不同合约的持仓变化方向相反(移仓换月)。
+
+所以口径上有两条铁律,改动时不要想当然:
+
+  1. **信号用品种合计**。拆到合约层面会被移仓撕成相反的两半(实测 IC_t 仅 0.58,
+     品种合计 t=5.22)。
+  2. **收益一律逐合约算,换月日用新合约自己的前一日结算价**。跨合约相除得到的
+     不是收益,是价差。
+
+席位组**滚动重选**(每 3 个月按截至当时的历史 alpha 取前 5),不硬编码名单:
+生猪只有三年样本、且只有一种市况,焊死名单等于把这一段行情的偏好写死。
+金银敢硬编码七家是有 17 年样本兜底。
+
+回测证据(2023-08~2026-08,research/REPORT_LH_PHASE2_v1.md):
+  恒定满仓做空基准 +99.2%/夏普 1.65/回撤 −14.8%
+  本引擎(离散)     +104.5%/夏普 2.26/回撤 −10.2%,36 笔平均持有 11 天
+  空头 21 笔 +85.9%(胜率 62%);**多头 15 笔仅 +4.5%,等于未经验证**。
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+CN_TZ = timezone(timedelta(hours=8))
+
+RULES = {
+    # —— 席位组 ——
+    "group_k": 5,            # Phase 1:3/5/8 里 5 在三个训练截点上都最好
+    "reselect_months": 3,    # 每季度按历史 alpha 重选
+    "warmup_days": 250,      # 首次选组前的最少历史
+    "member_min_days": 120,  # 一家至少在榜这么多天才参与排名
+    # —— 信号 ——
+    "sig_win": 5,            # 合计净持仓的变化窗口。20 日窗会混入动量(相关 +0.317)
+    "z_win": 120,            # 无量纲化的滚动窗。2026 年机构净空是 2024 年的四倍,
+                             # 绝对手数不能直接当阈值
+    # —— 进出场 ——
+    "enter": 1.0,            # 0.8/1.0/1.2 平稳(94/94/110%),取中不取峰值
+    # exit_z=0 意味着「消退出场」要求 z 恰好为 0,**实测三年 36 笔里一次都没触发过**
+    # (出场全部是 反向 32 / 持满 2 / 止损 2)。留着是当安全网,不要误以为它在起作用;
+    # 真想让信号衰减就出场,得把它调成 0.3 这类值,而那是个**新参数,必须先回测**。
+    "exit_z": 0.0,
+    "stop": 0.06,            # 4/6/8/10% 相邻档同向,不敏感
+    "max_hold": 40,          # 20/30/40/60 相邻档同向
+    # 做多额外要求过去 20 日是跌的。不是调参:Phase 0 双分档里「跌 × 机构减空」
+    # 是全表唯一正格子(+0.30%),「涨 × 减空」是 −1.97%。
+    "long_needs_dip": True,
+    "dip_win": 20,
+    # 与 Rust MEMBER_ALIASES / smart_money RULES["alias"] 保持同集。
+    # 不归一会把一家算成两家。「大华期货」不许加(与格林期货同日同合约并存 266 次,
+    # 是 2013 年被吸收合并的另一家公司)。
+    "alias": {"浙江永安": "永安期货", "乾坤期货": "高盛期货",
+              "上海东证": "东证期货", "国投安信": "国投期货",
+              "国投安信期货": "国投期货", "申银万国": "申万期货",
+              "格林大华期货": "格林大华", "格林期货": "格林大华"},
+    "multiplier": 16.0,      # LH 合约点值
+    "replay_start": "2023-08-11",   # 大商所席位数据起点,再往前没有席位
+}
+
+SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
+PRICE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina_v1": 3}
+
+
+# ---------------------------------------------------------------- 数据
+
+def _rank(src: pd.Series, table: dict) -> pd.Series:
+    out = src.map(table)
+    return out.where(~src.str.contains("_official", na=False), 0).fillna(4)
+
+
+def load_from_pg(container: str, pg_user: str, pg_db: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def q(sql: str) -> pd.DataFrame:
+        cmd = ["docker", "exec", "-i", container, "psql", "-U", pg_user, "-d", pg_db,
+               "-A", "-F", "\t", "--no-align", "-c", sql]
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                             encoding="utf-8").stdout
+        lines = [l for l in out.splitlines() if l and not l.startswith("(")]
+        from io import StringIO
+        return pd.read_csv(StringIO("\n".join(lines)), sep="\t")
+
+    price = q("select exchange,instrument,contract,trade_date,open_price,high_price,"
+              "low_price,close_price,settlement_price,volume,open_interest,source "
+              "from price_history where instrument='LH'")
+    seat = q("select instrument,contract,is_variety_total,trade_date,rank_type,member,"
+             "quantity,change,source from seat_history where instrument='LH'")
+    return price, seat
+
+
+def load_from_csv(csv_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def one(stem: str) -> pd.DataFrame:
+        # 生产链路落的是 .csv(run-smart-money.sh 导出);研究目录存的是 .csv.gz。
+        for name in (f"{stem}.csv", f"{stem}.csv.gz"):
+            p = csv_dir / name
+            if p.exists():
+                return pd.read_csv(p)
+        raise FileNotFoundError(f"{csv_dir}/{stem}.csv[.gz] 都不存在")
+    return one("lh_price"), one("lh_seat")
+
+
+def clean_price(price: pd.DataFrame) -> pd.DataFrame:
+    df = price.copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["_r"] = _rank(df["source"].astype(str), PRICE_RANK)
+    df = (df.sort_values(["contract", "trade_date", "_r", "source"])
+            .drop_duplicates(["contract", "trade_date"], keep="first"))
+    # 收盘价 0 是「当天无成交」不是价格(DEC-073),用结算价兜底
+    df["px"] = df["close_price"].replace(0, np.nan).fillna(df["settlement_price"])
+    df["settle"] = df["settlement_price"].replace(0, np.nan)
+    return df[df["settle"].notna()].reset_index(drop=True)
+
+
+def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
+    df = seat.copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    # PG boolean 经 CSV 是 't'/'f';astype(bool) 会把 'f' 判成 True
+    df["is_variety_total"] = df["is_variety_total"].astype(str).isin(["t", "true", "True", "1"])
+    df = df[(~df["is_variety_total"]) & df["rank_type"].isin(["long", "short"])
+            & df["contract"].notna()].copy()
+    key = df["member"].astype(str).str.replace(r"[（(][^）)]*[）)]$", "", regex=True)
+    df["member_key"] = key.map(lambda m: RULES["alias"].get(m, m))
+    df["_r"] = _rank(df["source"].astype(str), SEAT_RANK)
+    df = (df.sort_values(["trade_date", "contract", "rank_type", "member_key", "_r", "source"])
+            .drop_duplicates(["trade_date", "contract", "rank_type", "member_key"], keep="first"))
+    wide = df.pivot_table(index=["member_key", "contract", "trade_date"], columns="rank_type",
+                          values="quantity", aggfunc="sum")
+    out = pd.DataFrame(index=wide.index)
+    out["long_q"] = wide["long"] if "long" in wide.columns else np.nan
+    out["short_q"] = wide["short"] if "short" in wide.columns else np.nan
+    out["net"] = out["long_q"].fillna(0) - out["short_q"].fillna(0)
+    return out.reset_index()
+
+
+def main_series(price: pd.DataFrame) -> pd.DataFrame:
+    """主力合约与它的逐日收益。**换月日用新主力自己的前一日结算价。**
+
+    这是计价的地基:一旦跨合约相除,换月那天会凭空多出几个百分点的假收益,
+    而且不报错。
+    """
+    p = price.dropna(subset=["open_interest"])
+    idx = p.groupby("trade_date")["open_interest"].idxmax()
+    cand = p.loc[idx, ["trade_date", "contract"]].sort_values("trade_date")
+    dates, cands = cand["trade_date"].tolist(), cand["contract"].tolist()
+    ym = lambda c: str(c)[2:]
+    main, cur = [], cands[0]
+    for i in range(len(dates)):
+        if i > 0 and ym(cands[i - 1]) > ym(cur):
+            cur = cands[i - 1]
+        main.append(cur)
+
+    px = price.set_index(["contract", "trade_date"])["settle"].sort_index()
+    rows = []
+    for d, c in zip(dates, main):
+        s = px.get((c, d), np.nan)
+        hist = px.loc[c] if c in px.index.get_level_values(0) else pd.Series(dtype=float)
+        earlier = hist[hist.index < d]
+        prev = earlier.iloc[-1] if len(earlier) else np.nan
+        ret = s / prev - 1.0 if (np.isfinite(s) and np.isfinite(prev) and prev > 0) else np.nan
+        rows.append((d, c, s, ret))
+    out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret"]).set_index("trade_date")
+    out["past"] = out["settle"].pct_change(RULES["dip_win"])
+    return out
+
+
+# ---------------------------------------------------------------- 席位组
+
+def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp) -> pd.Series:
+    """截至 hi(不含)每家的择时收益 alpha = 实际盈亏 − 恒定仓位能赚到的钱。
+
+    **绝不许看 hi 之后的数据**——滚动重选的全部意义就在这里。
+    """
+    d = seat[seat["trade_date"] < hi].merge(
+        price[["contract", "trade_date", "settle"]], on=["contract", "trade_date"], how="inner")
+    if d.empty:
+        return pd.Series(dtype=float)
+    d = d.sort_values(["member_key", "contract", "trade_date"])
+    g = d.groupby(["member_key", "contract"])
+    d["prev_net"] = g["net"].shift()
+    d["prev_settle"] = g["settle"].shift()
+    gap = (d["trade_date"] - g["trade_date"].shift()).dt.days
+    d = d[d["prev_net"].notna() & (gap <= 5)]
+    if d.empty:
+        return pd.Series(dtype=float)
+    d = d.assign(dpx=(d["settle"] - d["prev_settle"]) * RULES["multiplier"])
+    grp = d.groupby("member_key")
+    pnl = grp.apply(lambda s: (s["dpx"] * s["prev_net"]).sum(), include_groups=False)
+    beta = grp.apply(lambda s: (s["dpx"] * s["prev_net"].mean()).sum(), include_groups=False)
+    days = grp["trade_date"].nunique()
+    return (pnl - beta)[days >= RULES["member_min_days"]].sort_values(ascending=False)
+
+
+def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
+                   dates: pd.DatetimeIndex) -> tuple[pd.Series, list]:
+    """逐日生效的席位组,外加一份重选历史(界面要展示"什么时候换了谁")。"""
+    start = dates.min() + pd.Timedelta(days=RULES["warmup_days"])
+    cuts = pd.date_range(start, dates.max(), freq=f"{RULES['reselect_months']}MS")
+    picks, log, cur = {}, [], None
+    for cut in cuts:
+        a = alpha_upto(seat, price, cut)
+        if len(a) >= RULES["group_k"]:
+            new = tuple(a.head(RULES["group_k"]).index)
+            if new != cur:
+                log.append({"date": cut.strftime("%Y-%m-%d"), "members": list(new),
+                            "alpha": {m: round(float(a[m]) / 1e8, 2)
+                                      for m in new}})
+            cur = new
+        picks[cut] = cur
+    ser = pd.Series(index=dates, dtype=object)
+    for d in dates:
+        valid = [c for c in cuts if c <= d]
+        ser[d] = picks[valid[-1]] if valid else None
+    return ser, log
+
+
+def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
+    """品种合计净持仓与它的变化、无量纲化 z。
+
+    换组当天不能直接 diff:新旧两组的持仓水平不同,那会把"换了一批人"当成
+    "机构大幅调仓"。所以每个组各自算一条,再按生效期取值。
+    """
+    net = pd.Series(index=groups.index, dtype=float)
+    chg = pd.Series(index=groups.index, dtype=float)
+    for grp in {g for g in groups.dropna().unique()}:
+        days = groups.index[groups == grp]
+        s = (seat[seat["member_key"].isin(list(grp))]
+             .groupby("trade_date")["net"].sum().sort_index())
+        net.loc[days] = s.reindex(days).values
+        chg.loc[days] = s.diff(RULES["sig_win"]).reindex(days).values
+    z = chg / chg.rolling(RULES["z_win"], min_periods=60).std()
+    return pd.DataFrame({"net": net, "chg": chg, "z": z})
+
+
+# ---------------------------------------------------------------- 回放
+
+def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> list[dict]:
+    """全量回放历史信号。与 research/run_lh_phase2.py 的 backtest_discrete 同口径。
+
+    T+1:今日收盘算出的信号,吃的是明日收益——日内不可能按今日结算价成交。
+    """
+    idx = mkt.index
+    trades, side, entry_i, cum = [], 0, None, 0.0
+    for i, d in enumerate(idx):
+        z = sig["z"].get(d, np.nan)
+        r = mkt["ret"].get(d, np.nan)
+        if side != 0:
+            cum = (1 + cum) * (1 + side * (r if np.isfinite(r) else 0)) - 1
+        reason = None
+        if side != 0:
+            if cum <= -RULES["stop"]:
+                reason = "止损"
+            elif i - entry_i >= RULES["max_hold"]:
+                reason = "持满"
+            elif np.isfinite(z) and side * z <= -RULES["enter"]:
+                reason = "反向"
+            elif np.isfinite(z) and abs(z) <= RULES["exit_z"] and side * z <= 0:
+                reason = "消退"
+        if reason:
+            e = idx[entry_i]
+            trades.append({
+                "side": "short" if side < 0 else "long",
+                "entry_date": e.strftime("%Y-%m-%d"),
+                "exit_date": d.strftime("%Y-%m-%d"),
+                "entry_px": _f(mkt["settle"].get(e)),
+                "exit_px": _f(mkt["settle"].get(d)),
+                "contract": str(mkt["main"].get(e)),
+                "ret_pct": round(cum * 100, 2),
+                "hold_days": i - entry_i,
+                "exit_reason": reason,
+            })
+            side, cum = 0, 0.0
+        if side == 0 and np.isfinite(z):
+            want = 0
+            if z <= -RULES["enter"]:
+                want = -1
+            elif z >= RULES["enter"]:
+                p = mkt["past"].get(d, np.nan)
+                if (not RULES["long_needs_dip"]) or (np.isfinite(p) and p < 0):
+                    want = 1
+            if want != 0:
+                side, entry_i, cum = want, i, 0.0
+    # 尚未平仓的那笔单独带出来(界面要显示"持有中")
+    if side != 0:
+        e = idx[entry_i]
+        trades.append({
+            "side": "short" if side < 0 else "long",
+            "entry_date": e.strftime("%Y-%m-%d"), "exit_date": None,
+            "entry_px": _f(mkt["settle"].get(e)), "exit_px": None,
+            "contract": str(mkt["main"].get(e)),
+            "ret_pct": round(cum * 100, 2), "hold_days": len(idx) - 1 - entry_i,
+            "exit_reason": None,
+        })
+    return trades
+
+
+def _f(v):
+    return None if v is None or not np.isfinite(v) else round(float(v), 1)
+
+
+# ---------------------------------------------------------------- 产物
+
+def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
+                  groups: pd.Series, log: list) -> dict:
+    d = mkt.index[-1]
+    z = sig["z"].get(d, np.nan)
+    trades = replay(sig, mkt)
+    open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
+    closed = [t for t in trades if t["exit_date"]]
+
+    grp = list(groups.get(d) or ())
+    today = seat[(seat["trade_date"] == d) & (seat["member_key"].isin(grp))]
+    prev_d = mkt.index[-1 - RULES["sig_win"]] if len(mkt) > RULES["sig_win"] else None
+    prev = seat[(seat["trade_date"] == prev_d) & (seat["member_key"].isin(grp))] if prev_d is not None else None
+    members = []
+    for m in grp:
+        now = float(today[today["member_key"] == m]["net"].sum()) if len(today) else 0.0
+        was = float(prev[prev["member_key"] == m]["net"].sum()) if prev is not None and len(prev) else np.nan
+        members.append({
+            "member": m,
+            "net": round(now),
+            "change": None if not np.isfinite(was) else round(now - was),
+            "on_board": bool(len(today[today["member_key"] == m])),
+        })
+
+    state = "观察中"
+    if open_trade:
+        state = "做空中" if open_trade["side"] == "short" else "做多中"
+
+    wins = [t for t in closed if t["ret_pct"] > 0]
+    return {
+        "instrument": "LH",
+        "name": "生猪 LH",
+        "unit": "元/吨",
+        "multiplier": RULES["multiplier"],
+        "data_date": d.strftime("%Y-%m-%d"),
+        "computed_at": datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "state": state,
+        "contract": str(mkt["main"].get(d)),
+        "price": _f(mkt["settle"].get(d)),
+        "signal": {
+            "z": None if not np.isfinite(z) else round(float(z), 2),
+            "enter": RULES["enter"],
+            "net": None if not np.isfinite(sig["net"].get(d, np.nan)) else int(sig["net"].get(d)),
+            "change": None if not np.isfinite(sig["chg"].get(d, np.nan)) else int(sig["chg"].get(d)),
+            "win": RULES["sig_win"],
+            # 连续版的建议仓位强度:回测夏普比离散版更高(2.66 vs 2.26),
+            # 但换手大、抗成本差,所以只作参考不作指令。
+            "suggested_position": None if not np.isfinite(z) else round(float(np.clip(z, -2, 2)), 2),
+        },
+        "position": open_trade,
+        "members": members,
+        "group_log": log[-8:],
+        "history": closed,
+        "stats": {
+            "trades": len(closed),
+            "win_rate": round(100 * len(wins) / len(closed), 1) if closed else None,
+            "avg_pct": round(float(np.mean([t["ret_pct"] for t in closed])), 2) if closed else None,
+            "cum_pct": round((np.prod([1 + t["ret_pct"] / 100 for t in closed]) - 1) * 100, 1)
+                       if closed else None,
+            "short_trades": sum(1 for t in closed if t["side"] == "short"),
+            "long_trades": sum(1 for t in closed if t["side"] == "long"),
+        },
+        "rules": {k: v for k, v in RULES.items() if k not in ("alias",)},
+        # 界面必须把这句话摆出来,不能让人以为多头信号和空头一样可信。
+        "caveats": [
+            "样本只有三年(2023-08 起,大商所席位数据起点),且**只有一种市况**——全程熊市。",
+            "**做多信号未经验证**:回测里多头 15 笔累计仅 +4.5%,而样本期内机构合计"
+            "净持仓一天都没转成净多。它符合「等机构转多就转向」的策略意图,但没有数据背书。",
+            "空头信号有回测支撑:21 笔 +85.9%,胜率 61.9%,最差 −3.8%。",
+            "2025 年策略几乎不赚(+2.8%,胜率 50%),信号会有整年失灵的时候。",
+            "回测按结算价成交、T+1 执行,未模拟涨跌停与流动性冲击。",
+        ],
+    }
+
+
+def main():
+    src = os.environ.get("ENGINE_SOURCE", "pg")
+    out_path = Path(os.environ.get("HOG_OUT", "/opt/futures-platform/signals/hog_signals.json"))
+    if src == "csv":
+        price_raw, seat_raw = load_from_csv(Path(os.environ.get("CSV_DIR", "../research/data")))
+    else:
+        price_raw, seat_raw = load_from_pg(
+            os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
+            os.environ.get("PG_USER", "futures_app"),
+            os.environ.get("PG_DB", "futures_platform"))
+
+    price = clean_price(price_raw)
+    seat = clean_seat(seat_raw)
+    mkt = main_series(price)
+    mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
+    groups, log = rolling_groups(seat, price, mkt.index)
+    sig = signal_series(seat, groups)
+
+    payload = build_payload(sig, mkt, seat, groups, log)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(out_path)   # 原子替换,避免前端读到半截文件
+    s = payload["stats"]
+    print(f"[hog] {payload['data_date']} 写出 {out_path}")
+    print(f"  状态 {payload['state']} | z={payload['signal']['z']} | "
+          f"席位组 {'、'.join(m['member'] for m in payload['members'])}")
+    print(f"  历史 {s['trades']} 笔(空 {s['short_trades']}/多 {s['long_trades']}),"
+          f"累计 {s['cum_pct']}%,胜率 {s['win_rate']}%")
+
+
+if __name__ == "__main__":
+    main()

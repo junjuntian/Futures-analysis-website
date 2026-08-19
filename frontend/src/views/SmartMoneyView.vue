@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import HogMoney from '../components/HogMoney.vue'
 
 // 机构资金信号页。数据由信号引擎每日盘后生成(nginx 静态服务的
 // /smart-money/signals.json),本页只负责在平台内渲染,不做任何计算。
@@ -106,6 +107,28 @@ interface SignalsPayload {
 const data = ref<SignalsPayload | null>(null)
 const error = ref('')
 const tab = ref<'today' | 'history' | 'weights' | 'rules'>('today')
+
+// 品种选择。**金银算一个品种**:它们共用一套信号(金银比、配对、跑路警报都是
+// 跨两个市场的),拆开看没有意义;生猪是另一套完全不同的信号,单独一个。
+// 记在本地:运营者盯哪个品种通常是稳定的,每次进来重选一遍是重复劳动。
+const VARIETY_KEY = 'smart-money.variety'
+type Variety = 'GOLD' | 'LH'
+const variety = ref<Variety>(readVariety())
+function readVariety(): Variety {
+  try {
+    return localStorage.getItem(VARIETY_KEY) === 'LH' ? 'LH' : 'GOLD'
+  } catch {
+    return 'GOLD' // 隐私模式下 localStorage 会抛;记不住是小事,页面打不开是大事
+  }
+}
+function pickVariety(v: Variety) {
+  variety.value = v
+  try {
+    localStorage.setItem(VARIETY_KEY, v)
+  } catch {
+    // 存不住就算了,不影响用
+  }
+}
 
 // 权重显示:撞上限时补一个未截断的真实 t 值。计算不受影响,见 RULES.weight_clip。
 function weightText(mk: { weights: Record<string, number>; weights_raw?: Record<string, number> },
@@ -226,6 +249,22 @@ onMounted(async () => {
 <template>
   <div class="page smart-money">
     <h1>机构资金</h1>
+
+    <!-- 品种选择:金银共用一套信号(金银比/配对/跑路警报都是跨两市场的),
+         所以它们算一个品种;生猪是另一套信号,单独一个。摆在标题下、tab 上——
+         它管的是整页,不是页内的某一块。 -->
+    <div class="variety-bar">
+      <button class="variety" :class="{ on: variety === 'GOLD' }" @click="pickVariety('GOLD')">
+        黄金白银
+      </button>
+      <button class="variety" :class="{ on: variety === 'LH' }" @click="pickVariety('LH')">
+        生猪
+      </button>
+    </div>
+
+    <HogMoney v-if="variety === 'LH'" />
+
+    <template v-else>
     <p v-if="data" class="sub">
       跟随金银双强七席位资金动向,每日收盘后自动计算。数据日期 <b>{{ data.data_date }}</b> ·
       计算于 {{ data.generated_at }}
@@ -641,12 +680,22 @@ onMounted(async () => {
         <div class="footnote">完整回测与验证过程见 research/REPORT_AU_v1.md</div>
       </div>
     </template>
+    </template>
   </div>
 </template>
 
 <style scoped>
 .smart-money h1 { font-size: 26px; font-weight: 700; margin: 0 0 6px; }
 .sub { color: var(--tv-text-secondary); margin: 0 0 22px; }
+
+/* 品种选择:分段按钮,比下拉更适合两三个固定选项——一眼看得见有哪些品种,
+   点一下就换,不用先展开。 */
+.variety-bar { display: inline-flex; gap: 0; margin: 6px 0 18px;
+  border: 1px solid var(--tv-border); border-radius: var(--tv-radius-sm); overflow: hidden; }
+.variety { padding: 7px 20px; font-size: 14px; cursor: pointer; border: 0;
+  background: var(--tv-bg-card); color: var(--tv-text-secondary); }
+.variety + .variety { border-left: 1px solid var(--tv-border); }
+.variety.on { background: var(--tv-blue); color: #fff; font-weight: 600; }
 
 /* —— TV 式品种状态条:滚动吸顶(el-main 是滚动容器,top:0 即贴其可视区顶) —— */
 .symbol-strip {

@@ -307,6 +307,9 @@ jobs:
           install -m 700 engine/run-official-seats.sh "${RELEASE_BUNDLE}/engine/run-official-seats.sh"
           install -m 700 engine/run-smart-money.sh "${RELEASE_BUNDLE}/engine/run-smart-money.sh"
           install -m 600 engine/smart_money.py "${RELEASE_BUNDLE}/engine/smart_money.py"
+          # 生猪引擎:与金银分开的两个文件,信号形态不同(合计流向 vs 逐家共振),
+          # 失败也各自隔离。漏装它线上不会报错,只会永远拿不到生猪信号。
+          install -m 600 engine/hog_money.py "${RELEASE_BUNDLE}/engine/hog_money.py"
           # 伦敦金基线:重挫态判定的基准数据,随发布包走(手工文件会漂移,吃过亏)
           install -d -m 700 "${RELEASE_BUNDLE}/engine/data"
           install -m 600 engine/data/london_xau.csv "${RELEASE_BUNDLE}/engine/data/london_xau.csv"
@@ -903,6 +906,7 @@ jobs:
             etc/cron.d/futures-collector
             etc/logrotate.d/futures-collector
             opt/futures-platform/smart-money/smart_money.py
+            opt/futures-platform/smart-money/hog_money.py
           )
           for script in "$RELEASE_DIR"/backfill/*; do
             host_paths+=("opt/futures-platform/$(basename "$script")")
@@ -968,6 +972,14 @@ jobs:
               echo "ENGINE_SUPERSEDED smart_money.py"
             fi
             install -m 644 "$RELEASE_DIR/engine/smart_money.py" "$engine_live"
+            hog_live=/opt/futures-platform/smart-money/hog_money.py
+            if test -f "$hog_live" &&
+               ! cmp -s "$RELEASE_DIR/engine/hog_money.py" "$hog_live"; then
+              install -d -m 700 "$superseded_dir"
+              cp -a "$hog_live" "$superseded_dir/hog_money.py"
+              echo "ENGINE_SUPERSEDED hog_money.py"
+            fi
+            install -m 644 "$RELEASE_DIR/engine/hog_money.py" "$hog_live"
             install -d -m 755 /opt/futures-platform/smart-money/data
             install -m 644 "$RELEASE_DIR/engine/data/london_xau.csv"               /opt/futures-platform/smart-money/data/london_xau.csv
           fi

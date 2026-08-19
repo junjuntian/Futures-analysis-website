@@ -22,7 +22,8 @@ fi
 mkdir -p "$TMP" "$WEB"
 
 echo "[smart-money] $(date '+%F %T') 导出数据…"
-for INST in AU AG; do
+# LH 与 AU/AG 一起导:生猪引擎读同样的两张表,只是品种不同。
+for INST in AU AG LH; do
   low=$(echo "$INST" | tr 'A-Z' 'a-z')
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
     "\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,volume,open_interest,source from price_history where instrument='$INST') to '/tmp/${low}_price.csv' with (format csv, header true)"
@@ -51,6 +52,27 @@ if [ -s "$TMP/signals.json" ]; then
 else
   echo "[smart-money] 引擎无输出,保留上一版 signals.json" >&2
   exit 1
+fi
+
+# ---- 生猪:独立引擎、独立产物 ----
+# 与金银**刻意分开跑**:信号形态不同(合计流向 vs 逐家共振),两条链失败也各自
+# 隔离。生猪挂了不该让金银信号跟着不更新——所以这一段不带 set -e 的传染性,
+# 失败只告警并保留上一版 hog_signals.json。
+if [ -f "$ROOT/hog_money.py" ]; then
+  echo "[hog] 计算生猪信号…"
+  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e HOG_OUT=/work/tmp/hog_signals.json       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
+    if [ -s "$TMP/hog_signals.json" ]; then
+      cp "$TMP/hog_signals.json" "$WEB/hog_signals.json.new"
+      mv "$WEB/hog_signals.json.new" "$WEB/hog_signals.json"
+      echo "[hog] 已更新 $WEB/hog_signals.json"
+    else
+      echo "[hog] 引擎无输出,保留上一版 hog_signals.json" >&2
+    fi
+  else
+    echo "[hog] 引擎失败,保留上一版 hog_signals.json(不影响金银)" >&2
+  fi
+else
+  echo "[hog] 未安装 hog_money.py,跳过生猪" >&2
 fi
 
 rm -f "$TMP"/*.csv
