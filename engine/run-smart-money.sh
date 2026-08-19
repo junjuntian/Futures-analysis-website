@@ -23,7 +23,9 @@ mkdir -p "$TMP" "$WEB"
 
 echo "[smart-money] $(date '+%F %T') 导出数据…"
 # LH 与 AU/AG 一起导:生猪引擎读同样的两张表,只是品种不同。
-for INST in AU AG LH; do
+# AU/AG 给金银引擎;LH/FG/SA 给合计流向引擎。都读同样的两张表,只是品种不同。
+# 加品种时**这里和 FLOW_CODES 要一起改**——只改一边不报错,只是那个品种没数据。
+for INST in AU AG LH FG SA; do
   low=$(echo "$INST" | tr 'A-Z' 'a-z')
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
     "\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,volume,open_interest,source from price_history where instrument='$INST') to '/tmp/${low}_price.csv' with (format csv, header true)"
