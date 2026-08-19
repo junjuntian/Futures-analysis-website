@@ -17,14 +17,20 @@
   2. **收益一律逐合约算,换月日用新合约自己的前一日结算价**。跨合约相除得到的
      不是收益,是价差。
 
-席位组**滚动重选**(每 3 个月按截至当时的历史 alpha 取前 5),不硬编码名单:
+席位组**滚动重选**(每年按截至当时的历史 alpha 取前 5),不硬编码名单:
 生猪只有三年样本、且只有一种市况,焊死名单等于把这一段行情的偏好写死。
 金银敢硬编码七家是有 17 年样本兜底。
 
-回测证据(2023-08~2026-08,research/REPORT_LH_PHASE2_v1.md):
+**只做空**——做多支路默认关闭,理由见 RULES["long_enabled"]。
+
+回测证据(2023-08~2026-08,一年选人 + 只做空):
   恒定满仓做空基准 +99.2%/夏普 1.65/回撤 −14.8%
-  本引擎(离散)     +104.5%/夏普 2.26/回撤 −10.2%,36 笔平均持有 11 天
-  空头 21 笔 +85.9%(胜率 62%);**多头 15 笔仅 +4.5%,等于未经验证**。
+  本引擎            +79.7%/夏普 2.39/回撤  −9.4%,21 笔胜率 71.4%、最差 −3.8%
+
+**必须正视的一件事:绝对收益没跑赢基准**(+79.7% vs +99.2%)。这三年是单边熊市,
+躺着满仓做空本身就有 +99% 复利。策略赢的是夏普(2.39 vs 1.65)与回撤(−9.4% vs
+−14.8%),以及**趋势反转时会退出而不是硬扛**——而后者在样本内无法验证(没有牛市)。
+界面上必须摆出这个对比(payload 的 `compare`),不然看的人会把熊市 beta 当成本事。
 """
 from __future__ import annotations
 
@@ -42,7 +48,12 @@ CN_TZ = timezone(timedelta(hours=8))
 RULES = {
     # —— 席位组 ——
     "group_k": 5,            # Phase 1:3/5/8 里 5 在三个训练截点上都最好
-    "reselect_months": 3,    # 每季度按历史 alpha 重选
+    # 2026-08-19 运营者拍板由 3 改 12:「3 个月太短,会有很多噪音」。数据支持这个
+    # 判断的一半——换组次数 9→2、胜率 58.3%→63.9%、最大回撤 −10.2%→−8.6%;
+    # **代价要说清**:离散版累计从 +104.5% 掉到 +86.5%,低于「恒定满仓做空」的 +99.2%。
+    # 另外 3/6/12 月三档是 94.2/67.7/77.1,**不单调**,所以这三个数之间的差异
+    # 多半是噪音,不能反过来论证 3 个月更好。
+    "reselect_months": 12,
     "warmup_days": 250,      # 首次选组前的最少历史
     "member_min_days": 120,  # 一家至少在榜这么多天才参与排名
     # —— 信号 ——
@@ -57,8 +68,19 @@ RULES = {
     "exit_z": 0.0,
     "stop": 0.06,            # 4/6/8/10% 相邻档同向,不敏感
     "max_hold": 40,          # 20/30/40/60 相邻档同向
-    # 做多额外要求过去 20 日是跌的。不是调参:Phase 0 双分档里「跌 × 机构减空」
-    # 是全表唯一正格子(+0.30%),「涨 × 减空」是 −1.97%。
+    # **做多支路默认关闭**(2026-08-19 运营者拍板)。三条依据:
+    #   ① 一年选人口径下多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),
+    #      还贡献了全表最差的 −7.4%;关掉后夏普 1.96 → 2.39。
+    #   ② 运营者本来想跟的是「机构真转多」。样本里它出现过 14 天(集中在
+    #      2025-07,最高 +4,046 手),但之后 20 日主力仍平均跌 1.18%,
+    #      14 次里最好一次只有 +0.61%——转多意味着跌得慢,不意味着会涨。
+    #   ③ 关掉不等于牛市被埋:机构减空时策略平仓观望,不是继续扛空单。
+    # **页面仍然显示机构转多状态**(见 payload 的 institution),只是不进场。
+    # 那 14 天全挤在一个窗口里,实质是 1 个事件,只能说「没有证据支持」,
+    # 不能说「证明必亏」——生猪真走出熊市、样本攒够了再议。
+    "long_enabled": False,
+    # 做多真要开启时才用得上:Phase 0 双分档里「跌 × 机构减空」是全表唯一
+    # 正格子(+0.30%),「涨 × 减空」是 −1.97%。
     "long_needs_dip": True,
     "dip_win": 20,
     # 与 Rust MEMBER_ALIASES / smart_money RULES["alias"] 保持同集。
@@ -246,13 +268,14 @@ def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 回放
 
-def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> list[dict]:
+def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> tuple[list[dict], pd.Series]:
     """全量回放历史信号。与 research/run_lh_phase2.py 的 backtest_discrete 同口径。
 
     T+1:今日收盘算出的信号,吃的是明日收益——日内不可能按今日结算价成交。
     """
     idx = mkt.index
     trades, side, entry_i, cum = [], 0, None, 0.0
+    pos = pd.Series(0.0, index=idx)
     for i, d in enumerate(idx):
         z = sig["z"].get(d, np.nan)
         r = mkt["ret"].get(d, np.nan)
@@ -286,12 +309,13 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> list[dict]:
             want = 0
             if z <= -RULES["enter"]:
                 want = -1
-            elif z >= RULES["enter"]:
+            elif z >= RULES["enter"] and RULES["long_enabled"]:
                 p = mkt["past"].get(d, np.nan)
                 if (not RULES["long_needs_dip"]) or (np.isfinite(p) and p < 0):
                     want = 1
             if want != 0:
                 side, entry_i, cum = want, i, 0.0
+        pos.iloc[i] = side
     # 尚未平仓的那笔单独带出来(界面要显示"持有中")
     if side != 0:
         e = idx[entry_i]
@@ -303,11 +327,22 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame) -> list[dict]:
             "ret_pct": round(cum * 100, 2), "hold_days": len(idx) - 1 - entry_i,
             "exit_reason": None,
         })
-    return trades
+    return trades, pos
 
 
 def _f(v):
     return None if v is None or not np.isfinite(v) else round(float(v), 1)
+
+
+def _perf(daily: pd.Series) -> dict:
+    """一条日收益序列的累计/夏普/最大回撤。策略与基准共用,口径才对得上。"""
+    dd = daily.fillna(0)
+    eq = (1 + dd).cumprod()
+    return {
+        "cum_pct": round((float(eq.iloc[-1]) - 1) * 100, 1),
+        "sharpe": round(float(dd.mean() / dd.std() * np.sqrt(242)), 2) if dd.std() > 0 else None,
+        "max_dd_pct": round(float((eq / eq.cummax() - 1).min()) * 100, 1),
+    }
 
 
 # ---------------------------------------------------------------- 产物
@@ -316,7 +351,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
-    trades = replay(sig, mkt)
+    trades, pos = replay(sig, mkt)
     open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
     closed = [t for t in trades if t["exit_date"]]
 
@@ -339,7 +374,32 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     if open_trade:
         state = "做空中" if open_trade["side"] == "short" else "做多中"
 
+    # 机构方向本身要报出来,与「要不要进场」分开。运营者盯的就是这个拐点:
+    # 做多支路虽然关着,但机构什么时候真的转成净多,他得第一时间看见。
+    net_now = sig["net"].get(d, np.nan)
+    net_ok = bool(np.isfinite(net_now))
+    # 「刚转多」= 今天净多而 sig_win 天前还是净空,用来在界面上打一次提示
+    prev_i = len(mkt) - 1 - RULES["sig_win"]
+    prev_net = sig["net"].get(mkt.index[prev_i], np.nan) if prev_i >= 0 else np.nan
+    institution = {
+        "net": int(net_now) if net_ok else None,
+        "side": ("net_long" if net_now > 0 else "net_short") if net_ok else None,
+        "just_flipped_long": bool(net_ok and np.isfinite(prev_net)
+                                  and net_now > 0 >= prev_net),
+        "long_enabled": RULES["long_enabled"],
+        # 关着做多时,z 上穿门槛只代表「机构在减空」,不产生进场——界面要说清,
+        # 否则看的人会以为信号漏了。
+        "long_signal_now": bool(np.isfinite(z) and z >= RULES["enter"]),
+    }
+
     wins = [t for t in closed if t["ret_pct"] > 0]
+
+    # 与「躺着满仓做空」的对比。**这一栏必须摆在界面上**:三年单边熊市里,
+    # 什么都不做地持有空单本身就有 +99% 的复利收益,不给基准,看的人会把
+    # 策略的累计收益当成本事。策略真正赢的是夏普与回撤,不是绝对收益。
+    strat_daily = (pos.shift(1).fillna(0) * mkt["ret"]
+                   - pos.shift(1).fillna(0).diff().abs().fillna(0) * 0.0005)
+    bench_daily = -mkt["ret"]
     return {
         "instrument": "LH",
         "name": "生猪 LH",
@@ -361,6 +421,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "suggested_position": None if not np.isfinite(z) else round(float(np.clip(z, -2, 2)), 2),
         },
         "position": open_trade,
+        "institution": institution,
         "members": members,
         "group_log": log[-8:],
         "history": closed,
@@ -373,14 +434,25 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "short_trades": sum(1 for t in closed if t["side"] == "short"),
             "long_trades": sum(1 for t in closed if t["side"] == "long"),
         },
+        "compare": {
+            "strategy": _perf(strat_daily),
+            "benchmark": _perf(bench_daily),
+            "benchmark_name": "恒定满仓做空",
+            "note": "同一段区间、同一口径(逐日复利,策略扣单边 0.05% 换手成本)。"
+                    "做空的复利收益不是买入持有取反——价格跌 52.9% 对应做空 +99.2%。",
+        },
         "rules": {k: v for k, v in RULES.items() if k not in ("alias",)},
         # 界面必须把这句话摆出来,不能让人以为多头信号和空头一样可信。
         "caveats": [
             "样本只有三年(2023-08 起,大商所席位数据起点),且**只有一种市况**——全程熊市。",
-            "**做多信号未经验证**:回测里多头 15 笔累计仅 +4.5%,而样本期内机构合计"
-            "净持仓一天都没转成净多。它符合「等机构转多就转向」的策略意图,但没有数据背书。",
-            "空头信号有回测支撑:21 笔 +85.9%,胜率 61.9%,最差 −3.8%。",
-            "2025 年策略几乎不赚(+2.8%,胜率 50%),信号会有整年失灵的时候。",
+            "**做多支路已关闭**:回测里多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),"
+            "关掉后夏普 1.96 → 2.39。机构减空时策略平仓观望,不是继续扛空单。",
+            "**「机构真转多」也不是买入信号**:样本里它出现过 14 天(集中在 2025-07),"
+            "之后 20 日主力仍平均跌 1.18%,最好一次只有 +0.61%。但那 14 天全挤在一个"
+            "窗口里,实质是 1 个事件——只能说没有证据支持,不能说证明必亏。",
+            "空头信号有回测支撑:21 笔 +79.8%,胜率 71.4%,最差 −3.8%。",
+            "**绝对收益没跑赢「躺着满仓做空」**(+86.5% vs +99.2%)。策略赢的是回撤"
+            "(−8.6% vs −14.8%)与夏普,以及趋势反转时会跟着退出——后者样本内无法验证。",
             "回测按结算价成交、T+1 执行,未模拟涨跌停与流动性冲击。",
         ],
     }

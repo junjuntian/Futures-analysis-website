@@ -26,7 +26,9 @@ pd.set_option("display.max_columns", 60)
 
 SIG_WIN = 5        # 信号窗口。Phase 0 已定,20 日窗混入动量
 GROUP_K = 5        # 组内席位数。Phase 1 三个截点上都是 5 最好
-RESELECT_M = 3     # 每 3 个月用截至当时的历史 alpha 重选一次
+# 2026-08-19 运营者拍板 3→12(「3 个月太短,会有很多噪音」)。必须与
+# engine/hog_money.py 的 RULES["reselect_months"] 保持一致,否则对拍会假失败。
+RESELECT_M = 12
 WARMUP_DAYS = 250  # 首次选组前至少要有这么多天历史
 COST_ONEWAY = 0.0005   # 单边成本(手续费+滑点)。LH 一跳 5 元/吨 × 16 吨 ≈ 万 3.8
 
@@ -150,7 +152,7 @@ def backtest_continuous(z: pd.Series, ret: pd.Series, cap: float = 2.0,
 def backtest_discrete(z: pd.Series, ret: pd.Series, past: pd.Series,
                       enter: float = 1.0, exit_z: float = 0.0,
                       stop: float = 0.06, max_hold: int = 40,
-                      long_needs_dip: bool = True,
+                      long_needs_dip: bool = True, long_enabled: bool = True,
                       cost: float = COST_ONEWAY) -> tuple[pd.DataFrame, list]:
     """离散进出场,更接近实盘。
 
@@ -188,7 +190,7 @@ def backtest_discrete(z: pd.Series, ret: pd.Series, past: pd.Series,
             want = 0
             if zz <= -enter:
                 want = -1
-            elif zz >= enter:
+            elif zz >= enter and long_enabled:
                 p = past.get(d, np.nan)
                 if (not long_needs_dip) or (np.isfinite(p) and p < 0):
                     want = 1

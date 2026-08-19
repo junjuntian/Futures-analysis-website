@@ -46,7 +46,10 @@ def research_trades() -> pd.DataFrame:
     mr = mr[mr.index >= df["trade_date"].min()]
     groups = P2.rolling_groups(df, mr.index)
     z = P2.zscore(P2.signal_series(df, groups))
-    tr, _ = P2.backtest_discrete(z, mr["ret"], mr["settle"].pct_change(20))
+    # 引擎的做多支路默认关闭(RULES["long_enabled"]=False),对拍要传同样的口径,
+    # 否则研究侧多出 15 笔做多,会报成假失败。
+    tr, _ = P2.backtest_discrete(z, mr["ret"], mr["settle"].pct_change(20),
+                                 long_enabled=False)
     return tr
 
 
