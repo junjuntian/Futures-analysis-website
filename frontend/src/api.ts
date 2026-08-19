@@ -331,6 +331,26 @@ export interface NetPositionDay {
   short_cost_lots: string
 }
 
+/**
+ * 最新一天里某一家的多空手数与均价。摘要下面那排逐家的数就是它。
+ *
+ * 与合计同源：后端按 member 分组各跑一遍同一套成本引擎，所以这排加起来
+ * 必然对得上合计那排。
+ */
+export interface MemberLeg {
+  member: string
+  long_lots: string
+  long_cost: string | null
+  long_cost_lots: string
+  short_lots: string
+  short_cost: string | null
+  short_cost_lots: string
+  /** 这家当天不在榜：持仓**未知**，不是零。手数字段此时是 0，别拿去显示。 */
+  missing: boolean
+  /** 这家当天的持仓由回榜日增减倒推得出。 */
+  inferred: boolean
+}
+
 export interface SeatNetPositionResponse {
   instrument: string
   contract: string | null
@@ -343,6 +363,9 @@ export interface SeatNetPositionResponse {
   /** 合约点值。盈亏由它乘出来，界面把它写在明面上。库里没配就是 `null`，此时不算盈亏。 */
   price_multiplier: string | null
   days: NetPositionDay[]
+  /** `days` 最后一天的日期，由后端一并给出，免得两边各判一次「哪天算最新」。 */
+  latest_trade_date: string | null
+  latest_members: MemberLeg[]
 }
 
 export interface SeatFavorite {

@@ -34,7 +34,11 @@ const BUILDING = {
   all_members: ['中信', '国泰君安'],
   contracts: ['AU2612'],
   price_series_kind: 'open_interest_weighted',
-  days: []
+  days: [],
+  // 按接口补齐，不图省事——mock 缺字段会让组件在渲染期读到 undefined，
+  // 表现是断言全绿、进程退出码却是 1（2026-08-18 踩过）。
+  latest_trade_date: null,
+  latest_members: []
 }
 
 function stubFetch() {
@@ -51,7 +55,8 @@ function stubFetch() {
         return response({
           member: '中信',
           instrument: null,
-          members: ['中信', '国泰君安'],
+          // 名录里放一家能用拼音首字母找的，拼音检索那条测试盯着它。
+          members: ['中信', '国泰君安', '高盛期货'],
           trade_date: '2026-08-14',
           available_dates: ['2026-08-14'],
           coverage_start: '2010-01-04',
@@ -93,6 +98,9 @@ describe('SeatsView 的选择记忆', () => {
   })
 
   it('记住的合约已到期时退回合约汇总，而不是停在一张空表上', async () => {
+    // 席位要显式给：一家没勾时净持仓子页整个不渲染（2026-08-19 起清空不再
+    // 自动补名录第一家），合约选择器也就无从谈起。
+    localStorage.setItem('seats.members', '中信')
     localStorage.setItem('seats.instrument', 'AU')
     // AU2608 不在 contracts 里——期货合约会到期，这是常态不是异常。
     localStorage.setItem('seats.contract', 'AU2608')
@@ -105,6 +113,7 @@ describe('SeatsView 的选择记忆', () => {
 
   it('「合约汇总」这个选择本身也要记住', async () => {
     // 空值不写进去的话，他主动切回汇总，下次进来又会被翻出上一个合约。
+    localStorage.setItem('seats.members', '中信')
     localStorage.setItem('seats.instrument', 'AU')
     localStorage.setItem('seats.contract', 'AU2612')
     const wrapper = mountPage()
@@ -146,6 +155,65 @@ describe('SeatsView 的选择记忆', () => {
     const asked = calls.map((url) => decodeURIComponent(url))
     expect(asked.some((url) => url.includes('member=中信'))).toBe(true)
     expect(asked.some((url) => url.includes('member=国泰君安'))).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('席位多选框', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().csrfToken = 'csrf-test'
+    stubFetch()
+  })
+
+  it('一家都没勾时不自动补上名录第一个，而是让人自己选', async () => {
+    // 清空是「我要重挑」。替他塞一家回去，他刚腾出来的框又满了；
+    // 配上加载期间禁用输入，「空着且能搜」这个状态就根本不存在了。
+    const wrapper = mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    // 从没被写过（初始空数组不算变化），更没有被塞进一个名录第一家。
+    expect(localStorage.getItem('seats.members')).toBeFalsy()
+    expect(wrapper.text()).toContain('先在上面选几个席位')
+    // 也没有为不存在的选择去打持仓接口。
+    const calls = (fetch as unknown as { mock: { calls: Array<[RequestInfo | URL]> } }).mock.calls
+      .map(([input]) => input.toString())
+    expect(calls.some((url) => url.includes('/seats/positions') && url.includes('member='))).toBe(
+      false
+    )
+    wrapper.unmount()
+  })
+
+  it('中文输入法预编辑期间敲 gs 也能筛出高盛', async () => {
+    // 这条盯的是 el-select 的 handleQueryChange 里那句
+    // `if (… || isComposing.value) return`——IME 预编辑期间它根本不调
+    // filter-method。而拼音搜索的主力用法恰恰是**永远不选字**：敲 gs 要的就是
+    // 这两个字母，composition 永不结束，查询就永远是空的。
+    // pinyin.test.ts 全绿也挡不住这个，因为坏的不是拼音表而是事件链路。
+    localStorage.setItem('seats.members', '中信')
+    const wrapper = mountPage()
+    await flushPromises()
+    await flushPromises()
+
+    const select = wrapper.findAllComponents({ name: 'ElSelect' })[0]
+    const input = select.find('input')
+    await input.trigger('click')
+    await flushPromises()
+
+    // 中文输入法：compositionstart 之后每敲一个字母来一次 compositionupdate，
+    // 不选字就永远等不到 compositionend。
+    await input.trigger('compositionstart')
+    ;(input.element as HTMLInputElement).value = 'gs'
+    await input.trigger('compositionupdate')
+    await flushPromises()
+
+    const options = select.findAllComponents({ name: 'ElOption' })
+    const labels = options.map((option) => option.props('label') as string)
+    expect(labels).toContain('高盛期货')
+    expect(labels).not.toContain('中信')
     wrapper.unmount()
   })
 })

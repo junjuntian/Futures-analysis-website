@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -1293,6 +1293,30 @@ pub struct NetPositionDayItem {
     pub short_cost_lots: String,
 }
 
+/// 最新一天里**某一家**的多空手数与均价。
+///
+/// 合计那一行说不出「这几家里谁在多、谁在空、各自成本多少」——五家合起来净空
+/// 一万四千手，可能是五家都在空，也可能是一家重仓空、四家轻仓多。摘要下面那排
+/// 就是拆给人看的（2026-08-19 运营者要求）。
+///
+/// **与合计同源**：按 member 分组各跑一遍 `build_variety_series`，算法与合计
+/// 一字不差。合计的均价本就是各家加权还原，所以这排数加起来必然对得上合计，
+/// 不会出现「分项与总数打架」。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberLegItem {
+    pub member: String,
+    pub long_lots: String,
+    pub long_cost: Option<String>,
+    pub long_cost_lots: String,
+    pub short_lots: String,
+    pub short_cost: Option<String>,
+    pub short_cost_lots: String,
+    /// 这家当天不在榜：持仓**未知**，不是零，也没计进合计。
+    pub missing: bool,
+    /// 这家当天的持仓含回榜反推成分：实际未上榜，数字由回榜日增减倒推。
+    pub inferred: bool,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SeatNetPositionResponse {
     pub instrument: String,
@@ -1310,6 +1334,10 @@ pub struct SeatNetPositionResponse {
     /// 曲线是按什么倍数算的。库里没有配置时为 `None`，此时盈亏整条不算。
     pub price_multiplier: Option<String>,
     pub days: Vec<NetPositionDayItem>,
+    /// 最新一天逐家的多空手数与均价，摘要那排用。日期就是 `days` 最后一天，
+    /// 一并回出来免得两边各自判断「哪天算最新」。没有数据时为空。
+    pub latest_trade_date: Option<String>,
+    pub latest_members: Vec<MemberLegItem>,
 }
 
 #[utoipa::path(
@@ -1386,6 +1414,8 @@ pub async fn query_seat_net_position(
     .map_err(|_| SpreadApiError::Internal(request_id))?;
 
     let mut days = Vec::new();
+    let mut latest_trade_date: Option<String> = None;
+    let mut latest_members: Vec<MemberLegItem> = Vec::new();
     if !members.is_empty() {
         let rows = database::spread_analytics::load_seat_net_positions(
             &state.auth.pool,
@@ -1446,8 +1476,7 @@ pub async fn query_seat_net_position(
             .and_then(|value| value.parse().ok())
             .unwrap_or(Decimal::ZERO);
 
-        let mut by_seat_contract: std::collections::BTreeMap<(String, String), Vec<DailyPosition>> =
-            std::collections::BTreeMap::new();
+        let mut by_seat_contract: BTreeMap<(String, String), Vec<DailyPosition>> = BTreeMap::new();
         for observation in &rows {
             let long = parse_decimal(&observation.long_position);
             let short = parse_decimal(&observation.short_position);
@@ -1460,11 +1489,31 @@ pub async fn query_seat_net_position(
                     settlement: observation.settlement.as_deref().map(parse_decimal),
                 });
         }
-        let per_series: Vec<Vec<DailyPosition>> = by_seat_contract.into_values().collect();
+        let per_series: Vec<Vec<DailyPosition>> = by_seat_contract.values().cloned().collect();
         let pnl_by_date: HashMap<Date, domain::seat_cost::VarietyDay> =
             build_variety_series(&per_series, pnl_factor)
                 .into_iter()
                 .map(|day| (day.trade_date, day))
+                .collect();
+
+        // 逐家再算一遍，供摘要下面那排「各家各自多少手、成本多少」。
+        //
+        // 分组维度换成「席位」，喂进去的还是同一批 (席位×合约) 序列、同一个
+        // `build_variety_series`——合计与分项必须同源，各写一套迟早对不上。
+        let mut per_member: BTreeMap<String, Vec<Vec<DailyPosition>>> = BTreeMap::new();
+        for ((member, _contract), series) in by_seat_contract {
+            per_member.entry(member).or_default().push(series);
+        }
+        let member_days: BTreeMap<String, HashMap<Date, domain::seat_cost::VarietyDay>> =
+            per_member
+                .into_iter()
+                .map(|(member, series)| {
+                    let by_date = build_variety_series(&series, pnl_factor)
+                        .into_iter()
+                        .map(|day| (day.trade_date, day))
+                        .collect();
+                    (member, by_date)
+                })
                 .collect();
 
         let observations: Vec<SeatContractDay> = rows
@@ -1477,7 +1526,48 @@ pub async fn query_seat_net_position(
             })
             .collect();
 
-        days = build_net_position_series(&observations, &members)
+        let series = build_net_position_series(&observations, &members);
+        // 「最新一天」在这里定一次就够：`days` 出去之后 trade_date 已经是字符串，
+        // 让前端再判一次哪天算最新，两边就有了各自的口径。
+        let latest_date = series.last().map(|day| day.trade_date);
+        if let Some(date) = latest_date {
+            latest_trade_date = Some(date.to_string());
+            latest_members = members
+                .iter()
+                .map(|member| {
+                    let day = member_days.get(member).and_then(|days| days.get(&date));
+                    MemberLegItem {
+                        member: member.clone(),
+                        // 掉榜那天这家一行都没有：手数留 0 而由 `missing` 说明
+                        // 「未知」——界面据此写「当日掉榜」，不是写「0 手」。
+                        long_lots: day
+                            .map(|d| d.long_lots.to_string())
+                            .unwrap_or_else(|| "0".to_string()),
+                        long_cost: day
+                            .and_then(|d| d.long_cost)
+                            .map(|v| v.round_dp(2).to_string()),
+                        long_cost_lots: day
+                            .map(|d| d.long_cost_lots.to_string())
+                            .unwrap_or_else(|| "0".to_string()),
+                        short_lots: day
+                            .map(|d| d.short_lots.to_string())
+                            .unwrap_or_else(|| "0".to_string()),
+                        short_cost: day
+                            .and_then(|d| d.short_cost)
+                            .map(|v| v.round_dp(2).to_string()),
+                        short_cost_lots: day
+                            .map(|d| d.short_cost_lots.to_string())
+                            .unwrap_or_else(|| "0".to_string()),
+                        missing: day.is_none(),
+                        inferred: inferred_by_date
+                            .get(&date)
+                            .is_some_and(|set| set.contains(member)),
+                    }
+                })
+                .collect();
+        }
+
+        days = series
             .into_iter()
             .map(|day| {
                 let candle = candle_by_date.get(&day.trade_date);
@@ -1538,6 +1628,8 @@ pub async fn query_seat_net_position(
             price_series_kind,
             price_multiplier,
             days,
+            latest_trade_date,
+            latest_members,
         },
         request_id,
     ))

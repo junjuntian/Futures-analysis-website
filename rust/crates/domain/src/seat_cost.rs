@@ -578,4 +578,42 @@ mod tests {
         assert_eq!(series[0].long_cost, Some(Decimal::from(900)));
         assert_eq!(series[0].long_cost_lots, Decimal::from(100));
     }
+
+    #[test]
+    fn splitting_by_seat_reproduces_the_combined_total() {
+        // 净持仓页摘要下面那排是**逐家**的手数与均价，上面那排是合计。两排必须
+        // 对得上——分项与总数打架的表，看的人只会两个都不信。
+        //
+        // 能对上的道理：`build_variety_series` 对「喂进来几条序列」是可加的，
+        // 手数直接相加，均价是按手数加权，各家分开算完再加权还原就是合计。
+        // 这条测试把这个性质钉死，免得日后有人给分项那条路另写一套算法。
+        let seat_a_near = vec![day(date!(2026 - 01 - 05), 100, Some(Decimal::from(900)))];
+        let seat_a_far = vec![day(date!(2026 - 01 - 05), -40, Some(Decimal::from(950)))];
+        let seat_b = vec![day(date!(2026 - 01 - 05), 60, Some(Decimal::from(1000)))];
+
+        let combined = build_variety_series(
+            &[seat_a_near.clone(), seat_a_far.clone(), seat_b.clone()],
+            Decimal::ONE,
+        );
+        let a = build_variety_series(&[seat_a_near, seat_a_far], Decimal::ONE);
+        let b = build_variety_series(&[seat_b], Decimal::ONE);
+
+        // 手数：逐家相加 == 合计。
+        assert_eq!(a[0].long_lots + b[0].long_lots, combined[0].long_lots);
+        assert_eq!(a[0].short_lots + b[0].short_lots, combined[0].short_lots);
+        assert_eq!(
+            a[0].net_position + b[0].net_position,
+            combined[0].net_position
+        );
+
+        // 均价：各家按自己覆盖的手数加权，还原出来就是合计的均价。
+        let weighted = a[0].long_cost.expect("甲有净多") * a[0].long_cost_lots
+            + b[0].long_cost.expect("乙有净多") * b[0].long_cost_lots;
+        let lots = a[0].long_cost_lots + b[0].long_cost_lots;
+        assert_eq!(weighted / lots, combined[0].long_cost.expect("合计有净多"));
+
+        // 空腿只有甲有，合计的空腿就该等于甲的。
+        assert_eq!(combined[0].short_cost, a[0].short_cost);
+        assert_eq!(combined[0].short_lots, Decimal::from(40));
+    }
 }

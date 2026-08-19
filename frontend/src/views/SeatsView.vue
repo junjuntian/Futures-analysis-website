@@ -13,6 +13,7 @@ import {
   getSeatNetPosition,
   getSeatPositions,
   getSpreadVarieties,
+  type MemberLeg,
   type NetPositionDay,
   type SeatFavorite,
   type SeatNetPositionResponse,
@@ -105,6 +106,9 @@ const buildingContract = ref(remembered('contract'))
 // 「今天在榜」误当成「存在过」——运营者选了高盛后挑不到 AU2608,就是这个。
 const buildingContracts = ref<string[]>([])
 const days = ref<NetPositionDay[]>([])
+// 最新一天逐家的手数与均价，摘要下面那排用。后端连日期一起给。
+const latestMembers = ref<MemberLeg[]>([])
+const latestMembersDate = ref<string | null>(null)
 const multiplier = ref<string | null>(null)
 // 汇总档 K 线的口径。单合约档为 null（那是真实行情，没有口径可言）。
 const priceSeriesKind = ref<SeatNetPositionResponse['price_series_kind']>(null)
@@ -142,6 +146,27 @@ const memberQuery = ref('')
 const filteredMembers = computed(() =>
   members.value.filter((name) => searchHit(name, memberQuery.value))
 )
+
+/**
+ * 中文输入法正在预编辑时，也把当前输入当作查询。
+ *
+ * 不加这个，拼音搜索在中文输入法下**完全不工作**：el-select 的 handleQueryChange
+ * 头一行就是 `if (states.previousQuery === val || isComposing.value) return`，
+ * 预编辑期间根本不调 filter-method。
+ * 那条短路是为「打中文」设计的——敲拼音时先别搜，等选完字再搜。可我们这个搜索框
+ * 的主力用法恰恰是**永远不选字**：输入 gs 找「高盛期货」，要的就是这两个字母本身，
+ * IME 一直停在预编辑态，composition 永不结束，查询就永远是空的
+ * （2026-08-19 运营者报「输入 gs 完全出不来」，实测挂真实组件对拍：英文输入法
+ * 下查询是 'gs'、下拉只剩高盛，中文输入法下查询恒为空串、列表原封不动）。
+ *
+ * composition 事件会冒泡到 el-select 根节点，所以在外层挂一次就够，
+ * 不必去够组件内部那个 input。选完字后 el-select 自己会再走一遍 filter-method，
+ * 两条路写的是同一个 memberQuery，不冲突。
+ */
+function onComposing(event: CompositionEvent) {
+  const input = event.target as HTMLInputElement | null
+  if (input && typeof input.value === 'string') memberQuery.value = input.value
+}
 
 // —— 收藏 ——
 //
@@ -238,18 +263,17 @@ async function loadPositions() {
     availableDates.value = meta.available_dates
     if (meta.trade_date) tradeDate.value = meta.trade_date
 
-    // 记住的那几家可能已经不在名录里（机构改名、退市、数据源换写法）。剔掉不认识的，
-    // 一家不剩就退回名录第一个——否则页面停在一张永远空的表上，看不出是「没数据」
-    // 还是「坏了」。
+    // 记住的那几家可能已经不在名录里（机构改名、退市、数据源换写法）。剔掉不认识的。
     const known = new Set(meta.members)
     const gone = selected.value.filter((name) => !known.has(name))
     if (gone.length) {
       ElMessage.info(`「${gone.join('、')}」已不在名录，已从所选中移除`)
       selected.value = selected.value.filter((name) => known.has(name))
     }
-    if (!selected.value.length && meta.members.length) {
-      selected.value = [meta.members[0]]
-    }
+    // **一家不剩时不再自动补上名录第一个。**多选框里清空是「我要重挑」，
+    // 替他塞一家回去，他刚腾出来的框又满了；配上加载期间禁用输入，
+    // 「空着且能搜」这个状态根本不存在，等于搜索框废掉（2026-08-19 运营者报）。
+    // 空着就空着，下面各子页会说明「先选几个席位」。
 
     // 并发取各家的持仓。上限十家，十个请求对自用面板是可接受的代价，换来的是
     // 后端契约一行不动。
@@ -274,6 +298,8 @@ async function loadPositions() {
 async function loadBuilding() {
   if (!selected.value.length || !buildingInstrument.value) {
     days.value = []
+    latestMembers.value = []
+    latestMembersDate.value = null
     buildingContracts.value = []
     return
   }
@@ -286,6 +312,8 @@ async function loadBuilding() {
     })
     multiplier.value = data.price_multiplier
     days.value = data.days
+    latestMembers.value = data.latest_members
+    latestMembersDate.value = data.latest_trade_date
     buildingContracts.value = data.contracts
     priceSeriesKind.value = data.price_series_kind
     // 上次记住的合约可能已经到期了——期货合约会到期，这是常态不是异常。
@@ -297,6 +325,8 @@ async function loadBuilding() {
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '净持仓读取失败')
     days.value = []
+    latestMembers.value = []
+    latestMembersDate.value = null
   } finally {
     loadingBuilding.value = false
   }
@@ -693,6 +723,35 @@ const latest = computed(() => {
 })
 
 /**
+ * 摘要下面那一排：最新一天**逐家**的多空手数与均价。
+ *
+ * 合计那排说不出持仓结构里「谁在多、谁在空」——五家合起来净空一万四千手，
+ * 可能是五家都在空，也可能一家重仓空、四家轻仓多，两种情形该有的判断完全不同
+ * （运营者 2026-08-19 要求拆开看）。
+ *
+ * 手数与均价的三态照旧：掉榜是**未知**不是零，成本覆盖不全要说覆盖了多少手。
+ * 数据由后端按 member 分组各跑一遍同一套成本引擎算出，与合计同源。
+ */
+const latestLegs = computed(() =>
+  latestMembers.value.map((leg) => {
+    const long = Number(leg.long_lots)
+    const short = Number(leg.short_lots)
+    return {
+      member: leg.member,
+      missing: leg.missing,
+      inferred: leg.inferred,
+      long: long > 0 ? { lots: lots(long), cost: legCost(leg.long_cost, leg.long_cost_lots, leg.long_lots) } : null,
+      short:
+        short > 0
+          ? { lots: lots(short), cost: legCost(leg.short_cost, leg.short_cost_lots, leg.short_lots) }
+          : null,
+      // 在榜但多空相等：他今天有行，只是净头寸为零。与掉榜是两回事。
+      flat: !leg.missing && long === 0 && short === 0
+    }
+  })
+)
+
+/**
  * 汇总档 K 线的口径说明，摆在「行情」标题旁边。
  *
  * 这根 K 线是算出来的，不是任何一个合约的真实成交价——不写明，看的人会拿这个价位
@@ -960,7 +1019,8 @@ const latestDailyPnl = computed(() => {
           :multiple-limit="MAX_MEMBERS"
           class="member-select"
           :placeholder="`选择席位（最多 ${MAX_MEMBERS} 家）`"
-          :disabled="loadingPositions"
+          :disabled="loadingPositions && !members.length"
+          @compositionupdate="onComposing"
         >
           <el-option v-for="name in filteredMembers" :key="name" :label="name" :value="name" />
         </el-select>
@@ -1006,9 +1066,15 @@ const latestDailyPnl = computed(() => {
       </div>
     </el-card>
 
+    <!-- 一家没勾时两个子页都没东西可画。**空着是允许的状态**（清空是为了重挑，
+         不该被自动塞回一家），所以要有人出来说一句，而不是留一片空白让人以为坏了。 -->
+    <el-card v-if="!selected.length" shadow="never">
+      <el-empty description="先在上面选几个席位" />
+    </el-card>
+
     <!-- 席位持仓按家分段：榜单的「名次」与「增减量」是逐家公布的，加起来没有
          意义，所以勾了几家就列几段，不合并。要看合计去净持仓子页。 -->
-    <template v-if="tab === 'positions'">
+    <template v-else-if="tab === 'positions'">
       <!-- 筛选器只出一次：它是对所有分段生效的一个条件，每段各放一个会让人
            以为可以逐家分别筛。 -->
       <el-card shadow="never" class="filter-card">
@@ -1199,6 +1265,24 @@ const latestDailyPnl = computed(() => {
                 >{{ part.text }}</span>
               </div>
             </div>
+            <!-- 合计那排的下一排：拆到每一家。合计说不出「谁在多、谁在空」，
+                 而那正是勾了好几家之后最要紧的一件事。 -->
+            <div v-if="latestLegs.length" class="member-legs">
+              <span v-for="leg in latestLegs" :key="leg.member" class="member-leg">
+                <b>{{ leg.member }}</b>
+                <template v-if="leg.missing">
+                  <span class="warn">当日掉榜，持仓未知</span>
+                </template>
+                <template v-else>
+                  <span v-if="leg.long" class="up">多 {{ leg.long.lots }}</span>
+                  <span v-if="leg.long">均价 {{ leg.long.cost }}</span>
+                  <span v-if="leg.short" class="down">空 {{ leg.short.lots }}</span>
+                  <span v-if="leg.short">均价 {{ leg.short.cost }}</span>
+                  <span v-if="leg.flat">当日无持仓</span>
+                  <span v-if="leg.inferred" class="warn">推算</span>
+                </template>
+              </span>
+            </div>
           </template>
           <SpreadChart
             :option="netOption"
@@ -1384,6 +1468,42 @@ h2 .muted {
   color: var(--tv-down);
   font-weight: 600;
   margin-left: 0;
+}
+
+/* 逐家那一排，在合计摘要下面。整排比合计淡一档——合计是主角，这排是它的拆解。
+   每家自成一块并用竖线隔开，不然五家的十几个数糊成一条，看不出哪个数是谁的。 */
+.member-legs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--tv-text-muted);
+}
+.member-leg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.member-leg + .member-leg {
+  border-left: 1px solid var(--tv-border);
+  padding-left: 18px;
+}
+.member-leg b {
+  color: var(--tv-text-secondary);
+  font-weight: 600;
+}
+.member-leg .up {
+  color: var(--tv-up);
+  font-weight: 600;
+}
+.member-leg .down {
+  color: var(--tv-down);
+  font-weight: 600;
+}
+.member-leg .warn {
+  color: var(--tv-warn);
 }
 .seats h2 {
   margin: 0;
