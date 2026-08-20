@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import HogMoney from '../components/HogMoney.vue'
 import type { FlowCode } from '../api'
+import { failureHint } from '../fetch-hint'
 
 // 机构资金信号页。数据由信号引擎每日盘后生成(nginx 静态服务的
 // /smart-money/signals.json),本页只负责在平台内渲染,不做任何计算。
@@ -253,7 +254,7 @@ onMounted(async () => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     data.value = await response.json()
   } catch (cause) {
-    error.value = `读取信号数据失败:${cause}。请确认信号引擎已运行。`
+    error.value = `读取信号数据失败:${cause}。${failureHint(cause)}`
   }
 })
 </script>

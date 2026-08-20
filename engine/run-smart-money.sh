@@ -48,7 +48,11 @@ docker run --rm \
 
 # 仅在引擎成功产出后才替换线上文件
 if [ -s "$TMP/signals.json" ]; then
-  cp "$TMP/signals.json" "$WEB/signals.json.new"
+  # **权限写死 644,不许靠继承 umask**(2026-08-20 事故):这个脚本既被 cron 调
+  # (umask 022 → 644,nginx 读得到),也被部署脚本调(umask 077 → 600,nginx 403)。
+  # DEC-099 让部署自动重算之后,第一次由部署产出的信号就把整个机构资金页面打成了
+  # 403 —— 修 A 问题引入 B 问题。`install -m 644` 把模式钉死,与谁调用无关。
+  install -m 644 "$TMP/signals.json" "$WEB/signals.json.new"
   mv "$WEB/signals.json.new" "$WEB/signals.json"
   echo "[smart-money] 已更新 $WEB/signals.json"
 else
@@ -65,7 +69,8 @@ if [ -f "$ROOT/hog_money.py" ]; then
   if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
     for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json pair_fgsa.json; do
       if [ -s "$TMP/$f" ]; then
-        cp "$TMP/$f" "$WEB/$f.new"
+        # 同上:模式写死,不靠继承的 umask。
+        install -m 644 "$TMP/$f" "$WEB/$f.new"
         mv "$WEB/$f.new" "$WEB/$f"
         echo "[flow] 已更新 $WEB/$f"
       else
@@ -78,5 +83,17 @@ if [ -f "$ROOT/hog_money.py" ]; then
 else
   echo "[flow] 未安装 hog_money.py,跳过" >&2
 fi
+
+# 收尾自检:产出必须是**别人读得到**的。写完不验,下一次 umask 变了又是一次
+# 静默的 403 —— 页面报「请确认信号引擎已运行」,而引擎明明跑得好好的。
+for f in "$WEB"/*.json; do
+  test -f "$f" || continue
+  perm=$(stat -c '%a' "$f")
+  case "$perm" in
+    644|664|666) ;;
+    *) echo "[smart-money] $f 权限 $perm,nginx 读不到,已改成 644" >&2
+       chmod 644 "$f" ;;
+  esac
+done
 
 rm -f "$TMP"/*.csv

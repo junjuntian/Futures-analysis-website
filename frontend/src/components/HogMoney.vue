@@ -11,6 +11,7 @@
  * 「等机构转多就转向」的策略意图,但没有数据背书,不能让它看起来和空头一样可信。
  */
 import { computed, onMounted, ref } from 'vue'
+import { failureHint } from '../fetch-hint'
 import { getSeatNetPosition, type MemberLeg as SeatCost,
   type FlowCode
 } from '../api'
@@ -155,7 +156,7 @@ onMounted(async () => {
     if (!res.ok) throw new Error(`读取失败 ${res.status}`)
     data.value = await res.json()
   } catch (e) {
-    error.value = e instanceof Error ? e.message : '读取信号数据失败'
+    error.value = `${e instanceof Error ? e.message : '读取信号数据失败'} — ${failureHint(e)}`
     return
   }
   const p = data.value
