@@ -15,7 +15,7 @@ use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
 use domain::seat_cost::{DailyPosition, build_cost_series, build_variety_series};
-use domain::seat_net_position::{SeatContractDay, build_net_position_series};
+use domain::seat_net_position::{SeatContractDay, build_net_position_series, cut_at};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -1260,6 +1260,13 @@ pub struct SeatNetPositionQuery {
     /// 逗号分隔的会员名。会员名里不会有逗号（归一后是「中信期货」这种写法）。
     pub members: Option<String>,
     pub contract: Option<String>,
+    /// 看到哪一天为止（含当天）。不传＝看到最新。
+    ///
+    /// 席位页顶上写着「选几个会员和一个交易日，**两个子页共用这组选择**」，
+    /// 而这一路此前**根本没有这个字段**——会员共用了，交易日没有，摘要永远报
+    /// 序列最后一天。前端的 watch 一直在日期变化时重新请求，只是请求里没带日期，
+    /// 于是每次都取回同一份。运营者 2026-08-20 选了 8.19 仍看到 8.20，当场发现。
+    pub trade_date: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1368,6 +1375,12 @@ pub async fn query_seat_net_position(
         return Err(SpreadApiError::Validation("invalid_instrument", request_id));
     }
     let members = parse_member_list(query.members.as_deref(), request_id)?;
+    // 解析不了就报错，不要默默当成「没选」——那会退回显示最新，正是这次要修的毛病：
+    // 用户明明选了一天，页面却给另一天，而且什么都不说。
+    let as_of: Option<Date> = match query.trade_date.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(parse_trade_date(raw, request_id)?),
+    };
     let contract = query
         .contract
         .as_deref()
@@ -1530,7 +1543,13 @@ pub async fn query_seat_net_position(
             })
             .collect();
 
-        let series = build_net_position_series(&observations, &members, &calendar);
+        // 截到所选交易日为止。**摘要、分腿、K 线、净持仓与累计盈亏必须停在同一天**，
+        // 只改摘要那一行会让页面上同时存在两个「今天」。累计盈亏本就是逐日累积的，
+        // 截到哪天就是那天收盘的累计值，不用另算。
+        let series = cut_at(
+            build_net_position_series(&observations, &members, &calendar),
+            as_of,
+        );
         // 「最新一天」在这里定一次就够：`days` 出去之后 trade_date 已经是字符串，
         // 让前端再判一次哪天算最新，两边就有了各自的口径。
         let latest_date = series.last().map(|day| day.trade_date);

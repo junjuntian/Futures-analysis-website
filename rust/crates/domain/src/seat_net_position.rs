@@ -116,6 +116,27 @@ pub fn build_net_position_series(
         .collect()
 }
 
+/// 把序列截到某个交易日为止(含当天)。
+///
+/// 席位页顶上写着「选几个会员和一个交易日,**两个子页共用这组选择**」,但净持仓
+/// 这一路从来没接过日期(`SeatNetPositionQuery` 里根本没有这个字段),永远报序列
+/// 最后一天。运营者 2026-08-20 选了 8.19,摘要那行仍写 2026-08-20,当场发现。
+///
+/// **截断而不是只改摘要那一行**:摘要、各家分腿、K 线、净持仓曲线、累计盈亏
+/// 全都要停在同一天,否则页面上会同时存在两个「今天」。累计盈亏本来就是逐日
+/// 累积的,截到哪天就是那天收盘的累计值,不需要另算。
+///
+/// `as_of` 为 `None` 时原样返回 —— 没选日期就是「看到最新」。
+pub fn cut_at(series: Vec<NetPositionDay>, as_of: Option<Date>) -> Vec<NetPositionDay> {
+    match as_of {
+        Some(end) => series
+            .into_iter()
+            .filter(|day| day.trade_date <= end)
+            .collect(),
+        None => series,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +297,47 @@ mod tests {
         let series = build_net_position_series(&rows, &["中信".into()], &[]);
         let dates: Vec<u8> = series.iter().map(|d| d.trade_date.day()).collect();
         assert_eq!(dates, vec![3, 7]);
+    }
+
+    fn series_of(days_: &[u8]) -> Vec<NetPositionDay> {
+        days_
+            .iter()
+            .map(|&n| NetPositionDay {
+                trade_date: day(n),
+                net_position: Decimal::from(n),
+                long_lots: Decimal::ZERO,
+                short_lots: Decimal::ZERO,
+                counted_members: vec![],
+                missing_members: vec![],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn 截到选中那天为止且包含当天() {
+        let cut = cut_at(series_of(&[3, 4, 5, 6, 7]), Some(day(5)));
+        let dates: Vec<u8> = cut.iter().map(|d| d.trade_date.day()).collect();
+        assert_eq!(dates, vec![3, 4, 5], "选中那天要留下,不是截在它前面");
+    }
+
+    #[test]
+    fn 没选日期就原样返回() {
+        // 没选 = 看最新,这是默认行为,不能因为加了参数就改掉。
+        let cut = cut_at(series_of(&[3, 4, 5]), None);
+        assert_eq!(cut.len(), 3);
+    }
+
+    #[test]
+    fn 选了非交易日就退到它之前最近的一天() {
+        // 用 `<=` 而不是相等:选到周末或休市日时,给「截至那时」而不是给一张空表。
+        let cut = cut_at(series_of(&[3, 4, 7, 10]), Some(day(9)));
+        let dates: Vec<u8> = cut.iter().map(|d| d.trade_date.day()).collect();
+        assert_eq!(dates, vec![3, 4, 7]);
+    }
+
+    #[test]
+    fn 选的日期早于全部数据时给空表而不是给最新那天() {
+        // 这里宁可空:给「最新」等于默默无视用户的选择,而那正是这次要修的毛病。
+        assert!(cut_at(series_of(&[5, 6]), Some(day(1))).is_empty());
     }
 }

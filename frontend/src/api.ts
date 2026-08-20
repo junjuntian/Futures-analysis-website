@@ -378,11 +378,14 @@ export function getSeatNetPosition(options: {
   instrument: string
   members: string[]
   contract?: string
+  /** 看到哪一天为止(含当天)。不传＝看到最新。席位页两个子页共用同一个交易日。 */
+  tradeDate?: string
 }): Promise<ApiEnvelope<SeatNetPositionResponse>> {
   const params = new URLSearchParams()
   params.set('instrument', options.instrument)
   params.set('members', options.members.join(','))
   if (options.contract) params.set('contract', options.contract)
+  if (options.tradeDate) params.set('trade_date', options.tradeDate)
   return getJson(`/api/v1/spread-analytics/seats/net-position?${params.toString()}`)
 }
 

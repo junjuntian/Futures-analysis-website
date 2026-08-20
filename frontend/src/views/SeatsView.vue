@@ -308,7 +308,10 @@ async function loadBuilding() {
     const { data } = await getSeatNetPosition({
       instrument: buildingInstrument.value,
       members: selected.value,
-      contract: buildingContract.value || undefined
+      contract: buildingContract.value || undefined,
+      // 顶上那句「两个子页共用这组选择」此前只对了一半:会员共用了,交易日没有。
+      // watch 一直在日期变化时重新请求,只是请求里没带日期,于是每次取回同一份。
+      tradeDate: tradeDate.value || undefined
     })
     multiplier.value = data.price_multiplier
     days.value = data.days
