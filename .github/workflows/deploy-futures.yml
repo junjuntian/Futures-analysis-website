@@ -991,11 +991,19 @@ jobs:
             # 不是当前引擎算的(DEC-099)。用**文件指纹**不用 git sha:镜像会被复用,
             # /api/v1/version 给的是构建时的 sha 而不是本次发布的 sha。
             install -d -m 755 /opt/futures-platform/smart-money/web
-            printf '{"fingerprint":"%s","installed_at":"%s"}\\n' \
+            printf '{"fingerprint":"%s","installed_at":"%s"}\n' \
               "$(sha256sum "$hog_live" | cut -c1-12)" \
               "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               >/opt/futures-platform/smart-money/web/engine.json
             chmod 644 /opt/futures-platform/smart-money/web/engine.json
+            # 写完立刻验一次是不是合法 JSON。**不验会坏得很安静**:前端 res.json()
+            # 抛异常被 catch 吞掉,指纹永远是 null,那道兜底就静静地失效了 ——
+            # 2026-08-20 第一版把 printf 的换行写成了字面的反斜杠 n,正是这样。
+            engine_fp_json=/opt/futures-platform/smart-money/web/engine.json
+            if ! python3 -m json.tool "$engine_fp_json" >/dev/null 2>&1; then
+              echo "ENGINE_FINGERPRINT_INVALID engine.json 不是合法 JSON" >&2
+              rm -f "$engine_fp_json"
+            fi
             install -d -m 755 /opt/futures-platform/smart-money/data
             install -m 644 "$RELEASE_DIR/engine/data/london_xau.csv"               /opt/futures-platform/smart-money/data/london_xau.csv
           fi
