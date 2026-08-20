@@ -7,7 +7,7 @@
 
 ## 当前生产状态
 
-- **生产 = `bcf92c0`**(2026-08-20),站点 `https://shejimao.trade`,
+- **生产 = `a3846b9`**(2026-08-20),站点 `https://shejimao.trade`,
   服务器别名 `qh`。发布流程照 `docs/RELEASE_PROCESS.md`,部署前跑
   `ops/preflight-deploy.sh`。
 
