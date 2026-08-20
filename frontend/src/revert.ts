@@ -54,17 +54,23 @@ export function driftTone(raw: string | null): 'with' | 'against' | '' {
 }
 
 /**
- * 资格判定（DEC-063 分层规则第一层）：历年触及率 ≥ 80% 且「持到期」为正。
+ * 资格判定（DEC-063 分层规则第一层，**DEC-098 去掉触及率那一条**）：
+ * 「持到期」为正。
  *
  * 这不是锦上添花的标签，是盈亏的分水岭：265 个历史报警段留一法回放，合格的
- * 120 段持到底中位 +29% 区间，不合格的 145 段 −26%。门槛写死不做旋钮——
- * 80% 与「为正」都没扫过参数，故意的，扫了就是过拟合。
+ * 120 段持到底中位 +29% 区间，不合格的 145 段 −26%。
+ *
+ * **原来还要求「历年触及率 ≥80%」，已去掉**：那个判据是「窗口内曾经朝这边动过
+ * 一次」，1 个点、1 天就算，剩余期一长就趋近 100%。全表实测 84% 的行两侧都过
+ * 这个门槛、41% 的行两侧同时是 100%——它筛不掉任何东西，真正在起作用的一直是
+ * drift。留着它只会让人以为资格是两条件把关的（DEC-098，运营者指出）。
+ *
  * drift 缺失按不合格：资格要的是正证据，「不知道」不放行。
+ * 「为正」这条门槛没扫过参数，故意的，扫了就是过拟合。
  */
 export function isQualified(stats: SpreadRevertStats): boolean {
-  const rate = Number(stats.rate)
   const drift = stats.drift_points === null ? NaN : Number(stats.drift_points)
-  return Number.isFinite(rate) && Number.isFinite(drift) && rate >= 0.8 && drift > 0
+  return Number.isFinite(drift) && drift > 0
 }
 
 /**

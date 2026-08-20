@@ -106,16 +106,17 @@ describe('isQualified', () => {
     }
   }
 
-  it('触及率≥80% 且持到期为正才合格', () => {
+  it('只看持到期为正 —— 触及率那条已去掉(DEC-098)', () => {
     // 生产实例：JD2609/JD2701 高位 92%、持到期 +81 —— 合格。
     expect(isQualified(full('0.9167', '81'))).toBe(true)
     // JD2612/JD2701:回归率 100% 但持到期 −166 —— 这正是要拦的陷阱。
     expect(isQualified(full('1', '-166'))).toBe(false)
-    // 触及率不够。
-    expect(isQualified(full('0.44', '120'))).toBe(false)
-    // 边界:80% 恰好算合格,持到期 0 不算正。
-    expect(isQualified(full('0.80', '1'))).toBe(true)
-    expect(isQualified(full('0.9', '0'))).toBe(false)
+    // **触及率低但持到期为正,现在算合格**:那条判据是「窗口内曾经朝这边动过一次」,
+    // 全表 84% 的行两侧都过它、41% 两侧同时 100%,它筛不掉任何东西。
+    expect(isQualified(full('0.44', '120'))).toBe(true)
+    // 触及率不管多高,持到期不为正就是不合格 —— 判据只剩这一条。
+    expect(isQualified(full('1', '0'))).toBe(false)
+    expect(isQualified(full('0.13', '1'))).toBe(true)
   })
 
   it('持到期缺失按不合格 —— 资格要正证据,「不知道」不放行', () => {

@@ -240,6 +240,8 @@ function legacyPointsText(item: SpreadMonitorItem) {
   if (!r) return ''
   const n = (v: string | null) => (v === null ? '—' : Math.round(Number(v)).toString())
   return (
+    `历年 ${r.hit}/${r.n} 年曾在窗口内朝这边动过(1 个点、1 天就算,` +
+    '剩余期一长趋近 100%,**几乎没有区分度**,所以不再摆在行内)。 ' +
     `历年同一日历位置起算的中位数:最有利 ${points(r.move_points) ?? '—'} 点 · ` +
     `持到期 ${points(r.drift_points) ?? '—'} 点 · 跳空最坏参考 −${n(r.mae_max_points)} 点。 ` +
     '**这三个数跨起点搬不动**:历年各年的起点相差几千点,今天的价差常常落在它们的' +
@@ -277,8 +279,12 @@ const CONFLICT_HINT =
   '叠在一起会放行一笔没有统计支持的交易。两侧打架时降档或放过。'
 
 const QUALIFIED_HINT =
-  '历年触及率 ≥80% 且「持到期」为正。留一法回放：合格的报警段持到底中位 +29% 区间，' +
-  '不合格的 −26%。不合格的行没有徽标——没有徽标就是「别做」。'
+  '判据只有一条:历年「持到期」为正 —— 从这个日历位置一路持到窗口止点,历年中位是' +
+  '朝回归方向走的。留一法回放:合格的报警段持到底中位 +29% 区间,不合格的 −26%。' +
+  '不合格的行没有徽标——没有徽标就是「别做」。' +
+  '**原来还要求「历年触及率 ≥80%」,DEC-098 去掉了**:那条判的是「窗口内曾经朝这边' +
+  '动过一次」,1 个点、1 天就算,剩余期一长趋近 100%。全表 84% 的行两侧都过它、' +
+  '41% 的行两侧同时是 100%,它筛不掉任何东西,留着只会让人以为资格是两条件把关。'
 
 /**
  * FG-SA 相对资金流向(DEC-087)。引擎按日写静态 JSON,这里只读不算。
@@ -631,11 +637,9 @@ function openDetail(item: SpreadMonitorItem) {
 
             <el-tooltip v-if="item.revert" :content="REVERT_HINT" placement="top">
               <div class="revert" :class="revertTone(item.revert)">
-                <span class="rate">{{ revertPct(item.revert) }}</span>
-                <span class="basis">
-                  {{ item.revert.hit }}/{{ item.revert.n }} 年曾回归
-                  <template v-if="item.revert.days">· 剩 {{ item.revert.days }} 天</template>
-                </span>
+                <!-- 「曾回归 100%」那个大号数字撤了(DEC-098):它 63% 的时间就是
+                     100%,却是全页面字号最大的数。收进悬停当背景,别当结论。 -->
+                <span class="basis" v-if="item.revert.days">剩 {{ item.revert.days }} 天</span>
                 <!-- 「最有利/持到期/风险预留」三个点数收进悬停(DEC-097)。
                      它们是历年从同一日历位置起算的中位数,**起点差几千点也照样相减**,
                      搬不到今天的处境上;有了平台位阶梯之后行内不再摆它们。
