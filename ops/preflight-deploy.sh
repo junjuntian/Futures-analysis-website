@@ -344,6 +344,33 @@ else
   pass "查不到上次成功部署的提交，保守 run_live_collection=true"
 fi
 
+# LATEST 有没有跟上上一次部署（DEC-100）。
+#
+# 三文件规则里 LATEST 是**覆盖式状态快照**，它就该描述当前生产。2026-08-20 一天里
+# 部署七次、漏更新一次，而漏掉的表现和引擎那个 bug 一模一样：**看起来一切正常，
+# 只是记录是旧的**。靠人记不行，做成门禁。
+#
+# 判据是「LATEST 里的 SHA == 上一次成功部署的 SHA」，不是「== HEAD」：
+# 一个文档提交没法在自己被部署之前就写出自己的 SHA（自指）。所以流程是
+# **部署完再用一个纯文档提交把 LATEST 更新成刚部署的那个**，那个提交不单独部署，
+# 跟着下一次发布一起走。这样这里就是一个干净的等式。
+latest_doc=docs/handoffs/LATEST.md
+if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ]; then
+  # 取值一律 `|| true`，判空另写一条 —— 一个查不到东西就闭嘴的门禁比没有门禁更糟
+  # （docs/DEPLOY_PREFLIGHT.md 二·守卫自己不能静默死掉）。
+  latest_sha=$(grep -o '生产 = `[0-9a-f]\{7,40\}`' "$latest_doc" 2>/dev/null |
+    head -1 | grep -o '[0-9a-f]\{7,40\}' || true)
+  if [ -z "$latest_sha" ]; then
+    fail "$latest_doc 里读不出「生产 = \`<sha>\`」——格式变了就等于这道门禁失效了"
+  elif [ "${last_deployed_sha:0:${#latest_sha}}" = "$latest_sha" ]; then
+    pass "LATEST 与上次部署一致（${latest_sha}）"
+  else
+    fail "LATEST 停在 ${latest_sha}，而上次成功部署是 ${last_deployed_sha:0:7} —— 先把 LATEST 更新成上次部署的那个再发布"
+  fi
+else
+  pass "查不到上次成功部署的提交，跳过 LATEST 一致性检查"
+fi
+
 # 引擎改了会怎样（DEC-099）。机构资金那几个页面读的是**每日定时任务产出的静态
 # JSON**，不是接口实时算的：部署只换代码、不重算 JSON，于是「代码已上线、页面还是
 # 旧引擎算的数」——而且看不出来，页面照常显示。2026-08-20 DEC-096 上线后就这样过了
