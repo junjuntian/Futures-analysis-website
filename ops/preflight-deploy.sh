@@ -21,6 +21,8 @@ DISPATCH=0
 failures=0
 pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; failures=$((failures + 1)); }
+# 提醒:不拦部署,但要显眼。用在「照做也不算错,但你得知道代价」的地方。
+warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 cd "$(dirname "$0")/.."
@@ -313,6 +315,34 @@ digest_of() {
 # 原来这里检查自建 runner 在线且空闲——那时它只有一台,被别的作业占着就得等,
 # 重启它还会杀掉正在跑的作业。2026-08-13 全部搬到托管 runner 之后没有这个约束:
 # 每个作业各拿一台全新机器,不排队也不互相干扰。这一节整体退役。
+
+# 采集窗口提醒(2026-08-20 实抓:当天连部署三次,其中一次正压在 09:30 UTC 上)。
+#
+# 部署与采集抢同一把 `/run/lock/futures-collector.lock`——迁移要 AccessExclusiveLock,
+# 和正在写 seat_history 的采集撞上就是死锁,所以部署优先、**采集整轮跳过**
+# (run-collector.sh 里的 COLLECTION_SKIPPED)。设计上没问题:下一轮会补。
+# 代价是中间那几小时页面上是缺的——上期所/郑商所有官方源不受影响,**大商所
+# (JD/JM/LH)只有新浪一条路**,那几个品种当天就少半数合约,最新一根蜡烛画不出来。
+# 运营者 2026-08-20 20:38 看生猪时正好撞在这个窗口里,当场问「怎么没有最新的蜡烛图」。
+#
+# 不拦部署:急着修线上问题时该部署还得部署。只是要知道代价,并记得部署完补跑一次
+# `/usr/local/sbin/run-futures-collector`(它是幂等的,提前跑一轮等同于把下一轮拉近)。
+collector_utc_rounds="08:00 09:30 13:30"
+now_utc_min=$(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
+for round in $collector_utc_rounds; do
+  r_min=$(( 10#${round%%:*} * 60 + 10#${round##*:} ))
+  gap=$(( now_utc_min - r_min ))
+  [ "$gap" -lt 0 ] && gap=$(( -gap ))
+  # ±20 分钟:采集一轮跑五六分钟,部署也要几分钟,留出两边的余量。
+  if [ "$gap" -le 20 ]; then
+    bj=$(( (r_min + 480) % 1440 ))
+    warn "$(printf '现在离采集轮 %s UTC(北京 %02d:%02d)只有 %d 分钟——部署会占住采集锁,那一轮整轮跳过' \
+      "$round" $(( bj / 60 )) $(( bj % 60 )) "$gap")"
+    warn "  大商所(JD/JM/LH)只有新浪一个源,跳过那轮当天就缺最新的蜡烛。"
+    warn "  照常部署没问题,但**部署完记得补跑** /usr/local/sbin/run-futures-collector"
+    break
+  fi
+done
 
 # 上一次成功部署的提交。下面三处都要用它:LATEST 一致性门禁、
 # run_live_collection 的改动判定、引擎改动提示。**必须算在失败汇总之前**——
