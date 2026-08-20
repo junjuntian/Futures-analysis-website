@@ -11,6 +11,7 @@
  * 「等机构转多就转向」的策略意图,但没有数据背书,不能让它看起来和空头一样可信。
  */
 import { computed, onMounted, ref } from 'vue'
+import { entryGateText } from '../entry-gate'
 import { failureHint } from '../fetch-hint'
 import { getSeatNetPosition, type MemberLeg as SeatCost,
   type FlowCode
@@ -74,7 +75,14 @@ interface HogPayload {
   }
   /**
    * 散户反向维度(DEC-085)。这三家在多个品种上长期站多头、长期亏钱,所以反向取用。
-   * **当前只作展示,不参与进出场**——样本还不足以推翻已上线的规则。
+   *
+   * **现行策略(方案 C,DEC-086)就是用它进出场**:与机构共振时按它的方向进场。
+   * 也就是说「进场条件」比的是 `retail.z`,**不是** `signal.z`。
+   *
+   * 这里原先写的是「当前只作展示,不参与进出场」——那句话在切到方案 C 之后就过期了,
+   * 而「进场条件」那一行正是照着它写的,于是长期显示机构那个数。2026-08-20 玻璃
+   * 机构 2.09、散户 0.92,页面写着「需达 1(现 2.09)」却又显示无持仓,运营者当场
+   * 问「为什么没有触发多单进场条件」。判据见 `../entry-gate.ts`。
    */
   retail: {
     members: MemberLeg[]
@@ -285,7 +293,15 @@ const exitText = computed(() => {
 const rolled = computed(() =>
   !!data.value?.position && data.value.position.contract !== data.value.contract)
 
-/** 信号强度条:z 相对进场门槛的比例,超过门槛就满格。 */
+/**
+ * **机构合计流向**那张卡里的强度条:机构 z 相对进场门槛的比例,超过就满格。
+ *
+ * **满格不等于会进场。** 方案 C 下进场比的是共振后的散户信号(见 ../entry-gate.ts),
+ * 机构这一路只是共振的另一半。2026-08-20 玻璃机构 2.09 把这条画成满格红条,
+ * 而真正被测的散户是 0.92 —— 满格的视觉配上当时那句写错的「进场条件」,
+ * 一起把人引向「条件已满足却没进场」。文案已修;这条仍按门槛缩放,
+ * 因为它就长在「机构合计流向」卡里、旁边写着「机构在减空/加多」。
+ */
 const zRatio = computed(() => {
   const z = data.value?.signal.z
   const e = data.value?.signal.enter ?? 1
@@ -426,7 +442,7 @@ const bySide = computed(() => {
           </p>
           <div v-else-if="!data.position" class="kv">
             <span class="k">进场条件</span>
-            <span class="v">信号强度需达 {{ data.signal.enter }}(现 {{ fmt(data.signal.z, 2) }})</span>
+            <span class="v">{{ entryGateText(data) }}</span>
           </div>
         </div>
 
