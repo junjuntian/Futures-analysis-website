@@ -112,6 +112,22 @@ jobs:
               python -m pytest -p no:cacheprovider
             '
 
+      # 引擎产出的是**运营者据以下单的信号**,却长期一行测试都不跑(2026-08-20 审计)。
+      # 与采集器分开一步:引擎装的是运行期锁(requirements.lock,含 pandas/numpy),
+      # 采集器那步装的是开发锁,两者不能混——混了会把引擎的运行期依赖悄悄换成
+      # 另一套版本,而测试照样绿。
+      - name: Engine lint and tests
+        shell: bash
+        run: |
+          docker run --rm             --cpus 2             --memory 1536m             --memory-swap 1536m             --env PIP_DISABLE_PIP_VERSION_CHECK=1             --env PIP_NO_CACHE_DIR=1             --env PIP_ROOT_USER_ACTION=ignore             --env PYTHONDONTWRITEBYTECODE=1             --env RUFF_CACHE_DIR=/tmp/ruff-cache             --tmpfs /tmp:rw,noexec,nosuid,size=128m             --volume "${GITHUB_WORKSPACE}:/workspace:ro"             --workdir /workspace             python:3.13.11-slim-bookworm             sh -ec '
+              python -m pip install --requirement collector/requirements.lock
+              # 版本与采集器的开发锁一致,免得两步用不同 ruff 得出不同结论。
+              python -m pip install pytest==8.4.1 ruff==0.14.14
+              python -m ruff check engine
+              cd engine
+              python -m pytest -p no:cacheprovider -q
+            '
+
       - name: Install pnpm
         uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
         with:

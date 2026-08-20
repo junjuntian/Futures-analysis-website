@@ -12,7 +12,8 @@
 依据：`DEC-014`、`DEC-015`、`DEC-016`、`DEC-017`、`DEC-020`、
 `DEC-024`、`DEC-027`、`DEC-033`、`DEC-036`、`DEC-040`、`DEC-042`，以及
 `sanheapi/sanheshuju-api-analysis.md`、`sanheshuju_client.py`、
-`sanheshuju_request.curl` 的本机只读分析结果。
+`sanheshuju_request.curl` 的本机只读分析结果(**这三个文件从未进过本仓库**,
+是立项时在本机分析的三合数据接口材料,在工作树里找不到是正常的)。
 
 视觉基线：用户随本单提供的效果图是 Phase 5 唯一视觉蓝本，其中自由价差三张、
 套利监控一张。实现不得另行套用通用后台模板改变信息层级、图表语义或红涨绿跌口径；

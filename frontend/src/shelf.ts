@@ -24,6 +24,20 @@ export function offsetText(shelf: SpreadShelf): string {
   return `${v > 0 ? '上方' : '下方'} ${Math.abs(v)} 点`
 }
 
+/**
+ * 到达概率的样本下界,与后端 `REACH_MIN_DAYS` 必须一致。
+ *
+ * 拟合脚本 `research/run_shelf_prob.py` 用 `a[a["T"] >= 5]` 把不足 5 天的观测
+ * 排除在样本外,所以后端在这个区间返回 `null`。页面上那一列会全变成「—」,
+ * **必须写清为什么**——否则读者会以为是数据没采到,而不是「这里没有依据」。
+ */
+export const REACH_MIN_DAYS = 5
+
+/** 剩余天数已低于曲线样本下界,概率不可用。 */
+export function reachUnavailable(daysLeft: number | null | undefined): boolean {
+  return daysLeft !== null && daysLeft !== undefined && daysLeft < REACH_MIN_DAYS
+}
+
 export interface DirectionEdge {
   target: SpreadShelf
   stop: SpreadShelf

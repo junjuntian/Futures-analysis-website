@@ -250,7 +250,7 @@ def load_from_pg(code: str, container: str, pg_user: str,
                "-A", "-F", "\t", "--no-align", "-c", sql]
         out = subprocess.run(cmd, capture_output=True, text=True, check=True,
                              encoding="utf-8").stdout
-        lines = [l for l in out.splitlines() if l and not l.startswith("(")]
+        lines = [ln for ln in out.splitlines() if ln and not ln.startswith("(")]
         from io import StringIO
         return pd.read_csv(StringIO("\n".join(lines)), sep="\t")
 
@@ -364,7 +364,8 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
     idx = p.groupby("trade_date")["open_interest"].idxmax()
     cand = p.loc[idx, ["trade_date", "contract"]].sort_values("trade_date")
     dates, cands = cand["trade_date"].tolist(), cand["contract"].tolist()
-    ym = lambda c: str(c)[2:]
+    def ym(c):
+        return str(c)[2:]
     main, cur = [], cands[0]
     for i in range(len(dates)):
         if i > 0 and ym(cands[i - 1]) > ym(cur):

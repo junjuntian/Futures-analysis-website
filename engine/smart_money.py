@@ -251,7 +251,8 @@ def main_contract(price: pd.DataFrame) -> pd.DataFrame:
     idx = p.groupby("trade_date")["open_interest"].idxmax()
     cand = p.loc[idx, ["trade_date", "contract"]].sort_values("trade_date")
     dates, cands = cand["trade_date"].tolist(), cand["contract"].tolist()
-    ym = lambda c: c[2:]
+    def ym(c):
+        return c[2:]
     main, cur = [], cands[0]
     for i in range(len(dates)):
         if i > 0 and ym(cands[i - 1]) > ym(cur):
@@ -270,7 +271,8 @@ def continuous(price: pd.DataFrame, mc: pd.DataFrame) -> pd.DataFrame:
 
     rows, prev_main, factor = [], None, 1.0
     for d, m in zip(mc["trade_date"], mc["main"]):
-        get = lambda k: wide[k].at[d, m] if m in wide[k].columns else np.nan
+        def get(k, d=d, m=m):
+            return wide[k].at[d, m] if m in wide[k].columns else np.nan
         c, s = get("close"), get("settle")
         c_eff = c if not np.isnan(c) else s
         if prev_main is not None and m != prev_main:
@@ -354,27 +356,27 @@ def usd_crash_state(high: np.ndarray, low: np.ndarray, reversal: float,
     peak_arr = np.full(n, np.nan)
     up, peak, trough, hit = True, high[0], low[0], False
     for i in range(n):
-        h, l = high[i], low[i]
-        if np.isnan(h) or np.isnan(l):
+        h, lo = high[i], low[i]
+        if np.isnan(h) or np.isnan(lo):
             state[i] = hit
             peak_arr[i] = peak
             continue
         if up:
             if h > peak:
                 peak = h
-            if l <= peak * (1 - reversal):
-                up, trough = False, l
-                hit = (1 - l / peak) >= trigger
+            if lo <= peak * (1 - reversal):
+                up, trough = False, lo
+                hit = (1 - lo / peak) >= trigger
         else:
             if h >= trough * (1 + reversal):
                 up, peak, hit = True, h, False
             else:
-                if l < trough:
-                    trough = l
+                if lo < trough:
+                    trough = lo
                 if not hit and (1 - trough / peak) >= trigger:
                     hit = True
         state[i] = hit
-        dd_now[i] = 1 - l / peak
+        dd_now[i] = 1 - lo / peak
         peak_arr[i] = peak
     return state, dd_now, peak_arr
 
@@ -468,13 +470,13 @@ def seat_cost(seat: pd.DataFrame, price: pd.DataFrame, member: str) -> pd.Series
 
         cost, prev_net = np.nan, 0.0
         for d in grp.index:
-            l, sh = lq.get(d, np.nan), sq.get(d, np.nan)
+            lg, sh = lq.get(d, np.nan), sq.get(d, np.nan)
             # 该合约当日两个榜都没有他 = 掉榜,持仓未知。**什么都不动**:
             # cost 与 prev_net 原样保留,等有数据那天接着算。补 0 会被下面
             # 读成平仓,清掉成本并在回榜日算出一个错的起点。
-            if np.isnan(l) and np.isnan(sh):
+            if np.isnan(lg) and np.isnan(sh):
                 continue
-            net = (0.0 if np.isnan(l) else float(l)) - (0.0 if np.isnan(sh) else float(sh))
+            net = (0.0 if np.isnan(lg) else float(lg)) - (0.0 if np.isnan(sh) else float(sh))
             px = settle.get((contract, d), np.nan)
 
             flipped = (prev_net > 0 > net) or (prev_net < 0 < net)
@@ -799,7 +801,10 @@ class MarketEngine:
         last = self.dates[-1]
         holding = next((t for t in trades if t.result == "持有中"), None)
         dec = self.meta["decimals"]
-        r = lambda x: None if x is None or (isinstance(x, float) and np.isnan(x)) else round(float(x), dec)
+        def r(x):
+            if x is None or (isinstance(x, float) and np.isnan(x)):
+                return None
+            return round(float(x), dec)
         conds = {
             "score": {"value": round(float(self.score[last]), 2),
                       "target": round(float(self.theta[last]), 2),

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { SpreadMonitorItem, SpreadShelf } from './api'
-import { edgeOf, offsetText, shelfLabel } from './shelf'
+import { edgeOf, offsetText, reachUnavailable, shelfLabel } from './shelf'
 
 function shelf(level: number, offset: number, extra: Partial<SpreadShelf> = {}): SpreadShelf {
   return {
@@ -28,6 +28,20 @@ describe('shelfLabel', () => {
     expect(shelfLabel(shelf(-1355, -420))).toBe('-1355')
     const wide = { ...shelf(-1117, -182), lo: '-1155', hi: '-1080' }
     expect(shelfLabel(wide)).toBe('-1155~-1080')
+  })
+})
+
+describe('reachUnavailable', () => {
+  it('不足 5 天时为真 —— 曲线的样本从 5 天起,再往下是外推', () => {
+    expect(reachUnavailable(4)).toBe(true)
+    expect(reachUnavailable(0)).toBe(true)
+    expect(reachUnavailable(5)).toBe(false)
+    expect(reachUnavailable(52)).toBe(false)
+  })
+
+  it('天数未知时不声称「不可用」—— 那是另一回事', () => {
+    expect(reachUnavailable(null)).toBe(false)
+    expect(reachUnavailable(undefined)).toBe(false)
   })
 })
 

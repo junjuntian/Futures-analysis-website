@@ -21,7 +21,7 @@ import {
   revertPct,
   tradeDirection
 } from '../revert'
-import { edgeOf, offsetText, shelfLabel } from '../shelf'
+import { edgeOf, offsetText, reachUnavailable, shelfLabel } from '../shelf'
 import { useAuthStore } from '../stores/auth'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
@@ -740,6 +740,10 @@ function openDetail(item: SpreadMonitorItem) {
                     <template v-else>—</template>
                   </span>
                 </div>
+                <p v-if="reachUnavailable(item.days_left)" class="reach-na">
+                  剩 {{ item.days_left }} 个交易日,<b>不给到达概率</b>:这条曲线的样本
+                  是剩余 5 日以上的处境,再往下没有依据。档位与距离照常。
+                </p>
                 <el-tooltip :content="DIRECTION_HINT" placement="top">
                   <table class="dir">
                     <thead>
@@ -1279,6 +1283,12 @@ function openDetail(item: SpreadMonitorItem) {
 .shelf .chip.target { color: var(--tv-accent, #2563d9); border: 1px solid currentColor; }
 .shelf .chip em { font-style: normal; font-weight: 600; margin-left: 3px; }
 .shelf .ladder { margin-top: 6px; border-top: 1px solid var(--tv-border, #e3e8ee); padding-top: 6px; }
+/* 概率不可用时的说明。**不能只留一列「—」**——那看着像数据没采到。 */
+.shelf .reach-na {
+  margin: 6px 0 0; padding: 5px 7px; font-size: 12px; line-height: 1.5;
+  color: var(--tv-text-muted); background: var(--tv-fill-muted, #f6f8fa);
+  border-radius: 4px;
+}
 .shelf .rung {
   display: grid; grid-template-columns: 84px 1fr 44px; gap: 8px;
   align-items: center; padding: 3px 0;

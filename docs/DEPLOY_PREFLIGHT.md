@@ -37,6 +37,8 @@
 - `engine/run-official-seats.sh` 取 workspace 用 `select ... from market_prices`
 - `deploy/collector/load-dce-daily.sql` 同一个判据
 - `deploy/collector/project-history.sql` 整个脚本就是从那两张中转表投影到宽表的桥
+  (**该脚本已随 `DEC-049` 删除**,这里留着是因为教训本身仍然成立——见上表同一条:
+  门禁守的是「`deploy/collector/` 下每个文件都装进发布包」这条规则,不是这个文件)
 
 三处都不在 Rust 代码里，所以 `cargo clippy` 和全部单元测试都是绿的；三处都不在
 部署的验收路径上（e2e 不跑 `run-official-seats`），所以部署也会绿。**第二天早上

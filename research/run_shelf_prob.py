@@ -13,10 +13,16 @@
   ① 单调:距离越远,概率必须越低;
   ② 样本:每个桶要有足够观测,否则那个百分比是装饰;
   ③ 剩余期必须**进分桶**,不能被平均掉——快到期时概率天然低。
+
+第四节**产出 Rust 里的 `REACH_CURVE` 常量**,并与仓库现值逐个对拍。
+2026-08-20 审计发现:代码注释写着「重估要跑本脚本」,而本脚本当时只有三段探索性
+打印,根本不产出那 4×31 个数——**烤死的常量,来路在仓库里无法复现**。现在跑一次
+就知道两件事:新算的曲线长什么样、它跟线上那份差多少。
 """
 from __future__ import annotations
 
 import pathlib
+import re
 
 import numpy as np
 import pandas as pd
@@ -111,6 +117,92 @@ def main() -> None:
         for d in (0.5, 1.0, 1.5, 2.0):
             row += f"{100*(g['zdown']>=d).mean():>9.1f}"
         print(row)
+
+    emit_curve(a)
+
+
+# ---- 第四节:产出并核对 Rust 常量 ----------------------------------------
+
+# 与 Rust 的 `reach_bucket` 一一对应。改这里就得改那边,反之亦然。
+CURVE_BINS = [4, 20, 40, 80, 10**9]
+CURVE_LABELS = ["5~20", "21~40", "41~80", ">80"]
+CURVE_GRID = np.round(np.arange(0, 3.01, 0.1), 2)   # z = 0.0 … 3.0,步长 0.1
+RUST_FILE = (pathlib.Path(__file__).resolve().parents[1]
+             / "rust" / "apps" / "api" / "src" / "spread_analytics.rs")
+
+
+def curve_table(a: pd.DataFrame) -> tuple[list[list[float]], list[int]]:
+    """每个剩余期桶一条经验生存曲线,**两个方向合并**。
+
+    合并方向 = 把 zdown 与 zup 拼起来一起数,所以每行贡献两个观测——Rust 注释里
+    的样本数(如 18,848)正是行数的两倍,不是写错了。合并的理由见 Rust 侧注释:
+    逐方向的版本样本外崩了,那些差异是行情往哪边走了(=漂移),不是品种特性。
+    """
+    b = a.assign(B=pd.cut(a["T"], CURVE_BINS, labels=CURVE_LABELS))
+    curves, counts = [], []
+    for lab in CURVE_LABELS:
+        g = b[b["B"] == lab]
+        z = np.concatenate([g["zdown"].to_numpy(), g["zup"].to_numpy()])
+        curves.append([round(100 * float((z >= d).mean()), 1) for d in CURVE_GRID])
+        counts.append(len(z))
+    return curves, counts
+
+
+def read_baked() -> list[list[float]] | None:
+    """读出仓库里现有的 REACH_CURVE,用于对拍。读不到返回 None(不当致命错)。"""
+    try:
+        src = RUST_FILE.read_text(encoding="utf-8")
+        blk = src[src.index("const REACH_CURVE"):]
+        blk = blk[: blk.index("\n];")]
+        blk = blk[blk.index("=") + 1:]            # 去掉 `[&[f64]; 4]` 这段类型标注
+        rows = re.findall(r"&\[(.*?)\],", blk, re.S)
+        return [[float(x) for x in re.findall(r"\d+\.\d+", r)] for r in rows]
+    except (OSError, ValueError):
+        return None
+
+
+def emit_curve(a: pd.DataFrame) -> None:
+    print()
+    print("=" * 92)
+    print("四、产出 Rust 常量 REACH_CURVE,并与仓库现值对拍")
+    print("=" * 92)
+    curves, counts = curve_table(a)
+
+    baked = read_baked()
+    if baked is None or len(baked) != len(curves):
+        print("  ⚠ 读不出仓库里的现值,只输出新算的曲线。")
+    else:
+        worst = 0.0
+        for lab, new, old in zip(CURVE_LABELS, curves, baked):
+            if len(new) != len(old):
+                diff = 99.9
+            else:
+                diff = max(abs(x - y) for x, y in zip(new, old))
+            worst = max(worst, diff)
+            verdict = "一致" if diff <= 0.05 else "**不一致**"
+            print(f"  剩余 {lab:>6s} 日   最大差 {diff:5.2f} 个百分点   {verdict}")
+        print()
+        if worst <= 0.05:
+            print("  → 仓库里的常量与本次重算一致,不用动代码。")
+        else:
+            print("  → **有差异。差异不等于该改**:先分清是数据多了几天(那就别动,")
+            print("     研究结论不该因为多一天数据就让页面上的数字无声漂移),")
+            print("     还是口径真的变了(那要连同 DECISIONS 一起改)。")
+
+    print()
+    print("  下面这段可直接替换 spread_analytics.rs 里的 REACH_CURVE:")
+    print()
+    print("const REACH_CURVE: [&[f64]; 4] = [")
+    for lab, row, n in zip(CURVE_LABELS, curves, counts):
+        print(f"    // 剩余 {lab} 个交易日,样本 {n:,}")
+        print("    &[")
+        for i in range(0, len(row), 15):
+            print("        " + ", ".join(str(x) for x in row[i:i + 15]) + ",")
+        print("    ],")
+    print("];")
+    print()
+    print(f"  (z 网格 {CURVE_GRID[0]}~{CURVE_GRID[-1]},步长 0.1,共 {len(CURVE_GRID)} 点;")
+    print("   Rust 侧 reach_pct 按同一步长线性插值,两边的步长必须一样)")
 
 
 if __name__ == "__main__":

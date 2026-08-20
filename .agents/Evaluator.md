@@ -9,5 +9,6 @@
 
 ## 输出
 
-- `docs/reviews/PHASE_01_EVALUATION.md`。
+- `docs/reviews/PHASE_01_EVALUATION.md`(该目录已随 `c9a9b9e` 删除,
+  原文用 `git show c9a9b9e^:docs/reviews/...` 取;新评审不要再往这个目录写)。
 - 最终状态只能标记为 `PASS` 或 `FAIL`。
