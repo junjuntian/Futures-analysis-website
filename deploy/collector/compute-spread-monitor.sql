@@ -231,7 +231,7 @@ select w.*,
 --   · **因果**:t 处的判定要到 t+3 才成立,所以 as_of 那天只能看到 rn+3 ≤ rn_asof
 --     的转折位。不加这一条,历史行就带着未来信息——与 pair_series 那段注释同一个
 --     道理。代价是最近三天的转折位当天不算数,界面要写「待确认」。
---   · 50 点内并成一档,**存 lo/hi 区间不存单点**:链式合并会让 −1080/−1115/−1155
+--   · **0.5σ 内**并成一档,**存 lo/hi 区间不存单点**:链式合并会让 −1080/−1115/−1155
 --     并出一个跨 75 点的档,只报均值 −1117 是假精度。
 --   · 触碰回合 = 收盘落在该档 ±25 点内的独立回合(连续日算一回合)。
 --   · 序列用 pair_series(**完整价差历史**),不是写入窗口那一段。
@@ -261,41 +261,6 @@ select workspace_id, c1, c2, trade_date as_of, rn rn_asof
 create index shelf_asof_key on shelf_asof (workspace_id, c1, c2, as_of);
 analyze shelf_asof;
 
-create temp table shelf as
-select workspace_id, c1, c2, as_of,
-       min(lvl) lo, max(lvl) hi, round(avg(lvl))::numeric lvl
-  from (select *, sum(g) over (partition by workspace_id, c1, c2, as_of
-                               order by lvl desc rows unbounded preceding) grp
-          from (select v.*,
-                       case when lag(lvl) over (partition by workspace_id, c1, c2, as_of
-                                                order by lvl desc) - lvl > 50
-                            then 1 else 0 end g
-                  from (select distinct a.workspace_id, a.c1, a.c2, a.as_of, p.v lvl
-                          from shelf_asof a
-                          join pivots p on p.workspace_id = a.workspace_id
-                                       and p.c1 = a.c1 and p.c2 = a.c2
-                                       and p.rn + 3 <= a.rn_asof) v) t) u
- group by workspace_id, c1, c2, as_of, grp;
-
-create temp table shelf_touch as
-select workspace_id, c1, c2, as_of, lo, hi, lvl,
-       count(*) filter (where near and not prev_near) touches
-  from (select s.workspace_id, s.c1, s.c2, s.as_of, s.lo, s.hi, s.lvl, p.trade_date,
-               abs(p.v - s.lvl) <= 25 near,
-               lag(abs(p.v - s.lvl) <= 25, 1, false)
-                 over (partition by s.workspace_id, s.c1, s.c2, s.as_of, s.lvl
-                       order by p.trade_date) prev_near
-          from shelf s
-          join ps_rn p on p.workspace_id = s.workspace_id and p.c1 = s.c1 and p.c2 = s.c2
-                      and p.trade_date <= s.as_of) x
- group by workspace_id, c1, c2, as_of, lo, hi, lvl;
-
-create temp table shelf_json as
-select workspace_id, c1, c2, as_of,
-       jsonb_agg(jsonb_build_object('level', lvl, 'lo', lo, 'hi', hi, 'touches', touches)
-                 order by lvl desc) shelves
-  from shelf_touch group by workspace_id, c1, c2, as_of;
-
 -- 日波动:近 20 个交易日价差日变动的样本标准差。读时用来算「距离 ÷ σ√剩余天数」。
 create temp table shelf_sigma as
 select workspace_id, c1, c2, trade_date as_of,
@@ -304,6 +269,55 @@ select workspace_id, c1, c2, trade_date as_of,
   from (select workspace_id, c1, c2, trade_date,
                v - lag(v) over (partition by workspace_id, c1, c2 order by trade_date) dv
           from ps_rn) t;
+create index shelf_sigma_key on shelf_sigma (workspace_id, c1, c2, as_of);
+analyze shelf_sigma;
+
+create temp table shelf as
+select workspace_id, c1, c2, as_of,
+       min(lvl) lo, max(lvl) hi, round(avg(lvl))::numeric lvl
+  from (select *, sum(g) over (partition by workspace_id, c1, c2, as_of
+                               order by lvl desc rows unbounded preceding) grp
+          from (select v.*,
+                       -- **并档阈值按各品种自己的日波动定**(2026-08-20 修,DEC-098):
+                       -- 原来写死 50 点,那是在生猪(σ≈94)上试出来的,≈0.5σ。
+                       -- 套到焦煤跨月(σ≈16)就是 3.2σ,把 31 个转折位链式并成一档、
+                       -- 跨 150 点——十个日波动宽,完全没用。0.5σ 在生猪上仍是 47 点
+                       -- (与原来验证过 −1355 的那个 50 几乎一样),在焦煤上是 8 点。
+                       case when lag(lvl) over (partition by workspace_id, c1, c2, as_of
+                                                order by lvl desc) - lvl > v.band
+                            then 1 else 0 end g
+                  from (select distinct a.workspace_id, a.c1, a.c2, a.as_of, p.v lvl,
+                               coalesce(0.5 * g.sigma, 50) band
+                          from shelf_asof a
+                          join pivots p on p.workspace_id = a.workspace_id
+                                       and p.c1 = a.c1 and p.c2 = a.c2
+                                       and p.rn + 3 <= a.rn_asof
+                          left join shelf_sigma g on g.workspace_id = a.workspace_id
+                                                 and g.c1 = a.c1 and g.c2 = a.c2
+                                                 and g.as_of = a.as_of) v) t) u
+ group by workspace_id, c1, c2, as_of, grp;
+
+create temp table shelf_touch as
+select workspace_id, c1, c2, as_of, lo, hi, lvl,
+       count(*) filter (where near and not prev_near) touches
+  from (select s.workspace_id, s.c1, s.c2, s.as_of, s.lo, s.hi, s.lvl, p.trade_date,
+               -- 触碰带同样按波动定,取并档阈值的一半(0.25σ)。
+               abs(p.v - s.lvl) <= coalesce(0.25 * g.sigma, 25) near,
+               lag(abs(p.v - s.lvl) <= coalesce(0.25 * g.sigma, 25), 1, false)
+                 over (partition by s.workspace_id, s.c1, s.c2, s.as_of, s.lvl
+                       order by p.trade_date) prev_near
+          from shelf s
+          join ps_rn p on p.workspace_id = s.workspace_id and p.c1 = s.c1 and p.c2 = s.c2
+                      and p.trade_date <= s.as_of
+          left join shelf_sigma g on g.workspace_id = s.workspace_id and g.c1 = s.c1
+                                 and g.c2 = s.c2 and g.as_of = s.as_of) x
+ group by workspace_id, c1, c2, as_of, lo, hi, lvl;
+
+create temp table shelf_json as
+select workspace_id, c1, c2, as_of,
+       jsonb_agg(jsonb_build_object('level', lvl, 'lo', lo, 'hi', hi, 'touches', touches)
+                 order by lvl desc) shelves
+  from shelf_touch group by workspace_id, c1, c2, as_of;
 
 -- 只保留窗口内、且到那天为止已积累够 30 天的行(2026-08-18 由 60 降,见上)。
 -- 门槛按当日算：一个组合在它上市第 10 天时,「历史极值」确实还没有意义。

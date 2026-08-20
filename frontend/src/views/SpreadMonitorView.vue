@@ -22,6 +22,7 @@ import {
   revertTone,
   tradeDirection
 } from '../revert'
+import { edgeOf, offsetText, shelfLabel } from '../shelf'
 import { useAuthStore } from '../stores/auth'
 
 // 阈值：落在区间两端多少算触发。括号里是 2026-08-11 生产快照上的真实触发数（共 91 组），
@@ -233,16 +234,6 @@ function targetShelves(item: SpreadMonitorItem) {
     .filter((s) => s.role === 'target')
     .sort((a, b) => Math.abs(Number(a.offset)) - Math.abs(Number(b.offset)))
 }
-/** 档位跨了几十点时显示区间,不报一个假精度的均值。 */
-function shelfLabel(s: SpreadShelf) {
-  const span = Math.abs(Number(s.hi) - Number(s.lo))
-  return span >= 30 ? `${s.lo}~${s.hi}` : s.level
-}
-function offsetText(s: SpreadShelf) {
-  const v = Number(s.offset)
-  return `${v > 0 ? '上方' : '下方'} ${Math.abs(v)} 点`
-}
-
 /** 「历年点数」那一格的悬停:三个跨起点搬不动的数,连同为什么把它们收起来。 */
 function legacyPointsText(item: SpreadMonitorItem) {
   const r = item.revert
@@ -260,6 +251,12 @@ function legacyPointsText(item: SpreadMonitorItem) {
     '仓位按到止损的距离算,它只回答「止损被跳空穿掉能穿多远」。'
   )
 }
+
+const DIRECTION_HINT =
+  '同一个位置,两个方向的风险常常很不对称(DEC-098)。这里并排给出**各自的**' +
+  '第一目标、止损与盈亏比 —— 盈亏比 = 到第一目标的距离 ÷ 到止损的距离,' +
+  '**<1 就是赚的没有亏的多**。概率是那一档的到达概率(长期频率,逐年 17%~53%,' +
+  '**不含方向判断**)。带 ⚡ 的那一侧是信号指的方向;另一侧只作对照,不代表建议做它。'
 
 const SHELF_HINT =
   '平台位 = 价差自己走出来的横盘转折位(收盘是前后各 3 个交易日里的极值,' +
@@ -739,6 +736,36 @@ function openDetail(item: SpreadMonitorItem) {
                     <template v-else>—</template>
                   </span>
                 </div>
+                <el-tooltip :content="DIRECTION_HINT" placement="top">
+                  <table class="dir">
+                    <thead>
+                      <tr><th>方向</th><th>第一目标</th><th>止损</th><th>盈亏比</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="d in [true, false]" :key="String(d)"
+                          :class="{ signal: (item.revert?.side === 'high') === d }">
+                        <td>
+                          {{ d ? '做空价差' : '做多价差' }}
+                          <em v-if="(item.revert?.side === 'high') === d && isEntry(item)">⚡</em>
+                        </td>
+                        <template v-if="edgeOf(item, d)">
+                          <td>{{ shelfLabel(edgeOf(item, d)!.target) }}
+                            <i>{{ edgeOf(item, d)!.gain }} 点</i>
+                            <b v-if="edgeOf(item, d)!.target.reach_pct !== null">
+                              {{ edgeOf(item, d)!.target.reach_pct!.toFixed(0) }}%</b>
+                          </td>
+                          <td>{{ shelfLabel(edgeOf(item, d)!.stop) }}
+                            <i>{{ edgeOf(item, d)!.risk }} 点</i></td>
+                          <td :class="{ thin: (edgeOf(item, d)!.ratio ?? 0) < 1 }">
+                            {{ edgeOf(item, d)!.ratio?.toFixed(2) ?? '—' }}
+                          </td>
+                        </template>
+                        <td v-else colspan="3" class="none">这一侧没有可用的档位</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </el-tooltip>
+
                 <p class="shelf-rule">
                   <b>日线收盘突破一档,才往下一档看</b>;反方向收盘站上最近那一档就止损。
                   <el-tooltip :content="SHELF_HINT" placement="top"><span class="q">档位怎么来的</span></el-tooltip>
@@ -1262,6 +1289,21 @@ function openDetail(item: SpreadMonitorItem) {
 }
 .shelf .q { text-decoration: underline dotted; cursor: help; margin: 0 6px; }
 .revert .legacy { text-decoration: underline dotted; cursor: help; }
+/* 双向盈亏比。信号指的那一侧加底色,另一侧是对照——它不是建议。 */
+.shelf .dir { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.shelf .dir th {
+  text-align: right; font-weight: 400; color: var(--tv-text-muted);
+  padding: 2px 6px; border-bottom: 1px solid var(--tv-border, #e3e8ee);
+}
+.shelf .dir th:first-child { text-align: left; }
+.shelf .dir td { text-align: right; padding: 3px 6px; font-variant-numeric: tabular-nums; }
+.shelf .dir td:first-child { text-align: left; }
+.shelf .dir tr.signal { background: var(--tv-accent-soft, #eef4ff); }
+.shelf .dir i { font-style: normal; color: var(--tv-text-muted); margin-left: 4px; }
+.shelf .dir b { margin-left: 4px; }
+/* 盈亏比 <1:赚的没有亏的多。用警示色,不用红绿——那是涨跌语义。 */
+.shelf .dir td.thin { color: var(--tv-warn, #d98e00); font-weight: 700; }
+.shelf .dir td.none { color: var(--tv-text-muted); text-align: left; }
 
 /* 另一侧统计:比主统计再弱一档,它是对照不是结论。 */
 .revert.alt {
