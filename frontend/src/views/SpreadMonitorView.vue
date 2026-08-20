@@ -19,7 +19,6 @@ import {
   isRedLine,
   points,
   revertPct,
-  revertTone,
   tradeDirection
 } from '../revert'
 import { edgeOf, offsetText, shelfLabel } from '../shelf'
@@ -240,7 +239,7 @@ function legacyPointsText(item: SpreadMonitorItem) {
   if (!r) return ''
   const n = (v: string | null) => (v === null ? '—' : Math.round(Number(v)).toString())
   return (
-    `历年 ${r.hit}/${r.n} 年曾在窗口内朝这边动过(1 个点、1 天就算,` +
+    `历年 ${r.hit}/${r.n} 年(${revertPct(r)})曾在窗口内朝这边动过(1 个点、1 天就算,` +
     '剩余期一长趋近 100%,**几乎没有区分度**,所以不再摆在行内)。 ' +
     `历年同一日历位置起算的中位数:最有利 ${points(r.move_points) ?? '—'} 点 · ` +
     `持到期 ${points(r.drift_points) ?? '—'} 点 · 跳空最坏参考 −${n(r.mae_max_points)} 点。 ` +
@@ -636,7 +635,8 @@ function openDetail(item: SpreadMonitorItem) {
             </div>
 
             <el-tooltip v-if="item.revert" :content="REVERT_HINT" placement="top">
-              <div class="revert" :class="revertTone(item.revert)">
+              <!-- 不再挂 revertTone:它原来只给那个大号数字上色,数字撤了它就是空类。 -->
+              <div class="revert">
                 <!-- 「曾回归 100%」那个大号数字撤了(DEC-098):它 63% 的时间就是
                      100%,却是全页面字号最大的数。收进悬停当背景,别当结论。 -->
                 <span class="basis" v-if="item.revert.days">剩 {{ item.revert.days }} 天</span>
@@ -1316,24 +1316,20 @@ function openDetail(item: SpreadMonitorItem) {
 }
 /* 历史回归率。同样避开红绿：这是个概率，不是价格方向。
    强弱只用主色与灰色的深浅区分。 */
+/* 原来是竖排:上面顶着那个大号「曾回归 100%」,下面几行小字。
+   DEC-098 把大号数字撤掉之后,剩下三个短标签各占一行,右栏空得发慌、
+   「历年点数 ⓘ」还成了孤岛。改成一行排布,中间用「·」分隔。 */
 .revert {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 2px 8px;
   cursor: help;
 }
-.revert .rate {
-  font-size: 17px;
-  font-weight: 700;
-  line-height: 1.15;
-  font-variant-numeric: tabular-nums;
-  color: var(--tv-text-secondary);
-}
-.revert.strong .rate {
-  color: var(--tv-blue);
-}
-.revert.weak .rate {
+.revert > .basis + .basis::before {
+  content: '·';
+  margin-right: 8px;
   color: var(--tv-text-muted);
 }
 .revert .basis {
