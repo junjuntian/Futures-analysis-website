@@ -1448,6 +1448,10 @@ pub async fn query_seat_net_position(
             }
         }
         .map_err(|_| SpreadApiError::Internal(request_id))?;
+        // 行情的完整交易日历 —— 净持仓序列的**外轴**。席位行驱动的轴在连续掉榜时
+        // 整段消失,category 轴会把那些天静默跳过,K 线跟着一起没(高盛/乾坤期货在
+        // 黄金上 2026-03-26~04-24 连续掉榜 21 个交易日,运营者两次发现)。
+        let calendar: Vec<Date> = candles.iter().map(|candle| candle.trade_date).collect();
         let candle_by_date: HashMap<Date, _> = candles
             .into_iter()
             .map(|candle| (candle.trade_date, candle))
@@ -1526,7 +1530,7 @@ pub async fn query_seat_net_position(
             })
             .collect();
 
-        let series = build_net_position_series(&observations, &members);
+        let series = build_net_position_series(&observations, &members, &calendar);
         // 「最新一天」在这里定一次就够：`days` 出去之后 trade_date 已经是字符串，
         // 让前端再判一次哪天算最新，两边就有了各自的口径。
         let latest_date = series.last().map(|day| day.trade_date);
@@ -1567,6 +1571,11 @@ pub async fn query_seat_net_position(
                 .collect();
         }
 
+        // 补回来的掉榜日在盈亏引擎里没有对应行(引擎照三态口径把掉榜当未知,不该改)。
+        // 但 `cumulative_pnl` 原先在拿不到 pnl 时兜底成 "0" —— 补轴之后那会让累计
+        // 曲线在掉榜段**直接砸到零**,画出一根不存在的巨亏,比原来的缺口更糟。
+        // 按 DEC-061 的既有口径:**累计沿用前值**,当日盈亏留空。
+        let mut carried_cumulative = "0".to_string();
         days = series
             .into_iter()
             .map(|day| {
@@ -1590,9 +1599,12 @@ pub async fn query_seat_net_position(
                     daily_pnl: pnl
                         .and_then(|p| p.daily_pnl)
                         .map(|v| v.round_dp(2).to_string()),
-                    cumulative_pnl: pnl
-                        .map(|p| p.cumulative_pnl.round_dp(2).to_string())
-                        .unwrap_or_else(|| "0".to_string()),
+                    cumulative_pnl: {
+                        if let Some(p) = pnl {
+                            carried_cumulative = p.cumulative_pnl.round_dp(2).to_string();
+                        }
+                        carried_cumulative.clone()
+                    },
                     long_cost: pnl
                         .and_then(|p| p.long_cost)
                         .map(|v| v.round_dp(2).to_string()),
