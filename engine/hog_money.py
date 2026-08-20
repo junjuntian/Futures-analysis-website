@@ -34,6 +34,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -331,6 +332,14 @@ def days_to_window_end(contract: str, today: pd.Timestamp) -> int:
         return 0
     return int(np.busday_count((today + pd.Timedelta(days=1)).date(),
                                (end + pd.Timedelta(days=1)).date()))
+
+
+def _self_fingerprint() -> str:
+    """本文件内容的 sha256 前 12 位。读不到就给空串,不能让它拖垮出信号。"""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
 
 
 def contract_prices(price: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -943,6 +952,13 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "multiplier": RULES["multiplier"],
         "data_date": d.strftime("%Y-%m-%d"),
         "computed_at": datetime.now(CN_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        # 本文件自身的指纹(DEC-099)。部署时会把安装到位那份的指纹写进
+        # web/engine.json,前端两边一比就知道「这份信号是不是当前引擎算的」。
+        # 为什么需要:页面读的是每日任务产出的**静态 JSON**,部署只换代码不重算
+        # JSON,会出现「代码已上线、页面还是旧引擎算的数」而且看不出来
+        # (2026-08-20 DEC-096 上线后就这样过了一夜)。部署现在会自动重算,
+        # 这一条是那道自动化万一没跑成时的兜底 —— 让它露馅,而不是静静地错。
+        "engine_fingerprint": _self_fingerprint(),
         "state": state,
         "contract": str(mkt["main"].get(d)),
         "price": _f(mkt["settle"].get(d)),

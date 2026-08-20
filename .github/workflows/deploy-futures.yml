@@ -980,7 +980,22 @@ jobs:
               cp -a "$hog_live" "$superseded_dir/hog_money.py"
               echo "ENGINE_SUPERSEDED hog_money.py"
             fi
+            if ! test -f "$hog_live" ||
+               ! cmp -s "$RELEASE_DIR/engine/hog_money.py" "$hog_live" ||
+               ! cmp -s "$RELEASE_DIR/engine/smart_money.py" "$engine_live"; then
+              # 引擎换了就得重算信号 —— 见下面 ENGINE_REFRESH 那段的说明。
+              ENGINE_CHANGED=1
+            fi
             install -m 644 "$RELEASE_DIR/engine/hog_money.py" "$hog_live"
+            # 指纹写进静态目录,前端拿它和 payload 里的比 —— 不一致就说明这份信号
+            # 不是当前引擎算的(DEC-099)。用**文件指纹**不用 git sha:镜像会被复用,
+            # /api/v1/version 给的是构建时的 sha 而不是本次发布的 sha。
+            install -d -m 755 /opt/futures-platform/smart-money/web
+            printf '{"fingerprint":"%s","installed_at":"%s"}\\n' \
+              "$(sha256sum "$hog_live" | cut -c1-12)" \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              >/opt/futures-platform/smart-money/web/engine.json
+            chmod 644 /opt/futures-platform/smart-money/web/engine.json
             install -d -m 755 /opt/futures-platform/smart-money/data
             install -m 644 "$RELEASE_DIR/engine/data/london_xau.csv"               /opt/futures-platform/smart-money/data/london_xau.csv
           fi
@@ -1084,6 +1099,29 @@ jobs:
           } >"$stable_tmp"
           chmod 600 "$stable_tmp"
           mv "$stable_tmp" "$STATE_ROOT/stable.env"
+
+          # 引擎换了就立刻重算一次信号(DEC-099)。
+          #
+          # 为什么必须自动做:机构资金那几个页面读的是**每日定时任务产出的静态
+          # JSON**,不是接口实时算的。部署只换代码、不重算 JSON,于是「代码已经
+          # 上线、页面还是旧引擎算的数」——而且**看不出来**:页面照常显示,只是
+          # 数字是旧的。2026-08-20 DEC-096(持仓跟合约)上线后就这样过了一夜,
+          # 运营者看到玻璃仍显示「进场 FG2609 / 现价 FG2701」才发现。
+          # 靠人记「部署后手工重跑」不行 —— 前几次我记得,这次就忘了。
+          #
+          # 放在 stable.env 落定之后:这里已经没有会失败的步骤了。
+          # **失败一律不阻断部署**(|| true):信号晚几小时由定时任务补上,
+          # 把一次已经验收通过的发布判失败,是拿真问题换假问题。
+          if test "${ENGINE_CHANGED:-0}" = 1 && test -x /usr/local/sbin/run-smart-money; then
+            echo "DEPLOY_STAGE engine_refresh_started"
+            if timeout 900 /usr/local/sbin/run-smart-money                  >>/var/log/futures-smart-money.log 2>&1; then
+              echo "ENGINE_REFRESH ok"
+            else
+              echo "ENGINE_REFRESH failed_nonfatal 见 /var/log/futures-smart-money.log" >&2
+            fi
+          else
+            echo "ENGINE_REFRESH skipped 引擎未变"
+          fi
           # 保留策略。**放在 stable 提交之后**：这里已经没有会失败的步骤，而且
           # 要保留哪两轮是由刚写好的 stable.env / stable.previous.env 定义的。
           #

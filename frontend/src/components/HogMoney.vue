@@ -105,6 +105,9 @@ interface HogPayload {
   rules: { reselect_months: number; group_k: number; enter: number; stop: number;
            max_hold: number; sig_win: number; long_enabled: boolean
            exit_before_delivery?: number } & Record<string, unknown>
+  /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
+   *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
+  engine_fingerprint?: string
   /** 顶部风险条。门槛写死在引擎里、数字实算,够不上门槛就是空数组
    *  ——生猪现在 0 条,玻璃 3 条,纯碱 5 条。可选:旧 JSON 没有这个字段。 */
   risk_flags?: Array<{ key: string; text: string }>
@@ -145,6 +148,7 @@ const pageSize = ref(20)
 const costs = ref<Record<string, SeatCost>>({})
 
 onMounted(async () => {
+  void loadEngineFingerprint()
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
     const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
@@ -216,6 +220,33 @@ const reselectText = computed(() => {
 /** 「N 笔全部由 反向/止损 触发」——原因和笔数都是数出来的。 */
 /** 交割倒计时的颜色档:撞线红、还剩不到两倍门槛的黄、其余不上色。
  *  门槛来自 payload,不写死 —— 规则改了文案与配色要跟着改。 */
+/** 部署时写下的「当前引擎指纹」。取不到就当没有,不误报。 */
+const liveFingerprint = ref<string | null>(null)
+async function loadEngineFingerprint() {
+  try {
+    const res = await fetch(`/smart-money/engine.json?t=${Date.now()}`)
+    if (res.ok) liveFingerprint.value = (await res.json())?.fingerprint ?? null
+  } catch {
+    // 取不到就不判断 —— 宁可不报,也不要报错的
+  }
+}
+
+/**
+ * 这份信号是不是当前引擎算的(DEC-099)。
+ *
+ * 页面读的是每日任务产出的**静态 JSON**,部署只换代码、不重算 JSON。
+ * 2026-08-20 DEC-096(持仓跟合约)上线后就这样过了一夜:代码已上线,页面仍显示
+ * 「玻璃 进场 FG2609 / 现价 FG2701」那笔本该被平掉的持仓,而且**看不出来**。
+ * 部署现在会自动重算(deploy-futures.yml 的 ENGINE_REFRESH),这一条是兜底。
+ *
+ * 两边任一为空都不判 —— 旧 JSON 没有这个字段,不能因为缺字段就报警。
+ */
+const engineStale = computed(() => {
+  const a = data.value?.engine_fingerprint
+  const b = liveFingerprint.value
+  return Boolean(a && b && a !== b)
+})
+
 const deliveryClass = computed(() => {
   const d = data.value?.delivery
   if (!d) return ''
@@ -305,6 +336,12 @@ const bySide = computed(() => {
     <!-- 风险条(运营者 2026-08-19 要求)。**摆在收益数字前面**——放在下面等于没放。
          条目由引擎按写死的门槛实算,不是按品种硬编码:哪天这个品种真变好了,
          条目会自己消失。 -->
+    <!-- 信号过期(DEC-099)。摆在最上面:它一旦出现,下面所有数字都不能信。 -->
+    <div v-if="engineStale" class="stale-banner">
+      ⚠ <b>这份信号是旧引擎算的</b> —— 引擎已经更新,但这份 JSON 还是更新之前跑出来的,
+      下面的持仓、历史与统计都可能与现行规则不符。等下一轮定时任务跑过会自动对齐。
+    </div>
+
     <div v-if="data.risk_flags && data.risk_flags.length" class="risk-banner">
       <div class="risk-head">
         ⚠ 这条曲线不好拿住 —— 先看完这{{ data.risk_flags.length }}条再看收益
@@ -732,6 +769,17 @@ const bySide = computed(() => {
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
 .reselect-note { margin: 0 0 8px; font-size: 12px; color: var(--tv-text-secondary); }
+/* 信号过期:比风险条更硬 —— 风险条说「这条曲线不好拿」,这条说「这些数字别信」。 */
+.stale-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--tv-warn, #d98e00);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tv-warn, #d98e00) 14%, transparent);
+  font-size: 13px;
+  line-height: 1.7;
+}
 /* 风险条:警示橙描边 + 浅底。不用红绿——那是涨跌语义,借过来会被读成方向。 */
 .risk-banner {
   margin: 0 0 14px;

@@ -344,6 +344,23 @@ else
   pass "查不到上次成功部署的提交，保守 run_live_collection=true"
 fi
 
+# 引擎改了会怎样（DEC-099）。机构资金那几个页面读的是**每日定时任务产出的静态
+# JSON**，不是接口实时算的：部署只换代码、不重算 JSON，于是「代码已上线、页面还是
+# 旧引擎算的数」——而且看不出来，页面照常显示。2026-08-20 DEC-096 上线后就这样过了
+# 一夜，运营者看到玻璃仍显示「进场 FG2609 / 现价 FG2701」才发现。
+#
+# 部署现在会自己重算（deploy-futures.yml 的 ENGINE_REFRESH，非阻断），页面也会在
+# 指纹对不上时挂横幅。这里只是把「这次部署会多花几分钟重算」说出来，免得看到
+# 部署变慢以为出了问题。**它是提示不是门禁**，所以用 note 不用 fail。
+if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ] &&
+   git cat-file -e "$last_deployed_sha" 2>/dev/null; then
+  engine_changes=$(git diff --name-only "$last_deployed_sha" HEAD -- engine/ | head -5)
+  if [ -n "$engine_changes" ]; then
+    pass "引擎有改动，部署会自动重算信号并多花几分钟：$(printf '%s' "$engine_changes" | tr '
+' ' ')"
+  fi
+fi
+
 # 最近一个已收盘的工作日，给验收用。
 collection_date=$(python -c "
 from datetime import date, timedelta

@@ -99,6 +99,51 @@ function stubFetch(payload: unknown = PAYLOAD, ok = true) {
 describe('生猪机构资金', () => {
   beforeEach(() => stubFetch())
 
+  it('引擎指纹对不上就挂「这份信号是旧引擎算的」', async () => {
+    // DEC-099:页面读的是每日任务产出的静态 JSON,部署只换代码不重算 JSON。
+    // 2026-08-20 DEC-096 上线后就这样过了一夜,而且看不出来 —— 这条是兜底。
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.includes('engine.json')) {
+        return { ok: true, status: 200, json: async () => ({ fingerprint: '新引擎指纹' }) } as Response
+      }
+      if (url.includes('/seats/net-position')) {
+        return { ok: true, status: 200, json: async () => NET_POSITION } as Response
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ...PAYLOAD, engine_fingerprint: '旧引擎指纹' })
+      } as Response
+    }))
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('这份信号是旧引擎算的')
+  })
+
+  it('指纹一致、或任一边缺失时都不报 —— 缺字段不是过期', async () => {
+    const mk = (payloadFp: string | undefined, liveFp: unknown) =>
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString()
+        if (url.includes('engine.json')) {
+          return { ok: true, status: 200, json: async () => ({ fingerprint: liveFp }) } as Response
+        }
+        if (url.includes('/seats/net-position')) {
+          return { ok: true, status: 200, json: async () => NET_POSITION } as Response
+        }
+        return {
+          ok: true, status: 200,
+          json: async () => ({ ...PAYLOAD, engine_fingerprint: payloadFp })
+        } as Response
+      }))
+    for (const [a, b] of [['同一个', '同一个'], [undefined, '新的'], ['旧的', undefined]] as const) {
+      mk(a, b)
+      const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+      await flushPromises()
+      expect(w.text()).not.toContain('这份信号是旧引擎算的')
+      w.unmount()
+    }
+  })
+
   it('够不上风险门槛的品种不挂风险条', async () => {
     // 生猪现在 0 条(夏普 2.23、回撤 −6.8%、胜率 61.1%、t=2.52)。
     // 门槛写死在引擎里、数字实算——不是按品种硬编码,所以这里也不能按品种断言。
