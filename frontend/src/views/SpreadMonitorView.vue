@@ -243,6 +243,24 @@ function offsetText(s: SpreadShelf) {
   return `${v > 0 ? '上方' : '下方'} ${Math.abs(v)} 点`
 }
 
+/** 「历年点数」那一格的悬停:三个跨起点搬不动的数,连同为什么把它们收起来。 */
+function legacyPointsText(item: SpreadMonitorItem) {
+  const r = item.revert
+  if (!r) return ''
+  const n = (v: string | null) => (v === null ? '—' : Math.round(Number(v)).toString())
+  return (
+    `历年同一日历位置起算的中位数:最有利 ${points(r.move_points) ?? '—'} 点 · ` +
+    `持到期 ${points(r.drift_points) ?? '—'} 点 · 跳空最坏参考 −${n(r.mae_max_points)} 点。 ` +
+    '**这三个数跨起点搬不动**:历年各年的起点相差几千点,今天的价差常常落在它们的' +
+    '分布之外,直接拿点数当目标、或当仓位分母,都不对。行内的平台位阶梯给的是' +
+    '**这一对合约自己图上的位置**,那才是能用的。 ' +
+    '`持到期` 的**符号**仍然在用——✓合格 徽标要求它为正,它防的是「回归率 100% ' +
+    '却一路朝反方向走」那种陷阱。 ' +
+    '「跳空最坏参考」是历年最坏那一年的浮亏极值。**它不再是仓位分母**:有了止损之后' +
+    '仓位按到止损的距离算,它只回答「止损被跳空穿掉能穿多远」。'
+  )
+}
+
 const SHELF_HINT =
   '平台位 = 价差自己走出来的横盘转折位(收盘是前后各 3 个交易日里的极值,' +
   '50 点内并成一档)。触碰回合 = 收盘落在该档 ±25 点内的独立回合数。' +
@@ -434,8 +452,11 @@ function openDetail(item: SpreadMonitorItem) {
         <strong>持到期为负</strong>就说明历年这段最终是朝反方向走的。
         三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
         就是信号日（次日执行），带它的行排在最上面，<strong>方向就写在标上</strong>——
-        「做空价差」= 卖腿1买腿2，「做多价差」= 买腿1卖腿2；仓位按「风险预留」那个点数算:
-        可承受亏损 ÷ (风险预留 × 点值) = 手数;浮亏到「补仓参考」是历年常态,不是逻辑坏了。
+        「做空价差」= 卖腿1买腿2，「做多价差」= 买腿1卖腿2；<strong>仓位按到止损的距离算</strong>:
+        可承受亏损 ÷ (到止损点数 × 点值) = 手数 —— 止损就摆在平台位那一行上。
+        浮亏到「历年常态浮亏」是常态,不是逻辑坏了。
+        (旧口径按「风险预留」那个历年最坏 MAE 算,与止损差出一两个数量级,已停用;
+        那个数收进「历年点数 ⓘ」,只当止损被跳空穿掉的最坏参考。)
         <strong>剩余 ≤15 交易日进交割红线</strong>,⚡ 压制、持仓清掉;16~39 日是衰减区,降档。
         「已拐头」还挂着但 ⚡ 已灭的，是进场日已过的存量状态；
         带 <strong>⚠ 信号差</strong> 的是 20 日内反复拐头的组合——降档仓位或放过。
@@ -618,24 +639,15 @@ function openDetail(item: SpreadMonitorItem) {
                   {{ item.revert.hit }}/{{ item.revert.n }} 年曾回归
                   <template v-if="item.revert.days">· 剩 {{ item.revert.days }} 天</template>
                 </span>
-                <span class="basis" v-if="points(item.revert.move_points)">
-                  最有利 {{ points(item.revert.move_points) }}
-                  <template v-if="points(item.revert.drift_points)">
-                    · 持到期
-                    <em :class="driftTone(item.revert.drift_points)">
-                      {{ points(item.revert.drift_points) }}
-                    </em>
-                  </template>
-                  点
-                </span>
+                <!-- 「最有利/持到期/风险预留」三个点数收进悬停(DEC-097)。
+                     它们是历年从同一日历位置起算的中位数,**起点差几千点也照样相减**,
+                     搬不到今天的处境上;有了平台位阶梯之后行内不再摆它们。
+                     `持到期` 的**符号**仍然在用——✓合格 徽标就是靠它判的。 -->
+                <el-tooltip :content="legacyPointsText(item)" placement="top">
+                  <span class="basis legacy">历年点数 ⓘ</span>
+                </el-tooltip>
                 <span class="basis mae" v-if="points(item.revert.mae_points)">
-                  补仓参考 −{{ Math.abs(Number(item.revert.mae_points)).toFixed(0) }}
-                  · 风险预留 −{{
-                    item.revert.mae_max_points === null
-                      ? '—'
-                      : Math.abs(Number(item.revert.mae_max_points)).toFixed(0)
-                  }}
-                  点
+                  历年常态浮亏 −{{ Math.abs(Number(item.revert.mae_points)).toFixed(0) }} 点
                 </span>
               </div>
             </el-tooltip>
@@ -694,7 +706,11 @@ function openDetail(item: SpreadMonitorItem) {
               <summary>
                 <span class="k">平台位</span>
                 <template v-if="stopShelf(item)">
-                  <span class="chip stop">止损 {{ shelfLabel(stopShelf(item)!) }}</span>
+                  <!-- 距离要摆出来:它现在是**仓位分母**(DEC-097),不是装饰。 -->
+                  <span class="chip stop">
+                    止损 {{ shelfLabel(stopShelf(item)!) }}
+                    <em>{{ Math.abs(Number(stopShelf(item)!.offset)) }} 点</em>
+                  </span>
                 </template>
                 <template v-for="(t, i) in targetShelves(item).slice(0, 2)" :key="t.level">
                   <span class="chip target">
@@ -1245,6 +1261,7 @@ function openDetail(item: SpreadMonitorItem) {
   margin: 6px 0 0; color: var(--tv-text-muted); line-height: 1.7; text-align: left;
 }
 .shelf .q { text-decoration: underline dotted; cursor: help; margin: 0 6px; }
+.revert .legacy { text-decoration: underline dotted; cursor: help; }
 
 /* 另一侧统计:比主统计再弱一档,它是对照不是结论。 */
 .revert.alt {
