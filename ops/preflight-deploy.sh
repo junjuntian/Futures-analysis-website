@@ -314,35 +314,12 @@ digest_of() {
 # 重启它还会杀掉正在跑的作业。2026-08-13 全部搬到托管 runner 之后没有这个约束:
 # 每个作业各拿一台全新机器,不排队也不互相干扰。这一节整体退役。
 
-if [ "$failures" -gt 0 ]; then
-  printf '\n\033[31m%d 项未通过，先修好再部署。\033[0m\n' "$failures"
-  printf '脚本查不了的前置条件见 docs/DEPLOY_PREFLIGHT.md，一并过一遍。\n'
-  exit 1
-fi
-
-# run_live_collection 按改动路径决定，不再无脑 false。
-#
-# false 是 2026-08-09 加的提速开关（跳过三次真采省约一小时），但 preflight 把它
-# 写死成了默认——采集器本身的改动也被跳过，坏 collector 直接上线，要等第二天
-# cron 才真实失败。改成：与上一次成功部署的提交做 diff，碰了采集链路
-#（collector/、deploy/collector/、backfill/、采集相关 e2e）就必须真采一轮。
-# 拿不到上次部署的提交时宁可 true：多花一小时，好过跳过唯一的集成门。
+# 上一次成功部署的提交。下面三处都要用它:LATEST 一致性门禁、
+# run_live_collection 的改动判定、引擎改动提示。**必须算在失败汇总之前**——
+# LATEST 那条是门禁不是提示,排在 `exit 1` 后面就等于「会打印 ✗ 但照样放行」
+# (2026-08-20 第一版就是这么写的,自己踩了 DEPLOY_PREFLIGHT 二·守卫不能静默死掉)。
 last_deployed_sha=$(gh api "repos/$REPO/actions/runs?per_page=20" \
   --jq '[.workflow_runs[] | select(.name == "Deploy futures" and .conclusion == "success")] | first | .head_sha' 2>/dev/null || echo "")
-run_live=true
-if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ] &&
-   git cat-file -e "$last_deployed_sha" 2>/dev/null; then
-  collector_changes=$(git diff --name-only "$last_deployed_sha" HEAD -- \
-    collector/ deploy/collector/ backfill/ rust/tests/phase_4a_e2e.sh | head -5)
-  if [ -z "$collector_changes" ]; then
-    run_live=false
-    pass "采集链路自上次部署（${last_deployed_sha:0:7}）无改动，run_live_collection=false"
-  else
-    pass "采集链路有改动，run_live_collection=true：$(printf '%s' "$collector_changes" | tr '\n' ' ')"
-  fi
-else
-  pass "查不到上次成功部署的提交，保守 run_live_collection=true"
-fi
 
 # LATEST 有没有跟上上一次部署（DEC-100）。
 #
@@ -369,6 +346,35 @@ if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ]; then
   fi
 else
   pass "查不到上次成功部署的提交，跳过 LATEST 一致性检查"
+fi
+
+
+if [ "$failures" -gt 0 ]; then
+  printf '\n\033[31m%d 项未通过，先修好再部署。\033[0m\n' "$failures"
+  printf '脚本查不了的前置条件见 docs/DEPLOY_PREFLIGHT.md，一并过一遍。\n'
+  exit 1
+fi
+
+# run_live_collection 按改动路径决定，不再无脑 false。
+#
+# false 是 2026-08-09 加的提速开关（跳过三次真采省约一小时），但 preflight 把它
+# 写死成了默认——采集器本身的改动也被跳过，坏 collector 直接上线，要等第二天
+# cron 才真实失败。改成：与上一次成功部署的提交做 diff，碰了采集链路
+#（collector/、deploy/collector/、backfill/、采集相关 e2e）就必须真采一轮。
+# 拿不到上次部署的提交时宁可 true：多花一小时，好过跳过唯一的集成门。
+run_live=true
+if [ -n "$last_deployed_sha" ] && [ "$last_deployed_sha" != "null" ] &&
+   git cat-file -e "$last_deployed_sha" 2>/dev/null; then
+  collector_changes=$(git diff --name-only "$last_deployed_sha" HEAD -- \
+    collector/ deploy/collector/ backfill/ rust/tests/phase_4a_e2e.sh | head -5)
+  if [ -z "$collector_changes" ]; then
+    run_live=false
+    pass "采集链路自上次部署（${last_deployed_sha:0:7}）无改动，run_live_collection=false"
+  else
+    pass "采集链路有改动，run_live_collection=true：$(printf '%s' "$collector_changes" | tr '\n' ' ')"
+  fi
+else
+  pass "查不到上次成功部署的提交，保守 run_live_collection=true"
 fi
 
 # 引擎改了会怎样（DEC-099）。机构资金那几个页面读的是**每日定时任务产出的静态
