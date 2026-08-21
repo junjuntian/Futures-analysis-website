@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -334,6 +336,114 @@ class TestNoOverlap:
 
 
 # ---- 规则本身 -----------------------------------------------------------
+
+
+class TestUnloadState:
+    """机构卸了多少 —— **只作展示的维度**,三处重置错了都不会报错。
+
+    它不进任何进出场判据(`replay` 一个字都不读它),所以错了不会体现为一笔坏交易,
+    只会在页面上显示一个看着合理的百分比。这类东西必须靠测试钉住。
+    """
+
+    @staticmethod
+    def _frames(dates, nets, members=("A", "B"), group=None):
+        """把一串合计净持仓铺成 unload_state 要的三个入参。
+
+        席位表按 members 平摊持仓 —— `unload_state` 只用它数「在榜几家」,
+        具体怎么摊不影响结果。
+        """
+        sig = pd.DataFrame({"net": list(nets)}, index=dates)
+        rows = []
+        for d, n in zip(dates, nets):
+            if not np.isfinite(n):
+                continue                       # 掉榜:那天一行都没有
+            for m in members:
+                rows.append({"trade_date": d, "member_key": m,
+                             "net": float(n) / len(members)})
+        seat = pd.DataFrame(rows, columns=["trade_date", "member_key", "net"])
+        grp = group if group is not None else [tuple(members)] * len(dates)
+        return sig, seat, pd.Series(grp, index=dates)
+
+    def test_从峰值卸掉一半就报一半(self):
+        idx = bdays("2026-03-02", 4)
+        sig, seat, groups = self._frames(idx, [-100.0, -200.0, -150.0, -100.0])
+        out = H.unload_state(sig, seat, groups)
+        assert out["pct"] == pytest.approx(0.5)
+        assert out["peak_net"] == -200
+        assert out["peak_date"] == idx[1].strftime("%Y-%m-%d")
+
+    def test_换组当天必须重来一轮(self):
+        """新旧两组持仓水平不同,不重置会把「换了一批人」读成「机构大幅出货」。
+
+        `signal_series` 算 chg 时为同一个理由分组算过一遍 —— 这里不能漏。
+        """
+        idx = bdays("2026-03-02", 4)
+        # 前两天是 A/B 组、持仓 −1000;后两天换成 C/D 组、持仓只有 −100。
+        sig = pd.DataFrame({"net": [-1000.0, -1000.0, -100.0, -100.0]}, index=idx)
+        rows = []
+        for d, n, ms in zip(idx, [-1000, -1000, -100, -100],
+                            [("A", "B"), ("A", "B"), ("C", "D"), ("C", "D")]):
+            for m in ms:
+                rows.append({"trade_date": d, "member_key": m, "net": n / 2})
+        seat = pd.DataFrame(rows)
+        groups = pd.Series([("A", "B"), ("A", "B"), ("C", "D"), ("C", "D")], index=idx)
+
+        out = H.unload_state(sig, seat, groups)
+        assert out["pct"] == 0.0, "换组之后要从新组自己的峰值起算,不是报「卸了 90%」"
+        assert out["peak_net"] == -100
+
+    def test_方向翻转重开一轮(self):
+        idx = bdays("2026-03-02", 4)
+        sig, seat, groups = self._frames(idx, [-200.0, -100.0, 50.0, 40.0])
+        out = H.unload_state(sig, seat, groups)
+        # 翻多之后峰值是 +50,今天 40 → 卸掉 20%。与之前那轮空头的 200 无关。
+        assert out["peak_net"] == 50
+        assert out["pct"] == pytest.approx(0.2)
+
+    def test_掉榜那天冻结而不是重置(self):
+        """掉榜是「不知道」不是「卸完了」(research/PITFALLS 第 4 条)。
+
+        研究脚本第一版在这里把整轮重置掉,于是掉榜一天,峰值就从下一个观测值
+        重新起算,出货程度掉回 0 —— 哪怕他实际已卸掉八成。
+        """
+        idx = bdays("2026-03-02", 4)
+        sig, seat, groups = self._frames(idx, [-200.0, np.nan, -60.0, -50.0])
+        out = H.unload_state(sig, seat, groups)
+        assert out["peak_net"] == -200, "掉榜不能让峰值从 −60 重新起算"
+        assert out["pct"] == pytest.approx(0.75)
+
+    def test_带出在榜家数好让页面说清掉榜混淆(self):
+        """五家掉两家会让合计净持仓下降,而人家可能一手没动。
+
+        实测这个混淆专门吃掉长窗口(纯碱 20 日的表观效应几乎全由它贡献)。
+        分不清的时候页面必须说出来,所以两个家数都要带出去。
+        """
+        idx = bdays("2026-03-02", 3)
+        sig = pd.DataFrame({"net": [-300.0, -300.0, -100.0]}, index=idx)
+        rows = []
+        for d, ms in zip(idx, [("A", "B", "C"), ("A", "B", "C"), ("A",)]):
+            for m in ms:
+                rows.append({"trade_date": d, "member_key": m, "net": -100.0})
+        seat = pd.DataFrame(rows)
+        groups = pd.Series([("A", "B", "C")] * 3, index=idx)
+
+        out = H.unload_state(sig, seat, groups)
+        assert out["pct"] == pytest.approx(2 / 3, abs=0.001)   # payload 里已 round 到千分位
+        assert out["legs_at_peak"] == 3
+        assert out["legs_now"] == 1, "页面据此提示:这个降幅分不清是出货还是掉榜"
+
+    def test_它不进任何进出场判据(self):
+        """**这条钉的是边界。**
+
+        这个量作为进场判据只在纯碱 5 日窗口上通过检验,横截面上没有支持
+        (玻璃样本外翻号、焦煤否)。现在它只该出现在 payload 里给人看;
+        哪天有人把它接进 replay,这条会红,逼他先去看
+        `REPORT_SA_UNLOAD_DEEP_v1.md` 再决定。
+        """
+        src = pathlib.Path(H.__file__).read_text(encoding="utf-8")
+        body = src[src.index("def replay("):src.index("def _f(")]
+        for word in ("unload", "peak_net", "legs_at_peak"):
+            assert word not in body, f"replay 里出现了 {word} —— 它只该用于显示"
 
 
 class TestRules:

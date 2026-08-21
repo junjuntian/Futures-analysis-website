@@ -496,6 +496,71 @@ def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 回放
 
+def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
+    """机构相对**本轮峰值**卸掉了多少 —— **只作展示,不进任何判据**。
+
+    运营者 2026-08-21:「和机构反向,要等机构出货出得差不多」。这个数现在页面上
+    根本没有,他只能自己盯着净持仓曲线目测。这里把它算出来摆上去。
+
+    **为什么只摆不用**(`REPORT_SA_UNLOAD_DEEP_v1.md`):这个量作为进场判据只在
+    **纯碱、5 日窗口**上通过了全部检验(掉榜控制/逐年 5/6/非重叠/置换第 0.2 百分位);
+    玻璃样本外符号翻转、焦煤明确否、生猪鸡蛋数据不够验。**横截面上没有支持**,
+    而且现行引擎持仓中位数在 20 日以上,那个 5 日效应对它没用。
+    所以它进 payload 只为显示,`replay` 一个字都不读它。
+
+    三处必须重置,否则这个数会说谎:
+
+    1. **换组当天** —— 新旧两组持仓水平不同,不重置会把「换了一批人」读成
+       「机构大幅出货」。`signal_series` 算 `chg` 时为同一个理由分组算过一遍。
+    2. **方向翻转 / 归零** —— 那一轮结束了,上一轮的峰值与新一轮无关。
+    3. **掉榜那天冻结,不给值** —— 掉榜是「不知道」不是「卸完了」
+       (`research/PITFALLS.md` 第 4 条)。第一版研究脚本在这里把整轮重置掉,
+       于是掉榜一天峰值就重新起算,出货程度掉回 0。
+
+    还要带出**在榜家数**:五家掉两家会让合计净持仓下降,而人家可能一手没动。
+    实测这个混淆专门吃掉长窗口(纯碱 20 日的表观效应几乎全由它贡献)。
+    分不清的时候页面必须说出来,所以 `legs_at_peak` 一起返回。
+    """
+    net = sig["net"]
+    # 当日在榜的**组内**家数。一次 groupby 建索引 —— 逐日在 seat 上过滤是
+    # O(天数 × 行数),玻璃 140 万行会跑到没法看。
+    by_day = seat.groupby("trade_date")["member_key"].agg(set)
+    legs = pd.Series(
+        [len(set(g) & by_day.get(d, set())) if (g := groups.get(d)) else np.nan
+         for d in net.index], index=net.index)
+
+    peak = np.nan
+    peak_at = None
+    peak_legs = np.nan
+    cur_side = 0
+    cur_grp = None
+    out = {"pct": None, "peak_net": None, "peak_date": None,
+           "legs_now": None, "legs_at_peak": None}
+    for d in net.index:
+        n = net.get(d, np.nan)
+        grp = groups.get(d)
+        if grp != cur_grp:                       # 换组:重来一轮
+            cur_grp, cur_side, peak, peak_at, peak_legs = grp, 0, np.nan, None, np.nan
+        if not np.isfinite(n):
+            continue                             # 掉榜=不知道:冻结,不给值
+        if n == 0:
+            cur_side, peak, peak_at, peak_legs = 0, np.nan, None, np.nan
+            continue
+        side = int(np.sign(n))
+        if side != cur_side:
+            cur_side, peak, peak_at, peak_legs = side, abs(n), d, legs.get(d, np.nan)
+        elif abs(n) > peak:
+            peak, peak_at, peak_legs = abs(n), d, legs.get(d, np.nan)
+        out = {
+            "pct": round(1.0 - abs(n) / peak, 3) if peak > 0 else None,
+            "peak_net": int(np.sign(n) * peak),
+            "peak_date": peak_at.strftime("%Y-%m-%d") if peak_at is not None else None,
+            "legs_now": int(legs.get(d)) if np.isfinite(legs.get(d, np.nan)) else None,
+            "legs_at_peak": int(peak_legs) if np.isfinite(peak_legs) else None,
+        }
+    return out
+
+
 def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """按 RULES["signal_source"] 决定进场与出场各用哪一路信号。
 
@@ -947,6 +1012,8 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 关着做多时,z 上穿门槛只代表「机构在减空」,不产生进场——界面要说清,
         # 否则看的人会以为信号漏了。
         "long_signal_now": bool(np.isfinite(z) and z >= RULES["enter"]),
+        # 机构卸了多少 —— **只显示,不进判据**,理由见 unload_state 的 docstring。
+        "unload": unload_state(sig, seat, groups),
     }
 
     SPLIT["v"] = edge_split(sig, mkt, rdf)

@@ -72,6 +72,29 @@ interface HogPayload {
     just_flipped_long: boolean
     long_enabled: boolean
     long_signal_now: boolean
+    /**
+     * 机构相对**本轮峰值**卸掉了多少 —— **只作展示,不进任何进出场判据**。
+     *
+     * 运营者 2026-08-21 提出「和机构反向要等机构出货出得差不多」。这个数此前
+     * 页面上根本没有,他只能盯着净持仓曲线目测,所以先把它摆出来。
+     *
+     * **为什么只摆不用**(`research/REPORT_SA_UNLOAD_DEEP_v1.md`):作为进场判据
+     * 它只在**纯碱、5 日窗口**上通过了全部检验(掉榜控制 / 逐年 5 之 6 / 非重叠 /
+     * 置换第 0.2 百分位);玻璃样本外符号翻转、焦煤明确否、生猪鸡蛋数据不够验。
+     * 横截面上没有支持,而且现行引擎持仓中位数在 20 日以上,那个 5 日效应用不上。
+     *
+     * `legs_now !== legs_at_peak` 时这个降幅**分不清是出货还是掉榜** ——
+     * 五家掉两家会让合计净持仓下降而人家一手没动。实测这个混淆专门吃掉长窗口
+     * (纯碱 20 日的表观效应几乎全由它贡献),所以界面必须把它说出来。
+     */
+    unload: {
+      /** 0~1;掉榜、刚建仓或刚换组时为 null。 */
+      pct: number | null
+      peak_net: number | null
+      peak_date: string | null
+      legs_now: number | null
+      legs_at_peak: number | null
+    }
   }
   /**
    * 散户反向维度(DEC-085)。这三家在多个品种上长期站多头、长期亏钱,所以反向取用。
@@ -294,6 +317,22 @@ const rolled = computed(() =>
   !!data.value?.position && data.value.position.contract !== data.value.contract)
 
 /**
+ * 在榜家数与峰值日不同 —— 这个比例不干净,界面要说出来。**两种情形要分开说**:
+ *
+ * · `fewer` 今日比峰值日少 → 合计净持仓的下降里混着掉榜,分不清是不是真出货;
+ * · `more`  今日比峰值日多 → 峰值那天有人没上榜,真实峰值可能更高,比例偏低。
+ *
+ * 第一版只写了掉榜那一种,而生猪当前正好是反过来的(今日 5 家、峰值日 4 家),
+ * 那句话对它是错的。
+ */
+const unloadMuddled = computed<'fewer' | 'more' | null>(() => {
+  const u = data.value?.institution.unload
+  if (!u || u.pct === null || u.legs_at_peak === null || u.legs_now === null) return null
+  if (u.legs_now === u.legs_at_peak) return null
+  return u.legs_now < u.legs_at_peak ? 'fewer' : 'more'
+})
+
+/**
  * **机构合计流向**那张卡里的强度条:机构 z 相对进场门槛的比例,超过就满格。
  *
  * **满格不等于会进场。** 方案 C 下进场比的是共振后的散户信号(见 ../entry-gate.ts),
@@ -459,6 +498,25 @@ const bySide = computed(() => {
             </div>
           </div>
           <div class="kv"><span class="k">合计净持仓</span><span class="v">{{ fmt(data.signal.net) }} 手</span></div>
+          <div v-if="data.institution.unload && data.institution.unload.pct !== null" class="kv">
+            <span class="k">已卸掉</span>
+            <span class="v">
+              {{ (data.institution.unload.pct * 100).toFixed(0) }}%
+              <i class="peak">峰值 {{ fmt(data.institution.unload.peak_net) }} 手
+                @{{ (data.institution.unload.peak_date || '').slice(5) }}</i>
+            </span>
+          </div>
+          <p v-if="unloadMuddled" class="unload-warn">
+            峰值日在榜 {{ data.institution.unload!.legs_at_peak }} 家、今日
+            {{ data.institution.unload!.legs_now }} 家 ——
+            <template v-if="unloadMuddled === 'fewer'">
+              <b>这个降幅分不清是出货还是掉榜</b>。掉出前二十不等于减仓,
+              合计净持仓会跟着降,而他可能一手没动。
+            </template>
+            <template v-else>
+              <b>峰值那天有人没上榜,真实峰值可能更高</b>,这个比例是偏低的估计。
+            </template>
+          </p>
           <div class="kv"><span class="k">{{ data.signal.win }} 日变化</span>
             <span class="v" :class="pnlClass(data.signal.change)">{{ fmt(data.signal.change) }} 手</span></div>
           <div class="kv"><span class="k">建议仓位强度</span><span class="v">{{ fmt(data.signal.suggested_position, 2) }}</span></div>
@@ -782,6 +840,13 @@ const bySide = computed(() => {
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tv-text-muted); }
 .dot.red { background: var(--tv-up); } .dot.green { background: var(--tv-down); }
 .big { font-size: 30px; font-weight: 700; margin: 6px 0 12px; font-variant-numeric: tabular-nums; }
+/* 「已卸掉」这一行只作展示,不进判据 —— 理由见类型定义上的注释。 */
+.unload-warn {
+  margin: 2px 0 6px; padding: 5px 7px; font-size: 12px; line-height: 1.5;
+  color: var(--tv-text-muted); background: var(--tv-fill-muted, #f6f8fa);
+  border-radius: 4px;
+}
+.peak { font-style: normal; margin-left: 6px; color: var(--tv-text-muted); font-size: 12px; }
 .kv { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; gap: 10px; }
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
