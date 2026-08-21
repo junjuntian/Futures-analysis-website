@@ -1104,6 +1104,34 @@ mod monitor_tests {
     }
 
     #[test]
+    fn the_frontend_uses_the_same_reach_floor_as_the_backend() {
+        // `REACH_MIN_DAYS` 在 Rust 与 TS 里**各写了一份**(2026-08-20 我自己造的)。
+        // 两边一旦分叉,页面会安静地自相矛盾:后端调低了下界就会返回概率,而前端
+        // 仍按旧值挂着「不给概率」的说明;后端调高则出现一列「—」却没有任何解释。
+        // 跨语言没法共享常量,那就让这条测试当那个「一处」——改 Rust 忘了改 TS,
+        // 这里当场红。同样的做法见 `rust_normalisation_matches_the_sql_member_key`。
+        let ts =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../frontend/src/shelf.ts");
+        let src =
+            std::fs::read_to_string(&ts).unwrap_or_else(|e| panic!("读不到 {}: {e}", ts.display()));
+        let needle = "export const REACH_MIN_DAYS = ";
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("shelf.ts 里找不到 {needle}——常量被改名了?两边一起改"))
+            + needle.len();
+        let value: i32 = src[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("shelf.ts 里的 REACH_MIN_DAYS 不是整数");
+        assert_eq!(
+            value, REACH_MIN_DAYS,
+            "前端 shelf.ts 的 REACH_MIN_DAYS={value},后端={REACH_MIN_DAYS} —— 两边必须一致"
+        );
+    }
+
+    #[test]
     fn the_traded_side_is_the_turn_side_not_the_alert_side() {
         // JM2612−JM2705 @2026-08-06 的真实形态:历年轨 3.6% 报**低位**,
         // 当年轨自 100% 退到 70.8% 拐**高位**。⚡ 是拐头给的,统计就得给高位侧

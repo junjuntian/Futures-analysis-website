@@ -316,33 +316,69 @@ digest_of() {
 # 重启它还会杀掉正在跑的作业。2026-08-13 全部搬到托管 runner 之后没有这个约束:
 # 每个作业各拿一台全新机器,不排队也不互相干扰。这一节整体退役。
 
-# 采集窗口提醒(2026-08-20 实抓:当天连部署三次,其中一次正压在 09:30 UTC 上)。
+# 定时任务窗口提醒(2026-08-20 实抓:当天连部署三次,其中一次正压在 09:30 UTC 上)。
 #
-# 部署与采集抢同一把 `/run/lock/futures-collector.lock`——迁移要 AccessExclusiveLock,
-# 和正在写 seat_history 的采集撞上就是死锁,所以部署优先、**采集整轮跳过**
-# (run-collector.sh 里的 COLLECTION_SKIPPED)。设计上没问题:下一轮会补。
-# 代价是中间那几小时页面上是缺的——上期所/郑商所有官方源不受影响,**大商所
-# (JD/JM/LH)只有新浪一条路**,那几个品种当天就少半数合约,最新一根蜡烛画不出来。
-# 运营者 2026-08-20 20:38 看生猪时正好撞在这个窗口里,当场问「怎么没有最新的蜡烛图」。
+# 部署要迁移锁(AccessExclusiveLock),和正在写 seat_history 的作业撞上就是死锁,
+# 所以两边共用 `/run/lock/futures-collector.lock`。**各作业抢不到时的反应不一样,
+# 提醒必须分开说**——统一说成「会跳过」是给错信息,而错信息比没信息更坏。
 #
-# 不拦部署:急着修线上问题时该部署还得部署。只是要知道代价,并记得部署完补跑一次
-# `/usr/local/sbin/run-futures-collector`(它是幂等的,提前跑一轮等同于把下一轮拉近)。
-collector_utc_rounds="08:00 09:30 13:30"
+#   skip  抢不到就整轮跳过,下一轮才补(run-collector,`flock -n`)。代价最大:
+#         上期所/郑商所有官方源不受影响,**大商所(JD/JM/LH)只有新浪一条路**,
+#         跳一轮那几个品种当天就少半数合约,最新一根蜡烛画不出来。
+#   wait  抢不到就等(`flock -w 900`),部署拖过 15 分钟才真丢。
+#   none  不碰这把锁,部署与它无关,不提醒。
+#
+# **时刻表从 `deploy/collector/*.cron` 现读,不在这里抄一份**——抄一份就是同一个
+# 事实两处维护,改了 cron 忘了改这里,提醒会静静地指向错误的时间。
+# 作业与抢锁行为的对应写在下面这张表里;**新增 cron 文件而没登记会当场报错**,
+# 逼你做一次判断,而不是被静默漏掉或一律乱报。
+lock_behaviour() {
+  case "$1" in
+    futures-collector)      echo skip ;;   # run-collector 用 flock -n
+    futures-official-seats) echo wait ;;   # flock -w 900
+    futures-smart-money)    echo none ;;   # 自己的 futures-smart-money.lock,与部署不互斥
+    futures-offsite-backup) echo none ;;   # pg_dump + scp,不碰这把锁
+    *)                      echo unknown ;;
+  esac
+}
+
 now_utc_min=$(( 10#$(date -u +%H) * 60 + 10#$(date -u +%M) ))
-for round in $collector_utc_rounds; do
-  r_min=$(( 10#${round%%:*} * 60 + 10#${round##*:} ))
-  gap=$(( now_utc_min - r_min ))
-  [ "$gap" -lt 0 ] && gap=$(( -gap ))
-  # ±20 分钟:采集一轮跑五六分钟,部署也要几分钟,留出两边的余量。
-  if [ "$gap" -le 20 ]; then
-    bj=$(( (r_min + 480) % 1440 ))
-    warn "$(printf '现在离采集轮 %s UTC(北京 %02d:%02d)只有 %d 分钟——部署会占住采集锁,那一轮整轮跳过' \
-      "$round" $(( bj / 60 )) $(( bj % 60 )) "$gap")"
-    warn "  大商所(JD/JM/LH)只有新浪一个源,跳过那轮当天就缺最新的蜡烛。"
-    warn "  照常部署没问题,但**部署完记得补跑** /usr/local/sbin/run-futures-collector"
-    break
+hit_skip=0
+for cron_file in deploy/collector/*.cron; do
+  [ -f "$cron_file" ] || continue
+  job=$(basename "$cron_file" .cron)
+  behaviour=$(lock_behaviour "$job")
+  if [ "$behaviour" = unknown ]; then
+    fail "定时任务 $job 没在 preflight 的 lock_behaviour 表里登记——它抢不抢部署的锁?登记完再发布"
+    continue
   fi
+  [ "$behaviour" = none ] && continue
+  # spread-warm 与 collector 同在一个 cron 文件里,行为不同但都归 collector 这档
+  # (它是 flock -w,比 skip 宽松;按更严的那档提醒不会漏报)。
+  while read -r minute hour _rest; do
+    case "$minute" in ''|[!0-9]*) continue ;; esac
+    case "$hour"   in ''|[!0-9]*) continue ;; esac
+    r_min=$(( 10#$hour * 60 + 10#$minute ))
+    gap=$(( now_utc_min - r_min ))
+    [ "$gap" -lt 0 ] && gap=$(( -gap ))
+    # ±20 分钟:一轮跑五到八分钟,部署也要几分钟,两边都留余量。
+    [ "$gap" -le 20 ] || continue
+    bj=$(( (r_min + 480) % 1440 ))
+    if [ "$behaviour" = skip ]; then
+      hit_skip=1
+      tail_text="抢不到锁就**整轮跳过**"
+    else
+      tail_text="抢不到锁会等 15 分钟,部署拖久了才丢"
+    fi
+    warn "$(printf '%02d:%02d UTC(北京 %02d:%02d)是 %s 的一轮,离现在 %d 分钟——%s' \
+      "$((r_min / 60))" "$((r_min % 60))" "$((bj / 60))" "$((bj % 60))" \
+      "$job" "$gap" "$tail_text")"
+  done < <(grep -v '^[[:space:]]*#' "$cron_file" | grep -v '^[[:space:]]*$')
 done
+if [ "$hit_skip" = 1 ]; then
+  warn "  跳掉的那一轮里,大商所(JD/JM/LH)只有新浪一个源,当天就缺最新的蜡烛。"
+  warn "  照常部署没问题,但**部署完记得补跑** /usr/local/sbin/run-futures-collector"
+fi
 
 # 上一次成功部署的提交。下面三处都要用它:LATEST 一致性门禁、
 # run_live_collection 的改动判定、引擎改动提示。**必须算在失败汇总之前**——

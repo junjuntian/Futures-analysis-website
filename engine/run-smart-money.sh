@@ -7,6 +7,29 @@ set -euo pipefail
 ROOT=/opt/futures-platform/smart-money
 TMP="$ROOT/tmp"
 WEB="$ROOT/web"
+
+# **自己跟自己不能并发**(2026-08-20 核验补)。这个脚本此前**不加任何锁**,
+# 而它有两个互不知情的调用方:
+#   · cron       08:40 / 10:10 / 14:10 UTC
+#   · 部署       DEC-099 的 ENGINE_REFRESH,引擎文件一变就立刻跑一遍
+# 一轮要跑六到八分钟,部署赶在 10:08 触发就会和 10:10 那轮叠在一起。两轮共用
+# 同一个 $TMP:后来者的 psql 导出会盖掉前者正在读的 CSV,而先跑完的那一轮
+# 结尾 `rm -f "$TMP"/*.csv` 会把另一轮的中间文件直接删掉。
+# 结果是**信号文件算错或没产出**,而 ENGINE_REFRESH 失败是有意不阻断部署的
+# (`|| true`),没人会当场发现。这是整条链上唯一没保护的作业,偏偏产出的是
+# 运营者据以下单的信号。
+#
+# 用**自己的锁**,不用 futures-collector.lock:部署在跑 ENGINE_REFRESH 时**仍然
+# 握着**那把锁(fd 8 从迁移一直开到脚本结束),共用会让部署自己的重算被自己挡住。
+#
+# 用 `-w` 等而不是 `-n` 跳过:两个调用方产出的是同一份东西,等前一轮跑完再跑
+# 一遍是幂等的;而跳过会让「引擎换了要立刻重算」这条(DEC-099)悄悄落空。
+# 900 秒 = 一轮的上限量级;真等不到就退出并留一行日志,让下一轮 cron 兜底。
+exec 7>/run/lock/futures-smart-money.lock
+if ! flock -w 900 7; then
+  echo "[smart-money] 另一轮还在跑,等了 900 秒仍拿不到锁,本轮退出" >&2
+  exit 0
+fi
 PG_CONTAINER=futures-analysis-platform-postgres-1
 PG_USER=futures_app
 PG_DB=futures_platform
