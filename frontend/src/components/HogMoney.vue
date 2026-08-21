@@ -466,7 +466,7 @@ const bySide = computed(() => {
             {{ pct(data.position.ret_pct) }}
           </div>
           <div v-else class="big gray">无持仓</div>
-          <div class="kv"><span class="k">现价</span><span class="v">{{ fmt(data.price) }} · {{ data.contract }}</span></div>
+          <div class="kv"><span class="k">收盘价</span><span class="v">{{ fmt(data.price) }} · {{ data.contract }}</span></div>
           <!-- 交割倒计时(2026-08-19 运营者要求)。2026-08-14 玻璃主力还是 FG2609、
                只剩 11 个交易日,页面对此只字不提 —— 差一天就撞线。 -->
           <div class="kv" v-if="data.delivery">

@@ -204,36 +204,43 @@ VARIETIES = {
         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
         "replay_start": "2020-06-01",   # 席位 2019-12 起,留半年预热
         "long_enabled": True,
-        # **2026-08-21 运营者拍板改成要 dip**(DEC-110)。修掉回榜前视后重扫,
-        # 两档夏普**完全相同**(都 0.36、t+0.95 vs t+0.98),而带 dip 的
-        # **回撤小 9.6 个百分点**(−52.2% vs −61.8%)、笔数少 18 笔(换手更低)。
-        # 夏普分不出高下时按回撤取 —— 这与 DEC-089/DEC-084 一路的取舍口径一致。
-        # **如实记**:这是在同一份样本上比出来的选择,不是样本外验证过的最优;
-        # 但它不是「翻开关找更高收益」,而是「同等收益下挑更浅的坑」,风险性质不同。
-        # (修前视之前那组数 0.78/0.75、−40.1%/−53.3% 已作废。)
-        "long_needs_dip": True,
+        # **不要 dip。2026-08-21 当天开过又回退了**(DEC-111)。
+        # 开的理由是「两档夏普完全相同(0.36 vs 0.36),按回撤取更浅的那个」——
+        # 那次比较用的 past 混了换月跳空(见 main_series 里 past 的注释),
+        # 修掉之后平局不存在了:
+        #   开−dip 夏普 0.36 / 累计 +47.0% / 回撤 −61.8% / 111 笔
+        #   开+dip 夏普 0.30 / 累计 +31.5% / 回撤 −52.4% /  92 笔
+        # 夏普与收益都是不要 dip 更好,只有回撤更深。**改它的那条理由被证伪了,
+        # 就退回原状**,而不是换个理由把改动留着 —— 后者是结论找依据。
+        # 回撤 −52% 与 −62% 之间的取舍如果哪天要重议,连同 dip_win 一起重扫。
+        "long_needs_dip": False,
         "out": "sa_signals.json",
-        "backtest": "93 笔 净 +44.4%/胜率 47.3%/回撤 −52.2%/夏普 0.35"
-                    "(2020-06 起,基准 −17.5%)(2026-08-21 修回榜前视 + 改要 dip 后重算,"
-                    "见 REPORT_PIT_LOOKAHEAD_v1 与 DEC-110)",
+        "backtest": "111 笔 净 +47.0%/胜率 45.9%/回撤 −61.8%/夏普 0.36"
+                    "(2020-06 起,基准 −17.5%)(2026-08-21 修回榜前视 + 修 past 跨合约"
+                    "污染后重算,见 REPORT_PIT_LOOKAHEAD_v1 与 DEC-111)",
     },
     # 鸡蛋、焦煤(2026-08-19 加)。两者的席位数据与生猪同一个起点 2023-08-11
     # (大商所),所以样本同样只有三年——**开关一律按各自的数据实测,不许照抄生猪**。
     "JD": {
         "name": "鸡蛋 JD", "unit": "元/500千克", "multiplier": 10.0,
         "replay_start": "2023-08-11",   # 大商所席位数据起点
-        # **做多开**(2026-08-20 运营者拍板)。DEC-096 换口径后重验,鸡蛋这一条翻了:
-        #   关 0.96/t+1.49 · **开+dip 1.02/t+1.78** · 开−dip 0.60/t+1.08
-        # 开着且要 dip 每项都略好(回撤 −11.5% vs −13.6%、胜率 52.0% vs 46.7%)。
-        # **我提示过这属于样本内选择**(同一份要报告成绩的样本上翻开关,DEC-090/093
-        # 记过的风险),差距也在噪音量级内 —— 运营者知情后拍板打开。别写成「实测最优」。
+        # **做多开**(2026-08-20 运营者拍板)。**排序在 2026-08-21 修完 past
+        # 跨合约污染后翻了**(DEC-111),现在是:
+        #   关 0.69 / +20.3% / 回撤 −15.3% / 16 笔
+        #   **开+dip 0.59 / +21.3% / −18.2% / 26 笔  ← 现行**
+        #   开−dip 0.39 / +14.2% / −20.4% / 32 笔
+        # 也就是说「开着且要 dip 每项都略好」这句话已经不成立 —— 关掉夏普更高、
+        # 回撤更浅,收益基本持平。**没有跟着翻是有意的**:26 笔 / 三年样本,
+        # 0.69 与 0.59 的差距在噪音量级内,跟着每次重扫翻开关就是在拟合噪音
+        # (DEC-090/093 记过)。留在这里是等运营者拿主意,不是「实测最优」。
         "long_enabled": True,
         "long_needs_dip": True,         # 开做多必须配 dip:不要 dip 掉到 0.60
         "out": "jd_signals.json",
         # **这个品种的信号没验出来**:t=1.08、胜率 38.5%、只有 13 笔。
         # 页面靠 risk_flags 自己会挂「胜率不到一半」「t<2 等于还没验证」两条。
-        "backtest": "26 笔 净 +30.9%/胜率 46.2%/回撤 −13.3%/夏普 0.79"
-                    "(2023-08 起,**低于基准 +61.6%**)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
+        "backtest": "26 笔 净 +21.3%/胜率 42.3%/回撤 −18.2%/夏普 0.59"
+                    "(2023-08 起,**低于基准 +61.6%**)(2026-08-21 修回榜前视 + 修 past "
+                    "跨合约污染后重算,见 REPORT_PIT_LOOKAHEAD_v1 与 DEC-111)",
     },
     "JM": {
         "name": "焦煤 JM", "unit": "元/吨", "multiplier": 60.0,
@@ -418,6 +425,11 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
         main.append(cur)
 
     px = price.set_index(["contract", "trade_date"])["settle"].sort_index()
+    # **只给页面展示用的收盘价**,不参与任何计价。
+    # clean_price 的 px 列已经按 DEC-073 处理过:收盘价 0 是「当天无成交」
+    # 不是价格,用结算价兜底。全套盈亏/成本仍旧一律走 settle —— 混用两种价
+    # 会让页面上的数与回测里的数对不上,那比标签写错更难查。
+    pc = price.set_index(["contract", "trade_date"])["px"].sort_index()
     # 开盘价:成交口径改成「次日开盘」之后它才是真正的成交价(DEC-090)。
     # 郑商所对无成交合约会写 0(DEC-073),按缺失处理,别当成真价格。
     po = (price.assign(_o=price["open_price"].replace(0, np.nan))
@@ -437,10 +449,21 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
         ret_o = o / oprev - 1.0 if (np.isfinite(o) and np.isfinite(oprev) and oprev > 0) else np.nan
         # 开→结算:同日同合约,天然安全。用来算「持仓到今天收盘的浮盈」。
         o2c = s / o - 1.0 if (np.isfinite(s) and np.isfinite(o) and o > 0) else np.nan
-        rows.append((d, c, s, ret, o, ret_o, o2c))
+        rows.append((d, c, s, ret, o, ret_o, o2c, pc.get((c, d), np.nan)))
     out = pd.DataFrame(rows, columns=["trade_date", "main", "settle", "ret",
-                                      "open", "ret_open", "o2c"]).set_index("trade_date")
-    out["past"] = out["settle"].pct_change(RULES["dip_win"])
+                                      "open", "ret_open", "o2c",
+                                      "close"]).set_index("trade_date")
+    # 回撤判据:**不能用 settle.pct_change** —— settle 是混合主连,换月那天
+    # 会凭空跳几个百分点(纯碱 2026-08-13 由 SA2609 换 SA2701,990 → 1031,+4.1%
+    # 全是合约价差)。旧写法把这个跳空当成真涨,于是「近 20 日在涨、没有回撤」,
+    # 把本该成立的做多挡在门外。实测符号被改写的天数:纯碱 8.6%、鸡蛋 12.2%、
+    # 生猪 10.4%、玻璃 7.5%、焦煤 5.6%。
+    #
+    # 正解是复用上面那条**已经处理过换月**的逐日 ret 连乘 —— 与本函数开头那句
+    # 「一旦跨合约相除,换月那天会凭空多出几个百分点,而且不报错」是同一条纪律,
+    # 只是 past 当初漏掉了。窗口内任一天 ret 缺失则整段为 NaN(判据从严)。
+    out["past"] = (1.0 + out["ret"]).rolling(RULES["dip_win"]).apply(
+        np.prod, raw=True) - 1.0
     # 每天的主力离自己的窗口止点还有几个交易日 —— 散户交割纪律靠它卡。
     out["dleft"] = [days_to_window_end(c, d) for c, d in zip(out["main"], out.index)]
     return out
@@ -1176,7 +1199,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "engine_fingerprint": _self_fingerprint(),
         "state": state,
         "contract": str(mkt["main"].get(d)),
-        "price": _f(mkt["settle"].get(d)),
+        # 页面那一行显示的是**收盘价**(运营者 2026-08-21 指定)。
+        # 注意它与下面所有盈亏字段不同源:盈亏一律用结算价算。
+        "price": _f(mkt["close"].get(d)),
         # 散户交割纪律的当前读数(2026-08-19 运营者要求)。界面要能一眼看出
         # 「这个主力还能拿几天」——2026-08-14 玻璃主力还是 FG2609,只剩 11 个
         # 交易日,差一天就撞线,而页面当时对此只字不提。

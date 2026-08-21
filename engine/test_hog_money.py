@@ -383,6 +383,45 @@ class TestEntrySide:
         assert 'RULES["long_enabled"]' not in body, "replay 里不该再自己判做多开关"
 
 
+class TestPastAcrossRollover:
+    """past(回撤判据)不许跨合约相除。
+
+    这是 2026-08-21 的线上事故:纯碱 8/13 主力由 SA2609 换 SA2701,结算价
+    990 → 1031(+4.1% 全是合约价差)。past 当时写的是 settle.pct_change(20),
+    把跳空当成真涨,于是「近 20 日没有回撤」把 8/20 那个做多信号挡在门外 ——
+    而按同合约算,那 20 日其实是跌的(−2.7%)。
+    """
+
+    @staticmethod
+    def _price():
+        # 老合约 A 从 100 缓慢跌;新合约 B 价位高一截(140 起),B 自己也在跌。
+        # 持仓量在第 25 天翻转,制造一次换月。
+        rows = []
+        for i, d in enumerate(pd.bdate_range("2024-01-01", periods=40)):
+            oi_a, oi_b = (900, 100) if i < 25 else (100, 900)
+            for c, px, oi in (("AA2409", 100.0 - i * 0.4, oi_a),
+                              ("AA2501", 140.0 - i * 0.5, oi_b)):
+                rows.append({"trade_date": d, "contract": c, "settlement_price": px,
+                             "close_price": px, "open_price": px,
+                             "open_interest": oi, "volume": 1,
+                             "source": "exchange"})
+        return H.clean_price(pd.DataFrame(rows))
+
+    def test_换月后不出现假涨(self):
+        mkt = H.main_series(self._price())
+        assert (mkt["main"] != mkt["main"].shift(1))[1:].any(), "夹具没造出换月,测试无效"
+        past = mkt["past"].dropna()
+        assert len(past), "past 全是 NaN,夹具太短"
+        # 两个合约都在跌,past 任何一天都不该为正。
+        assert past.max() < 0.0, f"换月跳空又混进 past 了:最大 {past.max():+.4f}"
+
+    def test_旧写法会踩这个坑(self):
+        """反证:确认夹具确实能重现事故,否则上面那条测试是空的。"""
+        mkt = H.main_series(self._price())
+        naive = mkt["settle"].pct_change(H.RULES["dip_win"]).dropna()
+        assert naive.max() > 0.0, "夹具没能重现跨合约假涨,上一条测试形同虚设"
+
+
 class TestPointInTime:
     """回榜反推 = 未来数据,当天那一格不许用(2026-08-21 修)。
 
