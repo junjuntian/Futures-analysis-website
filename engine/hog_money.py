@@ -496,17 +496,13 @@ def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 回放
 
-def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
-    """机构相对**本轮峰值**卸掉了多少 —— **只作展示,不进任何判据**。
+def unload_series(sig: pd.DataFrame, seat: pd.DataFrame,
+                  groups: pd.Series) -> pd.DataFrame:
+    """**逐日**的「机构相对本轮峰值卸掉了多少」。列:pct / peak_net / legs_now /
+    legs_at_peak,以及峰值那天的日期。
 
-    运营者 2026-08-21:「和机构反向,要等机构出货出得差不多」。这个数现在页面上
-    根本没有,他只能自己盯着净持仓曲线目测。这里把它算出来摆上去。
-
-    **为什么只摆不用**(`REPORT_SA_UNLOAD_DEEP_v1.md`):这个量作为进场判据只在
-    **纯碱、5 日窗口**上通过了全部检验(掉榜控制/逐年 5/6/非重叠/置换第 0.2 百分位);
-    玻璃样本外符号翻转、焦煤明确否、生猪鸡蛋数据不够验。**横截面上没有支持**,
-    而且现行引擎持仓中位数在 20 日以上,那个 5 日效应对它没用。
-    所以它进 payload 只为显示,`replay` 一个字都不读它。
+    页面只要最后一天(`unload_state`),研究要整条序列(拿它当出场判据做对照实验)。
+    **两者共用这一个实现** —— 今天已经栽过好几次「同一件事两处实现,一处过期」。
 
     三处必须重置,否则这个数会说谎:
 
@@ -514,7 +510,7 @@ def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> di
        「机构大幅出货」。`signal_series` 算 `chg` 时为同一个理由分组算过一遍。
     2. **方向翻转 / 归零** —— 那一轮结束了,上一轮的峰值与新一轮无关。
     3. **掉榜那天冻结,不给值** —— 掉榜是「不知道」不是「卸完了」
-       (`research/PITFALLS.md` 第 4 条)。第一版研究脚本在这里把整轮重置掉,
+       (`research/PITFALLS.md` 第 4 条)。研究脚本第一版在这里把整轮重置掉,
        于是掉榜一天峰值就重新起算,出货程度掉回 0。
 
     还要带出**在榜家数**:五家掉两家会让合计净持仓下降,而人家可能一手没动。
@@ -529,36 +525,61 @@ def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> di
         [len(set(g) & by_day.get(d, set())) if (g := groups.get(d)) else np.nan
          for d in net.index], index=net.index)
 
+    rows = []
     peak = np.nan
     peak_at = None
     peak_legs = np.nan
     cur_side = 0
     cur_grp = None
-    out = {"pct": None, "peak_net": None, "peak_date": None,
-           "legs_now": None, "legs_at_peak": None}
     for d in net.index:
         n = net.get(d, np.nan)
         grp = groups.get(d)
         if grp != cur_grp:                       # 换组:重来一轮
             cur_grp, cur_side, peak, peak_at, peak_legs = grp, 0, np.nan, None, np.nan
         if not np.isfinite(n):
+            rows.append((d, np.nan, None, None, np.nan, np.nan))
             continue                             # 掉榜=不知道:冻结,不给值
         if n == 0:
             cur_side, peak, peak_at, peak_legs = 0, np.nan, None, np.nan
+            rows.append((d, np.nan, None, None, np.nan, np.nan))
             continue
         side = int(np.sign(n))
         if side != cur_side:
             cur_side, peak, peak_at, peak_legs = side, abs(n), d, legs.get(d, np.nan)
         elif abs(n) > peak:
             peak, peak_at, peak_legs = abs(n), d, legs.get(d, np.nan)
-        out = {
-            "pct": round(1.0 - abs(n) / peak, 3) if peak > 0 else None,
-            "peak_net": int(np.sign(n) * peak),
-            "peak_date": peak_at.strftime("%Y-%m-%d") if peak_at is not None else None,
-            "legs_now": int(legs.get(d)) if np.isfinite(legs.get(d, np.nan)) else None,
-            "legs_at_peak": int(peak_legs) if np.isfinite(peak_legs) else None,
-        }
+        rows.append((
+            d,
+            round(1.0 - abs(n) / peak, 3) if peak > 0 else np.nan,
+            int(np.sign(n) * peak),
+            peak_at.strftime("%Y-%m-%d") if peak_at is not None else None,
+            legs.get(d, np.nan),
+            peak_legs,
+        ))
+    out = pd.DataFrame(
+        rows, columns=["date", "pct", "peak_net", "peak_date", "legs_now", "legs_at_peak"]
+    ).set_index("date")
     return out
+
+
+def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
+    """页面要的那一格:**最后一个算得出来的**那天的出货程度。
+
+    **只作展示,不进任何判据**(`replay` 一个字都不读它)。作为进场判据它只在
+    纯碱 5 日窗口上通过检验(`research/REPORT_SA_UNLOAD_DEEP_v1.md`),
+    玻璃样本外符号翻转、焦煤明确否 —— 横截面上没有支持。
+    """
+    ser = unload_series(sig, seat, groups)
+    valid = ser[ser["pct"].notna()]
+    if valid.empty:
+        return {"pct": None, "peak_net": None, "peak_date": None,
+                "legs_now": None, "legs_at_peak": None}
+    r = valid.iloc[-1]
+    def _i(v):
+        return int(v) if v is not None and np.isfinite(v) else None
+    return {"pct": float(r["pct"]), "peak_net": _i(r["peak_net"]),
+            "peak_date": r["peak_date"],
+            "legs_now": _i(r["legs_now"]), "legs_at_peak": _i(r["legs_at_peak"])}
 
 
 def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -584,8 +605,19 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
 def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
            retail: pd.DataFrame | None = None,
            op: pd.DataFrame | None = None,
-           st: pd.DataFrame | None = None) -> tuple[list[dict], pd.Series, pd.Series]:
+           st: pd.DataFrame | None = None,
+           extra_exit: pd.Series | None = None,
+           disable_reverse: bool = False) -> tuple[list[dict], pd.Series, pd.Series]:
     """全量回放历史信号。
+
+    `extra_exit` / `disable_reverse` 是**给研究做对照实验用的**,两个都默认关闭,
+    生产路径一个字节都不变(`test_两个研究参数默认关闭时与不传完全一致` 钉住)。
+    加在这里而不是另写一份 replay:今天已经栽过好几次「同一件事两处实现」,
+    出场口径一分叉,研究结论就与线上跑的不是同一套东西了。
+
+      · `extra_exit` —— 逐日布尔序列,为真那天挂出场(理由记「外部」)。
+        优先级排在交割纪律与止损**之后**:那两条是「不能再拿了」,不容替换。
+      · `disable_reverse` —— 关掉「反向」这条出场,用来做「换掉它」的对照。
 
     **成交口径:信号日收盘出信号,次日开盘成交**(DEC-090)。席位持仓排名是收盘之后
     才公布的(大商所约 15:30-16:00、郑商所约 16:26),按信号日结算价成交做不到。
@@ -656,8 +688,10 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 reason = "止损"
             elif i - entry_i >= RULES["max_hold"]:
                 reason = "持满"
-            elif np.isfinite(z) and side * z <= -RULES["enter"]:
+            elif (not disable_reverse) and np.isfinite(z) and side * z <= -RULES["enter"]:
                 reason = "反向"
+            elif extra_exit is not None and bool(extra_exit.get(d, False)):
+                reason = "外部"
             elif np.isfinite(z) and abs(z) <= RULES["exit_z"] and side * z <= 0:
                 reason = "消退"
         # 出场只能在**次日开盘**成交。那天没成交价就继续持有,理由挂着等到能成交

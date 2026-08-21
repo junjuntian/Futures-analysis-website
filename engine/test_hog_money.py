@@ -338,6 +338,66 @@ class TestNoOverlap:
 # ---- 规则本身 -----------------------------------------------------------
 
 
+class TestResearchHooks:
+    """`replay` 的两个研究参数 —— **它们存在的唯一前提是不影响生产路径**。"""
+
+    def test_两个研究参数默认关闭时与不传完全一致(self):
+        """加参数最怕的就是「顺手改了默认行为」。这条逐笔比对。
+
+        加在 replay 里而不是另写一份研究版:今天已经栽过好几次「同一件事两处
+        实现,一处过期」。代价就是必须有这条测试守着。
+        """
+        idx = bdays("2026-03-02", 12)
+        rng = np.random.default_rng(20260821)
+        opens = 1000 + np.cumsum(rng.normal(0, 8, len(idx)))
+        mkt, op, st = frames(idx, "LH2611", opens)
+        z = [-3.0, QUIET, QUIET, 3.0, QUIET, -3.0, QUIET, QUIET, 3.0, QUIET, QUIET, QUIET]
+        base = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        same = H.replay(signals(idx, z), mkt, op=op, st=st,
+                        extra_exit=None, disable_reverse=False)[0]
+        assert base == same
+
+    def test_外部出场能把仓位提前赶走(self):
+        idx = bdays("2026-03-02", 10)
+        mkt, op, st = frames(idx, "LH2611", [100.0] * 10)
+        # 全程强做空信号:不加干预会一直持有到末尾。
+        held = H.replay(signals(idx, -3.0), mkt, op=op, st=st)[0]
+        assert held[0]["exit_date"] is None, "基准应当是持有中"
+
+        kick = pd.Series(False, index=idx)
+        kick.iloc[4] = True
+        out = H.replay(signals(idx, -3.0), mkt, op=op, st=st, extra_exit=kick)[0]
+        assert out[0]["exit_reason"] == "外部"
+        assert out[0]["exit_date"] == idx[4].strftime("%Y-%m-%d")
+
+    def test_同一天两个条件都成立时止损优先于外部(self):
+        """交割纪律与止损是「不能再拿了」,不是择时判断,外部信号不容替换。
+
+        **优先级只在同一天多个条件同时成立时才有意义** —— 第一版把 extra_exit
+        全设成真,结果第一个持仓日就走「外部」,根本没轮到止损,那测的不是优先级。
+        这里让止损与外部**落在同一天**。
+        """
+        idx = bdays("2026-03-02", 6)
+        # 次日开盘 100 建空;第 2 天涨到 110 → 浮亏 10%,越过 6% 止损线。
+        mkt, op, st = frames(idx, "LH2611", [90.0, 100.0, 110.0, 110.0, 110.0, 110.0])
+        kick = pd.Series(False, index=idx)
+        kick.iloc[2] = True                     # 与止损同一天
+        trades = H.replay(signals(idx, -3.0), mkt, op=op, st=st, extra_exit=kick)[0]
+        closed = [t for t in trades if t["exit_date"]]
+        assert closed, "应当有平仓"
+        assert closed[0]["exit_reason"] == "止损", closed[0]["exit_reason"]
+        assert closed[0]["exit_date"] == idx[2].strftime("%Y-%m-%d")
+
+    def test_关掉反向之后那条理由不再出现(self):
+        idx = bdays("2026-03-02", 8)
+        mkt, op, st = frames(idx, "LH2611", [100.0] * 8)
+        z = [-3.0, QUIET, 3.0, 3.0, QUIET, QUIET, QUIET, QUIET]
+        on = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        assert any(t["exit_reason"] == "反向" for t in on), "基准里应当有反向出场"
+        off = H.replay(signals(idx, z), mkt, op=op, st=st, disable_reverse=True)[0]
+        assert not any(t["exit_reason"] == "反向" for t in off)
+
+
 class TestUnloadState:
     """机构卸了多少 —— **只作展示的维度**,三处重置错了都不会报错。
 
