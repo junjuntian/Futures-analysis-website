@@ -15,7 +15,7 @@ use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
 use domain::seat_cost::{DailyPosition, build_cost_series, build_variety_series};
-use domain::seat_net_position::{SeatContractDay, build_net_position_series, cut_at};
+use domain::seat_net_position::{SeatContractDay, as_of_day, build_net_position_series};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -1543,16 +1543,13 @@ pub async fn query_seat_net_position(
             })
             .collect();
 
-        // 截到所选交易日为止。**摘要、分腿、K 线、净持仓与累计盈亏必须停在同一天**，
-        // 只改摘要那一行会让页面上同时存在两个「今天」。累计盈亏本就是逐日累积的，
-        // 截到哪天就是那天收盘的累计值，不用另算。
-        let series = cut_at(
-            build_net_position_series(&observations, &members, &calendar),
-            as_of,
-        );
+        let series = build_net_position_series(&observations, &members, &calendar);
         // 「最新一天」在这里定一次就够：`days` 出去之后 trade_date 已经是字符串，
         // 让前端再判一次哪天算最新，两边就有了各自的口径。
-        let latest_date = series.last().map(|day| day.trade_date);
+        // 所选交易日对应的那一天:摘要那行与各家分腿看它,**序列本身一天不动**。
+        // 运营者要的是「一边看某天的各家明细、一边保留完整的图」——K 线、净持仓
+        // 曲线、累计盈亏都是上下文。第一版把序列整条截掉,被他当场否掉。
+        let latest_date = as_of_day(&series, as_of);
         if let Some(date) = latest_date {
             latest_trade_date = Some(date.to_string());
             latest_members = members

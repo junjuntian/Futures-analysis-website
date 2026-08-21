@@ -116,24 +116,29 @@ pub fn build_net_position_series(
         .collect()
 }
 
-/// 把序列截到某个交易日为止(含当天)。
+/// 选中那个交易日在序列里对应的那一天(含当天;没有正好那天就退到之前最近的一天)。
 ///
 /// 席位页顶上写着「选几个会员和一个交易日,**两个子页共用这组选择**」,但净持仓
-/// 这一路从来没接过日期(`SeatNetPositionQuery` 里根本没有这个字段),永远报序列
-/// 最后一天。运营者 2026-08-20 选了 8.19,摘要那行仍写 2026-08-20,当场发现。
+/// 这一路从来没接过日期(`SeatNetPositionQuery` 里根本没有这个字段),摘要永远报
+/// 序列最后一天。运营者 2026-08-20 选了 8.19,摘要那行仍写 2026-08-20,当场发现。
 ///
-/// **截断而不是只改摘要那一行**:摘要、各家分腿、K 线、净持仓曲线、累计盈亏
-/// 全都要停在同一天,否则页面上会同时存在两个「今天」。累计盈亏本来就是逐日
-/// 累积的,截到哪天就是那天收盘的累计值,不需要另算。
+/// **只决定「摘要与各家分腿看哪一天」,不动序列本身。**
+/// 我第一版把整条序列截到选中日为止,运营者当场否掉:
+/// 「应该只改净持仓的多单空单显示,就是改上面的文字,方便我看各家情况,其他全部不用变」。
+/// 他要的是**一边看某天的各家明细、一边保留完整的图**——K 线、净持仓曲线、累计盈亏
+/// 都是上下文,截掉等于把上下文一起拿走了。
 ///
-/// `as_of` 为 `None` 时原样返回 —— 没选日期就是「看到最新」。
-pub fn cut_at(series: Vec<NetPositionDay>, as_of: Option<Date>) -> Vec<NetPositionDay> {
+/// `as_of` 为 `None` 时给最后一天 —— 没选日期就是「看最新」。
+/// 选中日早于全部数据时给 `None`:那天他确实没有持仓可看,摘要留空比退回最新诚实
+/// (退回最新等于默默无视选择,那正是这次要修的毛病)。
+pub fn as_of_day(series: &[NetPositionDay], as_of: Option<Date>) -> Option<Date> {
     match as_of {
         Some(end) => series
-            .into_iter()
-            .filter(|day| day.trade_date <= end)
-            .collect(),
-        None => series,
+            .iter()
+            .rev()
+            .find(|day| day.trade_date <= end)
+            .map(|day| day.trade_date),
+        None => series.last().map(|day| day.trade_date),
     }
 }
 
@@ -314,30 +319,39 @@ mod tests {
     }
 
     #[test]
-    fn 截到选中那天为止且包含当天() {
-        let cut = cut_at(series_of(&[3, 4, 5, 6, 7]), Some(day(5)));
-        let dates: Vec<u8> = cut.iter().map(|d| d.trade_date.day()).collect();
-        assert_eq!(dates, vec![3, 4, 5], "选中那天要留下,不是截在它前面");
+    fn 选中当天就取当天() {
+        let s = series_of(&[3, 4, 5, 6, 7]);
+        assert_eq!(as_of_day(&s, Some(day(5))), Some(day(5)));
     }
 
     #[test]
-    fn 没选日期就原样返回() {
-        // 没选 = 看最新,这是默认行为,不能因为加了参数就改掉。
-        let cut = cut_at(series_of(&[3, 4, 5]), None);
-        assert_eq!(cut.len(), 3);
+    fn 没选日期就取最后一天() {
+        // 没选 = 看最新,这是默认行为,加了参数也不能把它改掉。
+        let s = series_of(&[3, 4, 5]);
+        assert_eq!(as_of_day(&s, None), Some(day(5)));
     }
 
     #[test]
-    fn 选了非交易日就退到它之前最近的一天() {
-        // 用 `<=` 而不是相等:选到周末或休市日时,给「截至那时」而不是给一张空表。
-        let cut = cut_at(series_of(&[3, 4, 7, 10]), Some(day(9)));
-        let dates: Vec<u8> = cut.iter().map(|d| d.trade_date.day()).collect();
-        assert_eq!(dates, vec![3, 4, 7]);
+    fn 选了非交易日就退到之前最近的一天() {
+        // 用 `<=` 而不是相等:选到周末或休市日时给「截至那时」,不是给一片空白。
+        let s = series_of(&[3, 4, 7, 10]);
+        assert_eq!(as_of_day(&s, Some(day(9))), Some(day(7)));
     }
 
     #[test]
-    fn 选的日期早于全部数据时给空表而不是给最新那天() {
-        // 这里宁可空:给「最新」等于默默无视用户的选择,而那正是这次要修的毛病。
-        assert!(cut_at(series_of(&[5, 6]), Some(day(1))).is_empty());
+    fn 选的日期早于全部数据时给空而不是退回最新() {
+        // 退回最新等于默默无视用户的选择,而那正是这次要修的毛病。
+        let s = series_of(&[5, 6]);
+        assert_eq!(as_of_day(&s, Some(day(1))), None);
+    }
+
+    #[test]
+    fn 不动序列本身() {
+        // **这条钉的是范围**:运营者要的是只改摘要那行,图要保持完整。
+        // 第一版把整条序列截掉被他当场否掉,这里防止有人再截一次。
+        let s = series_of(&[3, 4, 5, 6, 7]);
+        let before = s.len();
+        let _ = as_of_day(&s, Some(day(4)));
+        assert_eq!(s.len(), before, "as_of_day 只能挑一天出来,不许改动序列");
     }
 }

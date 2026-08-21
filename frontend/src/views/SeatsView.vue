@@ -695,7 +695,14 @@ function tooltipBody(index: number, head: string[] = []) {
  * 现在什么情况」。**不含盈亏**：他明确说了盈利不用显示在这里。
  */
 const latest = computed(() => {
-  const day = days.value[days.value.length - 1]
+  // **跟后端定的 as-of 日走,不取序列最后一天。**
+  // 交易日选 8.19 时这行要显示 8.19 的各家情况,而**图保持完整历史不截断**——
+  // 运营者 2026-08-21 的原话:「应该只改净持仓的多单空单显示,就是改上面的文字,
+  // 方便我看各家情况,其他全部不用变」。哪天算 as-of 由后端 `as_of_day` 一处决定,
+  // 摘要与下面那排各家分腿都读它,两半不会各判各的。
+  // **不给兜底**:后端没给 as-of 日,说明选中日早于全部数据,那天他确实没有持仓
+  // 可看。这时退回显示最新一天等于默默无视选择,而那正是这次要修的毛病。
+  const day = days.value.find((d) => d.trade_date === latestMembersDate.value)
   if (!day) return null
   const net = Number(day.net_position)
   const parts: Array<{ text: string; tone?: 'up' | 'down' | 'warn' }> = []
