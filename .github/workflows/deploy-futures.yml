@@ -44,7 +44,12 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # write 是给最后那一步「自动补 LATEST」用的(见工作流末尾)。
+  # **这是一次权限上调,理由要写清**:这个工作流只能手动 dispatch 触发,
+  # 而它跑在自建 runner 上、本来就握着生产的 SSH 私钥 —— 再给仓库写权限是
+  # 边际增量,不是新开一个口子。写入范围由那一步自己再卡一道:
+  # 只允许改 docs/handoffs/LATEST.md,diff 碰到别的文件就中止。
+  contents: write
   packages: read
 
 concurrency:
@@ -1297,6 +1302,66 @@ jobs:
             echo "- acceptance_sha=${{ inputs.acceptance_sha }}"
             sed 's/^/- /' "${RUNNER_TEMP}/deployment-report.txt"
           } >>"${GITHUB_STEP_SUMMARY}"
+
+      # 部署成功之后把 LATEST 那一行改成刚部署的 SHA。
+      #
+      # **为什么要自动化**:DEC-100 那道门禁 2026-08-21 一天之内拦了我两次,
+      # 两次都是同一个疏漏 —— 部署完忘了补这一行。门禁按设计工作了,但它拦住的
+      # 是「下一次部署」,中间那段时间 LATEST 一直指着旧 SHA,新会话接手就会
+      # 照着错的现状干活。这一步本来就是机械的,不该靠人记。
+      #
+      # 三道自保,任何一条不满足就跳过而不是硬来:
+      #   · 分支 HEAD 必须仍等于本次部署的 SHA —— 不等说明期间有人推了提交,
+      #     让他自己收口,别在这里制造冲突;
+      #   · diff 只允许碰 docs/handoffs/LATEST.md;
+      #   · `continue-on-error` —— 部署已经成功了,不能因为一个文档提交把它判失败。
+      - name: Update LATEST to the deployed SHA
+        if: success()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYED: ${{ inputs.acceptance_sha }}
+        run: |
+          set -euo pipefail
+          file=docs/handoffs/LATEST.md
+          short="${DEPLOYED:0:7}"
+          current=$(grep -oE '生产 = `[0-9a-f]{7,40}`' "$file" | head -1 |
+                    grep -oE '[0-9a-f]{7,40}' || true)
+          if [ -z "$current" ]; then
+            echo "LATEST_AUTOFIX skipped 读不出 LATEST 里的 SHA,格式变了?人工处理" >&2
+            exit 0
+          fi
+          if [ "$current" = "$short" ]; then
+            echo "LATEST_AUTOFIX noop 已经是 $short"
+            exit 0
+          fi
+          git fetch --quiet origin "${{ github.ref_name }}"
+          head_now=$(git rev-parse "origin/${{ github.ref_name }}")
+          if [ "$head_now" != "$DEPLOYED" ]; then
+            echo "LATEST_AUTOFIX skipped 分支已前移(${head_now:0:7} ≠ ${short}),交给推提交的人收口" >&2
+            exit 0
+          fi
+          today=$(date -u +%Y-%m-%d)
+          sed -i "s/${current}/${short}/g" "$file"
+          # 顺带把那一行的日期也刷新 —— 它写的是「这个 SHA 什么时候上的生产」。
+          sed -i "s/\(生产 = \`${short}\`\*\*\)([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\})/\1(${today})/" "$file"
+          touched=$(git diff --name-only)
+          if [ -z "$touched" ]; then
+            echo "LATEST_AUTOFIX noop 内容没变"
+            exit 0
+          fi
+          if [ "$touched" != "$file" ]; then
+            echo "LATEST_AUTOFIX aborted 改动碰到了别的文件:$touched" >&2
+            git checkout -- .
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "docs: LATEST 记为已部署的 ${short}(部署流水线自动补)" -- "$file"
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+              "HEAD:${{ github.ref_name }}"
+          echo "LATEST_AUTOFIX ok ${current} → ${short}"
 
       - name: Remove runner SSH material
         if: always()

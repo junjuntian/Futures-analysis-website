@@ -3230,3 +3230,156 @@ DEC 编号 87~105 无缺号且递增(98 那个是「附录」不是撞号);LATES
 全是官方行时新旧口径一模一样。**改回去不会报错,只会让回测重新变好看** ——
 这几条是唯一的屏障。
 
+## DEC-110 纯碱做多改成要回撤;部署流水线自动补 LATEST(2026-08-21)
+
+运营者同一轮拍了四件事,两件改代码、两件维持现状。
+
+### 纯碱  由 False 改 True
+
+修掉回榜前视后重扫,两档**夏普完全相同**(开−dip 0.36/t+0.98、开+dip 0.36/t+0.95),
+而带 dip 的**回撤小 9.6 个百分点**(−52.2% vs −61.8%)、笔数少 18 笔(换手更低)。
+**夏普分不出高下时按回撤取。** 代码注释里从 DEC-090 起就标着「这一条值得复议」。
+
+如实记两点:①这是在同一份样本上比出来的,不是样本外验证过的最优;
+②但它**不是「翻开关找更高收益」,而是「同等收益下挑更浅的坑」** —— 风险性质不同,
+不适用 DEC-096 鸡蛋那次「样本内选择」的同一条警告。
+
+新数字:**93 笔 净 +44.4%/胜率 47.3%/回撤 −52.2%/夏普 0.35**(基准 −17.5%)。
+
+### 部署流水线自动补 LATEST
+
+DEC-100 那道门禁 2026-08-21 一天之内拦了我**两次**,两次都是同一个疏漏 ——
+部署完忘了补 LATEST。门禁按设计工作了,但它拦的是**下一次部署**,
+中间那段时间 LATEST 一直指着旧 SHA,新会话接手就照着错的现状干活。
+这一步本来就是机械的,不该靠人记。
+
+做成部署成功后的自动步骤。**权限从  上调到 ** ——
+理由要写清:这个工作流只能手动 dispatch 触发,而它跑在自建 runner 上、
+本来就握着生产的 SSH 私钥,再给仓库写权限是边际增量,不是新开一个口子。
+
+三道自保,任何一条不满足就**跳过而不是硬来**:
+- 分支 HEAD 必须仍等于本次部署的 SHA —— 不等说明期间有人推了提交,让他自己收口;
+- diff --git a/.github/workflows/deploy-futures.yml b/.github/workflows/deploy-futures.yml
+index 6b42a61..11ae634 100644
+--- a/.github/workflows/deploy-futures.yml
++++ b/.github/workflows/deploy-futures.yml
+@@ -44,7 +44,12 @@ on:
+         type: string
+ 
+ permissions:
+-  contents: read
++  # write 是给最后那一步「自动补 LATEST」用的(见工作流末尾)。
++  # **这是一次权限上调,理由要写清**:这个工作流只能手动 dispatch 触发,
++  # 而它跑在自建 runner 上、本来就握着生产的 SSH 私钥 —— 再给仓库写权限是
++  # 边际增量,不是新开一个口子。写入范围由那一步自己再卡一道:
++  # 只允许改 docs/handoffs/LATEST.md,diff 碰到别的文件就中止。
++  contents: write
+   packages: read
+ 
+ concurrency:
+@@ -1298,6 +1303,66 @@ jobs:
+             sed 's/^/- /' "${RUNNER_TEMP}/deployment-report.txt"
+           } >>"${GITHUB_STEP_SUMMARY}"
+ 
++      # 部署成功之后把 LATEST 那一行改成刚部署的 SHA。
++      #
++      # **为什么要自动化**:DEC-100 那道门禁 2026-08-21 一天之内拦了我两次,
++      # 两次都是同一个疏漏 —— 部署完忘了补这一行。门禁按设计工作了,但它拦住的
++      # 是「下一次部署」,中间那段时间 LATEST 一直指着旧 SHA,新会话接手就会
++      # 照着错的现状干活。这一步本来就是机械的,不该靠人记。
++      #
++      # 三道自保,任何一条不满足就跳过而不是硬来:
++      #   · 分支 HEAD 必须仍等于本次部署的 SHA —— 不等说明期间有人推了提交,
++      #     让他自己收口,别在这里制造冲突;
++      #   · diff 只允许碰 docs/handoffs/LATEST.md;
++      #   · `continue-on-error` —— 部署已经成功了,不能因为一个文档提交把它判失败。
++      - name: Update LATEST to the deployed SHA
++        if: success()
++        continue-on-error: true
++        shell: bash
++        env:
++          GH_TOKEN: ${{ github.token }}
++          DEPLOYED: ${{ inputs.acceptance_sha }}
++        run: |
++          set -euo pipefail
++          file=docs/handoffs/LATEST.md
++          short="${DEPLOYED:0:7}"
++          current=$(grep -oE '生产 = `[0-9a-f]{7,40}`' "$file" | head -1 |
++                    grep -oE '[0-9a-f]{7,40}' || true)
++          if [ -z "$current" ]; then
++            echo "LATEST_AUTOFIX skipped 读不出 LATEST 里的 SHA,格式变了?人工处理" >&2
++            exit 0
++          fi
++          if [ "$current" = "$short" ]; then
++            echo "LATEST_AUTOFIX noop 已经是 $short"
++            exit 0
++          fi
++          git fetch --quiet origin "${{ github.ref_name }}"
++          head_now=$(git rev-parse "origin/${{ github.ref_name }}")
++          if [ "$head_now" != "$DEPLOYED" ]; then
++            echo "LATEST_AUTOFIX skipped 分支已前移(${head_now:0:7} ≠ ${short}),交给推提交的人收口" >&2
++            exit 0
++          fi
++          today=$(date -u +%Y-%m-%d)
++          sed -i "s/${current}/${short}/g" "$file"
++          # 顺带把那一行的日期也刷新 —— 它写的是「这个 SHA 什么时候上的生产」。
++          sed -i "s/\(生产 = \`${short}\`\*\*\)([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\})/(${today})/" "$file"
++          touched=$(git diff --name-only)
++          if [ -z "$touched" ]; then
++            echo "LATEST_AUTOFIX noop 内容没变"
++            exit 0
++          fi
++          if [ "$touched" != "$file" ]; then
++            echo "LATEST_AUTOFIX aborted 改动碰到了别的文件:$touched" >&2
++            git checkout -- .
++            exit 0
++          fi
++          git -c user.name="github-actions[bot]" +              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" +              commit -q -m "docs: LATEST 记为已部署的 ${short}(部署流水线自动补)" -- "$file"
++          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" +              "HEAD:${{ github.ref_name }}"
++          echo "LATEST_AUTOFIX ok ${current} → ${short}"
++
+       - name: Remove runner SSH material
+         if: always()
+         shell: bash
+diff --git a/engine/hog_money.py b/engine/hog_money.py
+index e8e7ace..e1bad10 100644
+--- a/engine/hog_money.py
++++ b/engine/hog_money.py
+@@ -204,12 +204,18 @@ VARIETIES = {
+         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
+         "replay_start": "2020-06-01",   # 席位 2019-12 起,留半年预热
+         "long_enabled": True,
+-        # 带 dip 的夏普几乎一样(0.78 vs 0.75)但**回撤好很多**(−40.1% vs −53.3%),
+-        # DEC-090 换成次日开盘成交之后才显出来。这一条值得复议,现状是维持不带 dip。
+-        "long_needs_dip": False,
++        # **2026-08-21 运营者拍板改成要 dip**(DEC-110)。修掉回榜前视后重扫,
++        # 两档夏普**完全相同**(都 0.36、t+0.95 vs t+0.98),而带 dip 的
++        # **回撤小 9.6 个百分点**(−52.2% vs −61.8%)、笔数少 18 笔(换手更低)。
++        # 夏普分不出高下时按回撤取 —— 这与 DEC-089/DEC-084 一路的取舍口径一致。
++        # **如实记**:这是在同一份样本上比出来的选择,不是样本外验证过的最优;
++        # 但它不是「翻开关找更高收益」,而是「同等收益下挑更浅的坑」,风险性质不同。
++        # (修前视之前那组数 0.78/0.75、−40.1%/−53.3% 已作废。)
++        "long_needs_dip": True,
+         "out": "sa_signals.json",
+-        "backtest": "111 笔 净 +47.0%/胜率 45.9%/回撤 −61.8%/夏普 **0.36**"
+-                    "(2020-06 起,基准 −17.5%)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
++        "backtest": "93 笔 净 +44.4%/胜率 47.3%/回撤 −52.2%/夏普 0.35"
++                    "(2020-06 起,基准 −17.5%)(2026-08-21 修回榜前视 + 改要 dip 后重算,"
++                    "见 REPORT_PIT_LOOKAHEAD_v1 与 DEC-110)",
+     },
+     # 鸡蛋、焦煤(2026-08-19 加)。两者的席位数据与生猪同一个起点 2023-08-11
+     # (大商所),所以样本同样只有三年——**开关一律按各自的数据实测,不许照抄生猪**。 只允许碰 ,碰到别的文件就  回滚;
+-  —— 部署已经成功,不能因为一个文档提交把它判失败。
+
+本地把三种情形都验过:SHA 不同时改 SHA 并刷新日期、重跑 noop、
+LATEST 格式被破坏时读不出 SHA 直接退出且不动文件。
+
+### 维持现状的两件(运营者拍板)
+
+- **「机构合计流向」强度条不改量程**(仍按进场门槛缩放)。
+- **鸡蛋与生猪的做多开关不动** —— 重扫结果它们现行配置就是三档里最优的
+  (生猪 关 2.37 vs 开+dip 1.90 / 开−dip 1.60;鸡蛋 开+dip 0.80 vs 关 0.70 /
+  开−dip 0.40),换成别的只会更差。
+  两者绝对收益仍低于「恒定满仓做空」基准(生猪 +87.4% vs +103.5%、
+  鸡蛋 +30.9% vs +62.7%),这一点未变,也未因此下架。
+
