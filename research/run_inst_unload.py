@@ -54,8 +54,15 @@ def retrace(net: pd.Series) -> pd.Series:
     peak = np.nan
     cur = 0
     for i, n in enumerate(net.to_numpy()):
-        if not np.isfinite(n) or n == 0:
-            peak, cur = np.nan, 0
+        if not np.isfinite(n):
+            # **掉榜那天是「不知道」,不是「这一轮结束了」**(research/PITFALLS 第 4 条
+            # 落在这个派生指标上)。第一版在这里把 peak/cur 一起清掉,于是掉榜一天,
+            # 峰值就从下一个观测值重新起算,出货程度掉回 0 —— 哪怕他实际已卸掉八成。
+            # 排除 reboard_inferred 之后缺口更多,这个 bug 咬得更狠。
+            # 正确做法:**冻结**这一轮的峰值与方向,当天不给值(不知道就是不知道)。
+            continue
+        if n == 0:
+            peak, cur = np.nan, 0      # 真平了,这一轮才算结束
             continue
         s = int(np.sign(n))
         if s != cur:
