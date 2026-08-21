@@ -1,9 +1,17 @@
 """拿「机构出货」当出场信号,跟现有的「散户反向」做对照。
 
-**为什么试这个**(`REPORT_PICK_ROUND_v1` 之后):量过引擎的出场理由,几乎全是
-「反向」—— 生猪 15/15、玻璃 194/235、纯碱 105/129。引擎的行为高度集中在这一条
-判据上。而这条线索最扎实的产物恰好是:**机构的出货是一个独立、可观测的过程**
-(出货期中位 4~5 天,`unload_series` 已经在算)。
+**为什么试这个**:量过引擎的出场理由,几乎全是「反向」—— 生猪 15/15、
+玻璃 194/235、纯碱 105/129。引擎的行为高度集中在这一条判据上。而这条线索最扎实
+的产物恰好是:**机构的出货是一个独立、可观测的过程**(出货期中位 4~5 天,
+`unload_series` 已经在算)。
+
+**这是第二次跑。** 第一次(2026-08-21 上午)跑到一半停了 —— 当时发现基准本身
+建立在**含回榜前视**的口径上(DEC-108),基准错了对比就没意义。现在引擎已经修成
+PIT 口径、纯碱也改成要 dip(DEC-110),基准是干净的,重跑。
+
+**先复现生产,对不上就中止。** 上一次正是靠这条发现前视的:我的基准跑出玻璃
+−12.4%/235 笔而文档记 +442%/214 笔,差得离谱 → 一查才知道漏了生产会做的事。
+这次一开始就断言。
 
 **先说清楚这条路上已经有过的负结果**,免得重复劳动:
   · 六轮系统性寻优含 **645 格出场搜索**,全部返回负结果(`research/PITFALLS.md` 5);
@@ -29,24 +37,41 @@ import pathlib
 import sys
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "engine"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import hog_money as H  # noqa: E402
-from run_inst_cost import load  # noqa: E402
+
+DATA = pathlib.Path(__file__).resolve().parent / "data"
+
+# 生产基准:笔数与逐笔复利累计(不扣费,与 payload 的 stats.cum_pct 同口径)。
+# **对不上就中止** —— 基准错了后面全白做。
+EXPECT = {"LH": (18, 90.8), "FG": (228, 69.8), "SA": (93, 58.7),
+          "JD": (26, 34.3), "JM": (21, 67.7)}
 
 CODES = ["LH", "FG", "SA", "JD", "JM"]
 GRID = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]      # 卸到多少算「出货差不多了」
 
 
 def prep(code: str):
-    H.use(code)
-    seat, price, _ = load(code)
+    """**逐字照抄 `run_one` 的序列** —— 口径一分叉,这个对比就没有意义了。
+
+    注意 `clean_seat` 吃的是**全量**席位数据(含 `reboard_inferred`):
+    PIT 口径在引擎内部处理(DEC-108 的 `net_off`),研究这边不该再自己排一遍,
+    那样排出来的不是生产在跑的东西。第一次跑这个实验就是这么错的。
+    """
+    v = H.use(code)
+    H.CURRENT = {"code": code, **v}
+    low = code.lower()
+    price = H.clean_price(pd.read_csv(DATA / f"{low}_price.csv.gz"))
+    seat = H.clean_seat(pd.read_csv(DATA / f"{low}_seat.csv.gz"))
     mkt = H.main_series(price)
+    op, st = H.contract_prices(price)
+    mkt = mkt[mkt.index >= pd.Timestamp(H.RULES["replay_start"])]
     groups, _, _ = H.rolling_groups(seat, price, mkt.index)
     sig = H.signal_series(seat, groups)
     rdf, _ = H.retail_series(seat, mkt.index)
-    op, st = H.contract_prices(price)
     unload = H.unload_series(sig, seat, groups)["pct"]
     return sig, mkt, rdf, op, st, unload
 
@@ -87,6 +112,12 @@ def main() -> None:
         base = run(bundle, "A", None)
         base_cum, base_n = perf(base)
         base_yr = by_year(base)
+        exp_n, exp_cum = EXPECT[code]
+        if base_n != exp_n or abs(base_cum - exp_cum) > 0.3:
+            print(f"\n**中止**:{code} 的基准没复现生产 —— "
+                  f"跑出 {base_n} 笔/{base_cum:+.1f}%,生产是 {exp_n} 笔/{exp_cum:+.1f}%。"
+                  f"基准错了后面全白做。")
+            continue
         print(f"\n{'=' * 92}")
         print(f"{H.VARIETIES[code]['name']}   基准A(反向出场) 累计 {base_cum:+.1f}% / {base_n} 笔")
         print("=" * 92)
