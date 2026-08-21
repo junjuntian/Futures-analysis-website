@@ -656,6 +656,34 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
     return retail["rz"].where(resonate), retail["rz"]
 
 
+def entry_side(ze: float, past: float) -> tuple[int, str | None]:
+    """今天这个信号会往**哪个方向**进场,进不了的话卡在哪一条。
+
+    返回 `(方向, 挡住的理由)`;方向 −1 做空 / 0 不进 / +1 做多。
+
+    **`replay` 与 `build_payload` 共用这一个。** 进场判据在两处各写一份,页面
+    迟早与实际不一致 —— DEC-104 就是这么来的:前端照着一句过期注释显示了机构
+    那个数,而引擎比的是散户那个数,页面上写着「需达 1(现 2.09)」却又显示无持仓。
+    这次运营者要求「一触发就显示做多还是做空」,更不能让前端自己推一遍。
+
+    这里**不判**交割窗口与次日有没有开盘价 —— 那两条要知道持仓合约、要能取到
+    次日开盘,是执行细节,由调用方各自补。
+    """
+    if not np.isfinite(ze):
+        return 0, "信号未就绪"
+    if ze <= -RULES["enter"]:
+        return -1, None
+    if ze < RULES["enter"]:
+        return 0, "强度未到门槛"
+    if not RULES["long_enabled"]:
+        # 关着做多时 z 上穿门槛只代表「机构在减空」,不产生进场 —— 界面要说清,
+        # 否则看的人会以为信号漏了。
+        return 0, "本品种做多已关"
+    if RULES["long_needs_dip"] and not (np.isfinite(past) and past < 0):
+        return 0, f"做多要求先有回撤(近 {RULES['dip_win']} 日未回落)"
+    return 1, None
+
+
 def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
            retail: pd.DataFrame | None = None,
            op: pd.DataFrame | None = None,
@@ -778,13 +806,7 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
             pos.iloc[i] = 0
             continue
         if side == 0 and np.isfinite(ze) and np.isfinite(px(c_now, i + 1, "open")):
-            want = 0
-            if ze <= -RULES["enter"]:
-                want = -1
-            elif ze >= RULES["enter"] and RULES["long_enabled"]:
-                p = mkt["past"].get(d, np.nan)
-                if (not RULES["long_needs_dip"]) or (np.isfinite(p) and p < 0):
-                    want = 1
+            want, _ = entry_side(ze, mkt["past"].get(d, np.nan))
             if want != 0:
                 side, entry_i, entry_c = want, i, c_now
         pos.iloc[i] = side
@@ -1105,6 +1127,22 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "unload": unload_state(sig, seat, groups),
     }
 
+    # 进场方向:**用进场那一路的信号**。方案 C 下 z_in 是共振后的散户信号,
+    # 与上面展示的机构 z 常常不同号 —— DEC-104 的教训就在这里。
+    _z_in, _ = entry_exit_signals(sig, rdf)
+    _entry_side, _entry_blocked = entry_side(
+        _z_in.get(d, np.nan), mkt["past"].get(d, np.nan))
+    # 方案 C 下 `z_in = 散户 rz.where(共振)` —— **不共振时它也是 NaN**,
+    # 被 `entry_side` 一律报成「信号未就绪」,而那两件事完全不同:
+    # 预热期是「还没数」,背离是「有数但方向打架,再大也不进」。分开说。
+    if _entry_blocked == "信号未就绪" and RULES["signal_source"] == "resonance"             and not resonate and np.isfinite(rz_now if rz_now is not None else np.nan):
+        _entry_blocked = "机构与散户背离,方案 C 下不进场"
+    # 交割窗口内只挡不进 —— 这一条 `entry_side` 不判(它不知道合约),这里补。
+    _c_now = mkt["main"].get(d)
+    if _entry_side != 0 and (not isinstance(_c_now, str)
+                             or days_to_window_end(_c_now, d) <= RULES["exit_before_delivery"]):
+        _entry_side, _entry_blocked = 0, "临近交割,窗口内只挡不进"
+
     SPLIT["v"] = edge_split(sig, mkt, rdf)
     wins = [t for t in closed if t["ret_pct"] > 0]
 
@@ -1151,6 +1189,13 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             # 连续版的建议仓位强度:回测夏普比离散版更高(2.66 vs 2.26),
             # 但换手大、抗成本差,所以只作参考不作指令。
             "suggested_position": None if not np.isfinite(z) else round(float(np.clip(z, -2, 2)), 2),
+            # **今天这个信号往哪边进** —— 运营者 2026-08-21:「触发信号要显示做多
+            # 或者做空,一触发就显示」。由引擎算,前端不许自己推一遍(理由见
+            # `entry_side`:DEC-104 就是前端自己推进场判据推错的)。
+            # 用的是**进场那一路**的信号(方案 C 下是共振后的散户信号),
+            # 不是上面那个 `z`(机构合计流向)—— 两者常常不同号。
+            "entry_side": {-1: "short", 1: "long"}.get(_entry_side),
+            "entry_blocked": _entry_blocked,
         },
         "position": open_trade,
         "institution": institution,

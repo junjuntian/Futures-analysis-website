@@ -60,6 +60,17 @@ interface HogPayload {
     change: number | null
     win: number
     suggested_position: number | null
+    /**
+     * **今天这个信号往哪边进** —— 引擎算好的,前端不许自己推。
+     *
+     * 运营者 2026-08-21:「触发信号要显示做多或者做空,一触发就显示」。
+     * 判据在引擎的 `entry_side`,`replay` 与 payload 共用同一份 ——
+     * DEC-104 正是前端自己推进场判据推错的:页面写着「需达 1(现 2.09)」
+     * 却又显示无持仓,因为它比的是机构那个数而引擎比的是散户那个。
+     */
+    entry_side: 'long' | 'short' | null
+    /** 进不了场时卡在哪一条(强度未到 / 做多已关 / 要求回撤 / 背离 / 临近交割)。 */
+    entry_blocked: string | null
   }
   position: HogTrade | null
   /**
@@ -481,7 +492,12 @@ const bySide = computed(() => {
           </p>
           <div v-else-if="!data.position" class="kv">
             <span class="k">进场条件</span>
-            <span class="v">{{ entryGateText(data) }}</span>
+            <span class="v">
+              <b v-if="data.signal.entry_side" :class="data.signal.entry_side === 'long' ? 'red' : 'green'">
+                {{ data.signal.entry_side === 'long' ? '⚡ 做多' : '⚡ 做空' }}
+              </b>
+              {{ entryGateText(data) }}
+            </span>
           </div>
         </div>
 

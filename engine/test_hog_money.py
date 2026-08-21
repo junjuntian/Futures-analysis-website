@@ -338,6 +338,51 @@ class TestNoOverlap:
 # ---- 规则本身 -----------------------------------------------------------
 
 
+class TestEntrySide:
+    """进场方向 —— 运营者 2026-08-21:「触发信号要显示做多或者做空,一触发就显示」。
+
+    **判据只有一份**(`entry_side`),`replay` 与 `build_payload` 共用。
+    前端不许自己推 —— DEC-104 就是前端自己推进场判据推错的:页面写着
+    「需达 1(现 2.09)」却又显示无持仓,因为它显示的是机构那个数而引擎比的是散户那个。
+    """
+
+    def test_做空做多按门槛两侧分(self):
+        H.RULES.update(long_enabled=True, long_needs_dip=False, enter=1.0)
+        assert H.entry_side(-1.5, 0.0) == (-1, None)
+        assert H.entry_side(+1.5, 0.0) == (1, None)
+        assert H.entry_side(+1.0, 0.0)[0] == 1, "恰好到门槛算达标"
+        assert H.entry_side(-1.0, 0.0)[0] == -1
+
+    def test_没到门槛要说没到而不是含糊(self):
+        H.RULES.update(long_enabled=True, long_needs_dip=False)
+        side, why = H.entry_side(0.92, 0.0)      # 玻璃 2026-08-20 的真实取值
+        assert side == 0 and why == "强度未到门槛"
+
+    def test_做多关着时上穿门槛也不进而且要说清(self):
+        """关着做多时 z 上穿只代表「机构在减空」,界面不说清会让人以为信号漏了。"""
+        H.RULES.update(long_enabled=False)
+        side, why = H.entry_side(+3.0, 0.0)
+        assert side == 0 and why == "本品种做多已关"
+        assert H.entry_side(-3.0, 0.0)[0] == -1, "做空那一侧不受影响"
+
+    def test_要求回撤时没回撤就不进(self):
+        H.RULES.update(long_enabled=True, long_needs_dip=True)
+        assert H.entry_side(+3.0, +0.05)[0] == 0
+        assert "回撤" in H.entry_side(+3.0, +0.05)[1]
+        assert H.entry_side(+3.0, -0.05) == (1, None)
+        assert H.entry_side(+3.0, np.nan)[0] == 0, "回撤未知不能当成有回撤"
+
+    def test_信号没值时不猜方向(self):
+        assert H.entry_side(np.nan, 0.0) == (0, "信号未就绪")
+
+    def test_replay与entry_side用的是同一套判据(self):
+        """抽函数之后 `replay` 必须走它 —— 两处各写一份是 DEC-104 的病根。"""
+        src = pathlib.Path(H.__file__).read_text(encoding="utf-8")
+        body = src[src.index("def replay("):src.index("def _f(")]
+        assert "entry_side(" in body, "replay 没有调用共用判据"
+        assert 'RULES["long_enabled"]' not in body, "replay 里不该再自己判做多开关"
+
+
 class TestPointInTime:
     """回榜反推 = 未来数据,当天那一格不许用(2026-08-21 修)。
 

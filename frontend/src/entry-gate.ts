@@ -19,7 +19,19 @@
 
 /** 判据需要的那几个字段。用结构类型,免得把整个 payload 类型拖进来。 */
 export interface EntryGateInput {
-  signal: { z: number | null; enter: number }
+  signal: {
+    z: number | null
+    enter: number
+    /**
+     * 引擎算好的进场方向与阻塞原因(2026-08-21 加)。**有它就以它为准。**
+     *
+     * 在此之前这个模块自己推「达标/背离/不达标」,而引擎那边 `entry_side` 也推
+     * 一遍 —— 又是「同一件事两处实现」。现在结论归引擎,这里只负责
+     * **把该比的那个数摆出来**(引擎不做展示格式)。
+     */
+    entry_side?: 'long' | 'short' | null
+    entry_blocked?: string | null
+  }
   retail: {
     z: number | null
     /** 与机构流向是否同号。方案 C 下不同号就进不了场,与强度无关。 */
@@ -85,7 +97,9 @@ export function entryGateText(data: EntryGateInput): string {
   }
   const head = `共振后的散户信号需达 ${gate.threshold}(现 ${shown(gate.value)})`
   // 机构那个数就摆在旁边的卡片里,不一起说清楚,读者一定会拿它去对门槛。
-  return gate.met
-    ? `${head} —— 已达标,次日开盘进场`
-    : `${head};机构 ${shown(flow)} 不是这里比的那个数`
+  const tail = `;机构 ${shown(flow)} 不是这里比的那个数`
+  // **结论以引擎为准。** 它知道做多开关、回撤要求、交割窗口这些这里看不到的东西。
+  if (data.signal.entry_side) return `${head} —— 已达标,次日开盘进场`
+  if (data.signal.entry_blocked) return `${head} —— ${data.signal.entry_blocked}${tail}`
+  return gate.met ? `${head} —— 已达标,次日开盘进场` : `${head}${tail}`
 }

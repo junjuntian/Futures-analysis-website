@@ -85,3 +85,29 @@ describe('entryGateText', () => {
     expect(entryGateText(fg({ trades: false }))).toContain('机构合计流向需达 1')
   })
 })
+
+describe('结论以引擎为准', () => {
+  /**
+   * 引擎知道做多开关、回撤要求、交割窗口 —— 这些这个模块看不到。
+   * 它自己推一遍就会与引擎打架,那正是 DEC-104 的病根。
+   */
+  const withEngine = (over: Partial<EntryGateInput['signal']>): EntryGateInput => ({
+    signal: { z: 2.09, enter: 1.0, ...over },
+    retail: { z: 1.19, resonate: true, trades: true }
+  })
+
+  it('引擎给了方向就报已达标', () => {
+    expect(entryGateText(withEngine({ entry_side: 'long' }))).toContain('已达标')
+  })
+
+  it('引擎说被挡住就照它的话说,哪怕本地判据算出达标', () => {
+    // 散户 1.19 ≥ 1,本地判据会说"达标";但引擎知道做多关着。
+    const text = entryGateText(withEngine({ entry_side: null, entry_blocked: '本品种做多已关' }))
+    expect(text).toContain('本品种做多已关')
+    expect(text).not.toContain('已达标')
+  })
+
+  it('引擎没给这两个字段时退回本地判据(老 payload 不炸)', () => {
+    expect(entryGateText(withEngine({}))).toContain('已达标')
+  })
+})
