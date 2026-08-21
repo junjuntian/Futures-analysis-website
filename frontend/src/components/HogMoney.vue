@@ -485,7 +485,7 @@ const bySide = computed(() => {
             <div class="kv"><span class="k">持有</span><span class="v">{{ data.position.hold_days }} 个交易日</span></div>
           </template>
           <p v-if="rolled" class="note">
-            这笔持仓跨过了主力换月:进场在 {{ data.position!.contract }},现价是
+            这笔持仓跨过了主力换月:进场在 {{ data.position!.contract }},上面那个收盘价是
             {{ data.contract }} 的。**两个价格不在同一个合约上,不要相减**——
             收益按逐日累积算(换月日用新合约自己的前一日结算价),生猪各合约价差
             最大到 49%,相减会得出一个完全错误的数。
