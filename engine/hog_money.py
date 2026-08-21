@@ -25,9 +25,11 @@
 
 回测证据(2023-08~2026-08,一年选人 + 只做空 + **次日开盘成交**,DEC-090):
   恒定满仓做空基准 +99.2%/夏普 1.65/回撤 −14.8%
-  本引擎            +85.0%/夏普 2.25/回撤  −5.0%,18 笔胜率 66.7%
+  本引擎            +87.4%/夏普 2.34/回撤  −4.2%,18 笔胜率 66.7%
+  (2026-08-21 修掉回榜前视后重算;生猪反推行少,几乎不受影响 —— 玻璃纯碱掉得很惨,
+   见各自的 backtest 与 research/REPORT_PIT_LOOKAHEAD_v1.md)
 
-**必须正视的一件事:绝对收益没跑赢基准**(+85.0% vs +99.2%)。这三年是单边熊市,
+**必须正视的一件事:绝对收益没跑赢基准**(+87.4% vs +99.2%)。这三年是单边熊市,
 躺着满仓做空本身就有 +99% 复利。策略赢的是夏普(2.25 vs 1.65)与回撤(−5.0% vs
 −14.8%),以及**趋势反转时会退出而不是硬扛**——而后者在样本内无法验证(没有牛市)。
 界面上必须摆出这个对比(payload 的 `compare`),不然看的人会把熊市 beta 当成本事。
@@ -174,7 +176,9 @@ RULES = {
 # 而且这是**在同一份要报告成绩的样本上做的选择**,属于样本内选择(见 DEC-090)。
 #
 # 生猪只做空(它样本里只有单边熊市,做多支路逐笔累计 −1.5%),而玻璃纯碱双向明显
-# 更好(FG 双向夏普 0.65 vs 只做空 0.36;SA 0.84 vs 0.58),因为它们跨了完整周期、
+# 更好(FG 双向夏普 0.65 vs 只做空 0.36;SA 0.84 vs 0.58 —— **这两组数是修前视
+# 之前算的,已作废**,FG 修后双向只有 0.21。做多开关要不要重议见 DEC-108),
+# 因为它们跨了完整周期、
 # 做多支路有真实机会。这条差异是实测出来的,不是设计出来的。
 VARIETIES = {
     "LH": {
@@ -183,7 +187,8 @@ VARIETIES = {
         "long_enabled": False,          # DEC-084:多头 15 笔逐笔累计 −1.5%,关掉
         "long_needs_dip": True,   # 做多已关,这条用不上;留 True 是生猪原口径
         "out": "hog_signals.json",
-        "backtest": "18 笔 净 +85.0%/胜率 66.7%/回撤 −5.0%/夏普 2.25(2023-08 起)",
+        "backtest": "18 笔 净 +87.4%/胜率 66.7%/回撤 −4.2%/夏普 2.34"
+                    "(2023-08 起,**低于基准 +99.2%**)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
     },
     "FG": {
         "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
@@ -192,7 +197,8 @@ VARIETIES = {
         # 实测带 dip 反而差:207 笔 夏普 0.58 → 158 笔 0.40(DEC-090 新口径)
         "long_needs_dip": False,
         "out": "fg_signals.json",
-        "backtest": "214 笔 净 +442%/胜率 50.9%/回撤 −45.9%/夏普 0.65(2013-01 起)",
+        "backtest": "228 笔 净 +34.9%/胜率 43.0%/回撤 −67.9%/夏普 **0.21**"
+                    "(2013-01 起,基准 −17.7%)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
     },
     "SA": {
         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
@@ -202,7 +208,8 @@ VARIETIES = {
         # DEC-090 换成次日开盘成交之后才显出来。这一条值得复议,现状是维持不带 dip。
         "long_needs_dip": False,
         "out": "sa_signals.json",
-        "backtest": "104 笔 净 +256%/胜率 46.2%/回撤 −55.8%/夏普 0.84(2020-06 起)",
+        "backtest": "111 笔 净 +47.0%/胜率 45.9%/回撤 −61.8%/夏普 **0.36**"
+                    "(2020-06 起,基准 −17.5%)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
     },
     # 鸡蛋、焦煤(2026-08-19 加)。两者的席位数据与生猪同一个起点 2023-08-11
     # (大商所),所以样本同样只有三年——**开关一律按各自的数据实测,不许照抄生猪**。
@@ -219,7 +226,8 @@ VARIETIES = {
         "out": "jd_signals.json",
         # **这个品种的信号没验出来**:t=1.08、胜率 38.5%、只有 13 笔。
         # 页面靠 risk_flags 自己会挂「胜率不到一半」「t<2 等于还没验证」两条。
-        "backtest": "25 笔 净 +42.4%/胜率 52.0%/回撤 −11.5%/夏普 1.02(2023-08 起,t=1.78 仍不显著)",
+        "backtest": "26 笔 净 +30.9%/胜率 46.2%/回撤 −13.3%/夏普 0.79"
+                    "(2023-08 起,**低于基准 +61.6%**)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
     },
     "JM": {
         "name": "焦煤 JM", "unit": "元/吨", "multiplier": 60.0,
@@ -228,7 +236,8 @@ VARIETIES = {
         "long_enabled": False,
         "long_needs_dip": True,
         "out": "jm_signals.json",
-        "backtest": "22 笔 净 +90.4%/胜率 68.2%/回撤 −14.7%/夏普 1.11(2023-08 起,t=+2.53)",
+        "backtest": "21 笔 净 +64.2%/胜率 61.9%/回撤 −14.7%/夏普 0.91"
+                    "(2023-08 起,基准 +18.2%)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
     },
 }
 
@@ -312,12 +321,28 @@ def clean_seat(seat: pd.DataFrame) -> pd.DataFrame:
     df["_r"] = _rank(df["source"].astype(str), SEAT_RANK)
     df = (df.sort_values(["trade_date", "contract", "rank_type", "member_key", "_r", "source"])
             .drop_duplicates(["trade_date", "contract", "rank_type", "member_key"], keep="first"))
-    wide = df.pivot_table(index=["member_key", "contract", "trade_date"], columns="rank_type",
-                          values="quantity", aggfunc="sum")
+    # 除了 `net`(事后完整),再算一条 `net_off`:**只用官方行**的净持仓。
+    # 两条并排存着,`_pit_pair` 据此把「当天可见」与「事后完整」分开 —— 那条
+    # 回榜反推的前视就是这么摘掉的(见 `_pit_pair`)。
+    #
+    # **逐腿判,不是整行判。** 一家可能多头榜在(官方行)、空头榜掉了(反推行);
+    # 整行丢掉会连那条**实盘看得见的**多头腿一起扔,实测在玻璃上 3,131 天里有
+    # 1,352 天因此算错。两腿都没有官方行才是「不知道」,给 NaN —— 掉榜≠零持仓
+    # (`research/PITFALLS.md` 第 4 条),给 0 会凭空造出一次清仓。
+    df["_off"] = ~df["source"].astype(str).eq("reboard_inferred")
+    idx = ["member_key", "contract", "trade_date"]
+    wide = df.pivot_table(index=idx, columns="rank_type", values="quantity", aggfunc="sum")
+    offw = (df[df["_off"]]
+            .pivot_table(index=idx, columns="rank_type", values="quantity", aggfunc="sum")
+            .reindex(wide.index))
     out = pd.DataFrame(index=wide.index)
     out["long_q"] = wide["long"] if "long" in wide.columns else np.nan
     out["short_q"] = wide["short"] if "short" in wide.columns else np.nan
     out["net"] = out["long_q"].fillna(0) - out["short_q"].fillna(0)
+    lo = offw["long"] if "long" in offw.columns else pd.Series(np.nan, index=wide.index)
+    sh = offw["short"] if "short" in offw.columns else pd.Series(np.nan, index=wide.index)
+    out["net_off"] = np.where(lo.isna() & sh.isna(), np.nan,
+                              lo.fillna(0) - sh.fillna(0))
     return out.reset_index()
 
 
@@ -476,6 +501,32 @@ def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
     return ser, log, out
 
 
+def _pit_pair(rows: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """按交易日汇总出两条线:**当日可见的**(只算官方行)与**事后完整的**(含反推)。
+
+    **这是那条前视的修法**(2026-08-21 实测):`reboard_inferred` 行是用**回榜日的
+    增减倒推**出来的,实测可见滞后**恒为 1 个交易日,100% 如此**(玻璃 5.0 万条、
+    纯碱 3.1 万条,最长都是 1)。时点因此很清楚 ——
+
+        第 D 日收盘,引擎算信号  → D 日的反推值**不存在**
+        第 D+1 日开盘,引擎成交  → 仍**不存在**(要 D+1 收盘后才推得出)
+        第 D+1 日收盘之后        → 才算得出来
+
+    而 D−1 及更早的反推值,在 D 日**确实已经可见**,用它们不是前视。
+    所以只需把「当天那一格」换成官方口径,历史照旧用全量。
+
+    修之前的实测代价(`research/REPORT_PIT_LOOKAHEAD_v1.md`):
+    玻璃 +573% → +48.5%(回撤 −45.9% → −64.7%)、纯碱 +295% → +63.7%、
+    鸡蛋 −37%、焦煤 −24%;生猪反而略好(它只有 2,520 条反推行)。
+    **那些差额全是实盘拿不到的钱。**
+    """
+    full = rows.groupby("trade_date")["net"].sum().sort_index()
+    # 那天这一组人**一条官方行都没有** → 整天不可知,给 NaN 而不是 0。
+    known = rows.dropna(subset=["net_off"])
+    off = known.groupby("trade_date")["net_off"].sum().reindex(full.index)
+    return off, full
+
+
 def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
     """品种合计净持仓与它的变化、无量纲化 z。
 
@@ -486,10 +537,13 @@ def signal_series(seat: pd.DataFrame, groups: pd.Series) -> pd.DataFrame:
     chg = pd.Series(index=groups.index, dtype=float)
     for grp in {g for g in groups.dropna().unique()}:
         days = groups.index[groups == grp]
-        s = (seat[seat["member_key"].isin(list(grp))]
-             .groupby("trade_date")["net"].sum().sort_index())
-        net.loc[days] = s.reindex(days).values
-        chg.loc[days] = s.diff(RULES["sig_win"]).reindex(days).values
+        off, full = _pit_pair(seat[seat["member_key"].isin(list(grp))])
+        # **当天用可见口径,被减数用全量** —— 滞后恒为 1 天,所以 sig_win 天前
+        # 那一格在今天必定已经可见,用全量不是前视。理由见 `_pit_pair`。
+        cur = off.reindex(days)
+        lag = full.shift(RULES["sig_win"]).reindex(days)
+        net.loc[days] = cur.values
+        chg.loc[days] = (cur - lag).values
     z = chg / chg.rolling(RULES["z_win"], min_periods=60).std()
     return pd.DataFrame({"net": net, "chg": chg, "z": z})
 
@@ -959,9 +1013,10 @@ def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
     have = [m for m in RULES["retail_seed"] if m in set(seat["member_key"])]
     if len(have) < 2:
         return pd.DataFrame(index=dates, columns=["net", "chg", "rz"], dtype=float), have
-    s = (seat[seat["member_key"].isin(have)]
-         .groupby("trade_date")["net"].sum().sort_index().reindex(dates))
-    chg = s.diff(RULES["sig_win"])
+    # 散户那一路吃同一条前视 —— 他们也会掉榜、也会被回榜反推。同样处理。
+    off, full = _pit_pair(seat[seat["member_key"].isin(have)])
+    s = off.reindex(dates)
+    chg = s - full.shift(RULES["sig_win"]).reindex(dates)
     rz = -(chg - chg.rolling(RULES["z_win"], min_periods=60).mean()) /          chg.rolling(RULES["z_win"], min_periods=60).std()
     return pd.DataFrame({"net": s, "chg": chg, "rz": rz}), have
 

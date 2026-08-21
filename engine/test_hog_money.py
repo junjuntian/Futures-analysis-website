@@ -338,6 +338,86 @@ class TestNoOverlap:
 # ---- 规则本身 -----------------------------------------------------------
 
 
+class TestPointInTime:
+    """回榜反推 = 未来数据,当天那一格不许用(2026-08-21 修)。
+
+    `reboard_inferred` 行是**用回榜日的增减倒推**的,实测可见滞后**恒为 1 个交易日**。
+    第 D 日收盘引擎算信号、第 D+1 日开盘成交,两个时点上 D 日的反推值都还不存在。
+    而信号是 `net.diff(sig_win)`,一头正好踩在这一格上。
+
+    修之前的代价(REPORT_PIT_LOOKAHEAD_v1):玻璃 +573%→+70%、夏普 0.65→0.21、
+    回撤 −45.9%→−67.9%;纯碱 +295%→+65%。**那些差额全是实盘拿不到的钱。**
+    这几条测试是防止它被改回去的唯一屏障 —— 改回去不会报错,只会让回测重新变好看。
+    """
+
+    @staticmethod
+    def _raw(rows):
+        """(trade_date, member, rank_type, quantity, source) → clean_seat 的入参。"""
+        return pd.DataFrame([
+            {"trade_date": d, "instrument": "LH", "contract": "LH2611",
+             "is_variety_total": "f", "rank_type": rt, "member": m,
+             "quantity": q, "source": src}
+            for d, m, rt, q, src in rows])
+
+    def test_官方腿要留下哪怕另一腿是反推的(self):
+        """**逐腿判,不是整行判。**
+
+        一家可能多头榜在(官方)、空头榜掉了(反推)。整行丢掉会连那条实盘看得见的
+        多头腿一起扔 —— 实测玻璃 3,131 天里有 1,352 天因此算错,这是我第一版的 bug。
+        """
+        d = pd.Timestamp("2026-03-02")
+        out = H.clean_seat(self._raw([
+            (d, "甲", "long", 100, "czce_official"),
+            (d, "甲", "short", 40, "reboard_inferred"),
+        ]))
+        r = out.iloc[0]
+        assert r["net"] == 60, "事后完整口径:100 − 40"
+        assert r["net_off"] == 100, "当日可见口径:只剩那条官方的多头腿"
+
+    def test_两腿都是反推就给未知而不是零(self):
+        """掉榜≠清仓(research/PITFALLS 第 4 条)。给 0 会凭空造出一次清仓。"""
+        d = pd.Timestamp("2026-03-02")
+        out = H.clean_seat(self._raw([
+            (d, "甲", "long", 100, "reboard_inferred"),
+            (d, "甲", "short", 40, "reboard_inferred"),
+        ]))
+        assert out.iloc[0]["net"] == 60
+        assert np.isnan(out.iloc[0]["net_off"]), "当天什么都不知道,不能报 0"
+
+    def test_当天的反推值不进信号而五天前的照用(self):
+        """滞后恒为 1 天,所以 `T − sig_win` 那一格在 T 日必定已可见。
+
+        构造:第 0 天与第 6 天各有一次掉榜(只有反推行)。
+        `sig_win=5`,看第 5 天的信号 —— 它的被减数是第 0 天(该用全量,那天的反推
+        在第 1 天就可见了),减数是第 5 天本身(官方,不受影响)。
+        """
+        H.RULES["sig_win"] = 5
+        idx = bdays("2026-03-02", 7)
+        rows = []
+        for i, d in enumerate(idx):
+            src = "reboard_inferred" if i in (0, 6) else "czce_official"
+            rows.append((d, "甲", "long", 100 + i * 10, src))
+        seat = H.clean_seat(self._raw(rows))
+        groups = pd.Series([("甲",)] * len(idx), index=idx)
+        sig = H.signal_series(seat, groups)
+        # 第 5 天:官方 150;被减数是第 0 天的 100(全量,含反推)→ chg = 50
+        assert sig["chg"].iloc[5] == pytest.approx(50.0)
+        assert sig["net"].iloc[5] == pytest.approx(150.0)
+        # 第 6 天只有反推行 → 当天不可知,信号留空而不是拿反推值凑
+        assert np.isnan(sig["net"].iloc[6]), "当天只有反推行,net 必须是未知"
+        assert np.isnan(sig["chg"].iloc[6])
+
+    def test_全是官方行时新旧口径应当一模一样(self):
+        """没有反推行的品种(如生猪只有 2,520 条)不该被这次改动影响。"""
+        idx = bdays("2026-03-02", 8)
+        rows = [(d, "甲", "long", 100 + i * 5, "czce_official") for i, d in enumerate(idx)]
+        seat = H.clean_seat(self._raw(rows))
+        assert (seat["net"] == seat["net_off"]).all()
+        groups = pd.Series([("甲",)] * len(idx), index=idx)
+        sig = H.signal_series(seat, groups)
+        assert sig["net"].dropna().tolist() == [100 + i * 5 for i in range(len(idx))]
+
+
 class TestResearchHooks:
     """`replay` 的两个研究参数 —— **它们存在的唯一前提是不影响生产路径**。"""
 
