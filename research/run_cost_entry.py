@@ -69,53 +69,68 @@ def load(code):
     return sig, mkt, rdf, op, st, groups, unload
 
 
-def cost_series(sig, mkt, groups):
-    """机构均价的逐日重建。加仓按当日主力结算价加权;减仓不动;
-    换组/翻向重置;掉榜日成本冻结但**当天不发信号**(返回 NaN)。"""
+def cost_series(sig, mkt, groups, price_col="settle"):
+    """机构均价的逐日重建。加仓按当日主力价(`price_col`)加权;减仓不动;
+    换组/翻向重置;掉榜日成本冻结但**当天不发信号**(返回 NaN)。
+    另带出 age(本轮已持续的可见交易日数,闸门用它查「翻向日进场」的占比)。"""
     net = sig["net"]
-    px = mkt["settle"]
+    px = mkt[price_col]
     side_s = pd.Series(0, index=net.index, dtype=float)
     cost_s = pd.Series(np.nan, index=net.index, dtype=float)
-    cur_grp, side, qty, cost = None, 0, 0.0, np.nan
+    age_s = pd.Series(np.nan, index=net.index, dtype=float)
+    cur_grp, side, qty, cost, age = None, 0, 0.0, np.nan, 0
     for d in net.index:
         grp = groups.get(d)
         if grp != cur_grp:
-            cur_grp, side, qty, cost = grp, 0, 0.0, np.nan
+            cur_grp, side, qty, cost, age = grp, 0, 0.0, np.nan, 0
         n = net.get(d, np.nan)
         p = px.get(d, np.nan)
         if not np.isfinite(n) or not np.isfinite(p):
             continue                     # 掉榜/缺价:冻结,当天不给值
         s = int(np.sign(n)) if n != 0 else 0
         if s == 0:
-            side, qty, cost = 0, 0.0, np.nan
+            side, qty, cost, age = 0, 0.0, np.nan, 0
             continue
         if s != side:
-            side, qty, cost = s, abs(n), p   # 新一轮:成本从翻向日起算
+            side, qty, cost, age = s, abs(n), p, 0   # 新一轮:成本从翻向日起算
         else:
             dn = abs(n) - qty
             if dn > 0:
                 cost = (cost * qty + dn * p) / (qty + dn)
             qty = abs(n)
+            age += 1
         side_s[d] = side
         cost_s[d] = cost
-    return side_s, cost_s
+        age_s[d] = age
+    return side_s, cost_s, age_s
 
 
-def build_entry(sig, mkt, groups, unload, tol, umax, need_adding=False):
+def build_entry(sig, mkt, groups, unload, tol, umax, need_adding=False,
+                price_col="settle", min_age=0, skip_group_days=0):
     """⚠️ `unload_series` 的 pct 是 **0~1 的小数**不是百分数 —— 第一版把阈值写成
     30/50,条件从未生效,跑出来的是「无卸仓过滤」的结果。教训:接别人的列,
     先 describe() 看量纲再用。"""
-    side_s, cost_s = cost_series(sig, mkt, groups)
-    px = mkt["settle"]
+    side_s, cost_s, age_s = cost_series(sig, mkt, groups, price_col)
+    px = mkt[price_col]
     z = pd.Series(0.0, index=mkt.index)
     ok_unload = unload.reindex(mkt.index).fillna(np.inf) <= umax
     # 掉榜日 unload 是 NaN → fillna(inf) → 不进场(不知道 ≠ 没减仓)
     chg = sig["chg"].reindex(mkt.index)
+    # 换组后的第几个交易日(闸门:排除换组余波)
+    gch = pd.Series(0, index=mkt.index, dtype=int)
+    prev_g, k = None, 10**6
+    for d in mkt.index:
+        g = groups.get(d)
+        k = 0 if g != prev_g else k + 1
+        prev_g = g
+        gch[d] = k
     for d in mkt.index:
         s = side_s.get(d, 0)
         c = cost_s.get(d, np.nan)
         p = px.get(d, np.nan)
         if s == 0 or not np.isfinite(c) or not np.isfinite(p) or not ok_unload.get(d, False):
+            continue
+        if age_s.get(d, 0) < min_age or gch.get(d, 10**6) < skip_group_days:
             continue
         if need_adding:
             g = chg.get(d, np.nan)
@@ -136,30 +151,35 @@ def perf(tr, daily):
     return len(closed), win, p["cum_pct"], p["max_dd_pct"], p["sharpe"]
 
 
-orig = H.entry_exit_signals
-for code in ("FG", "SA", "JD", "JM", "LH"):
-    sig, mkt, rdf, op, st, groups, unload = load(code)
-    H.RULES["long_enabled"] = True
-    H.RULES["long_needs_dip"] = False
-    bn, bc = BASE[code]
-    print("=" * 92)
-    print(f"[{code}] 基线(现行流量信号) {bn} 笔 / 累计 {bc:+.1f}%")
-    print("=" * 92)
-    combos = [(0.0, 0.3, False), (0.0, 0.5, False), (0.01, 0.3, False),
-              (0.0, 999.0, False),          # 无卸仓过滤对照(=第一版跑出的东西)
-              (0.0, 0.3, True), (0.0, 0.5, True)]
-    for tol, umax, adding in combos:
-        z_in = build_entry(sig, mkt, groups, unload, tol, umax, adding)
-        H.entry_exit_signals = lambda s, r, _z=z_in: (_z, r["rz"])
-        try:
-            tr, _, daily = H.replay(sig, mkt, rdf, op, st)
-        finally:
-            H.entry_exit_signals = orig
-        n, win, cum, dd, sh = perf(tr, daily)
-        utag = "无" if umax > 1 else f"≤{umax:.0%}"
-        btag = "+还在加仓" if adding else "        "
-        star = " ← 主规格" if (tol == 0.0 and umax == 0.3 and not adding) else ""
-        print(f"  容差 {tol*100:.0f}% / 卸仓{utag} {btag}: {n:>4} 笔  "
-              f"胜率 {win:4.1f}%  累计 {cum:>+7.1f}%  回撤 {dd:>+6.1f}%  "
-              f"夏普 {sh}{star}")
-    print()
+def main():
+    orig = H.entry_exit_signals
+    for code in ("FG", "SA", "JD", "JM", "LH"):
+        sig, mkt, rdf, op, st, groups, unload = load(code)
+        H.RULES["long_enabled"] = True
+        H.RULES["long_needs_dip"] = False
+        bn, bc = BASE[code]
+        print("=" * 92)
+        print(f"[{code}] 基线(现行流量信号) {bn} 笔 / 累计 {bc:+.1f}%")
+        print("=" * 92)
+        combos = [(0.0, 0.3, False), (0.0, 0.5, False), (0.01, 0.3, False),
+                  (0.0, 999.0, False),          # 无卸仓过滤对照(=第一版跑出的东西)
+                  (0.0, 0.3, True), (0.0, 0.5, True)]
+        for tol, umax, adding in combos:
+            z_in = build_entry(sig, mkt, groups, unload, tol, umax, adding)
+            H.entry_exit_signals = lambda s, r, _z=z_in: (_z, r["rz"])
+            try:
+                tr, _, daily = H.replay(sig, mkt, rdf, op, st)
+            finally:
+                H.entry_exit_signals = orig
+            n, win, cum, dd, sh = perf(tr, daily)
+            utag = "无" if umax > 1 else f"≤{umax:.0%}"
+            btag = "+还在加仓" if adding else "        "
+            star = " ← 主规格" if (tol == 0.0 and umax == 0.3 and not adding) else ""
+            print(f"  容差 {tol*100:.0f}% / 卸仓{utag} {btag}: {n:>4} 笔  "
+                  f"胜率 {win:4.1f}%  累计 {cum:>+7.1f}%  回撤 {dd:>+6.1f}%  "
+                  f"夏普 {sh}{star}")
+        print()
+
+
+if __name__ == "__main__":
+    main()
