@@ -47,7 +47,7 @@ def yearly(daily):
 def run_candidate(sig, mkt, rdf, op, st, groups, unload, kw, **extra):
     H.RULES["long_enabled"] = True
     H.RULES["long_needs_dip"] = False
-    z = R.build_entry(sig, mkt, groups, unload, 0.0, 0.3, **kw, **extra)
+    z = R.build_entry(sig, mkt, groups, unload, 0.0, 0.3, **{**kw, **extra})
     orig = H.entry_exit_signals
     H.entry_exit_signals = lambda s, r, _z=z: (_z, r["rz"])
     try:
@@ -57,7 +57,9 @@ def run_candidate(sig, mkt, rdf, op, st, groups, unload, kw, **extra):
     return [t for t in tr if t["exit_date"]], daily
 
 
-for code, kw in CAND.items():
+def gates(code, kw):
+    """对一个品种、一个候选规格跑五道闸门。返回 (通过数, 汇总 dict)。
+    判据写死在模块 docstring;玻璃轮龄实验(PLAN_FG_AGE_v1)复用本函数,不另写一套。"""
     sig, mkt, rdf, op, st, groups, unload = R.load(code)
     # 基线要用**生产配置**回放,所以必须在改 RULES 之前跑
     tr_b, _, day_b = H.replay(sig, mkt, rdf, op, st)
@@ -109,11 +111,13 @@ for code, kw in CAND.items():
           f"基线 {cum(day_b):+.1f}%/{sharpe(day_b):.2f}  [{'过' if g3 else '不过'}]")
 
     # —— 闸门 4:排除翻向日与换组余波 ——
-    tr_a, day_a = run_candidate(sig, mkt, rdf, op, st, groups, unload, kw, min_age=2)
+    _ma = kw.get("min_age", 0) + 2      # 候选本身已要求轮龄时,再加严 2 天
+    kw_a = {k: v for k, v in kw.items() if k != "min_age"}
+    tr_a, day_a = run_candidate(sig, mkt, rdf, op, st, groups, unload, kw_a, min_age=_ma)
     tr_g, day_g = run_candidate(sig, mkt, rdf, op, st, groups, unload, kw,
                                 skip_group_days=5)
     g4 = sharpe(day_a) > sharpe(day_b) and sharpe(day_g) > sharpe(day_b)
-    print(f"闸门4 轮龄≥2:{cum(day_a):+.1f}%/{sharpe(day_a):.2f}({len(tr_a)} 笔);"
+    print(f"闸门4 轮龄≥{_ma}:{cum(day_a):+.1f}%/{sharpe(day_a):.2f}({len(tr_a)} 笔);"
           f"避开换组 5 日:{cum(day_g):+.1f}%/{sharpe(day_g):.2f}({len(tr_g)} 笔)"
           f"  [{'过' if g4 else '不过'}]")
 
@@ -145,3 +149,11 @@ for code, kw in CAND.items():
           f"成本优势中位 候选 {cadv:+.2f}% vs 基线 {badv:+.2f}%")
     n_pass = sum([g1, g2, g3, g4, g5])
     print(f"  ★ [{code}] 五关通过 {n_pass}/5\n")
+    return n_pass, {"base_sharpe": sharpe(day_b), "cand_sharpe": sharpe(day_c),
+                    "cand_cum": cum(day_c), "cand_dd": H._perf(day_c)["max_dd_pct"],
+                    "n": len(tr_c), "t": tc, "gates": [g1, g2, g3, g4, g5]}
+
+
+if __name__ == "__main__":
+    for _code, _kw in CAND.items():
+        gates(_code, _kw)

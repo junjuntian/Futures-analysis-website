@@ -56,6 +56,10 @@ BASE = {"SA": (111, 64.6), "FG": (228, 69.8), "JD": (26, 24.5),
 def load(code):
     v = H.use(code)
     H.CURRENT = {"code": code, **v}
+    # 研究里的「基线」永远指**流量信号**(方案 C)。DEC-112/113 之后 use("JD"/"SA")
+    # 会把 signal_source 注入成 "cost",不钉回去,基线回放就会走 cost 分支
+    # 并因 sig 没有 cost_z 列而 KeyError —— 2026-08-22 玻璃实验时当场踩到。
+    H.RULES["signal_source"] = "resonance"
     low = code.lower()
     price = H.clean_price(pd.read_csv(DATA / f"{low}_price.csv.gz"))
     seat = H.clean_seat(pd.read_csv(DATA / f"{low}_seat.csv.gz"))
