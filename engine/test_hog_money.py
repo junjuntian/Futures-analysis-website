@@ -795,6 +795,11 @@ class TestRules:
         assert H.RULES["signal_source"] == "cost"
         assert H.RULES["long_enabled"] is True
         assert H.RULES["long_needs_dip"] is False
+        # 纯碱同日跟进(DEC-113,闸门 4/5 **知情破例**,不是验证通过)
+        H.use("SA")
+        assert H.RULES["signal_source"] == "cost"
+        assert H.RULES["long_needs_dip"] is False
         # 其余品种不许被顺手带成 cost
-        H.use("FG")
-        assert H.RULES["signal_source"] == "resonance"
+        for code in ("FG", "JM", "LH"):
+            H.use(code)
+            assert H.RULES["signal_source"] == "resonance", code
