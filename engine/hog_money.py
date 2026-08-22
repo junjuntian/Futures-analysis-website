@@ -174,6 +174,13 @@ RULES = {
     # 2 是边界最优 —— **不是旋钮**,旁边就是下坡。
     "cost_need_adding": False,
     "cost_min_age": 0,
+    # 出场模式(DEC-117,由 use() 按品种注入):
+    #   "retail" —— 四件套:散户翻向 / 止损 / 持满 / 临近交割(默认,四个品种);
+    #   "inst"   —— 机构出场:机构组方向翻转或本轮卸仓 > cost_unload_max 就走,
+    #               止损与临近交割保留,**关**散户翻向与持满(焦煤,五关全过)。
+    # 同一套 inst 出场在其余四品种的出场体检里全输(REPORT_EXIT_CAMPAIGN_v1),
+    # 所以它只能按品种开,不许当全局规则。
+    "exit_mode": "retail",
 }
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
@@ -306,10 +313,20 @@ VARIETIES = {
         # **这是知情破例,不是验证通过**:回撤从 −14.7% 放大到 −32.9%,页面 risk_flags 照挂。
         "long_enabled": True,
         "long_needs_dip": False,
+        # **出场换成机构出场(DEC-117,2026-08-23 运营者拍板)**:机构组翻向或本轮
+        # 卸仓 >30% 就走,止损/交割保留,关散户翻向与持满。五关全过
+        # (REPORT_JM_INST_EXIT_v1):逐年 3/4、walk-forward +195% vs +70%、
+        # 阈值 50% 仍 1.14、去抖 2 日仍 1.47、t +3.13。
+        # **赢的方式不是「拿得更久」,是「机构一松手立刻走、再上手立刻跟」的高换手跟随**
+        # (均持有 9→4 日、笔数 46→72),回撤因此砍半。来历是出场体检挑出来的,
+        # 记账标事后假设复验;只在焦煤成立,其余四品种出场体检全输,不许外推。
+        # 丑话:三年 72 笔、2025 一年贡献 +120%、换手翻倍实盘摩擦更多。
+        "exit_mode": "inst",
         "out": "jm_signals.json",
-        "backtest": "46 笔 净 +69.8%/胜率 54.3%/回撤 −32.9%/夏普 0.73"
-                    "(2023-08 起,基准 +18.2%)(2026-08-23 开做多,知情破例,见 DEC-116;"
-                    "只做空时代 21 笔 +64.2%/0.91/−14.7% 见 DEC-111)",
+        "backtest": "72 笔 净 +244.0%/胜率 59.7%/回撤 −13.9%/夏普 1.79"
+                    "(2023-08 起,基准 +18.2%)(2026-08-23 开做多 + 机构出场,"
+                    "见 DEC-116/117 与 REPORT_JM_INST_EXIT_v1;"
+                    "只做空+四件套时代 21 笔 +64.2%/0.91/−14.7% 见 DEC-111)",
     },
 }
 
@@ -329,6 +346,7 @@ def use(code: str) -> dict:
     RULES["signal_source"] = v.get("signal_source", "resonance")
     RULES["cost_need_adding"] = v.get("cost_need_adding", False)
     RULES["cost_min_age"] = v.get("cost_min_age", 0)
+    RULES["exit_mode"] = v.get("exit_mode", "retail")
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -838,6 +856,28 @@ def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
                       cost_reason=ext["cost_reason"].reindex(sig.index))
 
 
+def inst_exit_flags(sig: pd.DataFrame, mkt: pd.DataFrame, groups: pd.Series,
+                    unload: pd.Series) -> pd.Series:
+    """机构出场的逐日触发:机构组方向翻转(昨今都可见且不同)或本轮卸仓 > cost_unload_max。
+    掉榜日(方向/卸仓为 NaN)不触发 —— 不知道 ≠ 走了。
+    与 research/run_jm_inst_exit.py 的 flip | u30 **逐字同构**,闸门就是按它过的。"""
+    cc = inst_cost_series(sig, mkt, groups)
+    side = cc["side"].reindex(mkt.index)
+    prev = side.shift(1)
+    flip = (side.notna() & prev.notna() & (side != prev)).fillna(False)
+    over = (unload.reindex(mkt.index) > RULES["cost_unload_max"]).fillna(False)
+    return (flip | over).astype(bool)
+
+
+def attach_inst_exit(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
+                     groups: pd.Series) -> pd.DataFrame:
+    """把机构出场触发(inst_exit)挂到 sig 上。exit_mode="inst" 的品种必须在
+    replay 之前走这一步 —— replay 只认列。"""
+    unload = unload_series(sig, seat, groups)["pct"]
+    flags = inst_exit_flags(sig, mkt, groups, unload)
+    return sig.assign(inst_exit=flags.reindex(sig.index).fillna(False))
+
+
 def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """按 RULES["signal_source"] 决定进场与出场各用哪一路信号。
 
@@ -932,6 +972,16 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
     """
     idx = mkt.index
     z_in, z_out = entry_exit_signals(sig, retail)
+    # 机构出场模式(DEC-117):把研究用的两个钩子接到生产配置上 —— 触发序列来自
+    # attach_inst_exit 挂在 sig 上的 inst_exit 列,关掉散户翻向与持满。
+    # 理由记「机构出场」而不是「外部」,页面出场分布要能看出是谁触发的。
+    inst_mode = RULES.get("exit_mode") == "inst"
+    if inst_mode:
+        if "inst_exit" not in sig:
+            raise ValueError("exit_mode=inst 需要先 attach_inst_exit")
+        extra_exit = sig["inst_exit"]
+        disable_reverse = True
+    exit_label = "机构出场" if inst_mode else "外部"
     main = mkt["main"]
     op = (op if op is not None else pd.DataFrame()).reindex(idx)
     st = (st if st is not None else pd.DataFrame()).reindex(idx)
@@ -980,12 +1030,12 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 reason = "临近交割"
             elif cum <= -RULES["stop"]:
                 reason = "止损"
-            elif i - entry_i >= RULES["max_hold"]:
+            elif (not inst_mode) and i - entry_i >= RULES["max_hold"]:
                 reason = "持满"
             elif (not disable_reverse) and np.isfinite(z) and side * z <= -RULES["enter"]:
                 reason = "反向"
             elif extra_exit is not None and bool(extra_exit.get(d, False)):
-                reason = "外部"
+                reason = exit_label
             elif np.isfinite(z) and abs(z) <= RULES["exit_z"] and side * z <= 0:
                 reason = "消退"
         # 出场只能在**次日开盘**成交。那天没成交价就继续持有,理由挂着等到能成交
@@ -1551,6 +1601,8 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         sig = signal_series(seat, groups)
         if RULES["signal_source"] == "cost":
             sig = attach_cost_signal(sig, seat, mkt, groups)
+        if RULES["exit_mode"] == "inst":
+            sig = attach_inst_exit(sig, seat, mkt, groups)
         payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st)
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)

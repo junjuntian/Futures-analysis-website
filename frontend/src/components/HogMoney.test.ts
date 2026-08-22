@@ -354,12 +354,31 @@ describe('生猪机构资金', () => {
   })
 
   it('与机构背离时要如实标出', async () => {
-    stubFetch({ ...PAYLOAD, retail: { ...PAYLOAD.retail, resonate: false, z: -0.8 } })
+    // 散户净多且 5 日在加(change>0)→ 加多;z 为负 → 反向看跌。两半各有来源。
+    stubFetch({ ...PAYLOAD, retail: { ...PAYLOAD.retail, resonate: false, z: -0.8, change: 6974 } })
     const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     const t = w.text()
     expect(t).toContain('与机构背离')
-    expect(t).toContain('散户在加多')      // z 为负 → 反向看跌
+    expect(t).toContain('散户在加多 → 反向看跌')
+    w.unmount()
+  })
+
+  it('仓位动作按净持仓方向说:净空且在加就是「加空」,不是「减多」', async () => {
+    // 2026-08-23 焦煤实况:散户三家净空 −12,454、5 日 −3,018、z +0.26;
+    // 机构净多 66,360、5 日 −294、z −0.01。旧文案把前者写成「减多」、后者写成「加空」。
+    stubFetch({
+      ...PAYLOAD,
+      signal: { ...PAYLOAD.signal, net: 66360, change: -294, z: -0.01 },
+      retail: { ...PAYLOAD.retail, net: -12454, change: -3018, z: 0.26 }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('散户在加空 → 反向看涨')
+    expect(t).toContain('机构在减多')
+    expect(t).not.toContain('散户在减多')
+    expect(t).not.toContain('机构在加空')
     w.unmount()
   })
 

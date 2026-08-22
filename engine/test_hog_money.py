@@ -764,6 +764,67 @@ class TestCostSignal:
         assert list(z_out) == [0.7, -0.7, 0.2]        # 出场 = 散户 rz,原样
 
 
+class TestInstExit:
+    """机构出场模式(DEC-117,焦煤)。钉三件事:触发序列的三态、
+    inst 模式下散户翻向与持满确实被关掉、默认模式一个字节没变。"""
+
+    def test_触发序列_翻向与卸仓_掉榜不触发(self):
+        idx = pd.bdate_range("2024-01-01", periods=5)
+        sig = pd.DataFrame({"net": [10, 10, np.nan, -5, -5]}, index=idx, dtype=float)
+        mkt = pd.DataFrame({"settle": [100.0] * 5}, index=idx)
+        groups = pd.Series([("甲", "乙")] * 5, index=idx)
+        unload = pd.Series([0.0, 0.5, np.nan, 0.0, 0.0], index=idx)
+        f = H.inst_exit_flags(sig, mkt, groups, unload)
+        assert list(f) == [False, True, False, False, False]
+        # 第 1 天卸仓 50% 触发;第 2 天掉榜不触发;第 3 天翻向但前一天掉榜 → 不触发
+        # (昨今都可见才算翻向);第 4 天方向延续不触发
+
+    def test_inst模式_关散户翻向与持满_理由记机构出场(self):
+        """夹具:做空进场后散户 rz 立刻翻到 +2(四件套会「反向」出场),
+        inst 模式必须无视它,直到 inst_exit 为真那天才以「机构出场」平仓。"""
+        idx = pd.bdate_range("2024-01-01", periods=12)
+        sig = pd.DataFrame({"z": [-1.5] + [0.0] * 11,
+                            "inst_exit": [False] * 6 + [True] + [False] * 5}, index=idx)
+        retail = pd.DataFrame({"rz": [-1.5] + [2.0] * 11}, index=idx)
+        mkt = pd.DataFrame({"main": ["XX2501"] * 12, "settle": 100.0, "open": 100.0,
+                            "ret": 0.0, "ret_open": 0.0, "o2c": 0.0, "past": -0.01,
+                            "dleft": 200, "close": 100.0}, index=idx)
+        op = pd.DataFrame({"XX2501": 100.0}, index=idx)
+        st = pd.DataFrame({"XX2501": 100.0}, index=idx)
+        old = dict(H.RULES)
+        try:
+            # 用方案 C:出场那一路是散户 rz。若用 "flow",z_out 会是 sig 的 z(恒 0),
+            # 第 1 天就触发「消退」(z 恰为 0 那个老坑,见 QUIET),测不到想测的东西。
+            H.RULES["signal_source"] = "resonance"
+            H.RULES["long_enabled"] = False
+            H.RULES["max_hold"] = 3           # 四件套下第 3 天就会「持满」
+            H.RULES["exit_mode"] = "retail"
+            tr_r, _, _ = H.replay(sig, mkt, retail, op, st)
+            H.RULES["exit_mode"] = "inst"
+            tr_i, _, _ = H.replay(sig, mkt, retail, op, st)
+        finally:
+            H.RULES.clear()
+            H.RULES.update(old)
+        assert tr_r[0]["exit_reason"] in ("反向", "持满")
+        assert tr_i[0]["exit_reason"] == "机构出场"
+        assert tr_i[0]["exit_date"] == idx[6].strftime("%Y-%m-%d")
+
+    def test_inst模式缺列要报错不许静默退化(self):
+        idx = pd.bdate_range("2024-01-01", periods=3)
+        sig = pd.DataFrame({"z": [0.0] * 3}, index=idx)
+        retail = pd.DataFrame({"rz": [0.0] * 3}, index=idx)
+        mkt = pd.DataFrame({"main": ["XX2501"] * 3, "settle": 100.0, "open": 100.0,
+                            "ret": 0.0, "ret_open": 0.0, "o2c": 0.0, "past": 0.0,
+                            "dleft": 200, "close": 100.0}, index=idx)
+        old = H.RULES["exit_mode"]
+        H.RULES["exit_mode"] = "inst"
+        try:
+            with pytest.raises(ValueError):
+                H.replay(sig, mkt, retail)
+        finally:
+            H.RULES["exit_mode"] = old
+
+
 class TestRules:
     def test_use切换品种会就地改全局规则(self):
         """`RULES` 是模块级全局,`use()` 就地改它。
@@ -829,8 +890,13 @@ class TestRules:
         for code in ("JM", "LH"):
             H.use(code)
             assert H.RULES["signal_source"] == "resonance", code
-        # 焦煤做多已开、不要 dip(DEC-116 知情破例);生猪仍只做空
+        # 焦煤做多已开、不要 dip(DEC-116 知情破例),出场走机构出场(DEC-117);
+        # 生猪仍只做空、四件套出场 —— inst 出场在别家全输,不许被顺手带上
         H.use("JM")
         assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
+        assert H.RULES["exit_mode"] == "inst"
+        for code in ("LH", "FG", "SA", "JD"):
+            H.use(code)
+            assert H.RULES["exit_mode"] == "retail", code
         H.use("LH")
         assert H.RULES["long_enabled"] is False

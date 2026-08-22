@@ -151,7 +151,9 @@ interface HogPayload {
            /** 'cost' = 机构成本进场(鸡蛋 DEC-112 / 纯碱 DEC-113 / 玻璃 DEC-114);缺省 = 方案 C。 */
            signal_source?: string
            /** 玻璃专用的两条附加(DEC-114),别的品种缺省/假。 */
-           cost_need_adding?: boolean; cost_min_age?: number } & Record<string, unknown>
+           cost_need_adding?: boolean; cost_min_age?: number
+           /** 'inst' = 机构出场(焦煤,DEC-117);缺省 = 四件套。 */
+           exit_mode?: string; cost_unload_max?: number } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -182,6 +184,36 @@ const error = ref('')
 const tab = ref<'today' | 'history' | 'group' | 'rules'>('today')
 // 鸡蛋(DEC-112)进场走机构成本信号,策略方案与进场条件的文案都要换一套。
 const isCost = computed(() => data.value?.rules.signal_source === 'cost')
+
+/**
+ * 仓位动作(加多/减多/加空/减空)按**净持仓方向 + 5 日变化方向**说,z 的正负只负责
+ * 「反向看涨/看跌」那半句。此前两处都按 z 的正负说动作:2026-08-23 焦煤散户三家
+ * 净空 −12,454、5 日变化 −3,018(在加空),页面却写「散户在减多」;机构净多 66,360、
+ * 变化 −294(在减多),页面写「机构在加空」。运营者当场指出。
+ * 变化为 0 或缺数据时返回 null,调用方退回按 z 说的老话术。
+ */
+function posAction(net: number | null, change: number | null): string | null {
+  if (net === null || change === null || change === 0) return null
+  const adding = (net >= 0) === (change > 0)
+  return (adding ? '加' : '减') + (net >= 0 ? '多' : '空')
+}
+const instActionText = computed(() => {
+  const s = data.value?.signal
+  if (!s) return ''
+  const a = posAction(s.net, s.change)
+  if (a) return `机构在${a}`
+  return (s.z ?? 0) < 0 ? '机构在加空' : '机构在减空/加多'
+})
+const retailActionText = computed(() => {
+  const r = data.value?.retail
+  if (!r) return ''
+  const view = (r.z ?? 0) > 0 ? '反向看涨' : '反向看跌'
+  const a = posAction(r.net, r.change)
+  if (a) return `散户在${a} → ${view}`
+  return (r.z ?? 0) > 0 ? '散户在减多 → 反向看涨' : '散户在加多 → 反向看跌'
+})
+// 焦煤(DEC-117)出场走机构出场,策略方案页的出场那一条换文案。
+const isInstExit = computed(() => data.value?.rules.exit_mode === 'inst')
 const page = ref(1)
 // 与金银历史信号页同一套翻页控件(运营者 2026-08-19:后续品种也都用这个)。
 // 每页条数可改,所以不是常量。
@@ -515,7 +547,7 @@ const bySide = computed(() => {
                    :style="{ width: `${zRatio * 100}%` }" />
             </div>
             <div class="meter-label">
-              <span>{{ (data.signal.z ?? 0) < 0 ? '机构在加空' : '机构在减空/加多' }}</span>
+              <span>{{ instActionText }}</span>
               <b>{{ fmt(data.signal.z, 2) }}</b>
             </div>
           </div>
@@ -594,7 +626,7 @@ const bySide = computed(() => {
                    :style="{ width: `${Math.min(Math.abs(data.retail.z ?? 0), 2) / 2 * 100}%` }" />
             </div>
             <div class="meter-label">
-              <span>{{ (data.retail.z ?? 0) > 0 ? '散户在减多 → 反向看涨' : '散户在加多 → 反向看跌' }}</span>
+              <span>{{ retailActionText }}</span>
               <b>{{ fmt(data.retail.z, 2) }}</b>
             </div>
           </div>
@@ -785,7 +817,14 @@ const bySide = computed(() => {
               </template>
               <template v-else>z ≥ {{ data.signal.enter }} 时做多(本品种双向)。</template>
             </li>
-            <li><b>出场</b>:**散户反向信号翻向** / 硬止损
+            <li v-if="isInstExit"><b>出场(机构出场,DEC-117)</b>:**机构席位组方向翻转,
+              或本轮已卸掉 >{{ Math.round(Number(data.rules.cost_unload_max ?? 0.3) * 100) }}%** 就走;
+              硬止损 {{ (data.rules.stop * 100).toFixed(0) }}%<template v-if="data.rules.exit_before_delivery">
+              / 主力进入交割窗口前 {{ data.rules.exit_before_delivery }} 个交易日强制平仓</template>保留;
+              **不看散户翻向、不设持满**。它赢的方式是「机构一松手立刻走、再上手立刻跟」
+              (均持有 4 日、笔数比四件套多一半),不是拿得更久;只在焦煤验过,其余品种不用。<br>
+              <span class="hint">{{ exitText }}</span></li>
+            <li v-else><b>出场</b>:**散户反向信号翻向** / 硬止损
               {{ (data.rules.stop * 100).toFixed(0) }}% / 持满
               {{ data.rules.max_hold }} 个交易日<template v-if="data.rules.exit_before_delivery">
               / **主力进入交割窗口前 {{ data.rules.exit_before_delivery }} 个交易日
