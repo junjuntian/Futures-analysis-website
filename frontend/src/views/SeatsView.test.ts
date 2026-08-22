@@ -60,7 +60,8 @@ function stubFetch() {
           trade_date: '2026-08-14',
           available_dates: ['2026-08-14'],
           coverage_start: '2010-01-04',
-          rows: []
+          rows: [],
+          costs: []
         })
       }
       return response({})
@@ -155,6 +156,56 @@ describe('SeatsView 的选择记忆', () => {
     const asked = calls.map((url) => decodeURIComponent(url))
     expect(asked.some((url) => url.includes('member=中信'))).toBe(true)
     expect(asked.some((url) => url.includes('member=国泰君安'))).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('席位持仓表的成本列', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().csrfToken = 'csrf-test'
+    stubFetch()
+    // 在通用桩之上,给「中信」这一家一张带成本的持仓表。
+    const base = fetch as unknown as (input: RequestInfo | URL) => Promise<Response>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = decodeURIComponent(input.toString())
+        if (url.includes('/seats/positions') && url.includes('member=中信')) {
+          const row = (contract: string, rank_type: 'long' | 'short', quantity: string) => ({
+            exchange: 'DCE', instrument: 'LH', contract, is_variety_total: false,
+            variety_total_is_computed: false, rank_type, rank: 1, member: '中信',
+            quantity, change: '5', source: 'official'
+          })
+          return response({
+            member: '中信', instrument: null, members: ['中信'], trade_date: '2026-08-21',
+            available_dates: ['2026-08-21'], coverage_start: '2023-08-11',
+            rows: [row('LH2701', 'long', '2015'), row('LH2705', 'long', '980'), row('LH2705', 'short', '796')],
+            costs: [
+              { instrument: 'LH', contract: 'LH2701', net_position: '2015', cost: '13780.5', cost_unknown_reason: null },
+              // 这个合约那天不在榜:成本是「不知道」,不是 0 —— 界面必须说原因
+              { instrument: 'LH', contract: 'LH2705', net_position: null, cost: null, cost_unknown_reason: 'seat_off_the_board' }
+            ]
+          })
+        }
+        return base(input)
+      })
+    )
+  })
+
+  it('每个合约后面摆它自己的净持仓成本,并写清方向与手数;不可知的说原因', async () => {
+    localStorage.setItem('seats.members', '中信')
+    const wrapper = mountPage()
+    await flushPromises()
+    wrapper.findComponent({ name: 'ElRadioGroup' }).vm.$emit('update:modelValue', 'positions')
+    await flushPromises()
+    const text = wrapper.text()
+    expect(text).toContain('13,780.5')
+    expect(text).toContain('净多 2,015 手')
+    // LH2705 那行:成本空,原因要露出来,不能只画个横杠
+    expect(text).toContain('不在前 20 榜上')
     wrapper.unmount()
   })
 })

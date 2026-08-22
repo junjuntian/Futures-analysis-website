@@ -152,6 +152,7 @@ use uuid::Uuid;
         ,domain::spread_analytics::MonthlyCell
         ,domain::spread_analytics::MonthlyUpRatio
         ,spread_analytics::SeatPositionsResponse
+        ,spread_analytics::SeatContractCostItem
         ,spread_analytics::SeatPositionItem
         ,spread_analytics::SeatBuildingResponse
         ,spread_analytics::BuildingDayItem

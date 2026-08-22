@@ -14,7 +14,7 @@ use common::ApiResponse;
 use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
-use domain::seat_cost::{DailyPosition, build_cost_series, build_variety_series};
+use domain::seat_cost::{CostPoint, DailyPosition, build_cost_series, build_variety_series};
 use domain::seat_net_position::{SeatContractDay, as_of_day, build_net_position_series};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
@@ -629,6 +629,119 @@ pub struct SeatPositionItem {
     pub source: String,
 }
 
+/// 某席位在某合约于所选交易日的**净持仓成本(推算)**。席位持仓表每个合约后面那个数。
+///
+/// 与净持仓子页同一个引擎(`build_cost_series`)算出的同一个数:该合约从有记录起
+/// 逐日推到所选交易日。净持仓计价,多空不分开 —— 所以一个合约一个成本,
+/// 不是多头一个、空头一个(口径见 `domain::seat_cost`)。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatContractCostItem {
+    pub instrument: String,
+    pub contract: String,
+    /// 当日净持仓(持买减持卖)。`None` = 那天不在榜上,持仓未知。
+    pub net_position: Option<String>,
+    /// 净持仓成本(推算)。仓位为零、建仓当日无结算价、或不在榜时为空。
+    pub cost: Option<String>,
+    pub cost_unknown_reason: Option<String>,
+}
+
+/// 建仓日 → 成本引擎的输入。建仓接口与席位持仓表的成本列**共用这一处**,
+/// 「两边都没有行 = 不在榜」「只缺一边按 0」这两条口径只写一次。
+fn daily_positions_from(raw: &[database::spread_analytics::BuildingDay]) -> Vec<DailyPosition> {
+    raw.iter()
+        .map(|row| DailyPosition {
+            trade_date: row.trade_date,
+            // 两边都没有行 = 那天他不在榜上,持仓未知。
+            // 只缺一边(例如只上了多头榜)沿用旧口径按 0 计:那是「不在空头
+            // 前二十」,对这些主力席位而言与无空仓接近,且历来如此。
+            net_position: match (&row.long_position, &row.short_position) {
+                (None, None) => None,
+                (long, short) => Some(
+                    long.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO)
+                        - short.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO),
+                ),
+            },
+            settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
+        })
+        .collect()
+}
+
+/// 从一条合约的成本序列里取所选交易日那一点。序列按日升序,没有那天 = 那天没记录。
+fn cost_on(costs: &[CostPoint], day: Date) -> Option<&CostPoint> {
+    costs.iter().find(|point| point.trade_date == day)
+}
+
+fn cost_item(
+    instrument: String,
+    contract: String,
+    point: Option<&CostPoint>,
+) -> SeatContractCostItem {
+    SeatContractCostItem {
+        instrument,
+        contract,
+        net_position: point.and_then(|p| p.net_position.map(|v| v.to_string())),
+        cost: point.and_then(|p| p.cost.map(|v| v.round_dp(4).to_string())),
+        cost_unknown_reason: match point {
+            None => Some("no_record_that_day".to_string()),
+            Some(p) => p.cost_unknown_reason.map(str::to_string),
+        },
+    }
+}
+
+/// 席位持仓表里出现的每个(品种, 合约)各跑一遍成本引擎,取所选交易日那一点。
+/// 一个会员一天通常几个到几十个合约,逐个查对自用面板可接受;换来的是不在
+/// positions 的 SQL 里再拼一套成本逻辑。
+async fn contract_costs(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    member: &str,
+    rows: &[database::spread_analytics::SeatPositionRow],
+    day: Date,
+    request_id: Uuid,
+) -> Result<Vec<SeatContractCostItem>, SpreadApiError> {
+    let mut pairs: Vec<(String, String)> = rows
+        .iter()
+        .filter(|row| !row.is_variety_total && row.rank_type != "volume")
+        .filter_map(|row| row.contract.clone().map(|c| (row.instrument.clone(), c)))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    let mut factors: HashMap<String, Decimal> = HashMap::new();
+    let mut out = Vec::with_capacity(pairs.len());
+    for (instrument, contract) in pairs {
+        let factor = match factors.get(&instrument) {
+            Some(f) => *f,
+            None => {
+                let multiplier = database::spread_analytics::instrument_price_multiplier(
+                    pool,
+                    workspace_id,
+                    &instrument,
+                )
+                .await
+                .map_err(|_| SpreadApiError::Internal(request_id))?;
+                let f: Decimal = multiplier
+                    .as_deref()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(Decimal::ZERO);
+                factors.insert(instrument.clone(), f);
+                f
+            }
+        };
+        let raw = database::spread_analytics::load_building_days(
+            pool,
+            workspace_id,
+            &instrument,
+            member,
+            Some(contract.as_str()),
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        let series = build_cost_series(&daily_positions_from(&raw), factor);
+        out.push(cost_item(instrument, contract, cost_on(&series, day)));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SeatPositionsResponse {
     pub member: Option<String>,
@@ -648,6 +761,9 @@ pub struct SeatPositionsResponse {
     pub coverage_start: Option<Date>,
     #[schema(value_type = Vec<SeatPositionItem>)]
     pub rows: Vec<database::spread_analytics::SeatPositionRow>,
+    /// `rows` 里每个合约在所选交易日的净持仓成本(推算),运营者 2026-08-22 要求
+    /// 摆在多头/空头持仓后面。没选会员时为空(与 rows 同步)。
+    pub costs: Vec<SeatContractCostItem>,
 }
 
 #[utoipa::path(
@@ -727,6 +843,20 @@ pub async fn query_seat_positions(
         .map_err(|_| SpreadApiError::Internal(request_id))?,
         _ => Vec::new(),
     };
+    let costs = match (trade_date, member.as_deref()) {
+        (Some(day), Some(name)) => {
+            contract_costs(
+                &state.auth.pool,
+                context.workspace_id(),
+                name,
+                &rows,
+                day,
+                request_id,
+            )
+            .await?
+        }
+        _ => Vec::new(),
+    };
     Ok(Json(ApiResponse::new(
         SeatPositionsResponse {
             member,
@@ -736,6 +866,7 @@ pub async fn query_seat_positions(
             available_dates: dates.iter().map(ToString::to_string).collect(),
             coverage_start: dates.last().copied(),
             rows,
+            costs,
         },
         request_id,
     ))
@@ -1006,23 +1137,8 @@ pub async fn query_seat_building(
         )
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
-        let positions: Vec<_> = raw
-            .iter()
-            .map(|row| DailyPosition {
-                trade_date: row.trade_date,
-                // 两边都没有行 = 那天他不在榜上，持仓未知。
-                // 只缺一边（例如只上了多头榜）沿用旧口径按 0 计：那是「不在空头
-                // 前二十」，对这些主力席位而言与无空仓接近，且历来如此。
-                net_position: match (&row.long_position, &row.short_position) {
-                    (None, None) => None,
-                    (long, short) => Some(
-                        long.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO)
-                            - short.as_deref().map(parse_decimal).unwrap_or(Decimal::ZERO),
-                    ),
-                },
-                settlement: row.settlement_price.as_deref().and_then(|v| v.parse().ok()),
-            })
-            .collect();
+        // 映射口径与席位持仓表的成本列共用 daily_positions_from,只写一处。
+        let positions = daily_positions_from(&raw);
         let costs = build_cost_series(&positions, factor);
         days = raw
             .into_iter()
@@ -3521,6 +3637,69 @@ pub use monitor::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bday(
+        day: Date,
+        long: Option<&str>,
+        short: Option<&str>,
+        settle: &str,
+    ) -> database::spread_analytics::BuildingDay {
+        database::spread_analytics::BuildingDay {
+            trade_date: day,
+            open_price: None,
+            high_price: None,
+            low_price: None,
+            close_price: None,
+            settlement_price: Some(settle.to_string()),
+            long_position: long.map(str::to_string),
+            short_position: short.map(str::to_string),
+            inferred: false,
+        }
+    }
+
+    /// 席位持仓表那一列:取的是**所选交易日**那一点的净持仓成本,而且必须与
+    /// 净持仓子页同一个引擎 —— 这里直接用 build_cost_series 的结果对拍。
+    #[test]
+    fn contract_cost_picks_the_selected_day_from_the_same_engine() {
+        use time::macros::date;
+        let raw = vec![
+            bday(date!(2026 - 08 - 19), Some("100"), None, "1000"), // 建仓 100 手 @1000
+            bday(date!(2026 - 08 - 20), Some("200"), None, "1100"), // 加 100 手 @1100 → 1050
+            bday(date!(2026 - 08 - 21), Some("150"), None, "1200"), // 减仓:成本不动
+        ];
+        let series = build_cost_series(&daily_positions_from(&raw), Decimal::ZERO);
+        let item = cost_item(
+            "LH".into(),
+            "LH2701".into(),
+            cost_on(&series, date!(2026 - 08 - 21)),
+        );
+        assert_eq!(item.net_position.as_deref(), Some("150"));
+        assert_eq!(item.cost.as_deref(), Some("1050"));
+        assert!(item.cost_unknown_reason.is_none());
+        // 那天没记录 = 不在榜:三态里的「未知」,不是零
+        let missing = cost_item(
+            "LH".into(),
+            "LH2701".into(),
+            cost_on(&series, date!(2026 - 08 - 22)),
+        );
+        assert!(missing.cost.is_none());
+        assert_eq!(
+            missing.cost_unknown_reason.as_deref(),
+            Some("no_record_that_day")
+        );
+    }
+
+    #[test]
+    fn daily_positions_keep_the_three_states() {
+        use time::macros::date;
+        let raw = vec![
+            bday(date!(2026 - 08 - 19), None, None, "1000"), // 两边都没行:未知
+            bday(date!(2026 - 08 - 20), None, Some("30"), "1000"), // 只上空头榜:净空 30
+        ];
+        let pos = daily_positions_from(&raw);
+        assert!(pos[0].net_position.is_none());
+        assert_eq!(pos[1].net_position, Some(Decimal::from(-30)));
+    }
 
     fn leg(variety: &str, symbol: &str, month: &str) -> FreeSpreadLeg {
         FreeSpreadLeg {

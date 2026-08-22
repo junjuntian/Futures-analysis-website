@@ -428,6 +428,19 @@ export interface SeatPositionRow {
   source: string
 }
 
+/**
+ * 席位持仓表里某个合约在所选交易日的**净持仓成本（推算）**（2026-08-22 运营者要求
+ * 摆在多头/空头后面）。与净持仓子页同一个引擎算出的同一个数。净持仓计价、多空不分开，
+ * 所以一个合约一个成本。`cost` 为 null 时看 `cost_unknown_reason`——那是「不知道」，不是 0。
+ */
+export interface SeatContractCost {
+  instrument: string
+  contract: string
+  net_position: string | null
+  cost: string | null
+  cost_unknown_reason: string | null
+}
+
 export interface SeatPositionsResponse {
   member: string | null
   instrument: string | null
@@ -438,6 +451,8 @@ export interface SeatPositionsResponse {
   /** 该品种席位数据的最早一天。各品种起点相差十几年，界面必须说出来。 */
   coverage_start: string | null
   rows: SeatPositionRow[]
+  /** `rows` 里每个合约的净持仓成本。没选会员时为空。 */
+  costs: SeatContractCost[]
 }
 
 export function getSeatPositions(options: {

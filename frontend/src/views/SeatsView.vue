@@ -12,6 +12,7 @@ import {
   getSeatMemberInstruments,
   getSeatNetPosition,
   getSeatPositions,
+  type SeatContractCost,
   getSpreadVarieties,
   type MemberLeg,
   type NetPositionDay,
@@ -248,6 +249,7 @@ async function removeFavorite(favorite: SeatFavorite) {
 interface MemberRows {
   member: string
   rows: SeatPositionRow[]
+  costs: SeatContractCost[]
 }
 const memberRows = ref<MemberRows[]>([])
 
@@ -283,7 +285,7 @@ async function loadPositions() {
           member: name,
           tradeDate: tradeDate.value || undefined
         })
-        return { member: name, rows: data.rows }
+        return { member: name, rows: data.rows, costs: data.costs ?? [] }
       })
     )
     memberRows.value = fetched
@@ -417,6 +419,10 @@ interface ContractLine {
   shortChange: number | null | undefined
   /** 该行含回榜反推成分:那天实际未上榜,数字由回榜日增减倒推。 */
   inferred: boolean
+  /** 该合约的净持仓成本(推算),由后端按合约算好。null = 不知道,不是 0。 */
+  cost: string | null
+  costNet: string | null
+  costReason: string | null
 }
 interface InstrumentBlock {
   instrument: string
@@ -427,21 +433,26 @@ interface InstrumentBlock {
 
 // 增减量三态（未知 / 无行 / 真值）与吸收律见 src/seatChange.ts，那里有测试盯着。
 
-function buildBlocks(rows: SeatPositionRow[]): InstrumentBlock[] {
+function buildBlocks(rows: SeatPositionRow[], costs: SeatContractCost[] = []): InstrumentBlock[] {
   const wanted = new Set(instrumentFilter.value)
   const byInstrument = new Map<string, Map<string, ContractLine>>()
+  const costByKey = new Map(costs.map((c) => [`${c.instrument}|${c.contract}`, c]))
   for (const row of rows) {
     if (row.is_variety_total || !row.contract) continue
     if (wanted.size && !wanted.has(row.instrument)) continue
     if (row.rank_type === 'volume') continue
     const contracts = byInstrument.get(row.instrument) ?? new Map()
+    const hit = costByKey.get(`${row.instrument}|${row.contract}`)
     const line = contracts.get(row.contract) ?? {
       contract: row.contract,
       long: 0,
       longChange: undefined,
       short: 0,
       shortChange: undefined,
-      inferred: false
+      inferred: false,
+      cost: hit?.cost ?? null,
+      costNet: hit?.net_position ?? null,
+      costReason: hit?.cost_unknown_reason ?? null
     }
     // 任一腿来自回榜反推,整行标「推算」:那天他实际未上榜,数字是倒推的。
     if (row.source === 'reboard_inferred') line.inferred = true
@@ -487,9 +498,35 @@ function buildBlocks(rows: SeatPositionRow[]): InstrumentBlock[] {
 const memberBlocks = computed(() =>
   memberRows.value.map((entry) => ({
     member: entry.member,
-    blocks: buildBlocks(entry.rows)
+    blocks: buildBlocks(entry.rows, entry.costs)
   }))
 )
+
+/** 成本列的数:最多两位小数,千分位。 */
+function fmtCost(value: string) {
+  return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+/** 成本对应的净持仓方向与手数——成本是「净持仓」的成本,不标清楚方向这个数没法用。 */
+function costNetLabel(value: string) {
+  const n = Number(value)
+  if (n === 0) return '净持仓 0'
+  return `${n > 0 ? '净多' : '净空'} ${fmt(Math.abs(n))} 手`
+}
+/** 成本为空的原因,说人话。引擎给的是枚举,不认识的原样显示,别吞掉。 */
+function costReasonText(reason: string | null) {
+  switch (reason) {
+    case 'seat_off_the_board':
+      return '那天不在前 20 榜上,持仓未知'
+    case 'no_settlement_on_add':
+      return '建仓当日无结算价,成本不可知'
+    case 'no_record_that_day':
+      return '那天该合约没有他的记录'
+    case null:
+      return '仓位为零'
+    default:
+      return reason
+  }
+}
 
 function openBuilding(instrument: string, contract?: string) {
   buildingInstrument.value = instrument
@@ -1119,6 +1156,9 @@ const latestDailyPnl = computed(() => {
               <th>合约</th>
               <th>多头持仓</th>
               <th>空头持仓</th>
+              <th title="由公开持仓变化与结算价推出,不是成交均价;净持仓计价、多空不分开,与净持仓页同一个引擎">
+                成本<span class="th-sub">净持仓·推算</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -1159,6 +1199,15 @@ const latestDailyPnl = computed(() => {
                 <td class="figure">
                   <div>{{ fmt(line.short) }}</div>
                   <div class="change">{{ signed(line.shortChange) }}</div>
+                </td>
+                <td class="figure cost">
+                  <template v-if="line.cost !== null">
+                    <div>{{ fmtCost(line.cost) }}</div>
+                    <div v-if="line.costNet !== null" class="change">{{ costNetLabel(line.costNet) }}</div>
+                  </template>
+                  <div v-else class="change" :title="costReasonText(line.costReason)">
+                    —<span class="why">{{ costReasonText(line.costReason) }}</span>
+                  </div>
                 </td>
               </tr>
             </template>
@@ -1539,6 +1588,16 @@ h2 .muted {
 .positions th {
   background: var(--el-fill-color-light);
   font-weight: 600;
+}
+.positions .th-sub {
+  display: block;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+.positions .cost .why {
+  display: block;
+  font-size: 11px;
 }
 .instrument {
   font-weight: 600;
