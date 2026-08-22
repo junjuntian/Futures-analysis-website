@@ -829,3 +829,8 @@ class TestRules:
         for code in ("JM", "LH"):
             H.use(code)
             assert H.RULES["signal_source"] == "resonance", code
+        # 焦煤做多已开、不要 dip(DEC-116 知情破例);生猪仍只做空
+        H.use("JM")
+        assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
+        H.use("LH")
+        assert H.RULES["long_enabled"] is False
