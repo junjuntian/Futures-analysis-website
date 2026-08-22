@@ -19,6 +19,12 @@
 
 /** 判据需要的那几个字段。用结构类型,免得把整个 payload 类型拖进来。 */
 export interface EntryGateInput {
+  /**
+   * 引擎下发的规则全集。这里只关心 `signal_source`:'cost' 时(鸡蛋,DEC-112)
+   * 进场比的不是任何 z,而是三个状态条件 —— 文案必须换一套,否则读者又会
+   * 拿旁边的 z 去对门槛,重演 DEC-104 那个误会。
+   */
+  rules?: { signal_source?: unknown }
   signal: {
     z: number | null
     enter: number
@@ -45,8 +51,8 @@ export interface EntryGate {
   /** 真正被拿去和门槛比的那个数。共振不成立时为 `null` —— 那时它没有意义。 */
   value: number | null
   threshold: number
-  /** 这个数来自哪一路。 */
-  source: 'retail' | 'flow'
+  /** 这个数来自哪一路。'cost' 时 value/threshold 无意义(比的不是 z)。 */
+  source: 'retail' | 'flow' | 'cost'
   /** 机构与散户背离:方案 C 下直接判死,再大也不进场。 */
   divergent: boolean
   /** 门槛达成没有。做多做空对称,所以比的是绝对值。 */
@@ -55,6 +61,16 @@ export interface EntryGate {
 
 export function entryGate(data: EntryGateInput): EntryGate {
   const threshold = data.signal.enter
+  // 成本进场(DEC-112,鸡蛋):没有「某个 z 对门槛」这回事,结论全由引擎给。
+  if (data.rules?.signal_source === 'cost') {
+    return {
+      value: null,
+      threshold,
+      source: 'cost',
+      divergent: false,
+      met: !!data.signal.entry_side
+    }
+  }
   // 不走方案 C 时(`signal_source = "flow"`),进场就是拿机构信号比门槛,
   // 原来的显示是对的。
   if (!data.retail.trades) {
@@ -89,6 +105,12 @@ export function entryGateText(data: EntryGateInput): string {
   const flow = data.signal.z
   const shown = (v: number | null) => (v === null ? '—' : v.toFixed(2))
 
+  if (gate.source === 'cost') {
+    // 引擎的 entry_blocked 带着具体数字(「价 3702 高于机构成本 3660」),
+    // 直接转述;这里不复述三条件,免得两处文案漂移。
+    if (data.signal.entry_side) return '成本条件已满足 —— 次日开盘进场'
+    return `成本进场:${data.signal.entry_blocked ?? '条件未满足'}`
+  }
   if (gate.source === 'flow') {
     return `机构合计流向需达 ${gate.threshold}(现 ${shown(gate.value)})`
   }

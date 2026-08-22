@@ -160,7 +160,12 @@ RULES = {
     # **必须如实记住:三者单笔均值差的 t 只有 0.22~0.49,统计上分不出高下。**
     # 选 C 是运营者的判断(回撤最小、夏普最高),不是数据证明它更优——
     # 别在后续文档里把它写成「实测最优」。
-    "signal_source": "resonance",   # "flow"=原聪明钱单信号;"resonance"=方案 C
+    "signal_source": "resonance",   # "flow"=原聪明钱单信号;"resonance"=方案 C;
+                                    # "cost"=机构成本状态信号(DEC-112,由 use() 按品种注入)
+    # 成本进场的卸仓阈值:机构本轮已卸掉超过这个比例就不再进(0~1 小数!)。
+    # **预注册值,不是调参旋钮**:0.3→0.5 五个品种全部单调变差
+    # (REPORT_COST_ENTRY_v1),别回头调它。
+    "cost_unload_max": 0.30,
 }
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
@@ -240,25 +245,25 @@ VARIETIES = {
     "JD": {
         "name": "鸡蛋 JD", "unit": "元/500千克", "multiplier": 10.0,
         "replay_start": "2023-08-11",   # 大商所席位数据起点
-        # **做多开**(2026-08-20 运营者拍板)。**排序在 2026-08-21 修完 past
-        # 跨合约污染后翻了**(DEC-111),现在是:
-        #   关 0.69 / +20.3% / 回撤 −15.3% / 16 笔
-        #   **开+dip 0.59 / +21.3% / −18.2% / 26 笔  ← 现行**
-        #   开−dip 0.39 / +14.2% / −20.4% / 32 笔
-        # 也就是说「开着且要 dip 每项都略好」这句话已经不成立 —— 关掉夏普更高、
-        # 回撤更浅,收益基本持平。**没有跟着翻是有意的**:26 笔 / 三年样本,
-        # 0.69 与 0.59 的差距在噪音量级内,跟着每次重扫翻开关就是在拟合噪音
-        # (DEC-090/093 记过)。留在这里是等运营者拿主意,不是「实测最优」。
+        # **进场信号换成机构成本(DEC-112,2026-08-22 运营者拍板)** ——
+        # 五个品种里唯一把五道闸门全过的(REPORT_COST_GATES_v1):
+        # 逐年 3/4、选臂 walk-forward +42.8% vs +21.3%、收盘价源 1.34、
+        # 排除翻向日/换组余波仍 1.43/1.27、单笔 t +1.91。
+        # 机制指标:进场时机构建仓轮龄中位 4 日(流量信号 26 日 —— 运营者
+        # 「信号慢了」的诊断),进场成本优势中位 +0.32%(流量 −0.16%)。
+        # **首次在夏普与回撤上同时超过「恒定满仓做空」**(1.23/−8.9% vs
+        # 1.14/−20.1%),绝对收益仍略低(+48.9% vs +61.6%),页面照实摆。
+        # 丑话也钉死:34 笔、三年样本,t 仍未过 2。
+        # (流量信号时代的三档扫描 0.69/0.59/0.39 见 DEC-111,已成历史。)
         "long_enabled": True,
-        "long_needs_dip": True,         # 开做多必须配 dip:不要 dip 掉到 0.60
+        "long_needs_dip": False,  # 价不劣于成本本身就是「不追高」,再叠 dip 是双重计数
+        "signal_source": "cost",
         "out": "jd_signals.json",
-        # **这个品种的信号没验出来**:26 笔、胜率 42.3%、三年样本。
-        # (旧的「t=1.08、胜率 38.5%、13 笔」是加品种时那一代,已作废;
-        #  t 值在 DEC-111 口径下没有重算。)
-        # 页面靠 risk_flags 自己会挂「胜率不到一半」「t<2 等于还没验证」两条。
-        "backtest": "26 笔 净 +21.3%/胜率 42.3%/回撤 −18.2%/夏普 0.59"
-                    "(2023-08 起,**低于基准 +61.6%**)(2026-08-21 修回榜前视 + 修 past "
-                    "跨合约污染后重算,见 REPORT_PIT_LOOKAHEAD_v1 与 DEC-111)",
+        "backtest": "34 笔 净 +48.9%/胜率 64.7%/回撤 −8.9%/夏普 1.23"
+                    "(2023-08 起;恒定做空基准 +61.6%/夏普 1.14/回撤 −20.1% —— "
+                    "夏普与回撤首次胜过躺空,绝对收益仍略低)"
+                    "(2026-08-22 换成本进场信号,五道闸门 5/5,"
+                    "见 REPORT_COST_GATES_v1 与 DEC-112)",
     },
     "JM": {
         "name": "焦煤 JM", "unit": "元/吨", "multiplier": 60.0,
@@ -286,6 +291,8 @@ def use(code: str) -> dict:
     RULES["replay_start"] = v["replay_start"]
     RULES["long_enabled"] = v["long_enabled"]
     RULES["long_needs_dip"] = v["long_needs_dip"]
+    # 进场信号按品种选(DEC-112:鸡蛋走成本信号,其余仍是方案 C)。
+    RULES["signal_source"] = v.get("signal_source", "resonance")
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -685,6 +692,103 @@ def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> di
             "legs_now": _i(r["legs_now"]), "legs_at_peak": _i(r["legs_at_peak"])}
 
 
+def inst_cost_series(sig: pd.DataFrame, mkt: pd.DataFrame,
+                     groups: pd.Series) -> pd.DataFrame:
+    """机构均价/方向/轮龄的逐日重建 —— 成本进场信号的地基(DEC-112)。
+
+    会计规则(与 research/run_cost_entry.py 同一套,闸门就是按它过的):
+    加仓那天按当日**主力结算价**加权进 VWAP;减仓成本不动;换组/方向翻转重置;
+    掉榜或缺价那天**冻结**(不知道 ≠ 没动),当天不产出任何值。
+
+    这是前 20 截断席位数据上的**研究代理量**,不是交易所真值 ——
+    页面引用时不许写成「机构的真实成本」。
+    """
+    net = sig["net"]
+    px = mkt["settle"]
+    out = pd.DataFrame(index=net.index,
+                       columns=["side", "cost", "age"], dtype=float)
+    cur_grp, side, qty, cost, age = None, 0, 0.0, np.nan, 0
+    for d in net.index:
+        grp = groups.get(d)
+        if grp != cur_grp:
+            cur_grp, side, qty, cost, age = grp, 0, 0.0, np.nan, 0
+        n = net.get(d, np.nan)
+        p = px.get(d, np.nan)
+        if not np.isfinite(n) or not np.isfinite(p):
+            continue
+        s = int(np.sign(n)) if n != 0 else 0
+        if s == 0:
+            side, qty, cost, age = 0, 0.0, np.nan, 0
+            continue
+        if s != side:
+            side, qty, cost, age = s, abs(n), p, 0
+        else:
+            dn = abs(n) - qty
+            if dn > 0:
+                cost = (cost * qty + dn * p) / (qty + dn)
+            qty = abs(n)
+            age += 1
+        out.loc[d] = (side, cost, age)
+    return out
+
+
+def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
+                     unload: pd.Series) -> pd.DataFrame:
+    """把成本状态翻成进出场能用的两列:cost_z(±(enter+0.5) / 0)与
+    cost_reason(挡单原因,给页面「进场条件」那一行说人话用)。
+
+    三个条件缺一不可:机构在场(有净方向)、价格不劣于机构成本
+    (多:价 ≤ 成本;空:价 ≥ 成本,容差 0 —— 预注册,不设旋钮)、
+    机构本轮已卸掉 ≤ cost_unload_max。
+    纯函数,好测:所有输入都是现成序列,不碰全局状态。
+    """
+    amp = RULES["enter"] + 0.5
+    umax = RULES["cost_unload_max"]
+    z = pd.Series(0.0, index=settle.index)
+    reason = pd.Series(None, index=settle.index, dtype=object)
+    for d in settle.index:
+        n = net.get(d, np.nan)
+        p = settle.get(d, np.nan)
+        if not np.isfinite(n) or not np.isfinite(p):
+            reason[d] = "机构席位掉榜,今日仓位看不清"
+            continue
+        side = cc["side"].get(d, np.nan)
+        cost = cc["cost"].get(d, np.nan)
+        if not np.isfinite(side) or side == 0 or not np.isfinite(cost):
+            reason[d] = "机构未建立净方向"
+            continue
+        u = unload.get(d, np.nan)
+        if not np.isfinite(u):
+            reason[d] = "机构席位掉榜,今日仓位看不清"
+            continue
+        if u > umax:
+            reason[d] = f"机构本轮已卸掉 {u:.0%}(超过 {umax:.0%} 不追)"
+            continue
+        if side > 0:
+            if p <= cost:
+                z[d] = amp
+            else:
+                reason[d] = f"价 {p:.0f} 高于机构成本 {cost:.0f},等回到成本再进"
+        else:
+            if p >= cost:
+                z[d] = -amp
+            else:
+                reason[d] = f"价 {p:.0f} 低于机构空头成本 {cost:.0f},等弹回成本再进"
+    return pd.DataFrame({"cost_z": z, "cost_reason": reason})
+
+
+def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
+                       groups: pd.Series) -> pd.DataFrame:
+    """把成本进场信号(cost_z / cost_reason)挂到 sig 上。cost 模式的品种
+    必须在 build_payload / replay 之前走这一步 —— entry_exit_signals 只认列。"""
+    unload = unload_series(sig, seat, groups)["pct"]
+    cc = inst_cost_series(sig, mkt, groups)
+    ext = cost_entry_frame(cc, sig["net"], mkt["settle"],
+                           unload.reindex(mkt.index))
+    return sig.assign(cost_z=ext["cost_z"].reindex(sig.index),
+                      cost_reason=ext["cost_reason"].reindex(sig.index))
+
+
 def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """按 RULES["signal_source"] 决定进场与出场各用哪一路信号。
 
@@ -694,6 +798,16 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
     方案 C 的进场用共振后的散户信号、出场只用散户信号——出场不要求共振,
     否则聪明钱一转向就把仓位锁死在里面。
     """
+    if RULES["signal_source"] == "cost":
+        # 成本进场(DEC-112,目前只有鸡蛋):进场用 attach_cost_signal 预先挂在
+        # sig 上的状态信号(机构在场 + 价不劣于其成本 + 本轮卸仓 ≤30%);
+        # **出场仍走散户反向,四件套一字不动**(REPORT_COST_GATES_v1 的闸门
+        # 就是这么过的,出场换了闸门作废)。
+        if retail is None or retail.empty:
+            # 散户三家全缺席在现有品种上不会发生。真发生时宁可让反向/消退
+            # 失效(只剩止损/持满/交割),也不能安静换一路出场口径。
+            return sig["cost_z"], sig["cost_z"] * np.nan
+        return sig["cost_z"], retail["rz"]
     if RULES["signal_source"] != "resonance" or retail is None or retail.empty:
         return sig["z"], sig["z"]
     # 用**标准化后的 z** 判共振,不用原始 chg。
@@ -1144,12 +1258,17 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "z": None if rz_now is None else round(rz_now, 2),
         # z 为正 = 散户在减多/加空 → 反向看涨;为负 = 散户在加多 → 反向看跌
         "resonate": resonate,
-        "trades": RULES["signal_source"] == "resonance",
-        "note": "散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
-                "**现行策略(方案 C)就是用它进出场**:与聪明钱共振时按它的方向进场,"
-                "它翻向时出场。选它是因为回撤最小(−4.1% vs 主信号 −9.4%)、夏普最高;"
-                "但要如实知道——三个候选方案单笔均值差的 t 只有 0.22~0.49,"
-                "**统计上分不出高下**,这是一个判断,不是数据证明的最优解。",
+        # cost 模式下散户仍管**出场**,所以 trades 依旧为真 —— 它没有退出舞台。
+        "trades": RULES["signal_source"] in ("resonance", "cost"),
+        "note": ("散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
+                 "**本品种进场已改为机构成本信号(DEC-112),散户这一路只管出场**:"
+                 "它翻向时平仓,不再参与进场判断。"
+                 if RULES["signal_source"] == "cost" else
+                 "散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
+                 "**现行策略(方案 C)就是用它进出场**:与聪明钱共振时按它的方向进场,"
+                 "它翻向时出场。选它是因为回撤最小(−4.1% vs 主信号 −9.4%)、夏普最高;"
+                 "但要如实知道——三个候选方案单笔均值差的 t 只有 0.22~0.49,"
+                 "**统计上分不出高下**,这是一个判断,不是数据证明的最优解。"),
     }
 
     state = "观察中"
@@ -1186,6 +1305,12 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     # 预热期是「还没数」,背离是「有数但方向打架,再大也不进」。分开说。
     if _entry_blocked == "信号未就绪" and RULES["signal_source"] == "resonance"             and not resonate and np.isfinite(rz_now if rz_now is not None else np.nan):
         _entry_blocked = "机构与散户背离,方案 C 下不进场"
+    # 成本进场(DEC-112)下 entry_side 只知道 z 过没过线,报不出是哪个状态条件
+    # 挡的 —— 换成 attach_cost_signal 逐日记下的那条原因(带数字,能直接读)。
+    if RULES["signal_source"] == "cost" and _entry_side == 0 and "cost_reason" in sig:
+        _r = sig["cost_reason"].get(d)
+        if isinstance(_r, str) and _r:
+            _entry_blocked = _r
     # 交割窗口内只挡不进 —— 这一条 `entry_side` 不判(它不知道合约),这里补。
     _c_now = mkt["main"].get(d)
     if _entry_side != 0 and (not isinstance(_c_now, str)
@@ -1375,6 +1500,8 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
         groups, log, cuts = rolling_groups(seat, price, mkt.index)
         sig = signal_series(seat, groups)
+        if RULES["signal_source"] == "cost":
+            sig = attach_cost_signal(sig, seat, mkt, groups)
         payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st)
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)

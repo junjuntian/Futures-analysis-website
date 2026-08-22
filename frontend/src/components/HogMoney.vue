@@ -147,7 +147,9 @@ interface HogPayload {
   }
   rules: { reselect_months: number; group_k: number; enter: number; stop: number;
            max_hold: number; sig_win: number; long_enabled: boolean
-           exit_before_delivery?: number } & Record<string, unknown>
+           exit_before_delivery?: number
+           /** 'cost' = 机构成本进场(鸡蛋,DEC-112);缺省/其他 = 方案 C。 */
+           signal_source?: string } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -176,6 +178,8 @@ interface HogPayload {
 const data = ref<HogPayload | null>(null)
 const error = ref('')
 const tab = ref<'today' | 'history' | 'group' | 'rules'>('today')
+// 鸡蛋(DEC-112)进场走机构成本信号,策略方案与进场条件的文案都要换一套。
+const isCost = computed(() => data.value?.rules.signal_source === 'cost')
 const page = ref(1)
 // 与金银历史信号页同一套翻页控件(运营者 2026-08-19:后续品种也都用这个)。
 // 每页条数可改,所以不是常量。
@@ -756,7 +760,15 @@ const bySide = computed(() => {
               再用滚动标准差无量纲化得到强度 z。<br>
               <span class="hint">为什么用品种合计而不是逐合约:实测 84.6% 的交易日里同日不同合约
               的持仓变化方向相反——那是移仓换月,逐合约会把一次调仓读成两个相反的信号。</span></li>
-            <li><b>进场(方案 C)</b>:**散户反向信号与聪明钱流向同号(共振)** 且
+            <li v-if="isCost"><b>进场(成本信号,DEC-112)</b>:**机构在场 +
+              价格不劣于机构成本(多:价≤成本;空:价≥成本)+ 机构本轮卸仓 ≤30%**,
+              三条同时成立就进,**不等聪明钱大规模爆发** —— 那是趋势已启动的确认时刻,
+              实测那段收益拿不到(REPORT_LIMIT_ENTRY_v1)。换成本信号后进场时机构
+              建仓轮龄中位 4 个交易日(流量信号 26 日),进场成本优势中位 +0.32%。
+              五道闸门 5/5,见 REPORT_COST_GATES_v1。<br>
+              <span class="hint">机构成本是前 20 席位数据上的重建值(加仓日按结算价
+              加权),不是交易所真值。散户那一路仍在 —— 只管出场。</span></li>
+            <li v-if="!isCost"><b>进场(方案 C)</b>:**散户反向信号与聪明钱流向同号(共振)** 且
               散户反向 z ≤ −{{ data.signal.enter }} 时做空。两路都要求已过预热期
               ——聪明钱那路的标准化需要 60 个交易日,没预热完不参与判断。
               <template v-if="!data.institution.long_enabled">

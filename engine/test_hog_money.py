@@ -670,6 +670,80 @@ class TestUnloadState:
             assert word not in body, f"replay 里出现了 {word} —— 它只该用于显示"
 
 
+class TestCostSignal:
+    """成本进场信号(DEC-112,鸡蛋)。钉三件事:成本重建的会计规则、
+    状态条件各自的挡单原因、以及出场那一路**没有**被换掉。
+    这套判据的闸门记录在 REPORT_COST_GATES_v1 —— 改这里的语义等于闸门作废。"""
+
+    @staticmethod
+    def _mk(net_vals, px_vals):
+        idx = pd.bdate_range("2024-01-01", periods=len(net_vals))
+        sig = pd.DataFrame({"net": net_vals}, index=idx, dtype=float)
+        mkt = pd.DataFrame({"settle": px_vals}, index=idx, dtype=float)
+        groups = pd.Series([("甲", "乙")] * len(net_vals), index=idx)
+        return sig, mkt, groups
+
+    def test_加仓按当日结算价加权_减仓成本不动(self):
+        sig, mkt, groups = self._mk([10, 20, 20, 10, 10], [100, 110, 120, 130, 140])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        assert cc["cost"].iloc[0] == 100          # 首日建仓 = 当日结算价
+        assert abs(cc["cost"].iloc[1] - 105) < 1e-9   # (10×100+10×110)/20
+        assert abs(cc["cost"].iloc[2] - 105) < 1e-9   # 没加仓,不动
+        assert abs(cc["cost"].iloc[3] - 105) < 1e-9   # **减仓成本不动**
+        assert cc["age"].iloc[3] == 3
+
+    def test_方向翻转重置成本(self):
+        sig, mkt, groups = self._mk([10, -5, -5], [100, 90, 80])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        assert cc["side"].iloc[1] == -1
+        assert abs(cc["cost"].iloc[1] - 90) < 1e-9    # 新一轮从翻向日起算
+        assert cc["age"].iloc[1] == 0
+
+    def test_掉榜日冻结且不发信号(self):
+        sig, mkt, groups = self._mk([10, np.nan, 12], [100, 100, 100])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        assert not np.isfinite(cc["cost"].iloc[1])    # 冻结:当天不产出
+        unload = pd.Series([0.0, 0.0, 0.0], index=sig.index)
+        ext = H.cost_entry_frame(cc, sig["net"], mkt["settle"], unload)
+        assert ext["cost_z"].iloc[1] == 0
+        assert "掉榜" in ext["cost_reason"].iloc[1]
+
+    def test_三个挡单原因各说各的(self):
+        sig, mkt, groups = self._mk([10, 10, 10], [100, 100, 106])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        # 卸仓超三成挡住(第 1 天),价格高于成本挡住(第 2 天:价 106 > 成本 100)
+        unload = pd.Series([0.0, 0.5, 0.0], index=sig.index)
+        ext = H.cost_entry_frame(cc, sig["net"], mkt["settle"], unload)
+        assert ext["cost_z"].iloc[0] != 0             # 三条件全满足,进
+        assert ext["cost_z"].iloc[1] == 0
+        assert "卸掉" in ext["cost_reason"].iloc[1]
+        assert ext["cost_z"].iloc[2] == 0
+        assert "高于机构成本" in ext["cost_reason"].iloc[2]
+
+    def test_做空方向对称(self):
+        sig, mkt, groups = self._mk([-10, -10], [100, 104])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        unload = pd.Series([0.0, 0.0], index=sig.index)
+        ext = H.cost_entry_frame(cc, sig["net"], mkt["settle"], unload)
+        # 空头成本 100,现价 104 ≥ 成本 → 做空可进,信号为负
+        assert ext["cost_z"].iloc[1] < 0
+
+    def test_出场那一路仍是散户反向(self):
+        """cost 模式只换进场。出场换了,五道闸门全部作废。"""
+        idx = pd.bdate_range("2024-01-01", periods=3)
+        sig = pd.DataFrame({"z": [1.0, 1.0, 1.0],
+                            "cost_z": [1.5, 0.0, -1.5]}, index=idx)
+        retail = pd.DataFrame({"rz": [0.7, -0.7, 0.2]}, index=idx)
+        old = H.RULES["signal_source"]
+        H.RULES["signal_source"] = "cost"
+        try:
+            z_in, z_out = H.entry_exit_signals(sig, retail)
+        finally:
+            H.RULES["signal_source"] = old
+        assert list(z_in) == [1.5, 0.0, -1.5]
+        assert list(z_out) == [0.7, -0.7, 0.2]        # 出场 = 散户 rz,原样
+
+
 class TestRules:
     def test_use切换品种会就地改全局规则(self):
         """`RULES` 是模块级全局,`use()` 就地改它。
@@ -712,9 +786,15 @@ class TestRules:
         z_quiet = H.replay(signals(idx, [-3.0] + [QUIET] * 4), mkt, op=op, st=st)[0]
         assert z_quiet[0]["exit_date"] is None, f"z={QUIET} 不该触发任何出场"
 
-    def test_鸡蛋做多开关是开的且要求回撤(self):
-        """DEC-096 补记,运营者拍板。**这是样本内的选择**,写死在测试里是为了
-        以后有人无意改掉时能看见,不是说这个选择被样本外验证过。"""
+    def test_鸡蛋走成本进场信号(self):
+        """DEC-112,运营者拍板。这颗钉子上一代钉的是 DEC-096 的
+        「开做多 + 要 dip」—— 换成本信号时它按设计红了一次,这正是它的工作。
+        五道闸门 5/5 见 REPORT_COST_GATES_v1;dip 关掉是因为「价不劣于成本」
+        本身就是不追高,再叠 dip 是双重计数。"""
         H.use("JD")
+        assert H.RULES["signal_source"] == "cost"
         assert H.RULES["long_enabled"] is True
-        assert H.RULES["long_needs_dip"] is True
+        assert H.RULES["long_needs_dip"] is False
+        # 其余品种不许被顺手带成 cost
+        H.use("FG")
+        assert H.RULES["signal_source"] == "resonance"

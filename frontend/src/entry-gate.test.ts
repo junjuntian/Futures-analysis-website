@@ -111,3 +111,34 @@ describe('结论以引擎为准', () => {
     expect(entryGateText(withEngine({}))).toContain('已达标')
   })
 })
+
+describe('成本进场(DEC-112,鸡蛋)', () => {
+  const base = {
+    rules: { signal_source: 'cost' },
+    signal: { z: 0.4, enter: 1, entry_side: null as 'long' | 'short' | null,
+              entry_blocked: '价 3702 高于机构成本 3660,等回到成本再进' },
+    retail: { z: 0.9, resonate: true, trades: true }
+  }
+
+  it('结论全由引擎给:被挡时转述 entry_blocked,不摆 z 对门槛', () => {
+    const g = entryGate(base)
+    expect(g.source).toBe('cost')
+    expect(g.met).toBe(false)
+    const text = entryGateText(base)
+    expect(text).toContain('高于机构成本 3660')
+    // 绝不能出现「需达 1」这类 z 门槛话术 —— 那是 DEC-104 修过的误会
+    expect(text).not.toContain('需达')
+  })
+
+  it('entry_side 有值即已达标', () => {
+    const d = { ...base, signal: { ...base.signal, entry_side: 'long' as const, entry_blocked: null } }
+    expect(entryGate(d).met).toBe(true)
+    expect(entryGateText(d)).toContain('次日开盘进场')
+  })
+
+  it('没带 signal_source 的老 payload 走原路径,行为不变', () => {
+    const d = { ...base, rules: {} }
+    expect(entryGate(d).source).toBe('retail')
+  })
+})
+
