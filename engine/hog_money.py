@@ -166,6 +166,14 @@ RULES = {
     # **预注册值,不是调参旋钮**:0.3→0.5 五个品种全部单调变差
     # (REPORT_COST_ENTRY_v1),别回头调它。
     "cost_unload_max": 0.30,
+    # 玻璃专用的两个附加条件(DEC-114,由 use() 按品种注入;默认关 = 鸡蛋纯碱不变):
+    #   cost_need_adding —— 机构近 sig_win 日仍在**同向**加仓(「补仓我们也补」);
+    #   cost_min_age     —— 机构本轮已持仓 ≥ N 个可见交易日(翻向当天成本=现价,
+    #                       进场是构造性的;要求它先拿两天再跟)。
+    # 玻璃六关全过(REPORT_FG_AGE_v1),参数面轮龄 2/3/5 = 0.65/0.56/0.38 单调衰减,
+    # 2 是边界最优 —— **不是旋钮**,旁边就是下坡。
+    "cost_need_adding": False,
+    "cost_min_age": 0,
 }
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
@@ -217,9 +225,22 @@ VARIETIES = {
         # (2026-08-21 DEC-111 口径;旧的「207 笔 0.58 → 158 笔 0.40」是 DEC-090
         #  那一代、含前视含 past 污染,已作废)
         "long_needs_dip": False,
+        # **进场信号换成机构成本 + 两条附加(DEC-114,2026-08-22 运营者拍板)**。
+        # 规格:成本 + 卸仓≤30% + 机构近 5 日仍同向加仓 + 本轮已持仓 ≥2 日。
+        # 六关全过(REPORT_FG_AGE_v1):逐年赢 10/14、选臂 walk-forward +109.8% vs
+        # +34.9%(事前就会选中,连选 8 年)、收盘价源 0.52、轮龄≥4/避开换组仍赢、
+        # t +1.92、参数面 2/3/5 单调不翻脸。
+        # **来历是跑闸门时顺带看见的,记账标「事后假设复验通过」**,证据等级低鸡蛋一档。
+        # 流量信号时代 228 笔 +34.9%/0.21/−67.9% 是五品种最弱的,赢它门槛不高;
+        # 但 −67.9% → −31.6% 的回撤与事前选中是实打实的。
+        "signal_source": "cost",
+        "cost_need_adding": True,
+        "cost_min_age": 2,
         "out": "fg_signals.json",
-        "backtest": "228 笔 净 +34.9%/胜率 43.0%/回撤 −67.9%/夏普 **0.21**"
-                    "(2013-01 起,基准 −17.7%)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
+        "backtest": "120 笔 净 +218.1%/胜率 54.2%/回撤 −31.6%/夏普 0.65"
+                    "(2013-01 起,基准 −17.7%)(2026-08-22 换成本进场+还在加仓+轮龄≥2,"
+                    "六关全过但属事后假设复验,见 REPORT_FG_AGE_v1 与 DEC-114;"
+                    "流量信号时代 228 笔 +34.9%/0.21/−67.9% 见 DEC-111)",
     },
     "SA": {
         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
@@ -302,6 +323,8 @@ def use(code: str) -> dict:
     RULES["long_needs_dip"] = v["long_needs_dip"]
     # 进场信号按品种选(DEC-112:鸡蛋走成本信号,其余仍是方案 C)。
     RULES["signal_source"] = v.get("signal_source", "resonance")
+    RULES["cost_need_adding"] = v.get("cost_need_adding", False)
+    RULES["cost_min_age"] = v.get("cost_min_age", 0)
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -742,17 +765,21 @@ def inst_cost_series(sig: pd.DataFrame, mkt: pd.DataFrame,
 
 
 def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
-                     unload: pd.Series) -> pd.DataFrame:
+                     unload: pd.Series, chg: pd.Series | None = None) -> pd.DataFrame:
     """把成本状态翻成进出场能用的两列:cost_z(±(enter+0.5) / 0)与
     cost_reason(挡单原因,给页面「进场条件」那一行说人话用)。
 
     三个条件缺一不可:机构在场(有净方向)、价格不劣于机构成本
     (多:价 ≤ 成本;空:价 ≥ 成本,容差 0 —— 预注册,不设旋钮)、
     机构本轮已卸掉 ≤ cost_unload_max。
-    纯函数,好测:所有输入都是现成序列,不碰全局状态。
+    玻璃(DEC-114)再加两条:cost_min_age(机构本轮已持仓 ≥ N 日)与
+    cost_need_adding(机构近 sig_win 日仍同向加仓,看 `chg`)。
+    纯函数,好测:所有输入都是现成序列,不碰全局状态(RULES 只读)。
     """
     amp = RULES["enter"] + 0.5
     umax = RULES["cost_unload_max"]
+    min_age = RULES.get("cost_min_age", 0)
+    need_adding = RULES.get("cost_need_adding", False)
     z = pd.Series(0.0, index=settle.index)
     reason = pd.Series(None, index=settle.index, dtype=object)
     for d in settle.index:
@@ -773,6 +800,15 @@ def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
         if u > umax:
             reason[d] = f"机构本轮已卸掉 {u:.0%}(超过 {umax:.0%} 不追)"
             continue
+        age = cc["age"].get(d, np.nan)
+        if min_age and (not np.isfinite(age) or age < min_age):
+            reason[d] = f"机构本轮刚翻向(持仓 {0 if not np.isfinite(age) else int(age)} 日),等它先建仓 {min_age} 日"
+            continue
+        if need_adding:
+            g = chg.get(d, np.nan) if chg is not None else np.nan
+            if not (np.isfinite(g) and np.sign(g) == side):
+                reason[d] = f"机构近 {RULES['sig_win']} 日没在同向加仓,不追"
+                continue
         if side > 0:
             if p <= cost:
                 z[d] = amp
@@ -793,7 +829,7 @@ def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
     unload = unload_series(sig, seat, groups)["pct"]
     cc = inst_cost_series(sig, mkt, groups)
     ext = cost_entry_frame(cc, sig["net"], mkt["settle"],
-                           unload.reindex(mkt.index))
+                           unload.reindex(mkt.index), sig["chg"].reindex(mkt.index))
     return sig.assign(cost_z=ext["cost_z"].reindex(sig.index),
                       cost_reason=ext["cost_reason"].reindex(sig.index))
 

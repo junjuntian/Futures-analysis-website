@@ -148,8 +148,10 @@ interface HogPayload {
   rules: { reselect_months: number; group_k: number; enter: number; stop: number;
            max_hold: number; sig_win: number; long_enabled: boolean
            exit_before_delivery?: number
-           /** 'cost' = 机构成本进场(鸡蛋,DEC-112);缺省/其他 = 方案 C。 */
-           signal_source?: string } & Record<string, unknown>
+           /** 'cost' = 机构成本进场(鸡蛋 DEC-112 / 纯碱 DEC-113 / 玻璃 DEC-114);缺省 = 方案 C。 */
+           signal_source?: string
+           /** 玻璃专用的两条附加(DEC-114),别的品种缺省/假。 */
+           cost_need_adding?: boolean; cost_min_age?: number } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -761,8 +763,10 @@ const bySide = computed(() => {
               <span class="hint">为什么用品种合计而不是逐合约:实测 84.6% 的交易日里同日不同合约
               的持仓变化方向相反——那是移仓换月,逐合约会把一次调仓读成两个相反的信号。</span></li>
             <li v-if="isCost"><b>进场(成本信号,DEC-112)</b>:**机构在场 +
-              价格不劣于机构成本(多:价≤成本;空:价≥成本)+ 机构本轮卸仓 ≤30%**,
-              三条同时成立就进,**不等聪明钱大规模爆发** —— 那是趋势已启动的确认时刻,
+              价格不劣于机构成本(多:价≤成本;空:价≥成本)+ 机构本轮卸仓 ≤30%<template
+              v-if="data.rules.cost_need_adding"> + 机构近 {{ data.signal.win }} 日仍同向加仓</template><template
+              v-if="data.rules.cost_min_age"> + 机构本轮已持仓 ≥{{ data.rules.cost_min_age }} 日</template>**,
+              全部同时成立就进,**不等聪明钱大规模爆发** —— 那是趋势已启动的确认时刻,
               实测那段收益拿不到(REPORT_LIMIT_ENTRY_v1)。换成本信号后进场时机构
               建仓轮龄中位 4 个交易日(流量信号 26 日),进场成本优势中位 +0.32%。
               五道闸门 5/5,见 REPORT_COST_GATES_v1。<br>

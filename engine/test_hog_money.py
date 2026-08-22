@@ -728,6 +728,26 @@ class TestCostSignal:
         # 空头成本 100,现价 104 ≥ 成本 → 做空可进,信号为负
         assert ext["cost_z"].iloc[1] < 0
 
+    def test_玻璃两条附加条件各自挡单(self):
+        """DEC-114:最小轮龄与「还在加仓」。默认关时不得影响鸡蛋纯碱。"""
+        sig, mkt, groups = self._mk([10, 10, 10, 10], [100, 100, 100, 100])
+        cc = H.inst_cost_series(sig, mkt, groups)
+        unload = pd.Series([0.0] * 4, index=sig.index)
+        chg = pd.Series([5.0, 5.0, -3.0, 5.0], index=sig.index)   # 第 2 天机构在减
+        old = (H.RULES["cost_min_age"], H.RULES["cost_need_adding"])
+        try:
+            H.RULES["cost_min_age"], H.RULES["cost_need_adding"] = 0, False
+            base = H.cost_entry_frame(cc, sig["net"], mkt["settle"], unload, chg)
+            assert (base["cost_z"] != 0).all()          # 默认关:四天都进
+            H.RULES["cost_min_age"], H.RULES["cost_need_adding"] = 2, True
+            ext = H.cost_entry_frame(cc, sig["net"], mkt["settle"], unload, chg)
+        finally:
+            H.RULES["cost_min_age"], H.RULES["cost_need_adding"] = old
+        assert ext["cost_z"].iloc[0] == 0 and "刚翻向" in ext["cost_reason"].iloc[0]
+        assert ext["cost_z"].iloc[1] == 0 and "刚翻向" in ext["cost_reason"].iloc[1]   # 轮龄 1 < 2
+        assert ext["cost_z"].iloc[2] == 0 and "没在同向加仓" in ext["cost_reason"].iloc[2]
+        assert ext["cost_z"].iloc[3] != 0                # 轮龄 3、在加仓、价=成本:进
+
     def test_出场那一路仍是散户反向(self):
         """cost 模式只换进场。出场换了,五道闸门全部作废。"""
         idx = pd.bdate_range("2024-01-01", periods=3)
@@ -799,7 +819,13 @@ class TestRules:
         H.use("SA")
         assert H.RULES["signal_source"] == "cost"
         assert H.RULES["long_needs_dip"] is False
-        # 其余品种不许被顺手带成 cost
-        for code in ("FG", "JM", "LH"):
+        # 玻璃(DEC-114):成本 + 两条附加;鸡蛋纯碱那两条必须是默认关
+        H.use("FG")
+        assert H.RULES["signal_source"] == "cost"
+        assert H.RULES["cost_need_adding"] is True and H.RULES["cost_min_age"] == 2
+        H.use("JD")
+        assert H.RULES["cost_need_adding"] is False and H.RULES["cost_min_age"] == 0
+        # 焦煤生猪不许被顺手带成 cost
+        for code in ("JM", "LH"):
             H.use(code)
             assert H.RULES["signal_source"] == "resonance", code
