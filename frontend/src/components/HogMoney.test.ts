@@ -376,7 +376,7 @@ describe('生猪机构资金', () => {
     expect(t).not.toContain('下次')
     expect(t).not.toContain('换人历史')
     await w.findAll('.tab')[3].trigger('click')
-    expect(w.text()).toContain('固定名单(国泰君安、东证、东吴、永安、浙商')
+    expect(w.text()).toContain('固定名单(国泰君安、东证期货、东吴期货、永安期货、浙商期货')
     w.unmount()
   })
 
