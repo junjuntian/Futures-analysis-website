@@ -166,7 +166,9 @@ interface HogPayload {
            /** 'inst' = 机构出场(焦煤,DEC-117);缺省 = 四件套。 */
            exit_mode?: string; cost_unload_max?: number
            /** 'unload_bounce' = 做多只由机构净空且卸仓≥long_unload_min 触发(生猪,DEC-118)。 */
-           long_mode?: string; long_unload_min?: number } & Record<string, unknown>
+           long_mode?: string; long_unload_min?: number
+           /** 做多腿起始日(DEC-124):生猪只从 2026-01-01 起开做多,之前只做空。 */
+           long_since?: string | null } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -877,6 +879,10 @@ const bySide = computed(() => {
                 用来联动生猪向上套利;流量 z ≥ {{ data.signal.enter }} 的做多仍然不做。
                 知情破例,不是验证通过:做多腿 14 笔均值 +1.06%,整体夏普 2.34 → 2.14、
                 回撤 −4.2% → −8.4%。
+                <template v-if="data.rules.long_since">
+                  <br><b>做多腿只从 {{ data.rules.long_since }} 起开</b>(DEC-124,运营者按磨底年判断):
+                  之前的年份单边熊市,只做空;2026 年以来这条腿尚未触发过。
+                </template>
               </template>
               <template v-else>z ≥ {{ data.signal.enter }} 时做多(本品种双向)。</template>
             </li>

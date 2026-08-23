@@ -1016,3 +1016,29 @@ class TestRollBounce:
         mkt2 = mkt.assign(past=-0.03)
         out2 = H.roll_bounce_payload(mkt2, st, cfg)
         assert out2["active"] is False and out2["history"] == []
+
+
+class TestLongSince:
+    """DEC-124:生猪做多腿只从 2026-01-01 起开,之前的年份做多信号当不存在。"""
+
+    def test_生猪配了起始日其余品种为空(self):
+        H.use("LH")
+        assert H.RULES["long_since"] == "2026-01-01"
+        for code in ("FG", "SA", "JD", "JM"):
+            H.use(code)
+            assert H.RULES["long_since"] is None, code
+
+    def test_起始日之前做多信号不进场之后照进(self):
+        """同一条 z=+3 的做多信号,价格走平:起始日之前不开仓,之后开仓。"""
+        idx = bdays("2025-12-22", 10)
+        mkt, op, st = frames(idx, "LH2603", [100.0] * 10)
+        H.RULES["long_since"] = "2026-01-01"
+        z = [QUIET] * 10
+        z[1] = 3.0      # 2025-12-23:起始日前
+        z[8] = 3.0      # 2026-01-01(起始日当天,次日开盘成交)
+        tr = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        assert all(pd.Timestamp(t["entry_date"]) >= pd.Timestamp("2026-01-01") for t in tr), tr
+        assert len(tr) == 1 and tr[0]["side"] == "long"
+        H.RULES["long_since"] = None
+        tr2 = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        assert len(tr2) >= 1 and pd.Timestamp(tr2[0]["entry_date"]) < pd.Timestamp("2026-01-01")

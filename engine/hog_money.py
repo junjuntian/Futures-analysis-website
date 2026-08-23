@@ -237,6 +237,11 @@ VARIETIES = {
         "long_needs_dip": False,
         "long_mode": "unload_bounce",
         "long_unload_min": 0.50,
+        # **做多腿只从 2026-01-01 起开(DEC-124,2026-08-23 运营者拍板)**:2026 是磨底年,
+        # 之前的年份单边熊市,做多腿 13 笔 −24.6% 全在 2023~2025;2026 年这条腿一次没触发。
+        # 只做空 20 笔 +74.0%/夏普 1.83/回撤 −8.0%;开着全程 33 笔 +29.5%/0.72/−28.0%。
+        # 套利页反弹窗口背景(bounce_long)照常算,不受此限。
+        "long_since": "2026-01-01",
         # **固定席位名单(DEC-122,2026-08-23 运营者拍板)**:国泰君安/东证/东吴/永安/浙商。
         # 同一策略只换席位组回放:近一年 固定5家 +64.2%/夏普 3.94/回撤 −3.2%(10 笔 80%),
         # 滚动 alpha 组 +69.1%/3.22/−8.2%(16 笔 62%),固定4家(去永安) +57.0%/2.95/−11.7%。
@@ -383,6 +388,8 @@ def use(code: str) -> dict:
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     RULES["long_mode"] = v.get("long_mode", "flow")
     RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
+    # 做多腿起始日(DEC-124):None = 全程;给了日期就只在该日起允许做多进场(之前只做空)。
+    RULES["long_since"] = v.get("long_since")
     # 固定席位名单(DEC-122):None 走滚动重选;给了名单就整段回放都用这几家。
     RULES["fixed_members"] = list(v["fixed_members"]) if v.get("fixed_members") else None
     # 换月反弹提示(DEC-123):只有生猪配;None = 不出这块。
@@ -995,6 +1002,12 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
     return _apply_long_mode(retail["rz"].where(resonate), sig), retail["rz"]
 
 
+def long_allowed(d: pd.Timestamp) -> bool:
+    """做多腿是否在 d 这天开着(DEC-124):`long_since` 为空则全程开;否则 d ≥ long_since。"""
+    since = RULES.get("long_since")
+    return not since or pd.Timestamp(d) >= pd.Timestamp(since)
+
+
 def entry_side(ze: float, past: float) -> tuple[int, str | None]:
     """今天这个信号会往**哪个方向**进场,进不了的话卡在哪一条。
 
@@ -1156,6 +1169,9 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
             continue
         if side == 0 and np.isfinite(ze) and np.isfinite(px(c_now, i + 1, "open")):
             want, _ = entry_side(ze, mkt["past"].get(d, np.nan))
+            # 做多腿起始日(DEC-124):之前的年份做多信号当不存在,只做空。
+            if want == 1 and not long_allowed(d):
+                want = 0
             if want != 0:
                 side, entry_i, entry_c = want, i, c_now
         pos.iloc[i] = side
