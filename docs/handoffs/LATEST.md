@@ -7,7 +7,7 @@
 
 ## 当前生产状态
 
-- **生产 = `8771003`**(2026-08-23),站点 `https://shejimao.trade`,
+- **生产 = `9f09b5d`**(2026-08-23),站点 `https://shejimao.trade`,
   服务器别名 `qh`。发布流程照 `docs/RELEASE_PROCESS.md`,部署前跑
   `ops/preflight-deploy.sh`。
   **这一行写的是「上一次成功部署的 SHA」,部署完之后用一个纯文档提交更新它**
