@@ -374,6 +374,11 @@ function bounceAt(item: SpreadMonitorItem): BounceState | null {
   if (!row) return null
   return { ...bounce.value, active: row.active, unload: row.unload, side: row.side }
 }
+/** 当年位置(0~1),给反弹文案判高位/低位(DEC-128)。 */
+function pairPos(item: SpreadMonitorItem): number | null {
+  const p = item.pair.position
+  return p === null ? null : Number(p)
+}
 /** 状态取自哪一天 —— 与行的交易日不同时(周末/节假日退到前一天)要写出来。 */
 function bounceDate(item: SpreadMonitorItem): string | null {
   const row = bounceHistory.value.length ? pickBounceDay(bounceHistory.value, item.trade_date) : null
@@ -789,14 +794,13 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
 
             <!-- 生猪跨月组合的「卸仓反弹」窗口(DEC-119)。引擎算,这里只读。
-                 窗口开 = 机构净空且已卸掉 ≥ 门槛(引擎 long_unload_min,DEC-127 起 30%)。
-                 原验证(滚动组+50%)是牛市价差唯一能赚的窗口;**改固定 5 家后复验已不优于无条件**,
-                 文案由引擎 note 带过来,别在这里写死数字。**背景,不是进场信号。** -->
+                 文案按 DEC-128(2026 回测):机构净空 + 本轮卸掉多少 + 反弹参考区间 10~20% + 价差高位/低位,
+                 逻辑与数字都在 bounce-hint.ts 的 BOUNCE_REF/注释里,别在这里写死。**背景,不是进场信号。** -->
             <el-tooltip v-if="isLhCalendar(item) && bounceAt(item)" :content="bounce!.note" placement="top">
               <div class="basis fund">
                 <span class="k">反弹窗口</span>
-                <span class="v" :class="bounceHint(bounceAt(item)!).on ? 'disc' : 'prem'">
-                  {{ bounceHint(bounceAt(item)!).text }}
+                <span class="v" :class="bounceHint(bounceAt(item)!, pairPos(item)).on ? 'disc' : 'prem'">
+                  {{ bounceHint(bounceAt(item)!, pairPos(item)).text }}
                 </span>
                 <span v-if="bounceDate(item)" class="pctile">按 {{ bounceDate(item) }} 机构状态</span>
                 <span class="pctile flow-tip">背景参考,非进场信号</span>

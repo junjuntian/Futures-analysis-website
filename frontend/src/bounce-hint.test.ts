@@ -1,39 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import { bounceHint, pickBounceDay } from './bounce-hint'
+import { bounceHint, pairPosBand, pickBounceDay } from './bounce-hint'
 
 describe('生猪卸仓反弹窗口 → 套利页文案', () => {
   const base = { min: 0.5, note: '' }
 
-  it('窗口开:要写出已卸掉多少与阈值,并提醒一个月内', () => {
-    const h = bounceHint({ ...base, active: true, unload: 0.62, side: 'net_short' })
+  it('低位 + 卸仓在参考区间内 → 窗口开,写出卸掉多少/区间/低位', () => {
+    const h = bounceHint({ ...base, active: false, unload: 0.15, side: 'net_short' }, 0.12)
     expect(h.on).toBe(true)
     expect(h.text).toContain('窗口开')
-    expect(h.text).toContain('62%')
-    expect(h.text).toContain('≥50%')
-    expect(h.text).toContain('一个月内')
+    expect(h.text).toContain('已卸掉 15%')
+    expect(h.text).toContain('反弹参考区间 10~20%')
+    expect(h.text).toContain('处于价差低位')
   })
 
-  it('窗口关·机构净空但没卸够:要说还差多少', () => {
-    const h = bounceHint({ ...base, active: false, unload: 0.46, side: 'net_short' })
+  it('低位 + 已过参考区间 → 窗口关,说反弹多半已走完', () => {
+    const h = bounceHint({ ...base, active: true, unload: 0.38, side: 'net_short' }, 0.2)
     expect(h.on).toBe(false)
-    expect(h.text).toContain('只卸掉 46%')
+    expect(h.text).toContain('已卸掉 38%')
+    expect(h.text).toContain('已过反弹参考区间')
+    expect(h.text).toContain('处于价差低位')
+  })
+
+  it('低位 + 未到参考区间 → 半开,说早了一点', () => {
+    const h = bounceHint({ ...base, active: false, unload: 0.05, side: 'net_short' }, 0.1)
+    expect(h.on).toBe(false)
+    expect(h.text).toContain('未到反弹参考区间')
+  })
+
+  it('高位不论卸多少 → 窗口关,牛市价差别追', () => {
+    const h = bounceHint({ ...base, active: true, unload: 0.15, side: 'net_short' }, 0.95)
+    expect(h.on).toBe(false)
+    expect(h.text).toContain('处于价差高位')
+    expect(h.text).toContain('别追')
+  })
+
+  it('位置未知(组合太新)只报卸仓与区间,不判高低位', () => {
+    const h = bounceHint({ ...base, active: false, unload: 0.15, side: 'net_short' }, null)
+    expect(h.text).toContain('组合位置未知')
+    expect(h.text).not.toContain('处于价差')
   })
 
   it('窗口关·机构根本没净空:要点明牛市价差无条件是逆势', () => {
-    const h = bounceHint({ ...base, active: false, unload: 0.1, side: 'net_long' })
+    const h = bounceHint({ ...base, active: false, unload: 0.1, side: 'net_long' }, 0.1)
     expect(h.on).toBe(false)
     expect(h.text).toContain('未净空')
     expect(h.text).toContain('逆势')
   })
 
-  it('差一点点没到阈值时,不能四舍五入成「只卸掉 50%,未到 50%」', () => {
-    const h = bounceHint({ ...base, active: false, unload: 0.4975, side: 'net_short' })
-    expect(h.text).toContain('49.8%')
-    expect(h.text).not.toContain('只卸掉 50%')
+  it('位置分档:<30% 低位、>70% 高位、其余中位', () => {
+    expect(pairPosBand(0.1)).toBe('low')
+    expect(pairPosBand(0.5)).toBe('mid')
+    expect(pairPosBand(0.9)).toBe('high')
+    expect(pairPosBand(null)).toBeNull()
   })
 
   it('掉榜看不清时不编数字', () => {
-    const h = bounceHint({ ...base, active: false, unload: null, side: 'net_short' })
+    const h = bounceHint({ ...base, active: false, unload: null, side: 'net_short' }, 0.5)
     expect(h.text).toContain('掉榜看不清')
     expect(h.text).not.toContain('NaN')
   })
