@@ -344,11 +344,19 @@ mod tests {
         let rows = vec![row("中信", 3, 100, 0), row("中信", 4, 100, 0)];
         let base = build_net_position_series(&rows, &["中信".into()], &calendar(&[3, 4, 5, 6, 7]));
         let published: BTreeSet<Date> = [day(3), day(4)].into_iter().collect();
-        let out = mark_unpublished_and_extend_tail(base, &["中信".into()], &calendar(&[3, 4, 5, 6, 7]), &published);
+        let out = mark_unpublished_and_extend_tail(
+            base,
+            &["中信".into()],
+            &calendar(&[3, 4, 5, 6, 7]),
+            &published,
+        );
         let dates: Vec<u8> = out.iter().map(|d| d.trade_date.day()).collect();
         assert_eq!(dates, vec![3, 4, 5, 6, 7], "尾巴上的行情日要补上");
         assert!(!out[0].unpublished && !out[1].unpublished, "有榜的日子不标");
-        assert!(out[2].unpublished && out[4].unpublished, "没榜的日子标未公布");
+        assert!(
+            out[2].unpublished && out[4].unpublished,
+            "没榜的日子标未公布"
+        );
         assert_eq!(out[2].missing_members, vec!["中信".to_string()]);
         assert_eq!(out[2].net_position, Decimal::ZERO);
     }
@@ -359,7 +367,12 @@ mod tests {
         let rows = vec![row("中信", 3, 100, 0), row("中信", 5, 100, 0)];
         let base = build_net_position_series(&rows, &["中信".into()], &calendar(&[3, 4, 5]));
         let published: BTreeSet<Date> = [day(3), day(4), day(5)].into_iter().collect();
-        let out = mark_unpublished_and_extend_tail(base, &["中信".into()], &calendar(&[3, 4, 5]), &published);
+        let out = mark_unpublished_and_extend_tail(
+            base,
+            &["中信".into()],
+            &calendar(&[3, 4, 5]),
+            &published,
+        );
         assert!(!out[1].unpublished);
         assert_eq!(out[1].missing_members, vec!["中信".to_string()]);
     }
