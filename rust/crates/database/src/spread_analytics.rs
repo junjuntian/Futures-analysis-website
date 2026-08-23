@@ -2792,6 +2792,38 @@ pub async fn load_seat_net_positions(
         .collect())
 }
 
+/// 交易所**发过**这个合约(或品种)持仓排名的交易日(DEC-130)。
+///
+/// 大商所只对持仓量 ≥ 2 万手的合约公布成交持仓排名,合约临近到期跌破 2 万手后排名
+/// 停发——那些天库里**任何**席位都没有这个合约的行。净持仓页靠这个集合把
+/// 「交易所未公布」与「这家掉出前二十」分开说:前者整张榜不存在,后者榜在、人不在。
+/// 只看多空榜(成交量榜不算,与 seat_net_positions_sql 同一条纪律);按交易日去重,
+/// 不区分来源。选了具体合约看逐合约行,没选看品种汇总行。
+pub async fn seat_published_dates(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+    contract: Option<&str>,
+) -> Result<Vec<Date>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, Date>(
+        "select distinct trade_date from seat_history
+          where workspace_id = $1 and instrument = $2
+            and ($3::text is null or contract = $3)
+            and is_variety_total = ($3::text is null)
+            and rank_type in ('long', 'short')
+          order by trade_date",
+    )
+    .bind(workspace_id)
+    .bind(instrument)
+    .bind(contract)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 /// 一条席位组合收藏。
 #[derive(Debug, Clone)]
 pub struct SeatMemberFavorite {

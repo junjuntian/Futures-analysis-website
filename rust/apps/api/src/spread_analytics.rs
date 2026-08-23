@@ -15,7 +15,9 @@ use database::spread_analytics::{
     FavoriteLeg, NewFavorite, NewProviderCache, SeriesPersistence, SpreadRepositoryError,
 };
 use domain::seat_cost::{CostPoint, DailyPosition, build_cost_series, build_variety_series};
-use domain::seat_net_position::{SeatContractDay, as_of_day, build_net_position_series};
+use domain::seat_net_position::{
+    SeatContractDay, as_of_day, build_net_position_series, mark_unpublished_and_extend_tail,
+};
 use domain::spread_analytics::{
     ContinuousPoint, DEFAULT_RULE_VERSION, RawSpreadPoint, STATISTICS_ALGORITHM_VERSION,
     SegmentBoundary, WINDOW_ALGORITHM_VERSION, WindowQuality, WindowSegment,
@@ -1403,6 +1405,10 @@ pub struct NetPositionDayItem {
     pub missing_members: Vec<String>,
     /// 当天按**回榜反推值**计入合计的席位:他们实际未上榜,数字是倒推的。
     pub inferred_members: Vec<String>,
+    /// 交易所当天**没有公布**这个合约(或品种)的持仓排名(DEC-130):大商所只对持仓量
+    /// ≥ 2 万手的合约发排名,合约临近到期跌破 2 万手后停发。不是席位掉榜,是整张榜不存在;
+    /// 界面要分开说,净持仓留空不画 0。
+    pub unpublished: bool,
     /// 当日盈亏 =(今结算 − 昨结算)× 昨净持仓 × 点值,**逐「席位×合约」各算各的
     /// 再相加**(与建仓过程同一套 `build_variety_series`,不另起一套口径)。
     /// 掉榜或无结算价的那天为空:那天赚了多少不知道,不是零。
@@ -1660,6 +1666,20 @@ pub async fn query_seat_net_position(
             .collect();
 
         let series = build_net_position_series(&observations, &members, &calendar);
+        // 交易所未公布排名的日子 + 席位序列尾巴之后仍有行情的交易日(DEC-130):
+        // 大商所只对持仓量 ≥2 万手的合约发排名,LH2607 6/24 起停发,K 线与持仓在页面上
+        // 整个消失,运营者以为席位全掉榜了。补尾巴、标「未公布」,界面分开说。
+        let published: BTreeSet<Date> = database::spread_analytics::seat_published_dates(
+            &state.auth.pool,
+            context.workspace_id(),
+            &instrument,
+            contract.as_deref(),
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?
+        .into_iter()
+        .collect();
+        let series = mark_unpublished_and_extend_tail(series, &members, &calendar, &published);
         // 「最新一天」在这里定一次就够：`days` 出去之后 trade_date 已经是字符串，
         // 让前端再判一次哪天算最新，两边就有了各自的口径。
         // 所选交易日对应的那一天:摘要那行与各家分腿看它,**序列本身一天不动**。
@@ -1724,6 +1744,7 @@ pub async fn query_seat_net_position(
                     short_lots: day.short_lots.to_string(),
                     counted_members: day.counted_members,
                     missing_members: day.missing_members,
+                    unpublished: day.unpublished,
                     inferred_members: inferred_by_date
                         .get(&day.trade_date)
                         .map(|set| set.iter().cloned().collect())

@@ -38,6 +38,10 @@ pub struct NetPositionDay {
     pub counted_members: Vec<String>,
     /// 当天掉出前二十的席位。**持仓未知，未计入**，界面必须说出来。
     pub missing_members: Vec<String>,
+    /// 交易所当天**没有公布**这个合约(或品种)的持仓排名(DEC-130):大商所只对
+    /// 持仓量 ≥ 2 万手的合约发排名,合约临近到期跌破 2 万手后排名停发 —— 这不是
+    /// 席位掉榜,是整张榜不存在。界面要与「掉榜」分开说,净持仓留空而不是画 0。
+    pub unpublished: bool,
 }
 
 #[derive(Default)]
@@ -111,9 +115,48 @@ pub fn build_net_position_series(
                 short_lots: accum.short_lots,
                 counted_members: accum.present.into_iter().collect(),
                 missing_members: missing,
+                unpublished: false,
             }
         })
         .collect()
+}
+
+/// 把「交易所未公布排名」的日子标出来,并把席位序列**末尾之后**仍有行情的交易日补上(DEC-130)。
+///
+/// 运营者 2026-08-23:生猪 LH2607 的 K 线与持仓在 6/23 之后整个消失,以为席位全掉榜了。
+/// 查实是大商所**只对持仓量 ≥ 2 万手的合约公布成交持仓排名**:6/24 它跌到 19,583 手,
+/// 排名停发,席位数据自然断在那里;而行情一直有到 7/22、散户窗口止点 6/30 —— 最后一周
+/// 在页面上是看不见的。上面 `build_net_position_series` 只补首尾之间,尾巴之后一天不补
+/// (那是防「无中生有」),所以这里单独处理尾巴:
+///   · 尾巴上每个有行情的交易日补一行:手数 0、`missing` = 全部选中席位;
+///   · 无论首尾之间还是尾巴上,**`published` 里没有的日子标 `unpublished = true`**
+///     —— 那天交易所根本没发这张榜,不是谁掉了榜。
+/// `published` = 这个合约(或品种)在库里有**任何**席位行的交易日集合,由取数层给。
+pub fn mark_unpublished_and_extend_tail(
+    mut series: Vec<NetPositionDay>,
+    selected: &[String],
+    calendar: &[Date],
+    published: &BTreeSet<Date>,
+) -> Vec<NetPositionDay> {
+    if let Some(last) = series.last().map(|d| d.trade_date) {
+        for &date in calendar {
+            if date > last {
+                series.push(NetPositionDay {
+                    trade_date: date,
+                    net_position: Decimal::ZERO,
+                    long_lots: Decimal::ZERO,
+                    short_lots: Decimal::ZERO,
+                    counted_members: Vec::new(),
+                    missing_members: selected.to_vec(),
+                    unpublished: false,
+                });
+            }
+        }
+    }
+    for day in series.iter_mut() {
+        day.unpublished = !published.contains(&day.trade_date);
+    }
+    series
 }
 
 /// 选中那个交易日在序列里对应的那一天(含当天;没有正好那天就退到之前最近的一天)。
@@ -296,6 +339,32 @@ mod tests {
     }
 
     #[test]
+    fn 尾巴之后有行情的交易日补上并标交易所未公布() {
+        // LH2607:席位到 6/23,行情到 7/22,交易所 6/24 起停发排名(持仓 <2 万手)。
+        let rows = vec![row("中信", 3, 100, 0), row("中信", 4, 100, 0)];
+        let base = build_net_position_series(&rows, &["中信".into()], &calendar(&[3, 4, 5, 6, 7]));
+        let published: BTreeSet<Date> = [day(3), day(4)].into_iter().collect();
+        let out = mark_unpublished_and_extend_tail(base, &["中信".into()], &calendar(&[3, 4, 5, 6, 7]), &published);
+        let dates: Vec<u8> = out.iter().map(|d| d.trade_date.day()).collect();
+        assert_eq!(dates, vec![3, 4, 5, 6, 7], "尾巴上的行情日要补上");
+        assert!(!out[0].unpublished && !out[1].unpublished, "有榜的日子不标");
+        assert!(out[2].unpublished && out[4].unpublished, "没榜的日子标未公布");
+        assert_eq!(out[2].missing_members, vec!["中信".to_string()]);
+        assert_eq!(out[2].net_position, Decimal::ZERO);
+    }
+
+    #[test]
+    fn 首尾之间全员掉榜但交易所有发榜的日子不算未公布() {
+        // 那天榜是有的,只是这家不在前二十 —— 这是掉榜,不是未公布。
+        let rows = vec![row("中信", 3, 100, 0), row("中信", 5, 100, 0)];
+        let base = build_net_position_series(&rows, &["中信".into()], &calendar(&[3, 4, 5]));
+        let published: BTreeSet<Date> = [day(3), day(4), day(5)].into_iter().collect();
+        let out = mark_unpublished_and_extend_tail(base, &["中信".into()], &calendar(&[3, 4, 5]), &published);
+        assert!(!out[1].unpublished);
+        assert_eq!(out[1].missing_members, vec!["中信".to_string()]);
+    }
+
+    #[test]
     fn 日历为空时退回原行为() {
         // 调用方拿不到行情日历时不能崩,也不能凭空造日期。
         let rows = vec![row("中信", 3, 100, 0), row("中信", 7, 80, 0)];
@@ -314,6 +383,7 @@ mod tests {
                 short_lots: Decimal::ZERO,
                 counted_members: vec![],
                 missing_members: vec![],
+                unpublished: false,
             })
             .collect()
     }

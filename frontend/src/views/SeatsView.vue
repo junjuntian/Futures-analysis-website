@@ -543,7 +543,11 @@ const dates = computed(() => days.value.map((day) => day.trade_date))
 // 口径同引擎的「掉榜=不在场」)。**0 只进这条展示曲线**:掉榜底色标注、
 // 小窗「按 0 计入」说明、成本与盈亏的三态口径(掉榜=未知)全部保持——
 // 把 0 喂给成本链曾造出 16 万行假盈亏(DEC-048),别再来一次。
-const netSeries = computed(() => days.value.map((day) => num(day.net_position) ?? 0))
+// 交易所未公布排名的日子(DEC-130)留空:那天整张榜不存在,画 0 会被读成清仓,
+// 与「掉榜按 0 画」不是一回事 —— 掉榜是榜在人不在,日历上还有别家撑着曲线。
+const netSeries = computed(() =>
+  days.value.map((day) => (day.unpublished ? null : (num(day.net_position) ?? 0)))
+)
 const pnlSeries = computed(() => days.value.map((day) => num(day.daily_pnl)))
 const cumulativeSeries = computed(() => days.value.map((day) => num(day.cumulative_pnl)))
 
@@ -594,8 +598,9 @@ const gapDays = computed(() =>
 // 多选之后判据从「净持仓是 null」换成「有几家没算进来」：合计接口给的净持仓
 // 永远是个数（在榜那几家的和），少算了谁记在 `missing_members` 里。只勾一家时
 // 两者等价——那家掉榜，`missing_members` 就是他自己。
+// 未公布日(DEC-130)不算掉榜:整张榜不存在,不是谁掉了。
 const offBoardDays = computed(
-  () => days.value.filter((day) => day.missing_members.length > 0).length
+  () => days.value.filter((day) => day.missing_members.length > 0 && !day.unpublished).length
 )
 const inferredDays = computed(
   () => days.value.filter((day) => day.inferred_members.length > 0).length
@@ -606,8 +611,25 @@ const bands = computed(() =>
   offBoardBands(
     days.value.map((day) => ({
       trade_date: day.trade_date,
-      known: day.missing_members.length === 0
+      // 未公布日不进掉榜带:它另有一条带、另一句话(DEC-130)。
+      known: day.missing_members.length === 0 || Boolean(day.unpublished)
     }))
+  )
+)
+/** 交易所未公布排名的天数(DEC-130):大商所只对持仓量 ≥2 万手的合约发排名。 */
+const unpublishedDays = computed(() => days.value.filter((day) => day.unpublished).length)
+// 未公布带:与掉榜带同一套机械,用中性灰而不是警示色 —— 这不是谁的问题,是榜不存在。
+const unpublishedBands = computed(() =>
+  offBoardBands(
+    days.value.map((day) => ({
+      trade_date: day.trade_date,
+      known: !day.unpublished
+    }))
+  ).map(
+    ([start, end]): Band => [
+      { ...start, itemStyle: { color: withAlpha(chartTokens().axisLabel, 0.12) } },
+      end
+    ]
   )
 )
 
@@ -637,7 +659,7 @@ const offBoardMark = computed(() => ({
   silent: true,
   itemStyle: { color: withAlpha(chartTokens().accent, 0.16) },
   label: { show: false },
-  data: [...bands.value, ...inferredBands.value]
+  data: [...bands.value, ...inferredBands.value, ...unpublishedBands.value]
 }))
 
 // —— 小窗 ——
@@ -704,7 +726,9 @@ function tooltipBody(index: number, head: string[] = []) {
       )
     )
   }
-  if (day.missing_members.length) {
+  if (day.unpublished) {
+    parts.push(row('持仓排名', '交易所未公布（持仓量 <2 万手不发排名）· 持仓未知，不是掉榜'))
+  } else if (day.missing_members.length) {
     parts.push(
       row(
         '当日掉榜',
@@ -763,7 +787,9 @@ const latest = computed(() => {
   if (day.inferred_members.length) {
     parts.push({ text: `${day.inferred_members.join('、')} 未上榜，按回榜反推计入`, tone: 'warn' })
   }
-  if (day.missing_members.length) {
+  if (day.unpublished) {
+    parts.push({ text: '交易所当日未公布该合约持仓排名（持仓量 <2 万手），持仓未知', tone: 'warn' })
+  } else if (day.missing_members.length) {
     parts.push({ text: `${day.missing_members.join('、')} 当日掉榜，未计入`, tone: 'warn' })
   }
   return { date: day.trade_date, parts }
@@ -1276,6 +1302,11 @@ const latestDailyPnl = computed(() => {
             <strong>持仓未知</strong>——不是清仓。交易所只公布前 20 名，那些天文件里没有他这一行，
             合计里也就少算了他。图上以此底色标出；成本与累计盈亏在这几天原地保留，回榜后接着算。
           </span>
+        </p>
+        <p v-if="unpublishedDays" class="note muted">
+          另有 <strong>{{ unpublishedDays }}</strong> 天<strong>交易所没有公布这个合约的持仓排名</strong>
+          ——大商所只对持仓量 ≥ 2 万手的合约发排名，合约临近到期跌破 2 万手后就停发（生猪 LH2607
+          6/24 起如此）。这不是席位掉榜，是整张榜不存在：K 线照画、持仓留空、底色为灰。
         </p>
         <p v-if="inferredDays" class="note muted">
           另有 <strong>{{ inferredDays }}</strong> 天至少有一家实际没上榜，持仓由回榜日的增减

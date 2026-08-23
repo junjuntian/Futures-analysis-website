@@ -219,6 +219,43 @@ describe('席位多选框', () => {
     stubFetch()
   })
 
+  it('交易所未公布排名的日子(DEC-130):页头说明写出天数与 2 万手规则,与掉榜分开', async () => {
+    const day = (trade_date: string, extra: Record<string, unknown>) => ({
+      trade_date, open_price: '100', high_price: '101', low_price: '99', close_price: '100',
+      net_position: '0', long_lots: '0', short_lots: '0', counted_members: [], missing_members: ['中信'],
+      inferred_members: [], daily_pnl: null, cumulative_pnl: '0', long_cost: null, short_cost: null,
+      long_cost_lots: '0', short_cost_lots: '0', long_lots_total: '0', short_lots_total: '0', ...extra
+    })
+    const building = {
+      ...BUILDING, contract: 'AU2612', is_variety_total: false,
+      days: [
+        day('2026-06-22', { counted_members: ['中信'], missing_members: [], net_position: '-100', short_lots: '100' }),
+        day('2026-06-23', { counted_members: ['中信'], missing_members: [], net_position: '-100', short_lots: '100' }),
+        day('2026-06-24', { unpublished: true }),
+        day('2026-06-25', { unpublished: true })
+      ]
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.includes('/seats/member-instruments')) return response({ member: '中信', instruments: ['AU'] })
+      if (url.includes('/seats/net-position')) return response(building)
+      if (url.includes('/seats/favorites')) return response([])
+      if (url.includes('/seats/positions')) return response({ member: '中信', instrument: null, members: ['中信'], trade_date: '2026-08-14', available_dates: ['2026-08-14'], coverage_start: '2010-01-04', rows: [], costs: [] })
+      return response({})
+    }))
+    localStorage.setItem('seats.members', '中信')
+    localStorage.setItem('seats.instrument', 'AU')
+    localStorage.setItem('seats.contract', 'AU2612')
+    const wrapper = mountPage()
+    await flushPromises()
+    const text = wrapper.text()
+    expect(text).toContain('2 天交易所没有公布这个合约的持仓排名')
+    expect(text).toContain('2 万手')
+    // 未公布日不算掉榜:掉榜那句不该因为这两天而出现
+    expect(text).not.toContain('2 天至少有一家掉出交易所前 20 榜')
+    wrapper.unmount()
+  })
+
   it('一家都没勾时不自动补上名录第一个，而是让人自己选', async () => {
     // 清空是「我要重挑」。替他塞一家回去，他刚腾出来的框又满了；
     // 配上加载期间禁用输入，「空着且能搜」这个状态就根本不存在了。
