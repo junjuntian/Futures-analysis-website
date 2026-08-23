@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bounceHint } from './bounce-hint'
+import { bounceHint, pickBounceDay } from './bounce-hint'
 
 describe('生猪卸仓反弹窗口 → 套利页文案', () => {
   const base = { min: 0.5, note: '' }
@@ -38,3 +38,25 @@ describe('生猪卸仓反弹窗口 → 套利页文案', () => {
     expect(h.text).not.toContain('NaN')
   })
 })
+
+describe('按所选交易日取窗口状态', () => {
+  const hist = [
+    { d: '2026-08-18', active: false, unload: 0.4, side: 'net_short' as const },
+    { d: '2026-08-19', active: true, unload: 0.52, side: 'net_short' as const },
+    { d: '2026-08-21', active: false, unload: 0.46, side: 'net_short' as const }
+  ]
+
+  it('选了哪天就给哪天,不给最新', () => {
+    expect(pickBounceDay(hist, '2026-08-19')?.active).toBe(true)
+    expect(pickBounceDay(hist, '2026-08-21')?.active).toBe(false)
+  })
+
+  it('所选日没有行(节假日/周末)时退到之前最近的一天', () => {
+    expect(pickBounceDay(hist, '2026-08-20')?.d).toBe('2026-08-19')
+  })
+
+  it('早于历史起点:没有数据就是 null,不编', () => {
+    expect(pickBounceDay(hist, '2026-08-01')).toBeNull()
+  })
+})
+

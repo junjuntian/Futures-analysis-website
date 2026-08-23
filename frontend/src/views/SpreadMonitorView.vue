@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { bounceHint, type BounceState } from '../bounce-hint'
+import { bounceHint, pickBounceDay, type BounceDay, type BounceState } from '../bounce-hint'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
@@ -328,17 +328,34 @@ function fundFlowFor(item: SpreadMonitorItem) {
  * 与 FG-SA 资金流向同一性质:**背景,不是进场信号**。取不到就不显示。
  */
 const bounce = ref<BounceState | null>(null)
+/** 逐日历史(DEC-120):每一行按**它自己的交易日**取当天状态,不是最新状态。 */
+const bounceHistory = ref<BounceDay[]>([])
 
 function isLhCalendar(item: SpreadMonitorItem): boolean {
   return !item.is_cross_variety && item.instrument_1 === 'LH'
+}
+
+/** 这一行该显示的窗口状态。历史里找不到那天(早于起点)就不显示,不拿最新的顶。 */
+function bounceAt(item: SpreadMonitorItem): BounceState | null {
+  if (!bounce.value) return null
+  if (!bounceHistory.value.length) return bounce.value
+  const row = pickBounceDay(bounceHistory.value, item.trade_date)
+  if (!row) return null
+  return { ...bounce.value, active: row.active, unload: row.unload, side: row.side }
+}
+/** 状态取自哪一天 —— 与行的交易日不同时(周末/节假日退到前一天)要写出来。 */
+function bounceDate(item: SpreadMonitorItem): string | null {
+  const row = bounceHistory.value.length ? pickBounceDay(bounceHistory.value, item.trade_date) : null
+  return row && row.d !== item.trade_date ? row.d : null
 }
 
 async function loadBounce() {
   try {
     const res = await fetch(`/smart-money/hog_signals.json?t=${Date.now()}`)
     if (!res.ok) return
-    const data = (await res.json()) as { bounce_long?: BounceState | null }
+    const data = (await res.json()) as { bounce_long?: BounceState | null; bounce_history?: BounceDay[] | null }
     bounce.value = data.bounce_long ?? null
+    bounceHistory.value = data.bounce_history ?? []
   } catch {
     // 背景信息取不到就不显示,页面主体照常
   }
@@ -508,6 +525,10 @@ function openDetail(item: SpreadMonitorItem) {
           <el-option v-for="opt in THRESHOLDS" :key="opt.value" :label="opt.label" :value="opt.value" />
         </el-select>
 
+        <!-- 点击即弹面板:原来输入框可编辑,点进去是在文字里放光标,面板时开时不开
+             (2026-08-23 运营者报「有时候不弹」);也不再因为可选日期列表暂时为空就整体禁用——
+             列表没回来之前面板里全部日子不可选,但面板本身要能打开。历史信号模式下仍禁用
+             (那个模式不按单日看)。 -->
         <el-date-picker
           v-model="tradeDate"
           type="date"
@@ -515,8 +536,9 @@ function openDetail(item: SpreadMonitorItem) {
           placeholder="交易日"
           value-format="YYYY-MM-DD"
           :clearable="false"
+          :editable="false"
           :disabled-date="isNotTradingDay"
-          :disabled="historyMode || !availableDates.length"
+          :disabled="historyMode"
         />
 
         <el-radio-group v-model="direction">
@@ -728,12 +750,13 @@ function openDetail(item: SpreadMonitorItem) {
             <!-- 生猪跨月组合的「卸仓反弹」窗口(DEC-119)。引擎算,这里只读。
                  窗口开 = 机构净空且已卸掉 ≥50%,实测是牛市价差唯一能赚的窗口;
                  窗口外牛市价差无条件逆势。**背景,不是进场信号。** -->
-            <el-tooltip v-if="bounce && isLhCalendar(item)" :content="bounce.note" placement="top">
+            <el-tooltip v-if="isLhCalendar(item) && bounceAt(item)" :content="bounce!.note" placement="top">
               <div class="basis fund">
                 <span class="k">反弹窗口</span>
-                <span class="v" :class="bounceHint(bounce).on ? 'disc' : 'prem'">
-                  {{ bounceHint(bounce).text }}
+                <span class="v" :class="bounceHint(bounceAt(item)!).on ? 'disc' : 'prem'">
+                  {{ bounceHint(bounceAt(item)!).text }}
                 </span>
+                <span v-if="bounceDate(item)" class="pctile">按 {{ bounceDate(item) }} 机构状态</span>
                 <span class="pctile flow-tip">背景参考,非进场信号</span>
               </div>
             </el-tooltip>

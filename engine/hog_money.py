@@ -1545,6 +1545,17 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                     "窗口外无条件 −123 元/吨、37%(REPORT_LH_SPREAD_SIGNAL_v1)。"
                     "效应一个月内有效,40 日归零。**背景,不是进场信号。**",
         } if "bounce_long" in sig else None),
+        # 逐日历史(DEC-120):套利监控页选了别的交易日,要显示**那天**的窗口状态,
+        # 不能一直显示最新的 —— 运营者要拿它手动验证信号。每天一行,PIT 口径
+        # (当天可见的机构方向与卸仓比例)。掉榜日 unload/side 为 None。
+        "bounce_history": ([
+            {"d": dd.strftime("%Y-%m-%d"),
+             "active": bool(a),
+             "unload": (round(float(u), 4) if np.isfinite(u) else None),
+             "side": ({-1: "net_short", 1: "net_long"}.get(int(sd)) if np.isfinite(sd) else None)}
+            for dd, a, u, sd in zip(sig.index, sig["bounce_long"].fillna(False),
+                                    sig["bounce_unload"], sig["bounce_side"])
+        ] if "bounce_long" in sig else None),
         "institution": institution,
         "retail": retail_state,
         "members": members,

@@ -44,3 +44,26 @@ export function bounceHint(b: BounceState): BounceHint {
   }
   return { on: false, text: '窗口关:机构未净空 · 牛市价差无条件是逆势' }
 }
+
+/** 逐日历史里的一行(引擎 payload 的 bounce_history)。 */
+export interface BounceDay {
+  d: string
+  active: boolean
+  unload: number | null
+  side: 'net_short' | 'net_long' | null
+}
+
+/**
+ * 取「所选交易日」那天的窗口状态:历史按日升序,找最后一个 d ≤ date 的行。
+ * 所选日早于历史起点时返回 null(那天没有机构数据,不编)。
+ * 选了 8/19 就显示 8/19 的机构状态,不是最新的 —— 运营者要拿它手动验证信号。
+ */
+export function pickBounceDay(history: BounceDay[], date: string): BounceDay | null {
+  let hit: BounceDay | null = null
+  for (const row of history) {
+    if (row.d <= date) hit = row
+    else break
+  }
+  return hit
+}
+
