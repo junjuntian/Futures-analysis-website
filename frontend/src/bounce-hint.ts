@@ -24,17 +24,15 @@ export interface BounceHint {
 }
 
 /**
- * 2026 年回测出来的「卸仓 × 价差位置」参考(DEC-128,`research/run_lh_unload_spread_2026.py`,
- * 固定 5 家席位、机构净空日、生猪跨月 16 个组合 893 组合日):
- *   · 价差**低位**(当年位置 <30%)且机构本轮只卸掉 **10%~20%**:之后 20 日价差 +174 元/吨、涨 65%
- *     —— 这是反弹的参考区间;卸 0~10% 时 +69、54%(早了一点);
- *   · 低位但已卸掉 >20%:20 日 −89~−157、涨 27%~38% —— 反弹多半已走完(卸仓比价差拐头晚约 7 日,DEC-121);
- *   · 价差**高位**(>70%):不论卸掉多少 20 日都是 −289~−465、涨 ≤25% —— 牛市价差别追;
- *   · 中间(30%~70%):20 日 −154~−298。
- * **只有 2026 一年、约 5 个独立波段,不是全样本验证**;磨底年过去要回头重验。
- * 运营者 2026-08-23 要求页面按「已卸掉 xx%、反弹参考区间 xx~xx、处于价差高位/低位」写。
+ * 「反弹参考区间」= 2026 年历次生猪跨月价差**触底**那天,机构本轮已卸掉的比例落在什么范围
+ * (DEC-128,`research/run_lh_unload_at_turn_2026.py`,固定 5 家席位,17 次独立触底日):
+ *   最小 0% / 25 分位 10% / 中位 15% / 75 分位 26% / 最大 33%。取四分位 **10%~26%** 当参考区间。
+ * 见顶(11 次)时中位 10%、75 分位 30%;2026 机构净空日无条件分布 25 分位 8% / 中位 15% / 75 分位 25%
+ * —— **触底时的卸仓比例与平时差不多**,它标不出底部(价差拐头领先机构减仓约 7 日,DEC-121),
+ * 这里只是按运营者要求把历次触底时的卸仓范围写给人看。只有 2026 一年;磨底年过去要回头重验。
+ * 位置:当年位置 <30% 低位、>70% 高位。
  */
-export const BOUNCE_REF = { lo: 0.10, hi: 0.20, lowPos: 0.30, highPos: 0.70 } as const
+export const BOUNCE_REF = { lo: 0.10, hi: 0.26, lowPos: 0.30, highPos: 0.70, n: 17 } as const
 
 export type PairPosBand = 'low' | 'mid' | 'high'
 export function pairPosBand(position: number | null): PairPosBand | null {
@@ -45,9 +43,10 @@ export function pairPosBand(position: number | null): PairPosBand | null {
 const POS_LABEL: Record<PairPosBand, string> = { low: '价差低位', mid: '价差中位', high: '价差高位' }
 
 export function bounceHint(b: BounceState, position: number | null = null): BounceHint {
-  // 与阈值撞整时给一位小数:49.75% 四舍五入成 50% 会写出「只卸掉 50%,未到 50%」。
+  // 与区间边界撞整时给一位小数,免得写出「已卸掉 26%,已超过 10~26%」。
+  const edges = [BOUNCE_REF.lo, BOUNCE_REF.hi]
   const pct = (v: number) =>
-    Math.round(v * 100) === Math.round(b.min * 100) && v !== b.min
+    edges.some((e) => Math.round(v * 100) === Math.round(e * 100) && v !== e)
       ? `${(v * 100).toFixed(1)}%`
       : `${Math.round(v * 100)}%`
   if (b.side !== 'net_short') {
@@ -57,26 +56,16 @@ export function bounceHint(b: BounceState, position: number | null = null): Boun
   const uTxt = u === null ? '—(掉榜看不清)' : pct(u)
   const ref = `反弹参考区间 ${Math.round(BOUNCE_REF.lo * 100)}~${Math.round(BOUNCE_REF.hi * 100)}%`
   const band = pairPosBand(position)
+  const rel =
+    u === null ? '' : u > BOUNCE_REF.hi ? ',已超过历次触底时的卸仓比例' : u < BOUNCE_REF.lo ? ',还没到历次触底时的卸仓比例' : ',在区间内'
   if (band === null) {
-    // 没有位置(组合太新)就只报卸仓与区间,不判高低位
-    return { on: false, text: `机构净空且本轮已卸掉 ${uTxt},${ref} · 组合位置未知` }
+    return { on: false, text: `机构净空且本轮已卸掉 ${uTxt},${ref}${rel} · 组合位置未知` }
   }
   const pos = POS_LABEL[band]
-  if (band === 'high') {
-    return { on: false, text: `窗口关:机构净空且本轮已卸掉 ${uTxt},${ref},处于${pos} · 2026 高位不论卸多少 20 日均负,牛市价差别追` }
+  if (band === 'low') {
+    return { on: true, text: `窗口开:机构净空且本轮已卸掉 ${uTxt},${ref}${rel},处于${pos}` }
   }
-  if (band === 'mid') {
-    return { on: false, text: `窗口关:机构净空且本轮已卸掉 ${uTxt},${ref},处于${pos} · 2026 中位 20 日 −154~−298 元/吨` }
-  }
-  // 低位
-  if (u === null) return { on: false, text: `机构净空但掉榜看不清卸仓,${ref},处于${pos}` }
-  if (u >= BOUNCE_REF.lo && u <= BOUNCE_REF.hi) {
-    return { on: true, text: `窗口开:机构净空且本轮已卸掉 ${uTxt},在${ref}内,处于${pos} · 牛市价差可考虑(2026:20 日 +174 元/吨、涨 65%)` }
-  }
-  if (u < BOUNCE_REF.lo) {
-    return { on: false, text: `窗口半开:机构净空且本轮只卸掉 ${uTxt},未到${ref},处于${pos} · 早了一点(2026:20 日 +69、涨 54%)` }
-  }
-  return { on: false, text: `窗口关:机构净空且本轮已卸掉 ${uTxt},已过${ref},处于${pos} · 反弹多半已走完(2026:20 日 −89~−157)` }
+  return { on: false, text: `窗口关:机构净空且本轮已卸掉 ${uTxt},${ref}${rel},处于${pos}` }
 }
 
 /** 逐日历史里的一行(引擎 payload 的 bounce_history)。 */

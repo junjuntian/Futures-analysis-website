@@ -4,34 +4,25 @@ import { bounceHint, pairPosBand, pickBounceDay } from './bounce-hint'
 describe('生猪卸仓反弹窗口 → 套利页文案', () => {
   const base = { min: 0.5, note: '' }
 
-  it('低位 + 卸仓在参考区间内 → 窗口开,写出卸掉多少/区间/低位', () => {
+  it('低位 → 窗口开:写出已卸掉多少、反弹参考区间 10~26%、处于价差低位', () => {
     const h = bounceHint({ ...base, active: false, unload: 0.15, side: 'net_short' }, 0.12)
     expect(h.on).toBe(true)
-    expect(h.text).toContain('窗口开')
-    expect(h.text).toContain('已卸掉 15%')
-    expect(h.text).toContain('反弹参考区间 10~20%')
+    expect(h.text).toContain('窗口开:机构净空且本轮已卸掉 15%')
+    expect(h.text).toContain('反弹参考区间 10~26%')
+    expect(h.text).toContain('在区间内')
     expect(h.text).toContain('处于价差低位')
   })
 
-  it('低位 + 已过参考区间 → 窗口关,说反弹多半已走完', () => {
-    const h = bounceHint({ ...base, active: true, unload: 0.38, side: 'net_short' }, 0.2)
-    expect(h.on).toBe(false)
-    expect(h.text).toContain('已卸掉 38%')
-    expect(h.text).toContain('已过反弹参考区间')
-    expect(h.text).toContain('处于价差低位')
+  it('卸得比历次触底时多/少,要点出来', () => {
+    expect(bounceHint({ ...base, active: true, unload: 0.38, side: 'net_short' }, 0.2).text).toContain('已超过历次触底时的卸仓比例')
+    expect(bounceHint({ ...base, active: false, unload: 0.05, side: 'net_short' }, 0.2).text).toContain('还没到历次触底时的卸仓比例')
   })
 
-  it('低位 + 未到参考区间 → 半开,说早了一点', () => {
-    const h = bounceHint({ ...base, active: false, unload: 0.05, side: 'net_short' }, 0.1)
-    expect(h.on).toBe(false)
-    expect(h.text).toContain('未到反弹参考区间')
-  })
-
-  it('高位不论卸多少 → 窗口关,牛市价差别追', () => {
+  it('高位 → 窗口关,仍写卸仓与区间,处于价差高位', () => {
     const h = bounceHint({ ...base, active: true, unload: 0.15, side: 'net_short' }, 0.95)
     expect(h.on).toBe(false)
+    expect(h.text).toContain('窗口关:机构净空且本轮已卸掉 15%')
     expect(h.text).toContain('处于价差高位')
-    expect(h.text).toContain('别追')
   })
 
   it('位置未知(组合太新)只报卸仓与区间,不判高低位', () => {
@@ -52,6 +43,11 @@ describe('生猪卸仓反弹窗口 → 套利页文案', () => {
     expect(pairPosBand(0.5)).toBe('mid')
     expect(pairPosBand(0.9)).toBe('high')
     expect(pairPosBand(null)).toBeNull()
+  })
+
+  it('差一点点没到区间边界时,不能四舍五入成「已卸掉 26%,已超过 10~26%」', () => {
+    const h = bounceHint({ ...base, active: false, unload: 0.2625, side: 'net_short' }, 0.1)
+    expect(h.text).toContain('26.3%')
   })
 
   it('掉榜看不清时不编数字', () => {

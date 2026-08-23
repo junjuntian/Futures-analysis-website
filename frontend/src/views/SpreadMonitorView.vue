@@ -794,8 +794,9 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
 
             <!-- 生猪跨月组合的「卸仓反弹」窗口(DEC-119)。引擎算,这里只读。
-                 文案按 DEC-128(2026 回测):机构净空 + 本轮卸掉多少 + 反弹参考区间 10~20% + 价差高位/低位,
-                 逻辑与数字都在 bounce-hint.ts 的 BOUNCE_REF/注释里,别在这里写死。**背景,不是进场信号。** -->
+                 文案按 DEC-128(2026 回测):机构净空 + 本轮卸掉多少 + 反弹参考区间(历次价差触底时的卸仓比例
+                 四分位 10~26%)+ 价差高位/低位,逻辑与数字都在 bounce-hint.ts 的 BOUNCE_REF/注释里,别在这里写死。
+                 **背景,不是进场信号。** -->
             <el-tooltip v-if="isLhCalendar(item) && bounceAt(item)" :content="bounce!.note" placement="top">
               <div class="basis fund">
                 <span class="k">反弹窗口</span>
