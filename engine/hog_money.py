@@ -1534,7 +1534,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 只在 long_mode=unload_bounce 的品种上有;其余品种 None,前端据此不画。
         "bounce_long": ({
             "active": bool(sig["bounce_long"].get(d, False)),
-            "unload": _f(sig["bounce_unload"].get(d, np.nan)),
+            # 4 位小数:_f 只留 2 位,0.4975 会被写成 0.50,页面就会说「只卸掉 50%,未到 50%」。
+            "unload": (round(float(sig["bounce_unload"].get(d)), 4)
+                       if np.isfinite(sig["bounce_unload"].get(d, np.nan)) else None),
             "side": ({-1: "net_short", 1: "net_long"}.get(int(sig["bounce_side"].get(d)))
                      if np.isfinite(sig["bounce_side"].get(d, np.nan)) else None),
             "min": RULES["long_unload_min"],

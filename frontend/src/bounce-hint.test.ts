@@ -26,6 +26,12 @@ describe('生猪卸仓反弹窗口 → 套利页文案', () => {
     expect(h.text).toContain('逆势')
   })
 
+  it('差一点点没到阈值时,不能四舍五入成「只卸掉 50%,未到 50%」', () => {
+    const h = bounceHint({ ...base, active: false, unload: 0.4975, side: 'net_short' })
+    expect(h.text).toContain('49.8%')
+    expect(h.text).not.toContain('只卸掉 50%')
+  })
+
   it('掉榜看不清时不编数字', () => {
     const h = bounceHint({ ...base, active: false, unload: null, side: 'net_short' })
     expect(h.text).toContain('掉榜看不清')

@@ -25,7 +25,11 @@ export interface BounceHint {
 }
 
 export function bounceHint(b: BounceState): BounceHint {
-  const pct = (v: number) => `${Math.round(v * 100)}%`
+  // 与阈值撞整时给一位小数:49.75% 四舍五入成 50% 会写出「只卸掉 50%,未到 50%」。
+  const pct = (v: number) =>
+    Math.round(v * 100) === Math.round(b.min * 100) && v !== b.min
+      ? `${(v * 100).toFixed(1)}%`
+      : `${Math.round(v * 100)}%`
   if (b.active) {
     return {
       on: true,
