@@ -137,6 +137,14 @@ interface HogPayload {
   /** 重选切点。`group_log` 只记**换人**,所以阵容连年不变时它会停在很早的日期,
    *  看上去像「三年没重选过」。可选:旧 JSON 没有这个字段。 */
   reselect?: { last: string | null; next: string | null; changed_at: string | null }
+  /** 换月反弹提示(DEC-123,只有生猪有):主力剩 ≤dleft_max 日且近 20 日跌 ≥drop_min% →
+   *  提示买次主力 X+2。只是提示,不进持仓、不进回测。 */
+  roll_bounce?: {
+    active: boolean; main: string; days_left: number; drop20: number | null
+    dleft_max: number; drop_min: number; next: string; next_px: number | null; since: string
+    history: Array<{ date: string; main: string; days_left: number; drop20: number; next: string
+      next_px: number | null; next_ret20: number | null; days_seen: number }>
+  } | null
   history: HogTrade[]
   stats: {
     trades: number
@@ -656,6 +664,33 @@ const bySide = computed(() => {
         </div>
       </div>
 
+      <!-- 换月反弹提示(DEC-123,生猪专用,运营者 2026-08-23 拍板「直接做」):
+           主力剩 ≤22 日且近 20 日跌 ≥5% → 买次主力 X+2、移动止盈出场。依据只有 2026 年
+           3 次触发(2 对 1 错),是按磨底年判断开的门,不是验证 —— 字面上必须写清。 -->
+      <div v-if="data.roll_bounce" class="caveat-box roll" :class="{ on: data.roll_bounce.active }">
+        <template v-if="data.roll_bounce.active">
+          <b>换月反弹提示:主力 {{ data.roll_bounce.main }} 只剩 {{ data.roll_bounce.days_left }} 个交易日、
+          近 20 日跌 {{ data.roll_bounce.drop20 }}% —— 到期前被砸狠了。</b>
+          按磨底年的判断,这时买**次主力 {{ data.roll_bounce.next }}**
+          (结算 {{ fmt(data.roll_bounce.next_px) }}),移动止盈出场,不拿到期。
+        </template>
+        <template v-else>
+          <b>换月反弹提示(未触发)</b>:主力 {{ data.roll_bounce.main }} 剩 {{ data.roll_bounce.days_left }} 个交易日
+          (要 ≤{{ data.roll_bounce.dleft_max }})、近 20 日 {{ data.roll_bounce.drop20 ?? '—' }}%
+          (要 ≤−{{ data.roll_bounce.drop_min }}%)。触发时买次主力 {{ data.roll_bounce.next }}。
+        </template>
+        <div class="roll-hist">
+          <span class="gray">{{ data.roll_bounce.since.slice(0, 4) }} 年以来触发:</span>
+          <span v-for="h in data.roll_bounce.history" :key="h.date" class="chip">
+            {{ h.date }} {{ h.main }}剩{{ h.days_left }}日跌{{ h.drop20 }}% → 买{{ h.next }}
+            <i :class="pnlClass(h.next_ret20)">{{ h.next_ret20 === null ? '—' : pct(h.next_ret20) }}</i>
+            <span v-if="h.days_seen < 20" class="gray">({{ h.days_seen }}日)</span>
+          </span>
+          <span v-if="!data.roll_bounce.history.length" class="gray">无</span>
+        </div>
+        <p class="note">依据只有 2026 年这几次,不是全样本验证(DEC-123):磨底年到期前被砸狠的周期
+          次主力有一轮反弹,砸得温和的周期没有。只是提示,不进系统持仓、不算进回测;磨底年过去要回头关掉。</p>
+      </div>
       <!-- 这三种提示都必须在首屏,不能藏进策略方案页 -->
       <div v-if="data.institution.just_flipped_long" class="caveat-box flip">
         <b>机构合计净持仓刚转为净多。</b>
@@ -1002,6 +1037,14 @@ const bySide = computed(() => {
 /* 机构真转多是**好消息类**的提示,和「信号不可信」那种警告要分得开 */
 .caveat-box.flip { background: var(--tv-up-bg); border-color: var(--tv-up); }
 .caveat-box.flip b { color: var(--tv-up); }
+/* 换月反弹(DEC-123):未触发时灰底低调,触发时与「转多」同色系 */
+.caveat-box.roll { background: var(--tv-bg-secondary, #f7f8fa); border-color: var(--tv-border); }
+.caveat-box.roll b { color: var(--tv-text-secondary); }
+.caveat-box.roll.on { background: var(--tv-up-bg); border-color: var(--tv-up); }
+.caveat-box.roll.on b { color: var(--tv-up); }
+.roll-hist { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.roll-hist .chip { font-size: 12px; }
+.roll-hist .chip i { font-style: normal; margin-left: 4px; }
 
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th, .tbl td { padding: 8px 10px; border-bottom: 1px solid var(--tv-border); text-align: left; }

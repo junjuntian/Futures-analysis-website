@@ -981,3 +981,38 @@ class TestFixedGroup:
         assert cuts == []
         assert len(log) == 1 and log[0]["date"] == "2026-03-04" and log[0]["members"] == ["甲", "乙"]
         assert set(log[0]["alpha"]) == {"甲", "乙"}
+
+
+class TestRollBounce:
+    """DEC-123:换月反弹提示(生猪专用)。主力剩 ≤22 日且近 20 日跌 ≥5% → 提示买次主力 X+2。"""
+
+    def test_次主力合约按月份加二并跨年进位(self):
+        assert H.next_main_contract("LH2605") == "LH2607"
+        assert H.next_main_contract("LH2611") == "LH2701"
+        assert H.next_main_contract("LH2701", 4) == "LH2705"
+
+    def test_只有生猪配了换月反弹其余品种为空(self):
+        H.use("LH")
+        assert H.RULES["roll_bounce"] == {"since": "2026-01-01", "dleft_max": 22, "drop_min": 0.05}
+        for code in ("FG", "SA", "JD", "JM"):
+            H.use(code)
+            assert H.RULES["roll_bounce"] is None, code
+
+    def test_触发判定与历史只记每个主力首次(self):
+        """主力 LH2609 剩 22 日、近 20 日 −11% → 触发;同一主力后面几天不重复记;
+        历史从 since 起算;次主力 LH2611 的 20 日涨跌按结算价算。"""
+        idx = bdays("2026-07-01", 30)
+        st = pd.DataFrame({"LH2609": 11000.0, "LH2611": np.linspace(11985, 12485, 30)}, index=idx)
+        mkt = pd.DataFrame({"main": "LH2609", "dleft": np.arange(45, 15, -1),
+                            "past": -0.116, "close": 11000.0, "settle": 11000.0}, index=idx)
+        cfg = {"since": "2026-01-01", "dleft_max": 22, "drop_min": 0.05}
+        out = H.roll_bounce_payload(mkt, st, cfg)
+        assert out["active"] is True and out["next"] == "LH2611"
+        assert len(out["history"]) == 1
+        h = out["history"][0]
+        assert h["days_left"] == 22 and h["next"] == "LH2611" and h["drop20"] == -11.6
+        assert h["next_ret20"] is not None and h["next_ret20"] > 0
+        # 跌得不够 → 不触发、历史为空
+        mkt2 = mkt.assign(past=-0.03)
+        out2 = H.roll_bounce_payload(mkt2, st, cfg)
+        assert out2["active"] is False and out2["history"] == []

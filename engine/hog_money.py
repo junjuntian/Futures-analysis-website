@@ -246,6 +246,13 @@ VARIETIES = {
         # 择时收益 5.93,无一准则在所有窗口占优。
         "fixed_members": ["国泰君安", "东证期货", "东吴期货", "永安期货", "浙商期货"],
         "fixed_since": "2026-08-23",
+        # **换月反弹提示(DEC-123,2026-08-23 运营者拍板「直接做」)**:主力剩 ≤22 个交易日
+        # 且主力近 20 日跌 ≥5%(到期前被砸狠了)→ 提示买次主力 X+2、移动止盈出场。
+        # 依据只有 2026 年:触发 2 次(03-31 买 LH2607 +3.9%/20 日、07-30 买 LH2611 +4.2%),
+        # 砸得温和的 1 月/5 月周期正确跳过(次主力 −4.5%/−4.2%)。**两个样本,不是验证**,
+        # 和 DEC-121 一样是按磨底年判断开的门;席位规则在 2026 单独评全负(REPORT_LH_LOWS_v1)。
+        # 只是提示,不进引擎持仓,不算进回测。
+        "roll_bounce": {"since": "2026-01-01", "dleft_max": 22, "drop_min": 0.05},
         "out": "hog_signals.json",
         "backtest": "固定5家 近一年 +64.2%/夏普 3.94/回撤 −3.2%(10 笔 80%);全样本 33 笔"
                     " +29.5%/0.72/−28.0%(2023-08 起)。滚动 alpha 组同策略 近一年 +69.1%/"
@@ -378,6 +385,8 @@ def use(code: str) -> dict:
     RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
     # 固定席位名单(DEC-122):None 走滚动重选;给了名单就整段回放都用这几家。
     RULES["fixed_members"] = list(v["fixed_members"]) if v.get("fixed_members") else None
+    # 换月反弹提示(DEC-123):只有生猪配;None = 不出这块。
+    RULES["roll_bounce"] = dict(v["roll_bounce"]) if v.get("roll_bounce") else None
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -1210,6 +1219,54 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
     return trades, pos, daily
 
 
+def next_main_contract(contract: str, step: int = 2) -> str:
+    """生猪合约月 1/3/5/7/9/11,次主力 = 月份 +2(跨年进位)。"""
+    code = contract[:2]
+    y, m = int(contract[2:4]), int(contract[4:6])
+    m += step
+    while m > 12:
+        m -= 12
+        y += 1
+    return f"{code}{y:02d}{m:02d}"
+
+
+def roll_bounce_payload(mkt: pd.DataFrame, st: pd.DataFrame, cfg: dict) -> dict:
+    """换月反弹提示(DEC-123)。**只是提示,不进持仓、不进回测。**
+
+    条件:主力剩 ≤ dleft_max 个交易日 **且** 主力近 20 日(`past`,逐合约连乘)跌 ≥ drop_min。
+    同一个主力合约只记首次触发。`history` 自 cfg["since"] 起(规则按 2026 磨底年判断开的门,
+    之前的年份不展示);每条带次主力 X+2 触发日结算价、之后 20 日(或至今)涨跌。
+    """
+    since = pd.Timestamp(cfg["since"])
+    d = mkt.index[-1]
+    main = str(mkt["main"].get(d)); dleft = int(mkt["dleft"].get(d, 0))
+    past = mkt["past"].get(d, np.nan)
+    active = bool(dleft <= cfg["dleft_max"] and np.isfinite(past) and past <= -cfg["drop_min"])
+    nxt = next_main_contract(main)
+    hist, seen = [], set()
+    for dd, row in mkt[mkt.index >= since].iterrows():
+        c = str(row["main"])
+        if c in seen:
+            continue
+        if row["dleft"] <= cfg["dleft_max"] and np.isfinite(row["past"]) and row["past"] <= -cfg["drop_min"]:
+            seen.add(c)
+            n = next_main_contract(c)
+            px0 = st[n].get(dd, np.nan) if n in st.columns else np.nan
+            later = st[n].loc[dd:].dropna().iloc[:21] if n in st.columns else pd.Series(dtype=float)
+            ret = (float(later.iloc[-1]) / float(px0) - 1) * 100 if len(later) > 1 and np.isfinite(px0) and px0 else None
+            hist.append({"date": dd.strftime("%Y-%m-%d"), "main": c, "days_left": int(row["dleft"]),
+                         "drop20": round(float(row["past"]) * 100, 1), "next": n,
+                         "next_px": _f(px0), "next_ret20": None if ret is None else round(ret, 1),
+                         "days_seen": max(0, len(later) - 1)})
+    return {
+        "active": active, "main": main, "days_left": dleft,
+        "drop20": None if not np.isfinite(past) else round(float(past) * 100, 1),
+        "dleft_max": cfg["dleft_max"], "drop_min": round(cfg["drop_min"] * 100, 1),
+        "next": nxt, "next_px": _f(st[nxt].get(d, np.nan)) if nxt in st.columns else None,
+        "since": cfg["since"], "history": hist,
+    }
+
+
 def _f(v):
     return None if v is None or not np.isfinite(v) else round(float(v), 1)
 
@@ -1587,6 +1644,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         ] if "bounce_long" in sig else None),
         "institution": institution,
         "retail": retail_state,
+        # 换月反弹提示(DEC-123):只有生猪配了 roll_bounce;其余品种 None。
+        "roll_bounce": (roll_bounce_payload(mkt, st, RULES["roll_bounce"])
+                        if RULES.get("roll_bounce") and st is not None else None),
         "members": members,
         # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。

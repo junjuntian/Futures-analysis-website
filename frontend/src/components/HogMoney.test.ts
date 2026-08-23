@@ -325,6 +325,41 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('换月反弹提示(DEC-123):触发时写买次主力,未触发时写差多少;历史逐条带结果', async () => {
+    const rb = {
+      active: true, main: 'LH2609', days_left: 22, drop20: -11.6, dleft_max: 22, drop_min: 5,
+      next: 'LH2611', next_px: 11985, since: '2026-01-01',
+      history: [
+        { date: '2026-03-31', main: 'LH2605', days_left: 22, drop20: -11.4, next: 'LH2607', next_px: 10905, next_ret20: 3.9, days_seen: 20 },
+        { date: '2026-07-30', main: 'LH2609', days_left: 22, drop20: -11.6, next: 'LH2611', next_px: 11985, next_ret20: 4.2, days_seen: 13 }
+      ]
+    }
+    stubFetch({ ...PAYLOAD, roll_bounce: rb })
+    let w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    let t = w.find('.caveat-box.roll').text()
+    expect(t).toContain('买**次主力 LH2611**')
+    expect(t).toContain('2026-03-31')
+    expect(t).toContain('+3.90%')
+    expect(t).toContain('(13日)')
+    expect(t).toContain('不是全样本验证')
+    w.unmount()
+    stubFetch({ ...PAYLOAD, roll_bounce: { ...rb, active: false, main: 'LH2611', days_left: 53, drop20: -3.8, next: 'LH2701' } })
+    w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    t = w.find('.caveat-box.roll').text()
+    expect(t).toContain('未触发')
+    expect(t).toContain('剩 53 个交易日')
+    expect(t).toContain('买次主力 LH2701')
+    w.unmount()
+    // 没有这块(别的品种 / 旧产物)就不渲染
+    stubFetch({ ...PAYLOAD, roll_bounce: null })
+    w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.find('.caveat-box.roll').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',
