@@ -325,6 +325,26 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
+    stubFetch({
+      ...PAYLOAD, group_mode: 'fixed',
+      group_log: [{ date: '2026-08-23', members: ['国泰君安', '东证期货', '东吴期货', '永安期货', '浙商期货'],
+                    alpha: { '国泰君安': 4.99, '东证期货': 5.4, '东吴期货': 3.5, '永安期货': 0.92, '浙商期货': 2.14 } }],
+      reselect: { last: null, next: null, changed_at: '2026-08-23' }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[2].trigger('click')
+    const t = w.text()
+    expect(t).toContain('固定名单')
+    expect(t).toContain('永安期货')
+    expect(t).not.toContain('下次')
+    expect(t).not.toContain('换人历史')
+    await w.findAll('.tab')[3].trigger('click')
+    expect(w.text()).toContain('固定名单(国泰君安、东证、东吴、永安、浙商')
+    w.unmount()
+  })
+
   it('组内各家要显示当前主力合约上的持仓成本', async () => {
     const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()

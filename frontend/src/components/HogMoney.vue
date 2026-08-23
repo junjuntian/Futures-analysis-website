@@ -130,7 +130,10 @@ interface HogPayload {
     note: string
   }
   members: MemberLeg[]
-  group_log: Array<{ date: string; members: string[]; alpha: Record<string, number> }>
+  group_log: Array<{ date: string; members: string[]; alpha: Record<string, number | null> }>
+  /** 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单(生猪)。
+   *  没这个字段的老产物按 rolling 读。 */
+  group_mode?: 'fixed' | 'rolling'
   /** 重选切点。`group_log` 只记**换人**,所以阵容连年不变时它会停在很早的日期,
    *  看上去像「三年没重选过」。可选:旧 JSON 没有这个字段。 */
   reselect?: { last: string | null; next: string | null; changed_at: string | null }
@@ -296,6 +299,7 @@ const sideText = (s: string) => (s === 'short' ? '做空' : '做多')
  * 上一版把「每 3 个月」「36 笔」直接写进模板,引擎参数改成一年、做多关掉之后,
  * 页面还在说 3 个月和 36 笔——同一个事实两处维护,必然对不上(运营者当场发现)。
  */
+const isFixedGroup = computed(() => data.value?.group_mode === 'fixed')
 const reselectText = computed(() => {
   const m = data.value?.rules.reselect_months ?? 0
   return m === 12 ? '每年' : m === 1 ? '每月' : `每 ${m} 个月`
@@ -605,7 +609,8 @@ const bySide = computed(() => {
             </span>
           </div>
           <p class="note">
-            席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。
+            <template v-if="isFixedGroup">席位组是运营者拍板的**固定名单**(DEC-122),不滚动重选。</template>
+            <template v-else>席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。</template>
             成本是**{{ data.contract }} 这一个合约**上的净持仓成本(推算),按结算价推
             ——不是成交均价,我们看不到成交明细。
           </p>
@@ -759,17 +764,29 @@ const bySide = computed(() => {
     <template v-else-if="tab === 'group'">
       <div class="cards">
         <div class="card wide">
-          <h3>换人历史({{ reselectText }}重选一次)</h3>
+          <h3 v-if="isFixedGroup">固定名单(运营者拍板,不重选)</h3>
+          <h3 v-else>换人历史({{ reselectText }}重选一次)</h3>
+          <!-- 固定名单(DEC-122):生猪近一年同策略只换席位组回放,固定 5 家回撤 −3.2% 对
+               滚动组 −8.2%,运营者取回撤小的;全样本固定名单差得多(+29.5% 对 +117%),
+               这一点要在页面上说,别让人以为固定名单是验证出来更优的。 -->
+          <p v-if="isFixedGroup" class="note">
+            国泰君安、东证、东吴、永安、浙商五家固定,自 {{ data.group_log[0]?.date }} 起生效,
+            括号里是拍板时点各家的择时收益(亿元),只作参考不参与选人。
+            依据:同一策略近一年只换席位组回放,固定 5 家 +64.2%/夏普 3.94/**回撤 −3.2%**,
+            滚动择时组 +69.1%/3.22/−8.2% —— 收益略低、回撤小一半,运营者取后者。
+            **全样本(2023-08 起)固定名单只有 +29.5%/回撤 −28%**,名单是按今天的认知挑的,
+            回到 2024 年并不灵;磨底年过去要回头重验。
+          </p>
           <!-- 只列**换人**那几次。阵容没变的年份不写一条,不加这句会被读成
                「席位三年没更新」(运营者 2026-08-19 就是这么问的)。 -->
-          <p v-if="data.reselect?.last" class="reselect-note">
+          <p v-if="!isFixedGroup && data.reselect?.last" class="reselect-note">
             最近一次重选 <b>{{ data.reselect.last }}</b>
             <template v-if="data.reselect.changed_at && data.reselect.changed_at < data.reselect.last">
               · <b>阵容未变</b>(上次换人是 {{ data.reselect.changed_at }})
             </template>
             <template v-if="data.reselect.next">,下次 {{ data.reselect.next }}</template>
           </p>
-          <p class="note">
+          <p v-if="!isFixedGroup" class="note">
             括号里是该家截至重选时点的**择时收益**(亿元)——把「一直挂着同样大小的仓
             不动」能赚到的钱扣掉之后剩下的部分。按它选人,而不是按谁赚得多:
             实测按总盈亏选样本外 t=3.57、按仓位规模选 t=0.11,按择时收益选 t=5.22。
@@ -777,7 +794,7 @@ const bySide = computed(() => {
           <div v-for="g in [...data.group_log].reverse()" :key="g.date" class="glog">
             <b>{{ g.date }}</b>
             <span v-for="m in g.members" :key="m" class="chip">
-              {{ m }}<i>{{ g.alpha[m]?.toFixed(2) ?? '—' }}</i>
+              {{ m }}<i>{{ g.alpha[m] == null ? '—' : g.alpha[m]!.toFixed(2) }}</i>
             </span>
           </div>
         </div>
@@ -790,7 +807,9 @@ const bySide = computed(() => {
         <div class="card wide">
           <h3>怎么算的</h3>
           <ol class="rules">
-            <li><b>选人</b>:{{ reselectText }},按截至当时的**择时收益**排序取前
+            <li v-if="isFixedGroup"><b>选人</b>:固定名单(国泰君安、东证、东吴、永安、浙商,
+              DEC-122 运营者拍板),不滚动重选。</li>
+            <li v-else><b>选人</b>:{{ reselectText }},按截至当时的**择时收益**排序取前
               {{ data.rules.group_k }} 家。只用当时之前的数据,不看未来。</li>
             <li><b>信号</b>:这 5 家在**全品种合约上的合计净持仓**,取 {{ data.signal.win }} 日变化,
               再用滚动标准差无量纲化得到强度 z。<br>

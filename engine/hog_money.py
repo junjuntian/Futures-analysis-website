@@ -237,10 +237,19 @@ VARIETIES = {
         "long_needs_dip": False,
         "long_mode": "unload_bounce",
         "long_unload_min": 0.50,
+        # **固定席位名单(DEC-122,2026-08-23 运营者拍板)**:国泰君安/东证/东吴/永安/浙商。
+        # 同一策略只换席位组回放:近一年 固定5家 +64.2%/夏普 3.94/回撤 −3.2%(10 笔 80%),
+        # 滚动 alpha 组 +69.1%/3.22/−8.2%(16 笔 62%),固定4家(去永安) +57.0%/2.95/−11.7%。
+        # 运营者取回撤小的那版。**全样本固定名单只有 +29.5%/0.72/−28.0%(滚动 +117.4%)**
+        # —— 名单是按今天的认知挑的,回到 2024 年并不灵,这一条如实记在 DEC-122。
+        # 选人准则对比(REPORT_LH_SEAT_PICK_v1):走前「大席位挑赚钱多」t 4.15~5.15,
+        # 择时收益 5.93,无一准则在所有窗口占优。
+        "fixed_members": ["国泰君安", "东证期货", "东吴期货", "永安期货", "浙商期货"],
+        "fixed_since": "2026-08-23",
         "out": "hog_signals.json",
-        "backtest": "32 笔 净 +117.4%/胜率 56.2%/回撤 −8.4%/夏普 2.14"
-                    "(2023-08 起,基准 +99.2%)(2026-08-23 加卸仓反弹做多腿,知情破例,"
-                    "见 DEC-118 与 REPORT_LH_LONG_v1;只做空时代 18 笔 +87.4%/2.34/−4.2%)",
+        "backtest": "固定5家 近一年 +64.2%/夏普 3.94/回撤 −3.2%(10 笔 80%);全样本 33 笔"
+                    " +29.5%/0.72/−28.0%(2023-08 起)。滚动 alpha 组同策略 近一年 +69.1%/"
+                    "3.22/−8.2%,全样本 +117.4%/2.14/−8.4%(DEC-122 换固定名单,知情破例)",
     },
     "FG": {
         "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
@@ -367,6 +376,8 @@ def use(code: str) -> dict:
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     RULES["long_mode"] = v.get("long_mode", "flow")
     RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
+    # 固定席位名单(DEC-122):None 走滚动重选;给了名单就整段回放都用这几家。
+    RULES["fixed_members"] = list(v["fixed_members"]) if v.get("fixed_members") else None
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -629,6 +640,24 @@ def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
     if nxt is not None:
         out.append(nxt.strftime("%Y-%m-%d"))
     return ser, log, out
+
+
+def fixed_groups(members: list[str], seat: pd.DataFrame, price: pd.DataFrame,
+                 dates: pd.DatetimeIndex, decided: str) -> tuple[pd.Series, list, list]:
+    """固定名单版的 `rolling_groups`(DEC-122,2026-08-23 运营者拍板生猪用固定 5 家)。
+
+    返回形状与 `rolling_groups` 一致,后面 `signal_series`/`build_payload` 不用分叉:
+    逐日都是同一组;`log` 只有一条,日期写**拍板日**,括号里的择时收益按拍板日之前
+    的数据算(只是给界面看这几家当时的成色,不参与选人);`cuts` 为空 —— 没有重选。
+    **如实记**:固定名单是拿今天的认知挑的,放回 2024 年并不灵(全样本 +29.5%/回撤
+    −28%,滚动组 +117%/−8.4%),运营者按近一年(+64%/夏普 3.94/回撤 −3.2%)拍板。
+    """
+    mem = tuple(members)
+    ser = pd.Series([mem] * len(dates), index=dates, dtype=object)
+    a = alpha_upto(seat, price, pd.Timestamp(decided) + pd.Timedelta(days=1))
+    log = [{"date": decided, "members": list(mem),
+            "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in mem}}]
+    return ser, log, []
 
 
 def _pit_pair(rows: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -1559,6 +1588,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "institution": institution,
         "retail": retail_state,
         "members": members,
+        # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
+        # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
+        "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",
         "group_log": log[-8:],
         # 重选切点(2026-08-19 加):`group_log` 只记**换人**,阵容没变就不写。
         # 界面要能说「最近一次重选是哪天、换没换人」,否则看上去像三年没重选过。
@@ -1680,7 +1712,11 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         mkt = main_series(price)
         op, st = contract_prices(price)
         mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
-        groups, log, cuts = rolling_groups(seat, price, mkt.index)
+        if RULES.get("fixed_members"):
+            groups, log, cuts = fixed_groups(RULES["fixed_members"], seat, price, mkt.index,
+                                             v.get("fixed_since", "2026-08-23"))
+        else:
+            groups, log, cuts = rolling_groups(seat, price, mkt.index)
         sig = signal_series(seat, groups)
         if RULES["signal_source"] == "cost":
             sig = attach_cost_signal(sig, seat, mkt, groups)

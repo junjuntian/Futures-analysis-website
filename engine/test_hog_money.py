@@ -953,3 +953,31 @@ class TestRules:
         for code in ("FG", "SA", "JD", "JM"):
             H.use(code)
             assert H.RULES["long_mode"] == "flow", code
+
+
+class TestFixedGroup:
+    """DEC-122(2026-08-23 运营者拍板):生猪席位组改成固定 5 家,不滚动重选。"""
+
+    def test_生猪配了固定五家其余品种仍滚动(self):
+        H.use("LH")
+        assert H.RULES["fixed_members"] == ["国泰君安", "东证期货", "东吴期货", "永安期货", "浙商期货"]
+        for code in ("FG", "SA", "JD", "JM"):
+            H.use(code)
+            assert H.RULES["fixed_members"] is None, code
+
+    def test_固定名单逐日同一组且没有重选切点(self):
+        """形状必须与 `rolling_groups` 一致,下游 `signal_series`/`build_payload` 不分叉。
+        `log` 只一条、日期写拍板日;`cuts` 为空 —— 界面据此不再写「下次重选」。"""
+        idx = bdays("2026-03-02", 6)
+        seat = pd.DataFrame({"trade_date": list(idx) * 2, "contract": "LH2611",
+                             "member_key": ["甲"] * 6 + ["乙"] * 6,
+                             "net": [100] * 6 + [-50] * 6, "net_off": [100] * 6 + [-50] * 6,
+                             "source": "akshare_v1"})
+        price = pd.DataFrame({"trade_date": idx, "contract": "LH2611",
+                              "settle": [100.0] * 6, "source": "akshare_v1"})
+        ser, log, cuts = H.fixed_groups(["甲", "乙"], seat, price, idx, "2026-03-04")
+        assert list(ser.index) == list(idx)
+        assert all(g == ("甲", "乙") for g in ser)
+        assert cuts == []
+        assert len(log) == 1 and log[0]["date"] == "2026-03-04" and log[0]["members"] == ["甲", "乙"]
+        assert set(log[0]["alpha"]) == {"甲", "乙"}
