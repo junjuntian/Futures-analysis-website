@@ -153,7 +153,9 @@ interface HogPayload {
            /** 玻璃专用的两条附加(DEC-114),别的品种缺省/假。 */
            cost_need_adding?: boolean; cost_min_age?: number
            /** 'inst' = 机构出场(焦煤,DEC-117);缺省 = 四件套。 */
-           exit_mode?: string; cost_unload_max?: number } & Record<string, unknown>
+           exit_mode?: string; cost_unload_max?: number
+           /** 'unload_bounce' = 做多只由机构净空且卸仓≥long_unload_min 触发(生猪,DEC-118)。 */
+           long_mode?: string; long_unload_min?: number } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -814,6 +816,13 @@ const bySide = computed(() => {
                 <span class="hint">玻璃、纯碱**不关**:它们跨了完整周期、做多支路有真实
                 机会(FG 双向夏普 0.65 vs 只做空 0.36)。同一套规则换个品种要重新验,
                 不能照抄。</span>
+              </template>
+              <template v-else-if="data.rules.long_mode === 'unload_bounce'">
+                **做多腿只由「机构席位组净空、且本轮已卸掉 ≥{{ Math.round(Number(data.rules.long_unload_min ?? 0.5) * 100) }}%」触发**
+                (DEC-118):博机构减空之后那一周的反弹(实测 5 日 +1.5%,20 日归零),
+                用来联动生猪向上套利;流量 z ≥ {{ data.signal.enter }} 的做多仍然不做。
+                知情破例,不是验证通过:做多腿 14 笔均值 +1.06%,整体夏普 2.34 → 2.14、
+                回撤 −4.2% → −8.4%。
               </template>
               <template v-else>z ≥ {{ data.signal.enter }} 时做多(本品种双向)。</template>
             </li>

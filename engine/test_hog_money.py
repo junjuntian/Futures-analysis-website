@@ -72,6 +72,11 @@ def _plain_rules():
     """
     saved = dict(H.RULES)
     H.use("LH")
+    # 生猪 2026-08-23 起(DEC-118)做多腿走 unload_bounce,需要 sig 上有 bounce_long 列;
+    # 通用夹具是合成的,没有这列。测试基线取「生猪的基础规则 + 默认做多来源」,
+    # 品种专属的 long_mode / exit_mode 由各自的测试显式打开(TestBounceLong/TestInstExit/TestRules)。
+    H.RULES["long_mode"] = "flow"
+    H.RULES["exit_mode"] = "retail"
     H.RULES["signal_source"] = "plain"
     yield
     H.RULES.clear()
@@ -825,6 +830,49 @@ class TestInstExit:
             H.RULES["exit_mode"] = old
 
 
+class TestBounceLong:
+    """卸仓反弹做多(DEC-118,生猪):流量正值压掉、bounce 注入、做空优先、缺列报错。"""
+
+    def test_压掉正值_注入反弹_做空优先(self):
+        idx = pd.bdate_range("2024-01-01", periods=4)
+        sig = pd.DataFrame({"z": [1.5, 0.0, -1.5, np.nan],
+                            "bounce_long": [False, True, True, True]}, index=idx)
+        old = dict(H.RULES)
+        try:
+            H.RULES["long_mode"] = "unload_bounce"
+            H.RULES["enter"] = 1.0
+            out = H._apply_long_mode(sig["z"], sig)
+        finally:
+            H.RULES.clear()
+            H.RULES.update(old)
+        assert out.iloc[0] == 0.0          # 流量 +1.5 被压掉:不许顺带做多
+        assert out.iloc[1] == 1.5          # bounce 注入
+        assert out.iloc[2] == -1.5         # 做空信号优先
+        assert out.iloc[3] == 1.5          # 未就绪(NaN)的日子 bounce 照样能进
+
+    def test_flow模式一字不动(self):
+        idx = pd.bdate_range("2024-01-01", periods=2)
+        sig = pd.DataFrame({"z": [1.5, -0.3], "bounce_long": [True, True]}, index=idx)
+        old = H.RULES["long_mode"]
+        H.RULES["long_mode"] = "flow"
+        try:
+            out = H._apply_long_mode(sig["z"], sig)
+        finally:
+            H.RULES["long_mode"] = old
+        assert list(out) == [1.5, -0.3]
+
+    def test_缺列报错(self):
+        idx = pd.bdate_range("2024-01-01", periods=2)
+        sig = pd.DataFrame({"z": [0.0, 0.0]}, index=idx)
+        old = H.RULES["long_mode"]
+        H.RULES["long_mode"] = "unload_bounce"
+        try:
+            with pytest.raises(ValueError):
+                H._apply_long_mode(sig["z"], sig)
+        finally:
+            H.RULES["long_mode"] = old
+
+
 class TestRules:
     def test_use切换品种会就地改全局规则(self):
         """`RULES` 是模块级全局,`use()` 就地改它。
@@ -898,5 +946,10 @@ class TestRules:
         for code in ("LH", "FG", "SA", "JD"):
             H.use(code)
             assert H.RULES["exit_mode"] == "retail", code
+        # 生猪(DEC-118):做多开,但只由卸仓反弹触发;别的品种 long_mode 必须是 flow
         H.use("LH")
-        assert H.RULES["long_enabled"] is False
+        assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
+        assert H.RULES["long_mode"] == "unload_bounce" and H.RULES["long_unload_min"] == 0.50
+        for code in ("FG", "SA", "JD", "JM"):
+            H.use(code)
+            assert H.RULES["long_mode"] == "flow", code

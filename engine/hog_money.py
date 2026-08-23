@@ -181,6 +181,14 @@ RULES = {
     # 同一套 inst 出场在其余四品种的出场体检里全输(REPORT_EXIT_CAMPAIGN_v1),
     # 所以它只能按品种开,不许当全局规则。
     "exit_mode": "retail",
+    # 做多腿来源(DEC-118,由 use() 按品种注入):
+    #   "flow"          —— 进场那一路信号为正且过门槛就做多(默认);
+    #   "unload_bounce" —— **只**在「机构组净空 且 本轮已卸掉 ≥ long_unload_min」时做多,
+    #                      进场那一路的正值一律压掉(不许顺带做多)。生猪用:博机构减空
+    #                      之后那一周的反弹(REPORT_LH_LONG_v1:5 日 +1.5%,t 2.4;
+    #                      20 日归零),运营者拍板用它联动生猪向上套利。
+    "long_mode": "flow",
+    "long_unload_min": 0.50,
 }
 
 # 品种参数。**每加一个品种,规则要重新验一遍,不许照抄**——
@@ -218,11 +226,21 @@ VARIETIES = {
     "LH": {
         "name": "生猪 LH", "unit": "元/吨", "multiplier": 16.0,
         "replay_start": "2023-08-11",   # 大商所席位数据起点
-        "long_enabled": False,          # DEC-084:多头 15 笔逐笔累计 −1.5%,关掉
-        "long_needs_dip": True,   # 做多已关,这条用不上;留 True 是生猪原口径
+        # **做多腿打开,但只由「机构净空且本轮卸仓≥50%」触发(DEC-118,2026-08-23
+        # 运营者知情破例)**。流量 z≥1 的做多仍然不做(DEC-084:多头逐笔 −1.5%,
+        # 重扫 0.02%/t 0.02,确实没东西)。
+        # 依据:机构减空之后有**一周**反弹(5 日 +1.5%,t 2.4;20 日归零,REPORT_LH_LONG_v1);
+        # 隔离后的做多腿 14 笔 均值 +1.06%/t 1.18,整体 +117.4%/夏普 2.14/回撤 −8.4%
+        # (只做空 +87.4%/2.34/−4.2%)。**按预注册判据不过**(夏普降、回撤翻倍),
+        # 运营者拍板上:用它联动生猪向上套利(博反弹,向上套利更安全)。不是验证通过。
+        "long_enabled": True,
+        "long_needs_dip": False,
+        "long_mode": "unload_bounce",
+        "long_unload_min": 0.50,
         "out": "hog_signals.json",
-        "backtest": "18 笔 净 +87.4%/胜率 66.7%/回撤 −4.2%/夏普 2.34"
-                    "(2023-08 起,**低于基准 +99.2%**)(2026-08-21 修掉回榜前视后重算,见 REPORT_PIT_LOOKAHEAD_v1)",
+        "backtest": "32 笔 净 +117.4%/胜率 56.2%/回撤 −8.4%/夏普 2.14"
+                    "(2023-08 起,基准 +99.2%)(2026-08-23 加卸仓反弹做多腿,知情破例,"
+                    "见 DEC-118 与 REPORT_LH_LONG_v1;只做空时代 18 笔 +87.4%/2.34/−4.2%)",
     },
     "FG": {
         "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
@@ -347,6 +365,8 @@ def use(code: str) -> dict:
     RULES["cost_need_adding"] = v.get("cost_need_adding", False)
     RULES["cost_min_age"] = v.get("cost_min_age", 0)
     RULES["exit_mode"] = v.get("exit_mode", "retail")
+    RULES["long_mode"] = v.get("long_mode", "flow")
+    RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -878,6 +898,34 @@ def attach_inst_exit(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
     return sig.assign(inst_exit=flags.reindex(sig.index).fillna(False))
 
 
+def attach_bounce_long(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
+                       groups: pd.Series) -> pd.DataFrame:
+    """把「卸仓反弹做多」的触发列挂到 sig 上(DEC-118):
+    bounce_long = 机构组净空 且 本轮已卸掉 ≥ long_unload_min;另带 bounce_unload(当日卸仓比例)
+    与 bounce_side(当日机构方向)给页面说原因用。掉榜日两者 NaN → 不触发。
+    与 research/run_lh_long2.py 的 (side<0)&(unl>=X) 逐字同构。"""
+    unload = unload_series(sig, seat, groups)["pct"].reindex(mkt.index)
+    cc = inst_cost_series(sig, mkt, groups)
+    side = cc["side"].reindex(mkt.index)
+    flag = ((side < 0) & (unload >= RULES["long_unload_min"])).fillna(False).astype(bool)
+    return sig.assign(bounce_long=flag.reindex(sig.index).fillna(False),
+                      bounce_unload=unload.reindex(sig.index),
+                      bounce_side=side.reindex(sig.index))
+
+
+def _apply_long_mode(z_in: pd.Series, sig: pd.DataFrame) -> pd.Series:
+    """long_mode="unload_bounce" 时改写进场信号:进场那一路的正值压成 0(不许顺带做多),
+    满足 bounce_long 且当天没有做空信号的日子注入 +(enter+0.5)。做空信号优先。"""
+    if RULES.get("long_mode") != "unload_bounce":
+        return z_in
+    if "bounce_long" not in sig:
+        raise ValueError("long_mode=unload_bounce 需要先 attach_bounce_long")
+    amp = RULES["enter"] + 0.5
+    z = z_in.where(~(z_in > 0), 0.0)
+    inject = sig["bounce_long"].reindex(z.index).fillna(False).astype(bool) & ~(z <= -RULES["enter"])
+    return z.where(~inject, amp)
+
+
 def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """按 RULES["signal_source"] 决定进场与出场各用哪一路信号。
 
@@ -898,14 +946,15 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
             return sig["cost_z"], sig["cost_z"] * np.nan
         return sig["cost_z"], retail["rz"]
     if RULES["signal_source"] != "resonance" or retail is None or retail.empty:
-        return sig["z"], sig["z"]
+        return _apply_long_mode(sig["z"], sig), sig["z"]
     # 用**标准化后的 z** 判共振,不用原始 chg。
     # chg 不需要预热,拿它判等于「聪明钱信号还没预热完成就先拿来用」——
     # 2026-08-19 对拍时抓到:席位组 2024-05-01 首次生成,z 要 60 个交易日才有值,
     # 而 chg 当天就有,于是 2024-05-17 凭一个尚不可用的信号开了一仓。
     # np.sign(NaN) 是 NaN、NaN==NaN 为 False,所以改用 z 之后预热期自动不进场。
     resonate = np.sign(sig["z"]) == np.sign(retail["rz"])
-    return retail["rz"].where(resonate), retail["rz"]
+    # 生猪(DEC-118):做多只由「机构净空且卸仓≥50%」触发,共振后的正值不许顺带做多。
+    return _apply_long_mode(retail["rz"].where(resonate), sig), retail["rz"]
 
 
 def entry_side(ze: float, past: float) -> tuple[int, str | None]:
@@ -1410,6 +1459,14 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         _r = sig["cost_reason"].get(d)
         if isinstance(_r, str) and _r:
             _entry_blocked = _r
+    # 卸仓反弹做多(DEC-118)下,做多条件不在 z 里,原因要另说:机构没净空 / 卸仓没到。
+    if RULES.get("long_mode") == "unload_bounce" and _entry_side == 0 and "bounce_unload" in sig:
+        _bs = sig["bounce_side"].get(d, np.nan)
+        _bu = sig["bounce_unload"].get(d, np.nan)
+        _why = ("机构未净空" if not (np.isfinite(_bs) and _bs < 0)
+                else f"机构净空但本轮只卸掉 {_bu:.0%}" if np.isfinite(_bu)
+                else "机构掉榜看不清")
+        _entry_blocked = f"{_entry_blocked};做多需机构净空且本轮卸掉≥{RULES['long_unload_min']:.0%}({_why})"
     # 交割窗口内只挡不进 —— 这一条 `entry_side` 不判(它不知道合约),这里补。
     _c_now = mkt["main"].get(d)
     if _entry_side != 0 and (not isinstance(_c_now, str)
@@ -1603,6 +1660,8 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
             sig = attach_cost_signal(sig, seat, mkt, groups)
         if RULES["exit_mode"] == "inst":
             sig = attach_inst_exit(sig, seat, mkt, groups)
+        if RULES["long_mode"] == "unload_bounce":
+            sig = attach_bounce_long(sig, seat, mkt, groups)
         payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st)
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
