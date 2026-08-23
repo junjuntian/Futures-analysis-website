@@ -174,14 +174,17 @@ pub fn mark_unpublished_and_extend_tail(
 /// `as_of` 为 `None` 时给最后一天 —— 没选日期就是「看最新」。
 /// 选中日早于全部数据时给 `None`:那天他确实没有持仓可看,摘要留空比退回最新诚实
 /// (退回最新等于默默无视选择,那正是这次要修的毛病)。
+///
+/// **跳过交易所未公布排名的日子**(DEC-130):尾巴上那些天整张榜不存在,摘要与各家分腿
+/// 退到最后一个有榜的交易日 —— 摘要的日期标签会写出那一天,看的人知道这是「最后公布日」。
 pub fn as_of_day(series: &[NetPositionDay], as_of: Option<Date>) -> Option<Date> {
+    let published = series.iter().rev().filter(|day| !day.unpublished);
     match as_of {
-        Some(end) => series
-            .iter()
-            .rev()
-            .find(|day| day.trade_date <= end)
-            .map(|day| day.trade_date),
-        None => series.last().map(|day| day.trade_date),
+        Some(end) => published
+            .filter(|day| day.trade_date <= end)
+            .map(|day| day.trade_date)
+            .next(),
+        None => published.map(|day| day.trade_date).next(),
     }
 }
 
@@ -375,6 +378,24 @@ mod tests {
         );
         assert!(!out[1].unpublished);
         assert_eq!(out[1].missing_members, vec!["中信".to_string()]);
+    }
+
+    #[test]
+    fn 摘要日跳过交易所未公布的尾巴() {
+        let mut s = series_of(&[3, 4, 5, 6]);
+        s[2].unpublished = true;
+        s[3].unpublished = true;
+        assert_eq!(
+            as_of_day(&s, None),
+            Some(day(4)),
+            "没选日期:最后一个有榜的日子"
+        );
+        assert_eq!(
+            as_of_day(&s, Some(day(6))),
+            Some(day(4)),
+            "选在未公布段里:退到最后公布日"
+        );
+        assert_eq!(as_of_day(&s, Some(day(3))), Some(day(3)));
     }
 
     #[test]
