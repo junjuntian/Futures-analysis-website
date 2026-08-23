@@ -1530,6 +1530,19 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "entry_blocked": _entry_blocked,
         },
         "position": open_trade,
+        # 生猪(DEC-118/119):「卸仓反弹」窗口的当日状态,给套利监控页当背景。
+        # 只在 long_mode=unload_bounce 的品种上有;其余品种 None,前端据此不画。
+        "bounce_long": ({
+            "active": bool(sig["bounce_long"].get(d, False)),
+            "unload": _f(sig["bounce_unload"].get(d, np.nan)),
+            "side": ({-1: "net_short", 1: "net_long"}.get(int(sig["bounce_side"].get(d)))
+                     if np.isfinite(sig["bounce_side"].get(d, np.nan)) else None),
+            "min": RULES["long_unload_min"],
+            "note": "机构席位组净空、且本轮已卸掉 ≥50%:实测这是生猪跨月**牛市价差**"
+                    "(买近卖远)唯一能赚的窗口 —— 窗口内 20 日 +107 元/吨、涨 53%;"
+                    "窗口外无条件 −123 元/吨、37%(REPORT_LH_SPREAD_SIGNAL_v1)。"
+                    "效应一个月内有效,40 日归零。**背景,不是进场信号。**",
+        } if "bounce_long" in sig else None),
         "institution": institution,
         "retail": retail_state,
         "members": members,

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { bounceHint, type BounceState } from '../bounce-hint'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
@@ -90,6 +91,7 @@ onMounted(() => {
   void loadVarietyNames()
   void load()
   void loadFundFlow()
+  void loadBounce()
 })
 watch([threshold, tradeDate, historyMode], () => void load())
 
@@ -317,6 +319,28 @@ function fundFlowFor(item: SpreadMonitorItem) {
   return {
     widen,
     text: `${z > 0 ? '玻璃' : '纯碱'}更强 · 价差倾向${widen ? '走扩' : '收窄'}`
+  }
+}
+
+/**
+ * 生猪「卸仓反弹」窗口(DEC-119)。引擎(DEC-118)按日写在 hog_signals.json 的
+ * `bounce_long` 里,这里只读不算;只挂在生猪的跨月组合上。
+ * 与 FG-SA 资金流向同一性质:**背景,不是进场信号**。取不到就不显示。
+ */
+const bounce = ref<BounceState | null>(null)
+
+function isLhCalendar(item: SpreadMonitorItem): boolean {
+  return !item.is_cross_variety && item.instrument_1 === 'LH'
+}
+
+async function loadBounce() {
+  try {
+    const res = await fetch(`/smart-money/hog_signals.json?t=${Date.now()}`)
+    if (!res.ok) return
+    const data = (await res.json()) as { bounce_long?: BounceState | null }
+    bounce.value = data.bounce_long ?? null
+  } catch {
+    // 背景信息取不到就不显示,页面主体照常
   }
 }
 
@@ -697,6 +721,19 @@ function openDetail(item: SpreadMonitorItem) {
                   {{ fundFlowFor(item).text }}
                 </span>
                 <span class="pctile">强度 {{ fundFlow.z.toFixed(2) }}</span>
+                <span class="pctile flow-tip">背景参考,非进场信号</span>
+              </div>
+            </el-tooltip>
+
+            <!-- 生猪跨月组合的「卸仓反弹」窗口(DEC-119)。引擎算,这里只读。
+                 窗口开 = 机构净空且已卸掉 ≥50%,实测是牛市价差唯一能赚的窗口;
+                 窗口外牛市价差无条件逆势。**背景,不是进场信号。** -->
+            <el-tooltip v-if="bounce && isLhCalendar(item)" :content="bounce.note" placement="top">
+              <div class="basis fund">
+                <span class="k">反弹窗口</span>
+                <span class="v" :class="bounceHint(bounce).on ? 'disc' : 'prem'">
+                  {{ bounceHint(bounce).text }}
+                </span>
                 <span class="pctile flow-tip">背景参考,非进场信号</span>
               </div>
             </el-tooltip>
