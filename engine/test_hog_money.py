@@ -1043,3 +1043,38 @@ class TestLongSince:
         H.RULES["long_since"] = None
         tr2 = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
         assert len(tr2) >= 1 and pd.Timestamp(tr2[0]["entry_date"]) < pd.Timestamp("2026-01-01")
+
+
+class TestGroupOverrides:
+    """DEC-129:运营者点名换人,在滚动组之上、只管到下一次重选切点。"""
+
+    def test_玻璃配了华泰换国泰君安其余品种为空(self):
+        H.use("FG")
+        assert H.RULES["group_overrides"] == [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}}]
+        for code in ("LH", "SA", "JD", "JM"):
+            H.use(code)
+            assert H.RULES["group_overrides"] is None, code
+
+    def test_只在since到下次切点之间替换并写一条手动log(self):
+        idx = bdays("2026-08-17", 12)     # 08-17 ~ 09-01
+        grp = ("甲", "乙", "丙")
+        groups = pd.Series([grp] * len(idx), index=idx, dtype=object)
+        cuts = ["2026-05-01", "2026-09-01"]
+        seat = pd.DataFrame({"trade_date": list(idx) * 3, "contract": "FG2701",
+                             "member_key": ["甲"] * 12 + ["乙"] * 12 + ["丁"] * 12,
+                             "net": [100] * 12 + [-50] * 12 + [30] * 12, "net_off": [100] * 12 + [-50] * 12 + [30] * 12,
+                             "source": "akshare_v1"})
+        price = pd.DataFrame({"trade_date": idx, "contract": "FG2701", "settle": [100.0] * 12, "source": "akshare_v1"})
+        g, log = H.apply_group_overrides(groups, [], cuts, [{"since": "2026-08-23", "replace": {"丙": "丁"}}], seat, price)
+        assert g[pd.Timestamp("2026-08-21")] == grp, "since 之前不动"
+        assert g[pd.Timestamp("2026-08-24")] == ("甲", "乙", "丁"), "since 起换人"
+        assert g[pd.Timestamp("2026-09-01")] == grp, "下次切点起照常重选,点名失效"
+        assert len(log) == 1 and log[0]["manual"] is True and log[0]["members"] == ["甲", "乙", "丁"]
+
+    def test_新人已在组里时不替换不重复(self):
+        idx = bdays("2026-08-24", 3)
+        groups = pd.Series([("甲", "丁", "丙")] * 3, index=idx, dtype=object)
+        seat = pd.DataFrame({"trade_date": idx, "contract": "FG2701", "member_key": "甲", "net": 1, "net_off": 1, "source": "akshare_v1"})
+        price = pd.DataFrame({"trade_date": idx, "contract": "FG2701", "settle": 100.0, "source": "akshare_v1"})
+        g, log = H.apply_group_overrides(groups, [], [], [{"since": "2026-08-23", "replace": {"丙": "丁"}}], seat, price)
+        assert all(x == ("甲", "丁", "丙") for x in g) and log == []

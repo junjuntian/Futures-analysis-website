@@ -286,6 +286,11 @@ VARIETIES = {
         "signal_source": "cost",
         "cost_need_adding": True,
         "cost_min_age": 2,
+        # **手动换人(DEC-129,2026-08-23 运营者拍板)**:华泰 → 国泰君安,只管到下次重选(2026-10-01)。
+        # 国泰君安 2025-10 重选时择时第 6(7.83 亿,差华泰 3 亿,因 2023 亏 9.93 亿);截至今天已升到第 5(13.77 亿)。
+        # 同策略回放 2026 两组都是 0 笔(成本进场门自 2025-10 起没开过,见 DEC-129 如实记),换人对 2026 回测无影响。
+        # since 写最近一个交易日 08-21(拍板日 08-23 是周日,写 08-23 要到 08-24 的数据才生效)。
+        "group_overrides": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}}],
         "out": "fg_signals.json",
         "backtest": "120 笔 净 +218.1%/胜率 54.2%/回撤 −31.6%/夏普 0.65"
                     "(2013-01 起,基准 −17.7%)(2026-08-22 换成本进场+还在加仓+轮龄≥2,"
@@ -401,6 +406,8 @@ def use(code: str) -> dict:
     RULES["fixed_members"] = list(v["fixed_members"]) if v.get("fixed_members") else None
     # 换月反弹提示(DEC-123):只有生猪配;None = 不出这块。
     RULES["roll_bounce"] = dict(v["roll_bounce"]) if v.get("roll_bounce") else None
+    # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
+    RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -681,6 +688,36 @@ def fixed_groups(members: list[str], seat: pd.DataFrame, price: pd.DataFrame,
     log = [{"date": decided, "members": list(mem),
             "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in mem}}]
     return ser, log, []
+
+
+def apply_group_overrides(groups: pd.Series, log: list, cuts: list, overrides: list,
+                          seat: pd.DataFrame, price: pd.DataFrame) -> tuple[pd.Series, list]:
+    """运营者点名换人(DEC-129):`{"since": 日期, "replace": {旧: 新}}`,在滚动组之上,
+    **只管到下一次重选切点为止** —— 切点一到,照常按择时收益重选,点名失效。
+    这样既照运营者的判断换人,又不把「按年重选」这件事拆掉(DEC-126 的教训:固定名单弱的主因是失去重选)。
+    换人那天写一条 log(带 manual=True),括号里是当时的择时收益,界面能看出这是手动换的。
+    """
+    g = groups.copy()
+    for o in overrides:
+        since = pd.Timestamp(o["since"])
+        nxt = next((pd.Timestamp(c) for c in cuts if pd.Timestamp(c) > since), None)
+        rep = dict(o["replace"])
+        changed = None
+        for d in g.index:
+            if d < since or (nxt is not None and d >= nxt) or g[d] is None:
+                continue
+            new = tuple(rep.get(m, m) for m in g[d])
+            if len(set(new)) != len(new):   # 新人本来就在组里 → 不重复,保留原组
+                continue
+            g[d] = new
+            changed = changed or new
+        if changed:
+            a = alpha_upto(seat, price, since + pd.Timedelta(days=1))
+            log.append({"date": since.strftime("%Y-%m-%d"), "members": list(changed),
+                        "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in changed},
+                        "manual": True, "replace": rep})
+            log.sort(key=lambda x: x["date"])
+    return g, log
 
 
 def _pit_pair(rows: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
@@ -1807,6 +1844,8 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                                              v.get("fixed_since", "2026-08-23"))
         else:
             groups, log, cuts = rolling_groups(seat, price, mkt.index)
+            if RULES.get("group_overrides"):
+                groups, log = apply_group_overrides(groups, log, cuts, RULES["group_overrides"], seat, price)
         sig = signal_series(seat, groups)
         if RULES["signal_source"] == "cost":
             sig = attach_cost_signal(sig, seat, mkt, groups)

@@ -130,7 +130,9 @@ interface HogPayload {
     note: string
   }
   members: MemberLeg[]
-  group_log: Array<{ date: string; members: string[]; alpha: Record<string, number | null> }>
+  /** `manual`/`replace`(DEC-129):运营者点名换人写的那一条,只管到下次重选。 */
+  group_log: Array<{ date: string; members: string[]; alpha: Record<string, number | null>
+    manual?: boolean; replace?: Record<string, string> }>
   /** 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单(生猪)。
    *  没这个字段的老产物按 rolling 读。 */
   group_mode?: 'fixed' | 'rolling'
@@ -829,6 +831,10 @@ const bySide = computed(() => {
           </p>
           <div v-for="g in [...data.group_log].reverse()" :key="g.date" class="glog">
             <b>{{ g.date }}</b>
+            <!-- 手动换人(DEC-129):不是重选算出来的,要标出来;只管到下一次重选切点。 -->
+            <span v-if="g.manual" class="badge warn">手动换人
+              <template v-if="g.replace">({{ Object.entries(g.replace).map(([a, b]) => `${a}→${b}`).join('、') }})</template>
+              · 到下次重选为止</span>
             <span v-for="m in g.members" :key="m" class="chip">
               {{ m }}<i>{{ g.alpha[m] == null ? '—' : g.alpha[m]!.toFixed(2) }}</i>
             </span>
