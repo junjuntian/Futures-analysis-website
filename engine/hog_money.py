@@ -1239,7 +1239,8 @@ def roll_bounce_payload(mkt: pd.DataFrame, st: pd.DataFrame, cfg: dict) -> dict:
     """
     since = pd.Timestamp(cfg["since"])
     d = mkt.index[-1]
-    main = str(mkt["main"].get(d)); dleft = int(mkt["dleft"].get(d, 0))
+    main = str(mkt["main"].get(d))
+    dleft = int(mkt["dleft"].get(d, 0))
     past = mkt["past"].get(d, np.nan)
     active = bool(dleft <= cfg["dleft_max"] and np.isfinite(past) and past <= -cfg["drop_min"])
     nxt = next_main_contract(main)
