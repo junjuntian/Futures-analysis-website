@@ -949,7 +949,7 @@ class TestRules:
         # 生猪(DEC-118):做多开,但只由卸仓反弹触发;别的品种 long_mode 必须是 flow
         H.use("LH")
         assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
-        assert H.RULES["long_mode"] == "unload_bounce" and H.RULES["long_unload_min"] == 0.50
+        assert H.RULES["long_mode"] == "unload_bounce" and H.RULES["long_unload_min"] == 0.30  # DEC-127 由 0.50 降
         for code in ("FG", "SA", "JD", "JM"):
             H.use(code)
             assert H.RULES["long_mode"] == "flow", code

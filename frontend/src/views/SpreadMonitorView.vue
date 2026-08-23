@@ -560,12 +560,17 @@ function openDetail(item: SpreadMonitorItem) {
              (2026-08-23 运营者报「有时候不弹」);也不再因为可选日期列表暂时为空就整体禁用——
              列表没回来之前面板里全部日子不可选,但面板本身要能打开。历史信号模式下仍禁用
              (那个模式不按单日看)。 -->
+        <!-- 日历「弹不出来」(运营者 2026-08-23 两次报;Chrome 实测复现):双击/连点输入框时
+             popper 的 el-zoom-in-top 进场过渡被打断,卡在 enter-active、opacity≈0 —— 面板已经
+             display:block 但看不见,要好几秒才慢慢显出来。关掉这个 popper 的过渡动画就立刻显示
+             (页内注入同样 CSS 实测有效)。popper 传送到 body,样式写在下面的非 scoped 块里。 -->
         <el-date-picker
           v-model="tradeDate"
           type="date"
           style="width: 170px"
           placeholder="交易日"
           value-format="YYYY-MM-DD"
+          popper-class="spread-date-popper"
           :clearable="false"
           :editable="false"
           :disabled-date="isNotTradingDay"
@@ -784,8 +789,9 @@ function openDetail(item: SpreadMonitorItem) {
             </el-tooltip>
 
             <!-- 生猪跨月组合的「卸仓反弹」窗口(DEC-119)。引擎算,这里只读。
-                 窗口开 = 机构净空且已卸掉 ≥50%,实测是牛市价差唯一能赚的窗口;
-                 窗口外牛市价差无条件逆势。**背景,不是进场信号。** -->
+                 窗口开 = 机构净空且已卸掉 ≥ 门槛(引擎 long_unload_min,DEC-127 起 30%)。
+                 原验证(滚动组+50%)是牛市价差唯一能赚的窗口;**改固定 5 家后复验已不优于无条件**,
+                 文案由引擎 note 带过来,别在这里写死数字。**背景,不是进场信号。** -->
             <el-tooltip v-if="isLhCalendar(item) && bounceAt(item)" :content="bounce!.note" placement="top">
               <div class="basis fund">
                 <span class="k">反弹窗口</span>
@@ -970,6 +976,15 @@ function openDetail(item: SpreadMonitorItem) {
     </el-dialog>
   </section>
 </template>
+
+<style>
+/* 交易日日历的 popper(传送到 body,scoped 管不到):关掉过渡,避免连点时卡在 opacity 0。 */
+.spread-date-popper.el-popper {
+  transition: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+</style>
 
 <style scoped>
 .controls {

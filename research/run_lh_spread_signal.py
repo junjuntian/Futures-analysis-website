@@ -33,6 +33,16 @@ def tstat(a):
 sig, mkt, rdf, op, st, groups, unload = R.load("LH")
 v = H.use("LH")
 H.CURRENT = {"code": "LH", **v}
+# DEC-127 复验:席位组与门槛都按引擎现行配置(固定名单 + long_unload_min),不再写死 0.5 / 滚动组。
+import sys as _sys
+if len(_sys.argv) > 1:
+    H.RULES["long_unload_min"] = float(_sys.argv[1])
+THR = H.RULES["long_unload_min"]
+if H.RULES.get("fixed_members"):
+    price0 = H.clean_price(pd.read_csv(R.DATA / "lh_price.csv.gz")); seat0 = H.clean_seat(pd.read_csv(R.DATA / "lh_seat.csv.gz"))
+    groups, _, _ = H.fixed_groups(H.RULES["fixed_members"], seat0, price0, mkt.index, "2026-08-23")
+    sig = H.signal_series(seat0, groups)
+print(f"[配置] 席位组 {'固定 '+'、'.join(groups.iloc[-1]) if H.RULES.get('fixed_members') else '滚动'} | 卸仓门槛 {THR:.0%}")
 price = H.clean_price(pd.read_csv(R.DATA / "lh_price.csv.gz"))
 seat = H.clean_seat(pd.read_csv(R.DATA / "lh_seat.csv.gz"))
 idx = mkt.index
@@ -85,7 +95,7 @@ for i in range(len(idx)):
     if not (np.isfinite(s_) and s_ < 0):
         armed = True
         continue
-    if np.isfinite(u_) and u_ >= 0.5 and armed:
+    if np.isfinite(u_) and u_ >= THR and armed:
         E1.append(i)
         armed = False
 tr, _, _ = H.replay(sig_b, mkt, rdf, op, st)
@@ -93,7 +103,7 @@ pos = {d: i for i, d in enumerate(idx)}
 E2 = [pos[pd.Timestamp(t["entry_date"])] for t in tr if t["side"] == "long" and pd.Timestamp(t["entry_date"]) in pos]
 E3 = [i for i in range(len(idx)) if flag.iloc[i]]
 HOLD = [i for i in range(len(idx)) if np.isfinite(side.iloc[i]) and side.iloc[i] < 0
-        and np.isfinite(unl.iloc[i]) and unl.iloc[i] < 0.5]
+        and np.isfinite(unl.iloc[i]) and unl.iloc[i] < THR]
 ALL = list(range(len(idx)))
 
 print("=" * 100)
