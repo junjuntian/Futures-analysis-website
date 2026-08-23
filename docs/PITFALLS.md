@@ -577,3 +577,11 @@
   排查方向直接引偏,能一眼定位靠的是它旁边那个 `HTTP 403`。**状态码能分流就照它
   分流,分不出来就说分不出来**,别给一个听着笃定的错方向。同类:前端 `catch` 把
   根因吞掉,守卫静默失效(engine.json 那次)。
+
+## 部署验收 phase5a「jm 09-01 cache hit」在北京时间零点附近会假失败(2026-08-23)
+
+现象:deploy-futures 在 16:05 UTC(北京 00:05)验收失败 `PHASE5A_E2E_FAIL http_label=jm 09-01 cache hit expected=200 actual=503`,
+证据 live-combo-hit.json 是 `spread_provider_unavailable retry_after 58s` —— 第二次同样的查询没命中缓存、打到上游被限流。
+第一次查询在零点前、第二次在零点后,缓存键跟着日期变了。自动回滚 ROLLBACK_PASS,生产停在上一版,无损。
+**处置:避开北京 23:55~00:10 部署;撞上了直接重新 dispatch 即可(本次重跑即过)。** 与业务改动无关,别去改代码。
+
