@@ -150,7 +150,7 @@ const filtered = computed(() => {
  * 红线内不是没机会,是《体系》的硬纪律+数据实证的负期望区,不当进场信号。
  * 「首次」用 turn_crosses===1 判(DEC-070,运营者拍板):20 日窗内的第二次及
  * 以后穿线只挂 ⚠ 信号差,不再亮 ⚡;窗滑过之后的新穿线计数归 1,算新一轮。 */
-function isEntry(item: SpreadMonitorItem) {
+function isQualifiedEntry(item: SpreadMonitorItem) {
   return (
     item.is_new_turn &&
     item.turn_crosses === 1 &&
@@ -158,6 +158,31 @@ function isEntry(item: SpreadMonitorItem) {
     isQualified(item.revert) &&
     !isRedLine(item.days_left)
   )
+}
+/**
+ * ⚡ 反弹进场 · 生猪专用(DEC-121,运营者 2026-08-23 拍板):生猪跨月价差**低位**新拐头
+ * (首次穿线、未进红线)直接亮,**不过「持到期 > 0」的合格门**。
+ *
+ * 为什么只给生猪、只给低位:运营者判断 2026 是磨底年,要做的是移仓换月带来的反弹
+ * (择时平仓,不拿到期),合格门用「持到期」评资格天然把反弹型组合全部排除 ——
+ * 2026 年生猪 14 次低位拐头 20 日均 +22.8%、胜 93%,被合格门拦掉的 10 次均 +24.4% 全胜
+ * (REPORT_LH_TURN_ASSOC_v1)。拐头与机构/散户减仓关联弱(相关 +0.24 / +0.10),
+ * 7/24 价差触底比机构卸仓(8/4 起)早 7 个交易日,所以不挂机构条件,直接按价差拐头。
+ * **这是按年份判断开的门,不是全样本验证**:2025 同类事件好坏参半(−114% 到 +97%)。
+ * 磨底年结束要回头关掉或重验 —— 写在 DEC-121 里。
+ */
+function isLhBounceEntry(item: SpreadMonitorItem) {
+  return (
+    !item.is_cross_variety &&
+    item.instrument_1 === 'LH' &&
+    item.turn === 'low' &&
+    item.is_new_turn &&
+    item.turn_crosses === 1 &&
+    !isRedLine(item.days_left)
+  )
+}
+function isEntry(item: SpreadMonitorItem) {
+  return isQualifiedEntry(item) || isLhBounceEntry(item)
 }
 /** 排序权重:干净进场 2 > 信号差进场 1 > 其余 0。 */
 function entryRank(item: SpreadMonitorItem) {
@@ -218,6 +243,12 @@ const ENTRY_HINT =
   '今天刚拐头(位置今天才穿过回撤线)且资格合格 —— 回放口径里的进场日。' +
   '统计是盘后算的,执行等于次日进场。同一轮拐头只亮首次:20 日内第二次及以后的' +
   '穿线不再给进场标,只挂 ⚠ 信号差(DEC-070,运营者拍板)。'
+
+const LH_BOUNCE_HINT =
+  '生猪专用(DEC-121,运营者 2026-08-23 拍板):跨月价差低位刚拐头(今天穿过回撤线、本轮首次、' +
+  '未进红线)直接亮,不看「持到期」合格门。依据:2026 年 14 次低位拐头 20 日均 +22.8%、' +
+  '胜 93%,被合格门拦掉的 10 次均 +24.4% 全胜;机制是移仓换月。**出场用择时(移动止盈 1/3)' +
+  ',不拿到期。** 这是按磨底年的判断开的门,不是全样本验证 —— 2025 同类事件好坏参半。'
 
 const TURN_HINT =
   '近 20 个交易日内当年轨曾进 3% 报警带，当前已自极值回撤超过该品种的档位' +
@@ -645,10 +676,15 @@ function openDetail(item: SpreadMonitorItem) {
               >
                 <span class="badge-decay">衰减区 · 剩 {{ item.days_left }} 日</span>
               </el-tooltip>
-              <el-tooltip v-if="isEntry(item) && item.revert" :content="ENTRY_HINT" placement="top">
+              <el-tooltip v-if="isQualifiedEntry(item) && item.revert" :content="ENTRY_HINT" placement="top">
                 <!-- 方向必须写在标上(DEC-088):这个标此前只说「进场」,不说做多还是
                      做空,而它旁边的「✓ 合格」当时判的可能是反方向。 -->
                 <span class="badge-entry">⚡ 进场 · {{ tradeDirection(item.revert) }}价差</span>
+              </el-tooltip>
+              <!-- 生猪反弹进场(DEC-121):低位拐头即亮,不过合格门;徽标与正规 ⚡ 区分开,
+                   字面写明「反弹·择时平仓」,别让人当成拿到期的那种。 -->
+              <el-tooltip v-else-if="isLhBounceEntry(item)" :content="LH_BOUNCE_HINT" placement="top">
+                <span class="badge-entry bounce">⚡ 反弹进场 · 做多价差 · 择时平仓</span>
               </el-tooltip>
               <el-tag
                 v-if="item.alert"
@@ -1239,6 +1275,10 @@ function openDetail(item: SpreadMonitorItem) {
 }
 .tally .v.entry {
   color: var(--tv-blue);
+}
+/* 「⚡ 反弹进场」(生猪,DEC-121):实心橙,与正规 ⚡ 的蓝分开 —— 两者出场口径不同。 */
+.badge-entry.bounce {
+  background: var(--el-color-warning);
 }
 /* 「⚡ 进场」:全页唯一的实心蓝——它是唯一的行动指令,必须一眼跳出来。 */
 .badge-entry {
