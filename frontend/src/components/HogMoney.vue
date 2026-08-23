@@ -170,7 +170,9 @@ interface HogPayload {
            /** 'unload_bounce' = 做多只由机构净空且卸仓≥long_unload_min 触发(生猪,DEC-118)。 */
            long_mode?: string; long_unload_min?: number
            /** 做多腿起始日(DEC-124):生猪只从 2026-01-01 起开做多,之前只做空。 */
-           long_since?: string | null } & Record<string, unknown>
+           long_since?: string | null
+           /** 临近交割强平后不许原地续仓,要等新信号(DEC-131)。老产物没有=按开着读。 */
+           rearm_after_delivery?: boolean } & Record<string, unknown>
   /** 算出这份信号的那个引擎文件的指纹(DEC-099)。与 `engine.json` 里的比对,
    *  不一致 = 这份信号是旧引擎算的。可选:旧 JSON 没有这个字段。 */
   engine_fingerprint?: string
@@ -905,6 +907,9 @@ const bySide = computed(() => {
               强制平仓**(散户纪律,这段时间也不进场)</template>。出场只看散户那一路,不要求共振
               ——否则聪明钱一转向就把仓位锁死在里面。<br>
               <span class="hint">{{ exitText }}</span></li>
+            <li v-if="data.rules.rearm_after_delivery !== false"><b>强平后不续仓</b>(DEC-131):临近交割被强制平仓后,
+              **同方向信号没断过就不在新主力续仓**——那不是新信号,是同一个状态还挂着;信号消失过至少一天再出现才算新信号,照进。
+              反方向不受限。</li>
             <li><b>成交</b>:信号日收盘出信号,**次日开盘成交**。席位持仓排名是收盘后
               才公布的(大商所约 15:30-16:00、郑商所约 16:26),按信号日结算价成交
               做不到。这条口径下的收益比原来低很多——**收益几乎全部集中在信号后

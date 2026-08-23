@@ -1078,3 +1078,50 @@ class TestGroupOverrides:
         price = pd.DataFrame({"trade_date": idx, "contract": "FG2701", "settle": 100.0, "source": "akshare_v1"})
         g, log = H.apply_group_overrides(groups, [], [], [{"since": "2026-08-23", "replace": {"丙": "丁"}}], seat, price)
         assert all(x == ("甲", "丁", "丙") for x in g) and log == []
+
+
+class TestRearmAfterDelivery:
+    """DEC-131:临近交割强平后,同方向信号没断过就不许在新主力续仓;断过一天再出现才算新信号。"""
+
+    @staticmethod
+    def _two_contract_world():
+        # LH2609 散户窗口止点 2026-08-31:从 8/18 起剩 ≤10 日 → 临近交割。主力 8/18 起换到 LH2611。
+        idx = bdays("2026-08-03", 25)   # 08-03 ~ 09-04
+        op = pd.DataFrame({"LH2609": 100.0, "LH2611": 110.0}, index=idx)
+        st = op.copy()
+        main = ["LH2609" if d < pd.Timestamp("2026-08-18") else "LH2611" for d in idx]
+        mkt = pd.DataFrame({"main": main, "past": 0.0}, index=idx)
+        return idx, mkt, op, st
+
+    def test_强平后信号不断则不续仓(self):
+        idx, mkt, op, st = self._two_contract_world()
+        tr = H.replay(signals(idx, 3.0), mkt, op=op, st=st)[0]     # 做多信号全程成立
+        reasons = [t["exit_reason"] for t in tr]
+        assert "临近交割" in reasons, reasons
+        k = reasons.index("临近交割")
+        assert all(t["side"] != "long" for t in tr[k + 1:]), f"强平后不该在 LH2611 续多: {tr[k+1:]}"
+
+    def test_信号断一天再出现才算新信号(self):
+        idx, mkt, op, st = self._two_contract_world()
+        z = [3.0] * len(idx)
+        gap = list(idx).index(pd.Timestamp("2026-08-24"))
+        z[gap] = QUIET                                            # 8/24 信号消失一天
+        tr = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        longs_after = [t for t in tr if t["side"] == "long" and t["contract"] == "LH2611"]
+        assert len(longs_after) == 1 and longs_after[0]["entry_date"] >= "2026-08-25", tr
+
+    def test_反方向不受限(self):
+        idx, mkt, op, st = self._two_contract_world()
+        z = [3.0] * len(idx)
+        for k, d in enumerate(idx):
+            if d >= pd.Timestamp("2026-08-20"):
+                z[k] = -3.0                                       # 强平后转做空信号
+        tr = H.replay(signals(idx, z), mkt, op=op, st=st)[0]
+        assert any(t["side"] == "short" and t["contract"] == "LH2611" for t in tr), tr
+
+    def test_开关关掉恢复原行为(self):
+        idx, mkt, op, st = self._two_contract_world()
+        H.RULES["rearm_after_delivery"] = False
+        tr = H.replay(signals(idx, 3.0), mkt, op=op, st=st)[0]
+        H.RULES["rearm_after_delivery"] = True
+        assert any(t["side"] == "long" and t["contract"] == "LH2611" for t in tr), "关掉开关应照旧续仓"

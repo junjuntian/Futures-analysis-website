@@ -89,6 +89,11 @@ RULES = {
     # 倒数第 10 个交易日(含当日)正是 08-18。
     # 这不是调出来的参数,是纪律,别拿回测去优化它。
     "exit_before_delivery": 10,
+    # 临近交割强平之后**不许原地续仓**(DEC-131,2026-08-23 运营者拍板):做多/成本这类
+    # 状态型进场信号在强平那天多半还成立,引擎原来会立刻在新主力把同方向的仓续上
+    # (生猪 8/14 平 LH2609、同日开 LH2611 @12,425)。运营者:除非触发**新的**进场信号。
+    # 「新」= 该方向的进场信号至少消失过一天再出现;反方向不受限。
+    "rearm_after_delivery": True,
     # **做多支路默认关闭**(2026-08-19 运营者拍板)。三条依据:
     #   ① 一年选人口径下多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),
     #      还贡献了全表最差的 −7.4%;关掉后夏普 1.96 → 2.39。
@@ -1156,6 +1161,8 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
         return v
 
     trades, side, entry_i, entry_c, pending = [], 0, None, None, None
+    # 临近交割强平后的「待重新触发」方向(DEC-131):0 = 不限;±1 = 该方向要等信号消失一天再出现。
+    rearm = 0
     pos = pd.Series(0.0, index=idx)
     for i, d in enumerate(idx):
         z = z_out.get(d, np.nan)
@@ -1202,6 +1209,8 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 "exit_reason": reason,
                 "_i": entry_i, "_j": i, "_c": entry_c, "_fill": j,
             })
+            if reason == "临近交割" and RULES.get("rearm_after_delivery", True):
+                rearm = side
             side, pending = 0, None
         ze = z_in.get(d, np.nan)
         c_now = main.get(d)
@@ -1216,6 +1225,13 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
             # 做多腿起始日(DEC-124):之前的年份做多信号当不存在,只做空。
             if want == 1 and not long_allowed(d):
                 want = 0
+            # 临近交割强平后(DEC-131):同方向信号若一直没断,就不是新信号,不进;
+            # 信号断过一天(want 不再是那个方向)即解除,下次出现照进。反方向不受限。
+            if rearm != 0:
+                if want != rearm:
+                    rearm = 0
+                else:
+                    want = 0
             if want != 0:
                 side, entry_i, entry_c = want, i, c_now
         pos.iloc[i] = side
