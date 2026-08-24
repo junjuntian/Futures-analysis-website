@@ -1231,17 +1231,37 @@ const bySide = computed(() => {
   margin-top: 16px;
 }
 
-/* 一排合约小窗(DEC-134):恒 5 个,窄屏换行 */
+/* 合约小窗(DEC-134):恒 5 个,固定 3 列 = 两排(3+2,运营者拍板)。
+   ⚠ .card 基类带 min-width:290px,四列时每列只有 ~276px,卡片会撑破轨道
+   互相压盖(2026-08-24 线上实拍抓到的),.panel-card 必须把它盖掉。 */
 .panel-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
+}
+@media (max-width: 1100px) {
+  .panel-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .panel-row { grid-template-columns: minmax(0, 1fr); }
+}
+.panel-card {
+  min-width: 0;
+  overflow: hidden;
 }
 .panel-card h3 {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+}
+/* 数值行允许换行:净持仓/变化/成本挤不下就折到下一行,不许溢出压到隔壁卡 */
+.panel-card .kv .v {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  column-gap: 6px;
+  min-width: 0;
 }
 .panel-days {
   font-size: 12px;
