@@ -2296,9 +2296,10 @@ def fgsa_hedge_book() -> dict | None:
             if side != 0 and i0 is not None:
                 j0, j1 = min(i0 + 2, len(idx) - 1), min(i + 2, len(idx))
                 r = float(np.prod(1 + side * ret_sp.iloc[j0:j1])) - 1
+                # side 用多空词(运营者 2026-08-25 口径):long=多玻空碱=做多价差。
                 segs.append({"start": idx[i0].strftime("%Y-%m-%d"),
                              "end": idx[i - 1].strftime("%Y-%m-%d") if i < len(idx) or vals[-1] != side else None,
-                             "side": "widen" if side > 0 else "narrow",
+                             "side": "long" if side > 0 else "short",
                              "days": i - i0, "ret_pct": round(r * 100, 2)})
             i0, side = i, v
     open_seg = bool(len(vals) and vals[-1] != 0)
@@ -2314,8 +2315,10 @@ def fgsa_hedge_book() -> dict | None:
         "member": "永安期货",
         "data_date": d.strftime("%Y-%m-%d"),
         "state": state,
+        # 多空词不是扩缩词(运营者 2026-08-25 纠正):多玻空碱=做多价差,反之做空,
+        # 玻璃恒前腿;"走扩/收窄"是价格相对 0 轴的位置词,别用在仓位方向上。
         "direction": (None if state != "opposite"
-                      else ("widen" if fg_net > 0 else "narrow")),
+                      else ("long" if fg_net > 0 else "short")),
         "fg_net": None if not np.isfinite(fg_net) else int(fg_net),
         "sa_net": None if not np.isfinite(sa_net) else int(sa_net),
         "fg_main": str(fg["main"].iloc[-1]),
@@ -2326,9 +2329,10 @@ def fgsa_hedge_book() -> dict | None:
         "history": segs[-8:],
         "stats": stats,
         "note": ("**永安对冲簿(展示级,不进判据)**:永安在玻璃与纯碱主力的净持仓反向时"
-                 "(历史约 31% 的天数)跟它的方向持价差——它多玻璃空纯碱 → 做多价差,"
-                 "反之做空;同向就不在场。执行 = 郑商所套利指令 SP FG-SA(玻璃在前"
-                 "纯碱在后)。回放(扣 0.2%/翻转)与逐年见 stats,T+2 零衰减。"
+                 "(历史约 31% 的天数)跟它的方向持价差——它多玻璃空纯碱 → **做多价差**,"
+                 "空玻璃多纯碱 → **做空价差**(玻璃恒前腿)。执行 = 郑商所套利指令 "
+                 "SP FG-SA(玻璃在前纯碱在后)。两腿 @成本引自净持仓页同一台成本引擎"
+                 "(推算口径,非成交均价)。回放(扣 0.2%/翻转)与逐年见 stats,T+2 零衰减。"
                  "**为什么是永安一家**:五家阵营版同规则是死的,单席位对冲簿才是真"
                  "仓位表达。**丑话**:跨两轮共五个候选,全族校正 p=0.10,证据等级"
                  "「知情上」;利润前重后轻(2020-22 赚大头,近三年只是没亏);"
@@ -2371,8 +2375,12 @@ def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
         "fg_z": round(float(joined["fg"].iloc[-1]), 2),
         "sa_z": round(float(joined["sa"].iloc[-1]), 2),
         "direction": "widen" if z > 0 else ("narrow" if z < 0 else "flat"),
+        # 走扩/收窄以 0 轴为准(运营者 2026-08-25 纠正):收窄=向 0 轴靠近。价差为负时
+        # 玻璃更强(数值上行)是收窄不是走扩——前端按当前价差在 0 轴哪侧翻文案,
+        # 这里的 direction 字段只说数值方向(widen=数值上行),别直接当文案用。
         "note": "玻璃与纯碱的**相对**资金流向。正=玻璃这边资金相对更强,价差(FG−SA)"
-                "倾向走扩;负=倾向收窄。**这是背景不是交易信号**——它预测的是价差方向,"
+                "数值倾向上行——价差在 0 轴下方时=收窄(向 0 轴),上方时=走扩(离 0 轴);"
+                "负号反之。**这是背景不是交易信号**——它预测的是价差方向,"
                 "不含进出场与仓位。",
         "evidence": "全样本偏相关 +0.140(t=+5.43,N=1480),比 FG 单品种 +2.96、"
                     "SA 单品种 +4.41 都高;逐年 6 正 1 负;滚动样本外四个截点 "
@@ -2439,6 +2447,9 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         return None
     SIG_CACHE[code] = sig
     # 玻纯对冲簿(DEC-142):跨品种块在 pair_fgsa 里合成,这里只把单品种材料放进小缓存。
+    # 腿成本**不在引擎算**(运营者 2026-08-25:「成本直接引用净持仓的成本,不需要你
+    # 单独算」):前端拿浏览器登录态调 /seats/net-position,显示的就是净持仓页同一台
+    # 成本引擎的同一个数。引擎只出状态与净持仓(net_off 口径)。
     if code in ("FG", "SA"):
         PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
                             "ret_open": mkt["ret_open"], "main": mkt["main"]}

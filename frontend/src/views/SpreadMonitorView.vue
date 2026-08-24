@@ -6,6 +6,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 import {
+  getSeatNetPosition,
+  type MemberLeg,
   getSpreadMonitor,
   getSpreadVarieties,
   saveSpreadTemplateNote,
@@ -345,7 +347,8 @@ interface HedgeBook {
   member: string
   data_date: string
   state: 'opposite' | 'same' | null
-  direction: 'widen' | 'narrow' | null
+  /** long=多玻空碱=做多价差;short=空玻多碱=做空价差(玻璃恒前腿,运营者口径)。 */
+  direction: 'long' | 'short' | null
   fg_net: number | null
   sa_net: number | null
   fg_main: string
@@ -358,23 +361,53 @@ interface HedgeBook {
 }
 const hedgeBook = ref<HedgeBook | null>(null)
 
-/** 翻成这一行自己的走扩/收窄 —— 与 fundFlowFor 同一个腿序陷阱,同一个守法。 */
-function hedgeBookFor(item: SpreadMonitorItem) {
+/** 文案用**做多/做空价差**(运营者 2026-08-25 定的口径,玻璃恒前腿):
+ *  多玻空碱=做多价差,空玻多碱=做空价差 —— 不用"做扩/做缩",那是价格位置的词,
+ *  仓位方向的词是多空。定义锚在 FG 上,与行的腿序无关(建组 SQL 恒 a=FG)。 */
+function hedgeBookFor() {
   const hb = hedgeBook.value!
   if (hb.state !== 'opposite' || !hb.direction) {
-    return { on: false, widen: false, text: `永安两腿同向 · 不在场(玻 ${fmtNet(hb.fg_net)}/碱 ${fmtNet(hb.sa_net)})` }
+    return { on: false, long: false, text: `永安两腿同向 · 不在场(玻 ${fmtNet(hb.fg_net)}/碱 ${fmtNet(hb.sa_net)})` }
   }
-  const widen = (hb.direction === 'widen') === (item.instrument_1 === 'FG')
-  const legs = hb.direction === 'widen' ? `多${hb.fg_main} 空${hb.sa_main}` : `空${hb.fg_main} 多${hb.sa_main}`
+  const long = hb.direction === 'long'
+  const legs = long ? `多${hb.fg_main} 空${hb.sa_main}` : `空${hb.fg_main} 多${hb.sa_main}`
   return {
     on: true,
-    widen,
-    text: `永安两边吃 · ${widen ? '做扩' : '做缩'}(${legs})第 ${hb.seg_days ?? '—'} 日`
+    long,
+    text: `永安两边吃 · ${long ? '做多价差' : '做空价差'}(${legs})第 ${hb.seg_days ?? '—'} 日`
   }
 }
 
 function fmtNet(v: number | null): string {
   return v === null ? '—' : v.toLocaleString('zh-CN')
+}
+
+/** 两腿成本 —— **直接引净持仓页那台成本引擎的数**(运营者 2026-08-25:「成本直接
+ *  引用净持仓的成本,不需要你单独算」):浏览器带登录态调 /seats/net-position,
+ *  取 latest_members 里永安对应腿的 long_cost/short_cost,与净持仓页逐家那排
+ *  同源同数。取不到(掉榜/接口错)就不显示,不自己推。 */
+const hedgeCosts = ref<{ fg: string | null; sa: string | null }>({ fg: null, sa: null })
+
+async function loadHedgeCosts() {
+  const hb = hedgeBook.value
+  if (!hb) return
+  const one = async (instrument: 'FG' | 'SA', contract: string, net: number | null) => {
+    if (net === null || net === 0) return null
+    try {
+      const res = await getSeatNetPosition({ instrument, members: [hb.member], contract })
+      const leg = res.data.latest_members.find((m: MemberLeg) => m.member === hb.member)
+      if (!leg || leg.missing) return null
+      const cost = net > 0 ? leg.long_cost : leg.short_cost
+      return cost === null ? null : Number(cost).toFixed(2)
+    } catch {
+      return null
+    }
+  }
+  const [fg, sa] = await Promise.all([
+    one('FG', hb.fg_main, hb.fg_net),
+    one('SA', hb.sa_main, hb.sa_net)
+  ])
+  hedgeCosts.value = { fg, sa }
 }
 
 /** 只认玻璃×纯碱这一个跨品种组合——信号是为它算的,别挂到别的行上去。 */
@@ -383,17 +416,20 @@ function isFgSa(item: SpreadMonitorItem): boolean {
   return [item.instrument_1, item.instrument_2].sort().join('-') === 'FG-SA'
 }
 
-/** 把「玻璃相对更强」翻成这一行自己的走扩/收窄。
+/** 把「玻璃相对更强」翻成走扩/收窄 —— **以 0 轴为准**(运营者 2026-08-25 纠正)。
  *
- * z 的符号只说明**玻璃相对纯碱**的强弱,而行里的价差是「腿1 − 腿2」——
- * 只有腿1 是 FG 时,玻璃更强才等于价差走扩。现在建组的 SQL 恒定 a=FG、b=SA,
- * 但把这个前提写死在文案里,哪天腿序变了就会**反着显示而不报错**。 */
+ * 收窄 = 价差向 0 轴靠近,走扩 = 离开 0 轴,与价差此刻在 0 轴哪一侧有关:
+ * 价差为负时玻璃更强(数值上行)是**收窄**,为正时才是走扩——原实现不看 0 轴,
+ * 价差 −132 时写着「玻璃更强·走扩」,方向感是反的。
+ * 腿序守法照旧:z 说的是玻璃相对纯碱,行价差是「腿1−腿2」,腿1 非 FG 时数值方向翻。 */
 function fundFlowFor(item: SpreadMonitorItem) {
   const z = fundFlow.value?.z ?? 0
-  const widen = z > 0 === (item.instrument_1 === 'FG')
+  const up = z > 0 === (item.instrument_1 === 'FG')   // 行价差的数值方向
+  const sp = Number(item.spread)
+  const widen = Number.isFinite(sp) && sp !== 0 ? up === (sp > 0) : up
   return {
     widen,
-    text: `${z > 0 ? '玻璃' : '纯碱'}更强 · 价差倾向${widen ? '走扩' : '收窄'}`
+    text: `${z > 0 ? '玻璃' : '纯碱'}更强 · 价差倾向${widen ? '走扩(离0轴)' : '收窄(向0轴)'}`
   }
 }
 
@@ -460,6 +496,8 @@ async function loadFundFlow() {
       fundFlow.value = data
       // 对冲簿卡与 pair 信号同一个 JSON(DEC-142);老 JSON 没有这个键 -> 不显示。
       hedgeBook.value = data.hedge_book ?? null
+      // 腿成本另取自净持仓成本引擎(见 loadHedgeCosts 注释),失败只影响 @成本 一截。
+      void loadHedgeCosts()
     }
   } catch {
     // 背景信息取不到就不显示,页面主体照常
@@ -869,11 +907,12 @@ function openDetail(item: SpreadMonitorItem) {
             <el-tooltip v-if="hedgeBook && isFgSa(item)" :content="hedgeBook.note" placement="top">
               <div class="basis fund">
                 <span class="k">永安对冲簿</span>
-                <span class="v" :class="hedgeBookFor(item).on ? (hedgeBookFor(item).widen ? 'disc' : 'prem') : ''">
-                  {{ hedgeBookFor(item).text }}
+                <span class="v" :class="hedgeBookFor().on ? (hedgeBookFor().long ? 'disc' : 'prem') : ''">
+                  {{ hedgeBookFor().text }}
                 </span>
-                <span class="pctile" v-if="hedgeBookFor(item).on">
-                  玻 {{ fmtNet(hedgeBook.fg_net) }} / 碱 {{ fmtNet(hedgeBook.sa_net) }}
+                <span class="pctile" v-if="hedgeBookFor().on">
+                  玻 {{ fmtNet(hedgeBook.fg_net) }}{{ hedgeCosts.fg ? ` @${hedgeCosts.fg}` : '' }}
+                  / 碱 {{ fmtNet(hedgeBook.sa_net) }}{{ hedgeCosts.sa ? ` @${hedgeCosts.sa}` : '' }}
                 </span>
                 <span class="pctile">
                   回放 {{ hedgeBook.stats.cum_pct >= 0 ? '+' : '' }}{{ hedgeBook.stats.cum_pct }}% · 在场 {{ hedgeBook.stats.in_market_pct }}%
@@ -902,7 +941,11 @@ function openDetail(item: SpreadMonitorItem) {
                 <span class="v" :class="rollPressureHint(rollAt(item)!).on ? 'disc' : 'prem'">
                   {{ rollPressureHint(rollAt(item)!).text }}
                 </span>
-                <span class="pctile flow-tip">散户强制流,背景参考,非进场信号</span>
+                <!-- DEC-137 后这里是判据不再是纯背景,小字跟状态走(2026-08-25 运营者
+                     指出旧话「非进场信号」与 ⚡ 自相矛盾,DEC-104 同款病)。 -->
+                <span class="pctile flow-tip">
+                  {{ rollAt(item)!.entry_flag ? '⚡ 已升判据 · 每届一次,持到交割纪律日' : '散户强制流,背景参考' }}
+                </span>
               </div>
             </el-tooltip>
 
