@@ -181,3 +181,33 @@ def test_多仓并行_两个合约各是各的流():
     open_trades = [t for t in out["trades"] if t["exit_date"] is None]
     assert {t["contract"] for t in open_trades} == {FAR, c2}
     assert int(out["pos_count"].max()) == 2
+
+
+def test_contracts_panel_到期滑出_近月排序_未上榜(monkeypatch=None):
+    """DEC-134:一排合约小窗 —— 到期的不出现,近月在前,恒最多 5 个;
+    某家当日无行 = 未上榜,不是 0 手。"""
+    import hog_money as H
+    d = pd.Timestamp("2026-08-24")
+    prev = pd.Timestamp("2026-08-17")
+    rows = []
+    # 六个活跃合约 + 一个已到期的(2607 止点在 2026-06,应被剔除)
+    for c in ("LH2607", "LH2609", "LH2611", "LH2701", "LH2703", "LH2705", "LH2707"):
+        rows.append({"member_key": "甲", "contract": c, "trade_date": d,
+                     "net": -100.0, "net_off": -100.0})
+        rows.append({"member_key": "甲", "contract": c, "trade_date": prev,
+                     "net": -60.0, "net_off": -60.0})
+    # 乙只在 2611 上有行,且只有今天
+    rows.append({"member_key": "乙", "contract": "LH2611", "trade_date": d,
+                 "net": 50.0, "net_off": 50.0})
+    seat = pd.DataFrame(rows)
+    panel = H.contracts_panel(seat, ["甲", "乙"], d, prev)
+    names = [p["contract"] for p in panel]
+    assert names == ["LH2609", "LH2611", "LH2701", "LH2703", "LH2705"]  # 2607 到期剔除,2707 超出 5 个
+    p2611 = next(p for p in panel if p["contract"] == "LH2611")
+    jia = next(m for m in p2611["members"] if m["member"] == "甲")
+    yi = next(m for m in p2611["members"] if m["member"] == "乙")
+    assert jia["net"] == -100 and jia["change"] == -40 and jia["on_board"]
+    assert yi["net"] == 50 and yi["on_board"]
+    p2701 = next(p for p in panel if p["contract"] == "LH2701")
+    yi2 = next(m for m in p2701["members"] if m["member"] == "乙")
+    assert yi2["on_board"] is False

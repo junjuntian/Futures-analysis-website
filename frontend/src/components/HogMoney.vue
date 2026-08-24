@@ -135,6 +135,9 @@ interface HogPayload {
     note: string
   }
   members: MemberLeg[]
+  /** 一排合约小窗(DEC-134):近月起、组内还看得到持仓的 5 个合约,逐合约各家持仓。
+   *  到期/看不到持仓自动滑出,新合约自动补上。**可选**:旧 JSON 没有。 */
+  contracts_panel?: Array<{ contract: string; days_left: number; members: MemberLeg[] }>
   /** `manual`/`replace`(DEC-129):运营者点名换人写的那一条,只管到下次重选。 */
   group_log: Array<{ date: string; members: string[]; alpha: Record<string, number | null>
     manual?: boolean; replace?: Record<string, string> }>
@@ -262,13 +265,14 @@ const page = ref(1)
 const pageSize = ref(20)
 
 /**
- * 组内各家在**当前主力合约**上的持仓成本。
+ * 各家在**逐个合约**上的持仓成本(DEC-134:多合约开战,按合约看)。
  *
  * 不在引擎里重算,直接走净持仓页那条接口(`seats/net-position`)——那套成本引擎
  * 是 Rust 侧算的、有测试盯着,再用 Python 抄一遍就是同一个事实两处维护。
- * 取不到不影响主页面:成本是锦上添花,信号才是主体。
+ * 每个面板合约各取一份,并发、失败静默:成本是锦上添花,信号才是主体。
+ * 单合约成本列已从「组内各家」撤掉(运营者 2026-08-24:跨合约价差大,单点没意义)。
  */
-const costs = ref<Record<string, SeatCost>>({})
+const costsByContract = ref<Record<string, Record<string, SeatCost>>>({})
 
 onMounted(async () => {
   void loadEngineFingerprint()
@@ -284,17 +288,21 @@ onMounted(async () => {
     return
   }
   const p = data.value
-  if (!p?.members.length || !p.contract) return
-  try {
-    const { data: net } = await getSeatNetPosition({
-      instrument: props.instrument,
-      members: p.members.map((m) => m.member),
-      contract: p.contract
-    })
-    costs.value = Object.fromEntries(net.latest_members.map((m) => [m.member, m]))
-  } catch {
-    // 成本取不到就不显示这一列,页面照常用
-  }
+  if (!p?.members.length) return
+  const contracts = (p.contracts_panel ?? []).map((c) => c.contract)
+  await Promise.all(contracts.map(async (contract) => {
+    try {
+      const { data: net } = await getSeatNetPosition({
+        instrument: props.instrument,
+        members: p.members.map((m) => m.member),
+        contract
+      })
+      costsByContract.value[contract] =
+        Object.fromEntries(net.latest_members.map((m) => [m.member, m]))
+    } catch {
+      // 该合约成本取不到就不显示,面板照常用
+    }
+  }))
 })
 
 /**
@@ -304,8 +312,8 @@ onMounted(async () => {
  * ——那说明有合约的成本不可知(建仓当日无结算价、或数据起点之前就持有),
  * 不能让人以为这个均价覆盖了全部持仓。
  */
-function memberCost(name: string): string {
-  const c = costs.value[name]
+function memberCost(contract: string, name: string): string {
+  const c = costsByContract.value[contract]?.[name]
   if (!c) return '—'
   if (c.missing) return '当日掉榜'
   const short = Number(c.short_lots)
@@ -642,7 +650,6 @@ const bySide = computed(() => {
                 <span v-if="m.change !== null" :class="pnlClass(m.change)">
                   ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})
                 </span>
-                <span class="cost">成本 {{ memberCost(m.member) }}</span>
               </template>
               <span v-else class="gray">当日未上榜</span>
             </span>
@@ -650,11 +657,40 @@ const bySide = computed(() => {
           <p class="note">
             <template v-if="isFixedGroup">席位组是运营者拍板的**固定名单**(DEC-122),不滚动重选。</template>
             <template v-else>席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。</template>
-            成本是**{{ data.contract }} 这一个合约**上的净持仓成本(推算),按结算价推
-            ——不是成交均价,我们看不到成交明细。
+            这是**全品种合约合计**;逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
           </p>
         </div>
       </div>
+
+      <!-- 一排合约小窗(DEC-134,运营者 2026-08-24):多合约开战,逐合约看
+           各家持仓与该合约上的成本。到期/看不到持仓自动滑出,恒 5 个。
+           金银不在此组件,天然不受影响。 -->
+      <div v-if="data.contracts_panel && data.contracts_panel.length" class="panel-row">
+        <div v-for="c in data.contracts_panel" :key="c.contract" class="card panel-card">
+          <h3>
+            {{ c.contract }}
+            <span class="panel-days" :class="{ near: c.days_left <= (data.rules.exit_before_delivery ?? 10) * 2 }">
+              剩 {{ c.days_left }} 日
+            </span>
+          </h3>
+          <div v-for="m in c.members" :key="m.member" class="kv">
+            <span class="k">{{ m.member.slice(0, 4) }}</span>
+            <span class="v">
+              <template v-if="m.on_board">
+                <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
+                <span v-if="m.change !== null && m.change !== 0" :class="pnlClass(m.change)">
+                  ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})</span>
+                <span class="cost">{{ memberCost(c.contract, m.member) }}</span>
+              </template>
+              <span v-else class="gray">未上榜</span>
+            </span>
+          </div>
+        </div>
+      </div>
+      <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
+        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、{{ data.signal.win }} 日变化、
+        净持仓成本(推算,按结算价推,不是成交均价)。合约到期自动滑出、新合约自动补上,恒 5 个。
+      </p>
 
       <!-- 逐合约战役(DEC-133,生猪):多仓并行 —— 顶部状态条只显示最新一笔,
            全部持仓与逐合约观察列表都在这里。 -->
@@ -1193,5 +1229,34 @@ const bySide = computed(() => {
 /* 逐合约战役卡(DEC-133):持仓表与观察表之间的间隔 */
 .watch-head {
   margin-top: 16px;
+}
+
+/* 一排合约小窗(DEC-134):恒 5 个,窄屏换行 */
+.panel-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.panel-card h3 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.panel-days {
+  font-size: 12px;
+  font-weight: normal;
+  color: var(--el-text-color-secondary, #909399);
+}
+.panel-days.near {
+  color: #e6a23c;
+}
+.panel-card .cost {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #909399);
+}
+.panel-note {
+  margin-top: 4px;
 }
 </style>

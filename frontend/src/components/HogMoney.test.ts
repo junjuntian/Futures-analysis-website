@@ -417,18 +417,40 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
-  it('组内各家要显示当前主力合约上的持仓成本', async () => {
+  it('成本撤出组内各家,按合约显示在小窗一排里(DEC-134)', async () => {
+    // 运营者 2026-08-24:单合约成本没意义(跨合约价差大),多合约开战按合约看。
+    stubFetch({
+      ...PAYLOAD,
+      contracts_panel: [
+        { contract: 'LH2611', days_left: 53,
+          members: [
+            { member: '国泰君安', net: -11413, change: 3472, on_board: true },
+            { member: '东证期货', net: -2533, change: -120, on_board: true },
+            { member: '东吴期货', net: 0, change: null, on_board: false }
+          ] },
+        { contract: 'LH2701', days_left: 97,
+          members: [{ member: '国泰君安', net: -900, change: null, on_board: true }] }
+      ]
+    })
     const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()
     await flushPromises()
     const t = w.text()
+    // 小窗里有逐合约成本(净持仓接口按合约各取一份;mock 对每个合约都回同一份)
     expect(t).toContain('12835')                 // 国泰君安,覆盖完整
     expect(t).toContain('13075(覆盖 1,200 手)')  // 东证,覆盖不全要标出来
-    // 东吴当日不在榜:整行就是「当日未上榜」,压根不该去取成本
-    expect(t).toContain('当日未上榜')
-    // 成本是哪个合约上的,必须说清——生猪各合约价差最大 49%
-    expect(t).toContain('LH2611 这一个合约')
+    expect(t).toContain('LH2701')
+    expect(t).toContain('剩 53 日')
+    // 组内各家不再写「这一个合约」的成本说明
+    expect(t).not.toContain('这一个合约')
     w.unmount()
+  })
+
+  it('旧 JSON 没有 contracts_panel:不渲染小窗,也不去取成本', async () => {
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('当日未上榜')   // 组内各家照常
+    expect(w.find('.panel-row').exists()).toBe(false)
   })
 
   it('散户反向维度要显示,并标出与机构是共振还是背离', async () => {
@@ -492,13 +514,17 @@ describe('生猪机构资金', () => {
     // 三个品种一份组件、三份 payload。写死文件名会让玻璃纯碱显示生猪的数据,
     // 而且页面上一切正常、看不出错。
     const seen: string[] = []
+    const FG_PAYLOAD = { ...PAYLOAD, contracts_panel: [
+      { contract: 'FG2701', days_left: 90,
+        members: [{ member: '国泰君安', net: -100, change: null, on_board: true }] }
+    ] }
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString()
       seen.push(url)
       if (url.includes('/seats/net-position')) {
         return { ok: true, status: 200, json: async () => NET_POSITION } as Response
       }
-      return { ok: true, status: 200, json: async () => PAYLOAD } as Response
+      return { ok: true, status: 200, json: async () => FG_PAYLOAD } as Response
     }))
     const w = mount(HogMoney, { props: { instrument: 'FG' as const },
                                 global: { plugins: [ElementPlus] } })

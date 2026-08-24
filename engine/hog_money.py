@@ -1541,6 +1541,48 @@ def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
     return pd.DataFrame({"net": s, "chg": chg, "rz": rz}), have
 
 
+def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
+                    prev_d: pd.Timestamp | None, limit: int = 5) -> list[dict]:
+    """一排合约小窗(DEC-134,运营者 2026-08-24):从近月起,组内还看得到持仓的
+    5 个合约,逐合约给各家净持仓与变化。**多合约开战**的观察面 —— 单合约成本列
+    已撤(跨合约价差大,单点成本没意义),成本按合约由前端走净持仓接口取。
+
+    活跃 = 近 7 个自然日内组内任何一家在该合约上有行,且未过窗口止点;
+    到期/看不到持仓自动滑出,新合约有行了自动补上,恒保持 limit 个。
+    口径与「组内各家」卡完全一致:今天的行求和、change 对 sig_win 天前。"""
+    sub = seat[seat["member_key"].isin(grp)]
+    recent = sub[sub["trade_date"] >= d - pd.Timedelta(days=7)]
+    cands = []
+    for c in recent["contract"].unique():
+        if not isinstance(c, str):
+            continue
+        if days_to_window_end(c, d) <= 0:
+            continue
+        cands.append(c)
+    cands.sort(key=lambda c: c[-4:])
+    out = []
+    for c in cands[:limit]:
+        today = sub[(sub["trade_date"] == d) & (sub["contract"] == c)]
+        prev = (sub[(sub["trade_date"] == prev_d) & (sub["contract"] == c)]
+                if prev_d is not None else None)
+        members = []
+        for m in grp:
+            now_rows = today[today["member_key"] == m]
+            now = float(now_rows["net"].sum()) if len(now_rows) else 0.0
+            was = (float(prev[prev["member_key"] == m]["net"].sum())
+                   if prev is not None and len(prev[prev["member_key"] == m]) else np.nan)
+            members.append({
+                "member": m,
+                "net": round(now),
+                "change": None if not np.isfinite(was) else round(now - was),
+                "on_board": bool(len(now_rows)),
+            })
+        out.append({"contract": c,
+                    "days_left": int(days_to_window_end(c, d)),
+                    "members": members})
+    return out
+
+
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
                   op: pd.DataFrame | None = None, st: pd.DataFrame | None = None) -> dict:
@@ -1755,6 +1797,8 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "roll_bounce": (roll_bounce_payload(mkt, st, RULES["roll_bounce"])
                         if RULES.get("roll_bounce") and st is not None else None),
         "members": members,
+        # 一排合约小窗(DEC-134):逐合约的各家持仓,恒 5 个,近月起。
+        "contracts_panel": contracts_panel(seat, grp, d, prev_d),
         # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
         "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",
