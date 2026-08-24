@@ -107,6 +107,8 @@ const buildingContract = ref(remembered('contract'))
 // 「今天在榜」误当成「存在过」——运营者选了高盛后挑不到 AU2608,就是这个。
 const buildingContracts = ref<string[]>([])
 const days = ref<NetPositionDay[]>([])
+/** 逐家×逐日两条腿(DEC-132),与 days 下标对齐,小窗逐家那几行读它。 */
+const memberSeries = ref<NonNullable<SeatNetPositionResponse['member_series']>>([])
 // 最新一天逐家的手数与均价，摘要下面那排用。后端连日期一起给。
 const latestMembers = ref<MemberLeg[]>([])
 const latestMembersDate = ref<string | null>(null)
@@ -300,6 +302,7 @@ async function loadPositions() {
 async function loadBuilding() {
   if (!selected.value.length || !buildingInstrument.value) {
     days.value = []
+    memberSeries.value = []
     latestMembers.value = []
     latestMembersDate.value = null
     buildingContracts.value = []
@@ -317,6 +320,7 @@ async function loadBuilding() {
     })
     multiplier.value = data.price_multiplier
     days.value = data.days
+    memberSeries.value = data.member_series ?? []
     latestMembers.value = data.latest_members
     latestMembersDate.value = data.latest_trade_date
     buildingContracts.value = data.contracts
@@ -330,6 +334,7 @@ async function loadBuilding() {
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '净持仓读取失败')
     days.value = []
+    memberSeries.value = []
     latestMembers.value = []
     latestMembersDate.value = null
   } finally {
@@ -717,6 +722,30 @@ function tooltipBody(index: number, head: string[] = []) {
     )
   )
   parts.push(row('计入席位', `${day.counted_members.length} 家`))
+  // 逐家两条腿(DEC-132,运营者 2026-08-24):悬停到哪天就看哪天各家的多空单与成本推算,
+  // 与顶上「最新一天」那两行同一套口径。掉榜/未公布的那家写明,不display 0。
+  if (!day.unpublished) {
+    for (const ms of memberSeries.value) {
+      const leg = ms.legs[index] ?? null
+      if (leg === null) {
+        parts.push(row(`　${ms.member}`, `<span style="color:${tokens.accent}">掉榜，持仓未知</span>`))
+        continue
+      }
+      const l = Number(leg.l)
+      const sLots = Number(leg.s)
+      const bits: string[] = []
+      if (l > 0) {
+        bits.push(`<span style="color:${tokens.up};font-weight:600">多 ${lots(l)}</span>`
+          + (leg.lc === null ? '' : ` 均价 ${price(Number(leg.lc))}`))
+      }
+      if (sLots > 0) {
+        bits.push(`<span style="color:${tokens.down};font-weight:600">空 ${lots(sLots)}</span>`
+          + (leg.sc === null ? '' : ` 均价 ${price(Number(leg.sc))}`))
+      }
+      if (!bits.length) bits.push('0 手')
+      parts.push(row(`　${ms.member}`, bits.join(' · ')))
+    }
+  }
   // 掉榜与反推都要逐个点名。只说「少了一家」，看的人不知道少的是不是他最在意的那家。
   if (day.inferred_members.length) {
     parts.push(

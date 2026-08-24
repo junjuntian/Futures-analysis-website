@@ -1467,6 +1467,25 @@ pub struct SeatNetPositionResponse {
     /// 一并回出来免得两边各自判断「哪天算最新」。没有数据时为空。
     pub latest_trade_date: Option<String>,
     pub latest_members: Vec<MemberLegItem>,
+    /// 逐家×逐日的多空手数与成本(DEC-132,运营者 2026-08-24:小窗里悬停到哪天就要看
+    /// 哪天各家的多空单与成本推算)。`legs` 与 `days` **按下标对齐**;那天这家掉榜或
+    /// 交易所未公布时为 null。字段名故意短(l/lc/s/sc):十家×几千天,长名字白白翻倍体积。
+    pub member_series: Vec<MemberSeriesItem>,
+}
+
+/// 某席位某天的两条腿(紧凑形)。l=净多手数,lc=多腿成本,s=净空手数,sc=空腿成本。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberDayLegItem {
+    pub l: String,
+    pub lc: Option<String>,
+    pub s: String,
+    pub sc: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberSeriesItem {
+    pub member: String,
+    pub legs: Vec<Option<MemberDayLegItem>>,
 }
 
 #[utoipa::path(
@@ -1550,6 +1569,7 @@ pub async fn query_seat_net_position(
 
     let mut days = Vec::new();
     let mut latest_trade_date: Option<String> = None;
+    let mut member_series: Vec<MemberSeriesItem> = Vec::new();
     let mut latest_members: Vec<MemberLegItem> = Vec::new();
     if !members.is_empty() {
         let rows = database::spread_analytics::load_seat_net_positions(
@@ -1727,6 +1747,30 @@ pub async fn query_seat_net_position(
         // 但 `cumulative_pnl` 原先在拿不到 pnl 时兜底成 "0" —— 补轴之后那会让累计
         // 曲线在掉榜段**直接砸到零**,画出一根不存在的巨亏,比原来的缺口更糟。
         // 按 DEC-061 的既有口径:**累计沿用前值**,当日盈亏留空。
+        // 逐家×逐日(DEC-132):与 days 同序。member_days 只在这家有行的日子有值,
+        // 掉榜/未公布自然是 None,前端据此写「掉榜,持仓未知」。
+        let day_dates: Vec<Date> = series.iter().map(|day| day.trade_date).collect();
+        member_series = members
+            .iter()
+            .map(|member| {
+                let by_date = member_days.get(member);
+                MemberSeriesItem {
+                    member: member.clone(),
+                    legs: day_dates
+                        .iter()
+                        .map(|date| {
+                            by_date.and_then(|days| days.get(date)).map(|v| MemberDayLegItem {
+                                l: v.long_lots.to_string(),
+                                lc: v.long_cost.map(|x| x.round_dp(2).to_string()),
+                                s: v.short_lots.to_string(),
+                                sc: v.short_cost.map(|x| x.round_dp(2).to_string()),
+                            })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+
         let mut carried_cumulative = "0".to_string();
         days = series
             .into_iter()
@@ -1795,6 +1839,7 @@ pub async fn query_seat_net_position(
             days,
             latest_trade_date,
             latest_members,
+            member_series,
         },
         request_id,
     ))

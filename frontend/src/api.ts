@@ -367,6 +367,12 @@ export interface SeatNetPositionResponse {
   /** 合约点值。盈亏由它乘出来，界面把它写在明面上。库里没配就是 `null`，此时不算盈亏。 */
   price_multiplier: string | null
   days: NetPositionDay[]
+  /** 逐家×逐日的多空手数与成本(DEC-132),legs 与 days 按下标对齐;掉榜/未公布日为 null。
+   *  字段名故意短(l/lc/s/sc):十家×几千天,长名字白白翻倍体积。老产物没有这个字段。 */
+  member_series?: Array<{
+    member: string
+    legs: Array<null | { l: string; lc: string | null; s: string; sc: string | null }>
+  }>
   /** `days` 最后一天的日期，由后端一并给出，免得两边各判一次「哪天算最新」。 */
   latest_trade_date: string | null
   latest_members: MemberLeg[]
