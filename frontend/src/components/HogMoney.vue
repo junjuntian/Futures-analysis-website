@@ -465,9 +465,9 @@ const zRatio = computed(() => {
 
 const rows = computed(() => {
   const h = data.value?.history ?? []
-  // 按**进场日期**从先到后排(运营者 2026-08-24 指定)。campaign 的多合约并行
-  // 让引擎产出顺序变成"按流分组",直接 reverse 会看起来像按出场日乱排。
-  const sorted = [...h].sort((a, b) => a.entry_date.localeCompare(b.entry_date)
+  // 按**进场日期**倒序(运营者 2026-08-24 再次指定:最新的在最上面)。
+  // campaign 多合约并行让引擎产出顺序按流分组,必须显式排序。
+  const sorted = [...h].sort((a, b) => b.entry_date.localeCompare(a.entry_date)
     || a.contract.localeCompare(b.contract))
   const start = (page.value - 1) * pageSize.value
   return sorted.slice(start, start + pageSize.value)
