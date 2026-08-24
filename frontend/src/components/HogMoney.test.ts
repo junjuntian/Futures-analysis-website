@@ -200,6 +200,43 @@ describe('生猪机构资金', () => {
     expect(w.text()).not.toContain('还剩')
   })
 
+  it('campaign 品种渲染战役持仓与观察列表(DEC-133)', async () => {
+    // 生猪切换为逐合约战役:多仓并行 + 逐合约观察 + 份额资格。
+    // 老品种 payload 没有 campaign 字段,上面那条兼容测试盖住;这条盖有它的形状。
+    const campaign = {
+      ...PAYLOAD,
+      rules: { ...PAYLOAD.rules, strategy: 'campaign' },
+      signal: { ...PAYLOAD.signal, entry_side: null, entry_blocked: 'LH2611 多:区间累计加仓 543 手,未到 800 手' },
+      campaign: {
+        params: { add_min: 150, confirm: 800, gap: 3, tail: 10, unload: 0.3, share: 0.25 },
+        positions: [{
+          side: 'short', entry_date: '2026-08-10', exit_date: null, entry_px: 12155,
+          exit_px: null, contract: 'LH2611', ret_pct: -2.7, hold_days: 6, exit_reason: null,
+          batch_cost: 12104, camp_net: 11673, camp_peak: 14724, unload_pct: 0.2072
+        }],
+        watch: [
+          { contract: 'LH2611', side: 'long', camp_net: 543, camp_vwap: 12150, zone_add: 543,
+            batch_cost: 12150, zone_age: 2, qualified: false, entry_ready: false,
+            blocked: '该方向历史战役盈亏未达对侧 25%,非聪明钱侧', settle: 12190, days_left: 40 },
+          { contract: 'LH2611', side: 'short', camp_net: 11673, camp_vwap: 12180, zone_add: 6662,
+            batch_cost: 12180, zone_age: 1, qualified: true, entry_ready: false,
+            blocked: '已持仓', settle: 12190, days_left: 40 }
+        ],
+        qual: { long_pnl_yi: 1.43, short_pnl_yi: 35.74, long_ok: false, short_ok: true, share: 0.25 },
+        note: '逐合约战役:多仓并行。'
+      }
+    }
+    stubFetch(campaign)
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('战役持仓')
+    expect(w.text()).toContain('批次成本')
+    expect(w.text()).toContain('非聪明钱侧')
+    expect(w.text()).toContain('35.74')
+    // 机构已卸列:20% /30%走
+    expect(w.text()).toContain('21%')
+  })
+
   it('读引擎产出的 JSON 并渲染当前状态', async () => {
     const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
     await flushPromises()

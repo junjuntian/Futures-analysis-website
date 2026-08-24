@@ -60,6 +60,30 @@ describe('entryGate', () => {
   })
 })
 
+describe('campaign(DEC-133)', () => {
+  it('campaign 品种不比任何 z,结论全由引擎给', () => {
+    const g = entryGate({
+      rules: { strategy: 'campaign' },
+      signal: { z: 2.5, enter: 1, entry_side: null, entry_blocked: 'LH2611 多:区间未确认' },
+      retail: { z: 2.5, resonate: true, trades: false }
+    })
+    expect(g.source).toBe('campaign')
+    expect(g.met).toBe(false)
+    expect(entryGateText({
+      rules: { strategy: 'campaign' },
+      signal: { z: 2.5, enter: 1, entry_side: null, entry_blocked: 'LH2611 多:区间未确认' },
+      retail: { z: 2.5, resonate: true, trades: false }
+    })).toContain('区间未确认')
+  })
+  it('引擎给了方向就是可进场', () => {
+    expect(entryGateText({
+      rules: { strategy: 'campaign' },
+      signal: { z: 0, enter: 1, entry_side: 'short', entry_blocked: null },
+      retail: { z: 0, resonate: false, trades: false }
+    })).toContain('次日开盘进场')
+  })
+})
+
 describe('entryGateText', () => {
   it('点名比的是哪一路,并说清机构那个数不是它', () => {
     const text = entryGateText(fg())

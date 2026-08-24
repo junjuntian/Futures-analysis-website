@@ -24,7 +24,10 @@ export interface EntryGateInput {
    * 进场比的不是任何 z,而是三个状态条件 —— 文案必须换一套,否则读者又会
    * 拿旁边的 z 去对门槛,重演 DEC-104 那个误会。
    */
-  rules?: { signal_source?: unknown }
+  rules?: { signal_source?: unknown
+    /** 'campaign' = 逐合约战役策略(生猪,DEC-133):进出场全由引擎逐合约判,
+     *  没有「某个 z 对门槛」这回事,结论转述引擎的 entry_side/entry_blocked。 */
+    strategy?: unknown }
   signal: {
     z: number | null
     enter: number
@@ -52,7 +55,7 @@ export interface EntryGate {
   value: number | null
   threshold: number
   /** 这个数来自哪一路。'cost' 时 value/threshold 无意义(比的不是 z)。 */
-  source: 'retail' | 'flow' | 'cost'
+  source: 'retail' | 'flow' | 'cost' | 'campaign'
   /** 机构与散户背离:方案 C 下直接判死,再大也不进场。 */
   divergent: boolean
   /** 门槛达成没有。做多做空对称,所以比的是绝对值。 */
@@ -61,6 +64,17 @@ export interface EntryGate {
 
 export function entryGate(data: EntryGateInput): EntryGate {
   const threshold = data.signal.enter
+  // 逐合约战役(DEC-133,生猪):进出场按合约逐个判(建仓区间+批次成本+份额资格),
+  // 与任何 z 无关,结论全由引擎给 —— 前端只转述,不复算(DEC-104 的教训)。
+  if (data.rules?.strategy === 'campaign') {
+    return {
+      value: null,
+      threshold,
+      source: 'campaign',
+      divergent: false,
+      met: !!data.signal.entry_side
+    }
+  }
   // 成本进场(DEC-112,鸡蛋):没有「某个 z 对门槛」这回事,结论全由引擎给。
   if (data.rules?.signal_source === 'cost') {
     return {
@@ -105,6 +119,10 @@ export function entryGateText(data: EntryGateInput): string {
   const flow = data.signal.z
   const shown = (v: number | null) => (v === null ? '—' : v.toFixed(2))
 
+  if (gate.source === 'campaign') {
+    if (data.signal.entry_side) return '战役进场条件已满足 —— 次日开盘进场'
+    return `逐合约战役:${data.signal.entry_blocked ?? '今日无进场信号'}`
+  }
   if (gate.source === 'cost') {
     // 引擎的 entry_blocked 带着具体数字(「价 3702 高于机构成本 3660」),
     // 直接转述;这里不复述三条件,免得两处文案漂移。

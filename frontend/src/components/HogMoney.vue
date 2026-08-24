@@ -44,6 +44,11 @@ interface HogTrade {
   ret_pct: number
   hold_days: number
   exit_reason: string | null
+  /** campaign(DEC-133)附加:批次成本与持仓中的阵营状态。旧产物没有。 */
+  batch_cost?: number | null
+  camp_net?: number | null
+  camp_peak?: number | null
+  unload_pct?: number | null
 }
 interface HogPayload {
   name: string
@@ -188,6 +193,22 @@ interface HogPayload {
     limit: number
     must_exit: boolean
   }
+  /** 逐合约战役策略(DEC-133,生猪):多仓并行的持仓清单与逐流观察列表。
+   *  **可选**:只有 strategy=campaign 的品种有;其余品种与旧 JSON 都没有。 */
+  campaign?: {
+    params: Record<string, unknown>
+    positions: HogTrade[]
+    watch: Array<{
+      contract: string; side: 'long' | 'short'
+      camp_net: number | null; camp_vwap: number | null
+      zone_add: number; batch_cost: number | null; zone_age: number | null
+      qualified: boolean; entry_ready: boolean; blocked: string | null
+      settle: number; days_left: number
+    }>
+    qual: { long_pnl_yi: number; short_pnl_yi: number
+      long_ok: boolean; short_ok: boolean; share: number }
+    note: string
+  }
   /** 与「躺着满仓做空」的同口径对比。不给基准,看的人会把熊市 beta 当成策略的本事。 */
   compare: {
     strategy: { cum_pct: number; sharpe: number | null; max_dd_pct: number }
@@ -203,6 +224,8 @@ const error = ref('')
 const tab = ref<'today' | 'history' | 'group' | 'rules'>('today')
 // 鸡蛋(DEC-112)进场走机构成本信号,策略方案与进场条件的文案都要换一套。
 const isCost = computed(() => data.value?.rules.signal_source === 'cost')
+// 生猪(DEC-133)整套换成逐合约战役:多仓并行,进出场文案与策略方案页全换。
+const isCampaign = computed(() => !!data.value?.campaign)
 
 /**
  * 仓位动作(加多/减多/加空/减空)按**净持仓方向 + 5 日变化方向**说,z 的正负只负责
@@ -252,7 +275,9 @@ onMounted(async () => {
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
     const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
-    if (!res.ok) throw new Error(`读取失败 ${res.status}`)
+    // 文案格式必须是「HTTP <码>」—— fetch-hint 按 /HTTP (\d{3})/ 分流,
+    // 原来写「读取失败 403」它永远匹配不到,退回那句含糊的兜底(DEC-101 的教训)。
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     data.value = await res.json()
   } catch (e) {
     error.value = `${e instanceof Error ? e.message : '读取信号数据失败'} — ${failureHint(e)}`
@@ -631,6 +656,59 @@ const bySide = computed(() => {
         </div>
       </div>
 
+      <!-- 逐合约战役(DEC-133,生猪):多仓并行 —— 顶部状态条只显示最新一笔,
+           全部持仓与逐合约观察列表都在这里。 -->
+      <div v-if="isCampaign && data.campaign" class="cards">
+        <div class="card wide">
+          <h3>战役持仓({{ data.campaign.positions.length }} 笔并行)</h3>
+          <table v-if="data.campaign.positions.length" class="tbl">
+            <thead><tr><th>合约</th><th>方向</th><th>进场</th><th class="num">进场价</th>
+              <th class="num">批次成本</th><th class="num">浮动收益</th><th class="num">机构已卸</th></tr></thead>
+            <tbody>
+              <tr v-for="t in data.campaign.positions" :key="t.contract + t.side">
+                <td>{{ t.contract }}</td>
+                <td><span class="side" :class="t.side">{{ sideText(t.side) }}</span></td>
+                <td>{{ t.entry_date }}</td>
+                <td class="num">{{ fmt(t.entry_px) }}</td>
+                <td class="num">{{ fmt(t.batch_cost) }}</td>
+                <td class="num" :class="pnlClass(t.ret_pct)">{{ pct(t.ret_pct) }}</td>
+                <td class="num">
+                  {{ t.unload_pct === null || t.unload_pct === undefined ? '—' : `${(t.unload_pct * 100).toFixed(0)}%` }}
+                  <span class="gray">/30%走</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="kv"><span class="v gray">当前无持仓</span></div>
+          <h3 class="watch-head">逐合约观察</h3>
+          <table class="tbl">
+            <thead><tr><th>合约</th><th>方向</th><th class="num">阵营净持仓</th>
+              <th class="num">区间累计加仓</th><th class="num">批次成本</th><th>状态</th></tr></thead>
+            <tbody>
+              <tr v-for="w in data.campaign.watch" :key="w.contract + w.side">
+                <td>{{ w.contract }}</td>
+                <td><span class="side" :class="w.side">{{ sideText(w.side) }}</span></td>
+                <td class="num">{{ fmt(w.camp_net) }}</td>
+                <td class="num">{{ fmt(w.zone_add) }}</td>
+                <td class="num">{{ fmt(w.batch_cost) }}</td>
+                <td>
+                  <b v-if="w.entry_ready" :class="w.side === 'long' ? 'red' : 'green'">⚡ 可进场(结算 {{ fmt(w.settle) }} 已到批次成本)</b>
+                  <template v-else>{{ w.blocked }}</template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            聪明钱资格(份额判据,需 ≥ 对侧 {{ (data.campaign.qual.share * 100).toFixed(0) }}%):
+            空头人格历史战役 {{ data.campaign.qual.short_pnl_yi >= 0 ? '+' : '' }}{{ data.campaign.qual.short_pnl_yi }} 亿
+            {{ data.campaign.qual.short_ok ? '✓ 可跟' : '✗ 不可跟' }} ·
+            多头人格 {{ data.campaign.qual.long_pnl_yi >= 0 ? '+' : '' }}{{ data.campaign.qual.long_pnl_yi }} 亿
+            {{ data.campaign.qual.long_ok ? '✓ 可跟' : '✗ 不可跟' }}。
+            {{ data.campaign.note }}
+          </p>
+        </div>
+      </div>
+
       <!-- 散户反向:与机构流向并列的第二个维度。它们经常指相反方向,
            所以摆在一起看才有意义——共振时信号最强,背离时基本没信息。 -->
       <div class="cards">
@@ -859,7 +937,29 @@ const bySide = computed(() => {
               再用滚动标准差无量纲化得到强度 z。<br>
               <span class="hint">为什么用品种合计而不是逐合约:实测 84.6% 的交易日里同日不同合约
               的持仓变化方向相反——那是移仓换月,逐合约会把一次调仓读成两个相反的信号。</span></li>
-            <li v-if="isCost"><b>进场(成本信号,DEC-112)</b>:**机构在场 +
+            <template v-if="isCampaign">
+              <li><b>进场(逐合约战役,DEC-133)</b>:对每届主力合约、每个方向独立判 ——
+                **阵营逢跌/亏着加仓的区间累计净加 ≥{{ fmt(Number(data.campaign?.params.confirm)) }} 手确认**,
+                且**当日结算不劣于该区间的批次成本**(多:价≤成本;空:价≥成本),
+                且**该方向通过聪明钱份额资格**(该向在本品种全部历史合约上的累计战役盈亏
+                ≥ 对侧的 {{ ((Number(data.campaign?.params.share) || 0) * 100).toFixed(0) }}% ——
+                生猪多头人格 +1.4 亿对空头 +35.7 亿,被它挡在门外:那一侧是套保/接盘,不是聪明钱)。
+                次日开盘成交;一个区间只进一笔;**多仓并行**,逐合约各是各的流。<br>
+                <span class="hint">左侧进场:跟着机构「亏着还在买」的那批筹码进,位置与他们最好的筹码相同。
+                回测 20 日内最大有利偏移中位 +8.1%、最大不利中位 −5.1% —— 先扛后赚是常态,这是左侧的定义。</span></li>
+              <li><b>出场</b>:**阵营|净持仓|跌破自进场峰值的 70%(机构卸仓 30%)→ 次日开盘走**;
+                或交割纪律(窗口止点前 {{ data.rules.exit_before_delivery ?? 10 }} 个交易日强平)。
+                **没有价格止损** —— 回撤控制靠「机构出货第一脚就走」:机构卸仓要卸几个星期、
+                全程是他们自己的卖压,小资金一脚就能出干净,没理由替他们扛剩下 70% 的出货。<br>
+                <span class="hint">{{ exitText }}</span></li>
+              <li><b>成交与计价</b>:信号日收盘判、次日开盘成交(席位排名收盘后才公布);
+                计价用**该合约自己的**开盘/结算 —— 左侧建仓常发生在它还不是主力的时候。</li>
+              <li><b>回测与丑话</b>:51 笔,简单加总 +118.8pp、逐笔复利 +200.5%、逐年全正、
+                最差单笔 −4.1%,超过组内最赚钱席位(东吴 +95.9%/复利 +122.7%)。
+                **安慰剂检验 p=0.159**:做空方向本身贡献大头,进场择时的增量在 51 笔样本上
+                尚不显著 —— 这是 2026-08-24 上线时如实记下的边界(REPORT_DIP_COST_v1 第五轮)。</li>
+            </template>
+            <li v-if="!isCampaign && isCost"><b>进场(成本信号,DEC-112)</b>:**机构在场 +
               价格不劣于机构成本(多:价≤成本;空:价≥成本)+ 机构本轮卸仓 ≤30%<template
               v-if="data.rules.cost_need_adding"> + 机构近 {{ data.signal.win }} 日仍同向加仓</template><template
               v-if="data.rules.cost_min_age"> + 机构本轮已持仓 ≥{{ data.rules.cost_min_age }} 日</template>**,
@@ -869,7 +969,7 @@ const bySide = computed(() => {
               五道闸门 5/5,见 REPORT_COST_GATES_v1。<br>
               <span class="hint">机构成本是前 20 席位数据上的重建值(加仓日按结算价
               加权),不是交易所真值。散户那一路仍在 —— 只管出场。</span></li>
-            <li v-if="!isCost"><b>进场(方案 C)</b>:**散户反向信号与聪明钱流向同号(共振)** 且
+            <li v-if="!isCampaign && !isCost"><b>进场(方案 C)</b>:**散户反向信号与聪明钱流向同号(共振)** 且
               散户反向 z ≤ −{{ data.signal.enter }} 时做空。两路都要求已过预热期
               ——聪明钱那路的标准化需要 60 个交易日,没预热完不参与判断。
               <template v-if="!data.institution.long_enabled">
@@ -893,30 +993,30 @@ const bySide = computed(() => {
               </template>
               <template v-else>z ≥ {{ data.signal.enter }} 时做多(本品种双向)。</template>
             </li>
-            <li v-if="isInstExit"><b>出场(机构出场,DEC-117)</b>:**机构席位组方向翻转,
+            <li v-if="!isCampaign && isInstExit"><b>出场(机构出场,DEC-117)</b>:**机构席位组方向翻转,
               或本轮已卸掉 >{{ Math.round(Number(data.rules.cost_unload_max ?? 0.3) * 100) }}%** 就走;
               硬止损 {{ (data.rules.stop * 100).toFixed(0) }}%<template v-if="data.rules.exit_before_delivery">
               / 主力进入交割窗口前 {{ data.rules.exit_before_delivery }} 个交易日强制平仓</template>保留;
               **不看散户翻向、不设持满**。它赢的方式是「机构一松手立刻走、再上手立刻跟」
               (均持有 4 日、笔数比四件套多一半),不是拿得更久;只在焦煤验过,其余品种不用。<br>
               <span class="hint">{{ exitText }}</span></li>
-            <li v-else><b>出场</b>:**散户反向信号翻向** / 硬止损
+            <li v-else-if="!isCampaign"><b>出场</b>:**散户反向信号翻向** / 硬止损
               {{ (data.rules.stop * 100).toFixed(0) }}% / 持满
               {{ data.rules.max_hold }} 个交易日<template v-if="data.rules.exit_before_delivery">
               / **主力进入交割窗口前 {{ data.rules.exit_before_delivery }} 个交易日
               强制平仓**(散户纪律,这段时间也不进场)</template>。出场只看散户那一路,不要求共振
               ——否则聪明钱一转向就把仓位锁死在里面。<br>
               <span class="hint">{{ exitText }}</span></li>
-            <li v-if="data.rules.rearm_after_delivery !== false"><b>强平后不续仓</b>(DEC-131):临近交割被强制平仓后,
+            <li v-if="!isCampaign && data.rules.rearm_after_delivery !== false"><b>强平后不续仓</b>(DEC-131):临近交割被强制平仓后,
               **同方向信号没断过就不在新主力续仓**——那不是新信号,是同一个状态还挂着;信号消失过至少一天再出现才算新信号,照进。
               反方向不受限。</li>
-            <li><b>成交</b>:信号日收盘出信号,**次日开盘成交**。席位持仓排名是收盘后
+            <li v-if="!isCampaign"><b>成交</b>:信号日收盘出信号,**次日开盘成交**。席位持仓排名是收盘后
               才公布的(大商所约 15:30-16:00、郑商所约 16:26),按信号日结算价成交
               做不到。这条口径下的收益比原来低很多——**收益几乎全部集中在信号后
               第一天,而那一天拿不到**。</li>
-            <li><b>计价</b>:主力合约,**换月日用新合约自己的前一日开盘/结算价**。生猪各
+            <li v-if="!isCampaign"><b>计价</b>:主力合约,**换月日用新合约自己的前一日开盘/结算价**。生猪各
               合约相对主力偏离最大 49%,跨合约相除得到的是价差不是收益。</li>
-            <li><b>为什么选方案 C</b>:同一时间轴(2023-08 起)三个候选——
+            <li v-if="!isCampaign"><b>为什么选方案 C</b>:同一时间轴(2023-08 起)三个候选——
               原聪明钱单信号 21 笔 +66.7%/胜率 61.9%/回撤 −12.0%/夏普 1.79;
               散户反向单独 21 笔 +73.8%/57.1%/−8.0%/1.74;
               **方案 C 18 笔 +79.8%/61.1%/回撤 −6.8%/夏普 2.23**。
@@ -925,7 +1025,7 @@ const bySide = computed(() => {
               <br><span class="hint">**但三者单笔均值差的 t 只有 0.22~0.49,
               统计上分不出高下。**选 C 是运营者的判断(回撤最小、夏普最高),
               不是数据证明它最优——真失效了会知道,但要几个月。</span></li>
-            <li><b>散户三家怎么来的</b>:三家长期站多头、长期亏钱的席位
+            <li v-if="!isCampaign"><b>散户三家怎么来的</b>:三家长期站多头、长期亏钱的席位
               (东方财富、平安期货、徽商期货),把它们的持仓变化反过来用。
               名单**跨品种固定、不逐品种重选**——这是它相对「找聪明钱」的好处:
               没有挑人的过拟合。<br>
@@ -1089,4 +1189,9 @@ const bySide = computed(() => {
 .rules { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.9; }
 .rules li { margin-bottom: 6px; }
 .caveats { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.9; color: var(--tv-text-secondary); }
+
+/* 逐合约战役卡(DEC-133):持仓表与观察表之间的间隔 */
+.watch-head {
+  margin-top: 16px;
+}
 </style>

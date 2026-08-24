@@ -267,6 +267,26 @@ VARIETIES = {
         # 和 DEC-121 一样是按磨底年判断开的门;席位规则在 2026 单独评全负(REPORT_LH_LOWS_v1)。
         # 只是提示,不进引擎持仓,不算进回测。
         "roll_bounce": {"since": "2026-01-01", "dleft_max": 22, "drop_min": 0.05},
+        # **策略切换为逐合约战役(campaign,DEC-133,2026-08-24 运营者拍板)**:
+        # 左侧批次进场(逢跌加仓区间确认 + 价<=批次成本)x 聪明钱份额资格
+        # (方向历史战役盈亏 >= 对侧25%,把"多头人格=套保接盘"挡在门外)x
+        # 机构卸仓30%快出 x 交割纪律;多仓并行(逐合约独立)。
+        # 回测(research/REPORT_DIP_COST_v1 第五轮 + run_smart_filter2.py):
+        # 51 笔 简单加总 +118.8pp / 逐笔复利 +200.5% / 逐年全正 / 最差单笔 −4.1%,
+        # 超过组内最赚钱席位(东吴 简单 +95.9%/复利 +122.7%)。
+        # 丑话如实:安慰剂 p=0.159 —— 做空方向本身贡献大头,择时增量 51 笔上不显著;
+        # 手数阈值按品种规模缩放(中位阵营峰值 10,644/64,800 手 = x0.164,四舍五入)。
+        # 旧方案 C 的展示维度(机构流向卡/散户维度/卸仓反弹/换月提示)全部保留,
+        # 只有**进出场与历史/统计/对比**换成 campaign 的产物。
+        "strategy": "campaign",
+        "campaign": {
+            "add_min": 150.0,    # 逢跌加仓日的阵营净加门槛(手)= 焦煤1000 x 0.164
+            "confirm": 800.0,    # 区间累计净加确认线(手)= 焦煤5000 x 0.164
+            "gap": 3,            # 逢跌日相隔 <=gap 并为一段
+            "tail": 10,          # 区间尾后仍可进场的天数
+            "unload": 0.30,      # 阵营自进场峰值卸掉该比例 -> 出场
+            "share": 0.25,       # 聪明钱份额资格:该向历史盈亏 >= 对侧 x share
+        },
         "out": "hog_signals.json",
         "backtest": "固定5家 近一年 +64.2%/夏普 3.94/回撤 −3.2%(10 笔 80%);全样本 33 笔"
                     " +29.5%/0.72/−28.0%(2023-08 起)。滚动 alpha 组同策略 近一年 +69.1%/"
@@ -413,6 +433,10 @@ def use(code: str) -> dict:
     RULES["roll_bounce"] = dict(v["roll_bounce"]) if v.get("roll_bounce") else None
     # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
     RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
+    # 逐合约战役策略(DEC-133):strategy="campaign" 的品种,进出场与历史/统计
+    # 由 engine/campaign.py 产出;flow 系(方案C/成本)照旧。参数见 VARIETIES 注释。
+    RULES["strategy"] = v.get("strategy", "flow")
+    RULES["campaign"] = dict(v["campaign"]) if v.get("campaign") else None
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
@@ -1647,7 +1671,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     # 一条,两条对不上也没人会发现——夏普和回撤描述的是另一个策略。
     strat_daily = daily
     bench_daily = -mkt["ret"].fillna(0)
-    return {
+    payload = {
         "instrument": CURRENT["code"],
         "name": CURRENT["name"],
         "unit": CURRENT["unit"],
@@ -1775,6 +1799,81 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "risk_flags": risk_flags(_perf(strat_daily), closed, strat_daily,
                                  _perf(bench_daily)),
     }
+    # —— 逐合约战役策略(DEC-133):进出场/历史/统计/对比换成 campaign 的产物 ——
+    # 上面按旧口径算完的展示维度(机构流向卡、散户维度、卸仓反弹、换月提示、
+    # 席位组)**原样保留**——它们是运营者每天看的背景信息,与哪套策略在交易无关。
+    if RULES.get("strategy") == "campaign" and RULES.get("campaign"):
+        import campaign as _campaign
+        camp = _campaign.run(seat, mkt,
+                             op if op is not None else pd.DataFrame(),
+                             st if st is not None else pd.DataFrame(),
+                             list(groups.get(d) or ()), RULES)
+        c_trades = camp["trades"]
+        c_open = [t for t in c_trades if t["exit_date"] is None]
+        c_closed = [t for t in c_trades if t["exit_date"] is not None]
+        c_daily = camp["daily"]
+        c_wins = [t for t in c_closed if t["ret_pct"] > 0]
+        sides = {t["side"] for t in c_open}
+        payload["state"] = ("观察中" if not c_open else
+                            ("做空中" if sides == {"short"} else
+                             "做多中" if sides == {"long"} else "多空并持")
+                            + (f"×{len(c_open)}" if len(c_open) > 1 else ""))
+        # 状态条仍用单笔 position(取最新进场那笔);完整清单在 campaign.positions。
+        payload["position"] = (sorted(c_open, key=lambda t: t["entry_date"])[-1]
+                               if c_open else None)
+        payload["history"] = c_closed
+        payload["stats"] = {
+            "trades": len(c_closed),
+            "win_rate": round(100 * len(c_wins) / len(c_closed), 1) if c_closed else None,
+            "avg_pct": round(float(np.mean([t["ret_pct"] for t in c_closed])), 2) if c_closed else None,
+            "cum_pct": round((np.prod([1 + t["ret_pct"] / 100 for t in c_closed]) - 1) * 100, 1)
+                       if c_closed else None,
+            "short_trades": sum(1 for t in c_closed if t["side"] == "short"),
+            "long_trades": sum(1 for t in c_closed if t["side"] == "long"),
+            "exit_reasons": {r: sum(1 for t in c_closed if t["exit_reason"] == r)
+                             for r in sorted({t["exit_reason"] for t in c_closed
+                                              if t["exit_reason"]})},
+        }
+        payload["compare"] = {
+            "strategy": _perf(c_daily),
+            "benchmark": _perf(bench_daily),
+            "benchmark_name": "恒定满仓做空",
+            "note": "同一段区间、同一口径(逐日复利,策略扣单边 0.05% 换手成本)。"
+                    "campaign 策略多仓并行,资金曲线按「每仓 1 单位等权、当日取均值」;"
+                    "历史表的逐笔收益是各仓自己的连乘,与该曲线口径不同,别互相求和核对。",
+        }
+        payload["caveats"] = _caveats(_perf(c_daily), _perf(bench_daily), c_closed)
+        payload["risk_flags"] = risk_flags(_perf(c_daily), c_closed, c_daily,
+                                           _perf(bench_daily))
+        # 进场条件:campaign 的观察列表里有就绪的流,报它的方向;没有就报最接近的原因。
+        ready = [w for w in camp["watch"] if w["entry_ready"]]
+        if ready:
+            payload["signal"]["entry_side"] = ready[0]["side"]
+            payload["signal"]["entry_blocked"] = None
+        else:
+            payload["signal"]["entry_side"] = None
+            live = [w for w in camp["watch"] if w["blocked"] not in (None, "已持仓")]
+            live.sort(key=lambda w_: -w_["zone_add"])
+            payload["signal"]["entry_blocked"] = (
+                f"{live[0]['contract']} {'多' if live[0]['side'] == 'long' else '空'}:{live[0]['blocked']}"
+                if live else "无进行中的建仓区间")
+        # 散户维度降级为纯展示:campaign 的进出场不读它。文案跟着改,
+        # 否则页面还在说「方案 C 用它进出场」——同一件事两处说法相反必出事(DEC-104)。
+        payload["retail"]["trades"] = False
+        payload["retail"]["note"] = (
+            "散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
+            "**本品种已切换为逐合约战役策略(DEC-133),散户这一路只作展示**,"
+            "不参与进出场;它仍是独立的第二意见:与机构一致还是背离,比方向本身更有信息量。")
+        payload["campaign"] = {
+            "params": dict(RULES["campaign"]),
+            "positions": c_open,
+            "watch": camp["watch"],
+            "qual": camp["qual"],
+            "note": "逐合约战役:左侧批次进场(逢跌加仓区间+价≤批次成本)、"
+                    "聪明钱份额资格(该向历史战役盈亏≥对侧25%)、机构卸仓30%快出、"
+                    "交割纪律;多仓并行,每届合约每方向一个独立的流。",
+        }
+    return payload
 
 
 # ---------------------------------------------------------------- FG-SA 配对
