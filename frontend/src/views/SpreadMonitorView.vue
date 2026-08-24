@@ -532,6 +532,12 @@ function openDetail(item: SpreadMonitorItem) {
         三步用法：只看带 <strong>✓ 合格</strong> 的行；<strong>⚡ 进场</strong> 亮的当晚
         就是信号日（次日执行），带它的行排在最上面，<strong>方向就写在标上</strong>——
         「做空价差」= 卖腿1买腿2，「做多价差」= 买腿1卖腿2。
+        <!-- 拐头分档写死在这段文案里(运营者 2026-08-24 要求写明):值必须与
+             deploy/collector/compute-spread-monitor.sql 的分档表和 monitor.rs 的
+             turn_retreat() 保持一致(DEC-070 定档、DEC-075 AP 退回默认),改那边要同步这里。 -->
+        <strong>「已拐头」怎么判</strong>：近 20 个交易日内当年轨曾进 3% 报警带，且已自极值
+        <strong>回撤超过区间宽度的一个比例</strong>——这个比例按品种分档（DEC-070 全量回测定的）：
+        焦煤 20%、鸡蛋 5%、玻璃-纯碱跨品种 8%、其余（含生猪跨月）10%。⚡ 只在<strong>本轮首次</strong>穿线那天亮。
         <strong>唯一例外是生猪跨月的橙色「⚡ 反弹进场」</strong>（DEC-121）：低位刚拐头就亮、
         <strong>不过合格门</strong>，做多价差、移动止盈 1/3 出场、不拿到期——按 2026 磨底年的判断开的门，不是全样本验证。
         生猪行上的「反弹窗口」（已卸掉多少 · 反弹参考区间 10~26% · 价差高/低位）是<strong>背景参考</strong>，
