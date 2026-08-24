@@ -32,6 +32,11 @@
     (窗口止点前 exit_before_delivery 交易日)。无价格止损(运营者框架)。
   · 多仓并行是常态(生猪有仓日 65% 同时 >=2 笔,最多 5 笔——整条曲线的空头)。
     逐日净值按「每仓 1 单位等权、当日在场仓位取均值」出资金曲线口径。
+  · **散户接盘确认(DEC-138,只展示当仓位分级,不当开关)**:进场信号日散户三家
+    在该合约上 5 日向**对面**加仓 = 确认。LH 实测逐年 4/4 同向:有确认 25 笔
+    +4.96%/胜 68%,无确认 25 笔 +0.65%/胜 52%(t=2.29)。当硬门测过不划算
+    (总账 127.9->106.9pp、t 降),它的位置是运营者模型第 3 点的「逐步加仓」:
+    确认 -> 正常仓/可跟批;未确认 -> 轻仓,仓位由运营者定。
 """
 from __future__ import annotations
 
@@ -168,8 +173,28 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
             continue
         opc = (op[c] if c in op.columns else pd.Series(np.nan, index=px.index)).reindex(px.index)
         w = camp_frame(seat, c, members, px)
+        # 散户三家在该合约上的可见净持仓(DEC-138 接盘确认用;名单来自 RULES)
+        retail_names = [m for m in rules.get("retail_seed", []) if m in set(seat["member_key"])]
+        rsub = seat[(seat["member_key"].isin(retail_names)) & (seat["contract"] == c)]
+        if len(rsub):
+            rw = (rsub.pivot_table(index="trade_date", columns="member_key",
+                                   values="net_off", aggfunc="first").reindex(px.index).ffill())
+            rnet = rw.sum(axis=1)
+        else:
+            rnet = pd.Series(np.nan, index=px.index)
         dleft = pd.Series([days_to_window_end(c, t) for t in px.index], index=px.index)
         for side in (+1, -1):
+            def retail_state(t):
+                """(散户净持仓, 5日变化, 是否向对面加=确认)。无数据全 None/False。"""
+                if not rnet.notna().any():
+                    return None, None, False
+                rn = rnet.asof(t)
+                r5 = rn - rnet.asof(t - pd.Timedelta(days=7))
+                if not np.isfinite(rn):
+                    return None, None, False
+                conf = bool(np.isfinite(r5) and np.sign(r5) == -side and abs(r5) > 0)
+                return float(rn), (float(r5) if np.isfinite(r5) else None), conf
+
             net, vwap = camp_series(w, px, side)
             z_add, z_cost, z_age, z_start = zone_scan(px, net, vwap, side, cfg)
             idx = list(px.index)
@@ -206,6 +231,7 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                             "units": len(pos["units"]),
                             "entries": [{"date": idx[u["fill_i"]].strftime("%Y-%m-%d"),
                                          "px": round(u["px"], 2)} for u in pos["units"]],
+                            "retail_confirm": bool(pos.get("retail_confirm", False)),
                             "_units": [dict(u) for u in pos["units"]],
                             "_out_i": fill, "_c": c, "_side": side,
                         })
@@ -228,6 +254,7 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                                        "batch_cost": float(z_cost.iloc[i]),
                                        "zone": zone_id,
                                        "steps": 1,
+                                       "retail_confirm": retail_state(t)[2],
                                        "peak": float(net.iloc[i]) if np.isfinite(net.iloc[i]) else 0.0}
                     elif (pos is not None and pos.get("zone") == zone_id
                           and len(pos["units"]) < max_units and ok_px):
@@ -261,6 +288,10 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                     "units": len(pos["units"]),
                     "entries": [{"date": idx[u["fill_i"]].strftime("%Y-%m-%d"),
                                  "px": round(u["px"], 2)} for u in pos["units"]],
+                    "retail_confirm": bool(pos.get("retail_confirm", False)),
+                    "retail_now": (lambda st_: {"net": None if st_[0] is None else int(round(st_[0])),
+                                                "chg5": None if st_[1] is None else int(round(st_[1])),
+                                                "opposite_adding": st_[2]})(retail_state(t)),
                     "camp_net": int(nn) if np.isfinite(nn) else None,
                     "camp_peak": int(pos["peak"]),
                     "unload_pct": round(float(unload), 4) if unload is not None else None,
@@ -284,8 +315,12 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                     if (side > 0 and pcx > zc) or (side < 0 and pcx < zc):
                         blocked = f"价 {pcx:,.0f} {'高于' if side > 0 else '低于'}批次成本 {zc:,.0f},等回到成本再进"
                 nn = float(net.iloc[i]) if np.isfinite(net.iloc[i]) else None
+                r_now = retail_state(t)
                 watch.append({
                     "contract": c, "side": "long" if side > 0 else "short",
+                    "retail_net": None if r_now[0] is None else int(round(r_now[0])),
+                    "retail_chg5": None if r_now[1] is None else int(round(r_now[1])),
+                    "retail_confirm": r_now[2],
                     "camp_net": int(nn) if nn is not None else None,
                     "camp_vwap": round(float(vwap.iloc[i])) if np.isfinite(vwap.iloc[i]) else None,
                     "zone_add": int(z_add.iloc[i]),

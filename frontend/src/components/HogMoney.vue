@@ -50,6 +50,9 @@ interface HogTrade {
   /** 跟批加仓(DEC-135):本笔战役的单位数与各批成交明细;entry_px 为均价。 */
   units?: number
   entries?: Array<{ date: string; px: number }>
+  /** 散户接盘确认(DEC-138,只展示当仓位分级):进场时散户是否在向对面加仓。 */
+  retail_confirm?: boolean
+  retail_now?: { net: number | null; chg5: number | null; opposite_adding: boolean } | null
   camp_net?: number | null
   camp_peak?: number | null
   unload_pct?: number | null
@@ -212,6 +215,7 @@ interface HogPayload {
     positions: HogTrade[]
     watch: Array<{
       contract: string; side: 'long' | 'short'
+      retail_net?: number | null; retail_chg5?: number | null; retail_confirm?: boolean
       camp_net: number | null; camp_vwap: number | null
       zone_add: number; batch_cost: number | null; zone_age: number | null
       qualified: boolean; entry_ready: boolean; blocked: string | null
@@ -717,7 +721,8 @@ const bySide = computed(() => {
           </p>
           <table v-if="data.campaign.positions.length" class="tbl">
             <thead><tr><th>合约</th><th>方向</th><th>进场</th><th class="num">进场价</th>
-              <th class="num">批次成本</th><th class="num">浮动收益</th><th class="num">机构已卸</th></tr></thead>
+              <th class="num">批次成本</th><th class="num">浮动收益</th><th class="num">机构已卸</th>
+              <th>散户接盘</th></tr></thead>
             <tbody>
               <tr v-for="t in data.campaign.positions" :key="t.contract + t.side">
                 <td>{{ t.contract }}</td>
@@ -735,6 +740,12 @@ const bySide = computed(() => {
                   {{ t.unload_pct === null || t.unload_pct === undefined ? '—' : `${(t.unload_pct * 100).toFixed(0)}%` }}
                   <span class="gray">/30%走</span>
                 </td>
+                <td>
+                  进场{{ t.retail_confirm ? '✓' : '✗' }}
+                  <template v-if="t.retail_now">
+                    · 现{{ t.retail_now.opposite_adding ? '仍在接 ✓' : '未接' }}
+                  </template>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -742,7 +753,8 @@ const bySide = computed(() => {
           <h3 class="watch-head">逐合约观察</h3>
           <table class="tbl">
             <thead><tr><th>合约</th><th>方向</th><th class="num">阵营净持仓</th>
-              <th class="num">区间累计加仓</th><th class="num">批次成本</th><th>状态</th></tr></thead>
+              <th class="num">区间累计加仓</th><th class="num">批次成本</th>
+              <th class="num">散户(对面)</th><th>状态</th></tr></thead>
             <tbody>
               <tr v-for="w in data.campaign.watch" :key="w.contract + w.side">
                 <td>{{ w.contract }}</td>
@@ -750,6 +762,12 @@ const bySide = computed(() => {
                 <td class="num">{{ fmt(w.camp_net) }}</td>
                 <td class="num">{{ fmt(w.zone_add) }}</td>
                 <td class="num">{{ fmt(w.batch_cost) }}</td>
+                <td class="num">
+                  {{ fmt(w.retail_net) }}
+                  <span v-if="w.retail_chg5 !== null && w.retail_chg5 !== undefined" :class="pnlClass(w.retail_chg5)">
+                    ({{ (w.retail_chg5 ?? 0) >= 0 ? '+' : '' }}{{ fmt(w.retail_chg5) }})</span>
+                  <b v-if="w.retail_confirm" class="green">接盘✓</b>
+                </td>
                 <td>
                   <b v-if="w.entry_ready" :class="w.side === 'long' ? 'red' : 'green'">⚡ 可进场(结算 {{ fmt(w.settle) }} 已到批次成本)</b>
                   <template v-else>{{ w.blocked }}</template>
@@ -764,6 +782,9 @@ const bySide = computed(() => {
             多头人格 {{ data.campaign.qual.long_pnl_yi >= 0 ? '+' : '' }}{{ data.campaign.qual.long_pnl_yi }} 亿
             {{ data.campaign.qual.long_ok ? '✓ 可跟' : '✗ 不可跟' }}。
             {{ data.campaign.note }}
+            散户接盘确认(DEC-138,只当仓位分级不当开关):进场时散户 5 日在向对面
+            加仓的战役,历史单笔均值 +4.96%/胜 68%;未接盘的 +0.65%/胜 52%(逐年 4/4 同向,
+            t=2.29)。接盘 ✓ = 正常仓/可跟批;✗ = 轻仓,仓位自定。
           </p>
         </div>
       </div>
