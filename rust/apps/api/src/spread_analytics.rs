@@ -1759,12 +1759,14 @@ pub async fn query_seat_net_position(
                     legs: day_dates
                         .iter()
                         .map(|date| {
-                            by_date.and_then(|days| days.get(date)).map(|v| MemberDayLegItem {
-                                l: v.long_lots.to_string(),
-                                lc: v.long_cost.map(|x| x.round_dp(2).to_string()),
-                                s: v.short_lots.to_string(),
-                                sc: v.short_cost.map(|x| x.round_dp(2).to_string()),
-                            })
+                            by_date
+                                .and_then(|days| days.get(date))
+                                .map(|v| MemberDayLegItem {
+                                    l: v.long_lots.to_string(),
+                                    lc: v.long_cost.map(|x| x.round_dp(2).to_string()),
+                                    s: v.short_lots.to_string(),
+                                    sc: v.short_cost.map(|x| x.round_dp(2).to_string()),
+                                })
                         })
                         .collect(),
                 }
