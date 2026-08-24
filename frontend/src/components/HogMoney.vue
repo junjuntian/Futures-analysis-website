@@ -165,6 +165,23 @@ interface HogPayload {
   /** 移仓强制流压力表(DEC-136,只有生猪有):散户多头剩仓 → 近月对次主力承压。
    *  只显示不进判据。可选:旧 JSON 与其他品种没有。 */
   roll_pressure?: RollPressureState | null
+  /** 单席位跟随第二引擎(DEC-139,只有焦煤有:跟华泰)。与主引擎并列、各管各仓。
+   *  可选:旧 JSON 与其他品种没有。 */
+  seat_follow?: {
+    member: string
+    side: 'long' | 'short' | null
+    net: number | null
+    run_days: number | null
+    run_ret_pct: number | null
+    entry_date: string | null
+    entry_px: number | null
+    flipped_today: boolean
+    history: Array<{ date: string; side: 'long' | 'short'; contract: string
+      entry_px: number | null; hold_days: number; ret_pct: number; open: boolean }>
+    stats: { cum_pct: number; sharpe: number | null; max_dd_pct: number; flips: number
+      yearly: Record<string, number> }
+    note: string
+  } | null
   history: HogTrade[]
   stats: {
     trades: number
@@ -674,6 +691,44 @@ const bySide = computed(() => {
             <template v-else>席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。</template>
             这是**全品种合约合计**;逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
           </p>
+        </div>
+      </div>
+
+      <!-- 第二引擎:单席位跟随(DEC-139,焦煤跟华泰)。与主引擎并列,各管各仓。 -->
+      <div v-if="data.seat_follow" class="cards">
+        <div class="card wide">
+          <h3>
+            第二引擎 · 跟{{ data.seat_follow.member }}
+            <span v-if="data.seat_follow.side" class="badge" :class="data.seat_follow.side === 'short' ? 'ok' : 'warn'">
+              {{ sideText(data.seat_follow.side) }}中 第 {{ data.seat_follow.run_days }} 日
+            </span>
+          </h3>
+          <p v-if="data.seat_follow.flipped_today" class="caveat-box flip">
+            <b>⚡ {{ data.seat_follow.member }} 已翻向 {{ sideText(data.seat_follow.side ?? 'short') }} —— 次日开盘反手(本引擎唯一的操作时点)。</b>
+          </p>
+          <div class="kv"><span class="k">{{ data.seat_follow.member }}净持仓</span>
+            <span class="v" :class="(data.seat_follow.net ?? 0) > 0 ? 'red' : 'green'">{{ fmt(data.seat_follow.net) }} 手</span></div>
+          <div class="kv"><span class="k">本段进场</span>
+            <span class="v">{{ data.seat_follow.entry_date }} @ {{ fmt(data.seat_follow.entry_px) }}</span></div>
+          <div class="kv"><span class="k">本段浮动</span>
+            <span class="v" :class="pnlClass(data.seat_follow.run_ret_pct)">{{ pct(data.seat_follow.run_ret_pct) }}</span></div>
+          <div class="kv"><span class="k">回放(扣成本)</span>
+            <span class="v">累计 {{ pct(data.seat_follow.stats.cum_pct) }} · 夏普 {{ data.seat_follow.stats.sharpe }}
+              · 回撤 {{ pct(data.seat_follow.stats.max_dd_pct) }} · 翻转 {{ data.seat_follow.stats.flips }} 次</span></div>
+          <div class="kv"><span class="k">逐年</span>
+            <span class="v">
+              <span v-for="(r, y) in data.seat_follow.stats.yearly" :key="y" class="chip">
+                {{ y }} <i :class="pnlClass(r)">{{ pct(r) }}</i></span>
+            </span></div>
+          <div class="roll-hist">
+            <span class="gray">最近翻转:</span>
+            <span v-for="h in data.seat_follow.history.slice(-8)" :key="h.date" class="chip">
+              {{ h.date.slice(5) }} {{ sideText(h.side) }} {{ h.hold_days }}日
+              <i :class="pnlClass(h.ret_pct)">{{ pct(h.ret_pct) }}</i>
+              <span v-if="h.open" class="gray">(进行中)</span>
+            </span>
+          </div>
+          <p class="note" v-html="mdBold(data.seat_follow.note)"></p>
         </div>
       </div>
 

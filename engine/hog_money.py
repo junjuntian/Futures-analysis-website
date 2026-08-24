@@ -410,6 +410,17 @@ VARIETIES = {
         "exit_mode": "inst",
         # 席位组:滚动按年重选(DEC-125 当日曾改固定 5 家又改回,DEC-126:固定名单弱于滚动的主因
         # 是失去「按年重选」本身,不是某一家;固定通道代码保留,配置不填即滚动)。
+        # **第二引擎:跟华泰(DEC-139,2026-08-24 运营者拍板)**。与现行引擎并列,
+        # 各管各的仓位——两者日收益相关 −0.07,50/50 组合夏普 1.82 > 单跑任一台
+        # (现行 1.73 / 华泰 0.99)。**替换不成立,分散成立**(REPORT_JM_HUATAI_v1)。
+        # 为什么是华泰:五家全测唯一逐年 4/4 全正,且有独立旁证(五家里唯一
+        # 5 日流向 IC 显著者 t=2.32,REPORT_JM_SEAT_PICK_v1 勘误先于回测指认);
+        # 东证 2 天一翻 T+1 跟不上,永安是仓位户方向无信息。
+        # 闸门:安慰剂 p=0.034 / T+2 几乎不衰减(1.05→1.02)/ 扣成本 +150.6%/0.99。
+        # **三条丑话**(页面照挂):①肥尾——66 段胜率 41%,利润的 130% 在 5 个长趋势段,
+        # 要连吃十几段小亏;②五选一 Bonferroni p≈0.17,先验押在 IC 旁证上;
+        # ③2026 年靠 6 月一波。
+        "follow_seat": {"member": "华泰期货"},
         "out": "jm_signals.json",
         "backtest": "72 笔 净 +244.0%/胜率 59.7%/回撤 −13.9%/夏普 1.79"
                     "(2023-08 起,基准 +18.2%)(2026-08-23 开做多 + 机构出场,"
@@ -446,6 +457,8 @@ def use(code: str) -> dict:
     RULES["roll_bounce"] = dict(v["roll_bounce"]) if v.get("roll_bounce") else None
     # 移仓压力表(DEC-136):只有生猪配;None = 不出这块。
     RULES["roll_pressure"] = dict(v["roll_pressure"]) if v.get("roll_pressure") else None
+    # 单席位跟随第二引擎(DEC-139):只有焦煤配(华泰);None = 不出这块。
+    RULES["follow_seat"] = dict(v["follow_seat"]) if v.get("follow_seat") else None
     # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
     RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
     # 逐合约战役策略(DEC-133):strategy="campaign" 的品种,进出场与历史/统计
@@ -1720,6 +1733,98 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
     return out
 
 
+def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dict:
+    """单席位跟随第二引擎(DEC-139,焦煤跟华泰)。
+
+    规则(零参数,验收见 REPORT_JM_HUATAI_v1):该席位在**当日主力合约**上的可见
+    净持仓(net_off,按合约 ffill)方向;收盘定、次日开盘反手。与现行引擎并列
+    显示、各管各的仓位 —— 相关 −0.07,是分散不是替换。
+    统计每次全量重算(幂等),不写死数字。
+    """
+    member = cfg["member"]
+    sub = seat[seat["member_key"] == member]
+    sig = pd.Series(np.nan, index=mkt.index)
+    net_now_s = pd.Series(np.nan, index=mkt.index)
+    for c in dict.fromkeys(mkt["main"]):
+        if not isinstance(c, str):
+            continue
+        rows = sub[sub["contract"] == c]
+        if rows.empty:
+            continue
+        w = rows.pivot_table(index="trade_date", values="net_off", aggfunc="sum").iloc[:, 0]
+        days = mkt.index[mkt["main"] == c]
+        wf = w.reindex(days.union(w.index)).ffill().reindex(days)
+        sig.loc[days] = wf.values
+        net_now_s.loc[days] = wf.values
+    pos = np.sign(sig)
+    pos[pos == 0] = np.nan
+    pos = pos.ffill()
+    adjo = (1 + mkt["ret_open"].fillna(0)).cumprod()
+    # 翻转与逐段
+    flips = []       # (下标, 新方向)
+    prev = None
+    for i, d in enumerate(mkt.index):
+        p_ = pos.iloc[i]
+        if not np.isfinite(p_):
+            continue
+        if prev is None or p_ != prev:
+            flips.append((i, int(p_)))
+        prev = p_
+    runs = []
+    for (i, s_), nxt in zip(flips, flips[1:] + [None]):
+        j = nxt[0] if nxt else len(mkt.index) - 1
+        a = float(adjo.iloc[min(i + 1, len(adjo) - 1)])
+        b = float(adjo.iloc[min(j + 1, len(adjo) - 1)])
+        runs.append({"date": mkt.index[i].strftime("%Y-%m-%d"),
+                     "side": "long" if s_ > 0 else "short",
+                     "contract": str(mkt["main"].iloc[i]),
+                     "entry_px": _f(mkt["open"].iloc[min(i + 1, len(mkt) - 1)]),
+                     "hold_days": j - i,
+                     "ret_pct": round(s_ * (b / a - 1) * 100, 2),
+                     "open": nxt is None})
+    # 当前段浮动按最新结算补一段(开→结算)
+    if runs and runs[-1]["open"] and len(flips):
+        i, s_ = flips[-1]
+        a = float(adjo.iloc[min(i + 1, len(adjo) - 1)])
+        b = float(adjo.iloc[-1])
+        o2c = mkt["o2c"].iloc[-1]
+        b_mark = b * (1 + (o2c if np.isfinite(o2c) else 0.0))
+        runs[-1]["ret_pct"] = round(s_ * (b_mark / a - 1) * 100, 2)
+    # 扣成本净值(单边 0.05%,翻转日双边)
+    turn = (pos.shift(2) != pos.shift(3)).astype(float)
+    daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()
+    eq = (1 + daily).cumprod()
+    stats = {
+        "cum_pct": round((float(eq.iloc[-1]) - 1) * 100, 1),
+        "sharpe": round(float(daily.mean() / daily.std() * np.sqrt(242)), 2) if daily.std() > 0 else None,
+        "max_dd_pct": round(float((eq / eq.cummax() - 1).min()) * 100, 1),
+        "flips": len(flips),
+        "yearly": {str(y): round((float(np.prod(1 + g)) - 1) * 100, 1)
+                   for y, g in daily.groupby(daily.index.year)},
+    }
+    cur_side = pos.iloc[-1] if np.isfinite(pos.iloc[-1]) else None
+    prev_side = pos.iloc[-2] if len(pos) > 1 and np.isfinite(pos.iloc[-2]) else None
+    return {
+        "member": member,
+        "side": None if cur_side is None else ("long" if cur_side > 0 else "short"),
+        "net": None if not np.isfinite(net_now_s.iloc[-1]) else int(net_now_s.iloc[-1]),
+        "run_days": runs[-1]["hold_days"] if runs else None,
+        "run_ret_pct": runs[-1]["ret_pct"] if runs else None,
+        "entry_date": runs[-1]["date"] if runs else None,
+        "entry_px": runs[-1]["entry_px"] if runs else None,
+        "flipped_today": bool(cur_side is not None and prev_side is not None
+                              and cur_side != prev_side),
+        "history": runs[-12:],
+        "stats": stats,
+        "note": ("第二引擎,与主引擎并列、各管各的仓位(实测两者日收益相关 −0.07,"
+                 "50/50 组合夏普 1.82 高于任一台单跑)。规则:华泰在当日主力的可见净持仓"
+                 "方向,翻转→次日开盘反手,约每月两次。**丑话**:66 段胜率仅 41%、"
+                 "利润集中在少数长趋势段(前 5 段占 130%),要连吃十几段小亏不动摇;"
+                 "五选一有选择偏差(先验靠华泰流向 IC t=2.32 独立指认);"
+                 "2026 年主要靠 6 月一波。验收 REPORT_JM_HUATAI_v1。"),
+    }
+
+
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
                   op: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
@@ -1937,6 +2042,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 移仓压力表(DEC-136,只有生猪配):散户多头剩仓 → 近月承压。只显示。
         "roll_pressure": (roll_pressure_payload(seat, mkt, st, RULES["roll_pressure"], vols)
                           if RULES.get("roll_pressure") and st is not None else None),
+        # 单席位跟随第二引擎(DEC-139,只有焦煤配):跟华泰,与主引擎并列各管各仓。
+        "seat_follow": (seat_follow_payload(seat, mkt, RULES["follow_seat"])
+                        if RULES.get("follow_seat") else None),
         "members": members,
         # 一排合约小窗(DEC-134):逐合约的各家持仓,恒 5 个,近月起。
         "contracts_panel": contracts_panel(seat, grp, d, prev_d),
