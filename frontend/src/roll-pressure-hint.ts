@@ -8,10 +8,15 @@
  *
  * 统计数字(秩相关/分组收益)只住引擎的 `note` 里,这里不抄第二份 ——
  * 同一个事实两处维护是这个仓库最高产的 bug 源。
- * **只是背景,不进任何判据。**
+ * **DEC-137 已升级为判据**:窗口内散户剩仓处历届高位 → ⚡压力进场·做空价差
+ * (PIT 回测 7 触发/12 可判,+2.93%/胜 86%;未触发届 −0.88%);同窗口做多价差
+ * 信号按 ⚠ 对待。判据布尔由引擎给(entry_flag/suppress_long),这里只写文案。
  */
 export interface RollPressureState {
   active: boolean
+  /** 判据(DEC-137,引擎算):窗口内且散户剩仓处历届高位 = ⚡压力进场·做空价差。 */
+  entry_flag?: boolean
+  suppress_long?: boolean
   main: string
   next: string
   days_left: number
@@ -48,7 +53,7 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
     : ''
   const head = `${rp.main} 剩 ${rp.days_left} 日,散户多头剩仓 ${fmt(rp.retail_net)} 手${q}`
   if (rp.level === 'high') {
-    return { on: true, text: `${head} —— 处历届高位,历届高剩仓届价差(近−次月)多数下跌,关注空 ${rp.main} 多 ${rp.next}` }
+    return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next});窗口内做多价差信号按 ⚠ 对待` }
   }
   if (rp.level === 'low') {
     return { on: false, text: `${head} —— 处历届低位,历届低剩仓届价差常反涨,压力不明显` }

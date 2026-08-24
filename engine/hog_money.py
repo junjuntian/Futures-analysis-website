@@ -1477,8 +1477,14 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         sn = (st[main] - st[nxt]).dropna()
         if len(sn):
             spread_now = _f(sn.iloc[-1])
+    active = bool(dleft <= int(cfg.get("window", 30)))
+    # 判据(DEC-137,运营者拍板):窗口内且散户剩仓处历届高位 -> ⚡压力进场·做空价差
+    # (空近月多次主力);同窗口做多价差信号降级挂⚠。判据在引擎算,前端只渲染(DEC-104)。
+    entry_flag = bool(active and level == "high")
     return {
-        "active": bool(dleft <= int(cfg.get("window", 30))),
+        "active": active,
+        "entry_flag": entry_flag,
+        "suppress_long": entry_flag,
         "main": main, "next": nxt, "days_left": dleft,
         "window": int(cfg.get("window", 30)),
         "retail_net": None if cur_retail is None else int(round(cur_retail)),
@@ -1494,8 +1500,12 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
                  "近月相对次主力被压。历届锚点(剩≤%d日)实测:散户剩仓与其后价差变动"
                  "秩相关 −0.53,高剩仓组价差 −3.14%%(88%% 的届在跌),低剩仓组 −0.36%%;"
                  "散户没剩仓的届价差反而涨。**机构剩仓没有预测力(机构能慢慢移仓),"
-                 "别把这块改成看机构**。只是背景,不进判据;16 届样本,2609 出过反例"
-                 "(磨底年反弹),攒实盘再议。" % anchor),
+                 "别把这块改成看机构**。**DEC-137 已升级为判据**:窗口内散户剩仓处历届"
+                 "高位 → ⚡压力进场·做空价差(空近月多次主力),每届一次,持到交割纪律日;"
+                 "PIT 回测 7 触发/12 可判 +2.93%%/胜 86%%,未触发届 −0.88%%;同窗口做多"
+                 "价差信号按 ⚠ 对待。丑话:7 次触发 6 次集中在 2025-26(散户参与度抬升的"
+                 "时代效应),上一届 2609 亏过 −2.24%%;16 届样本,性质同 DEC-121 知情上。"
+                 % anchor),
     }
 
 
@@ -2039,8 +2049,20 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
             "散户三家长期站多头、长期亏钱,故反向取用;名单跨品种固定、不逐品种重选。"
             "**本品种已切换为逐合约战役策略(DEC-133),散户这一路只作展示**,"
             "不参与进出场;它仍是独立的第二意见:与机构一致还是背离,比方向本身更有信息量。")
+        # 跨期对冲结构识别(DEC-137):**合格的**反向战役共存(空近+多远)时标出来。
+        # 生猪多头人格现被份额资格挡着,共存要等资格门自然打开;资格豁免版已回测否决
+        # (对冲腿 15 笔 −1.84%/笔、组合夏普 1.95→1.72,见 REPORT_ROLL_PRESSURE_v1 附录)
+        # —— 对冲腿也必须是聪明钱,别再试豁免。
+        pairs = []
+        for lg in c_open:
+            if lg["side"] != "long":
+                continue
+            for sh in c_open:
+                if sh["side"] == "short" and sh["contract"][2:6] < lg["contract"][2:6]:
+                    pairs.append({"short": sh["contract"], "long": lg["contract"]})
         payload["campaign"] = {
             "params": dict(RULES["campaign"]),
+            "pairs": pairs,
             "positions": c_open,
             "watch": camp["watch"],
             "qual": camp["qual"],

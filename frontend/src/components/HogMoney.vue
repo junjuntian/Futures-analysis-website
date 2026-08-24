@@ -207,6 +207,8 @@ interface HogPayload {
    *  **可选**:只有 strategy=campaign 的品种有;其余品种与旧 JSON 都没有。 */
   campaign?: {
     params: Record<string, unknown>
+    /** 跨期对冲结构(DEC-137):合格的反向战役共存(空近+多远)。多数时候为空。 */
+    pairs?: Array<{ short: string; long: string }>
     positions: HogTrade[]
     watch: Array<{
       contract: string; side: 'long' | 'short'
@@ -706,6 +708,13 @@ const bySide = computed(() => {
       <div v-if="isCampaign && data.campaign" class="cards">
         <div class="card wide">
           <h3>战役持仓({{ data.campaign.positions.length }} 笔并行)</h3>
+          <p v-if="data.campaign.pairs && data.campaign.pairs.length" class="note pair-note">
+            <b>当前呈跨期对冲结构:</b>
+            <span v-for="pr in data.campaign.pairs" :key="pr.short + pr.long" class="chip">
+              空 {{ pr.short }} + 多 {{ pr.long }}
+            </span>
+            —— 两腿都是合格聪明钱战役,方向风险部分对消;逐腿仍各按自己的阵营出场。
+          </p>
           <table v-if="data.campaign.positions.length" class="tbl">
             <thead><tr><th>合约</th><th>方向</th><th>进场</th><th class="num">进场价</th>
               <th class="num">批次成本</th><th class="num">浮动收益</th><th class="num">机构已卸</th></tr></thead>
