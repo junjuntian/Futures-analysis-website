@@ -211,3 +211,42 @@ def test_contracts_panel_到期滑出_近月排序_未上榜(monkeypatch=None):
     p2701 = next(p for p in panel if p["contract"] == "LH2701")
     yi2 = next(m for m in p2701["members"] if m["member"] == "乙")
     assert yi2["on_board"] is False
+
+
+def test_跟批加仓_台阶批次_只摊好不摊坏_封顶(monkeypatch=None):
+    """DEC-135:同区间每多攒够一个 confirm 台阶算新批;价格优于均价才加;最多 max_units。
+
+    多头夹具:首枪后区间继续攒台阶,一次在更低价(该加),一次在更高价(不许加)。
+    """
+    idx = bdays("2026-01-05", 20)
+    #            首枪:第4天确认600>=500、960<=成本970 -> 第5天开盘950成交
+    settles = [1000, 990, 980, 970, 960, 950, 940, 930, 942, 944, 930, 930, 930, 930, 930, 930, 930, 930, 930, 930]
+    #  第6~7天继续加仓(跌着买):累计 600->1000(跨过2x500台阶)且价940<均价950 -> 跟加@第8天开盘942
+    #  第8~9天又加(第9天944>均价? 均价=(950+942)/2=946,944<946 仍更优)-> 但台阶3在第9天(1400//500=2 -> 第10天1800//500=3)
+    nets = [0, 0, 200, 400, 600, 600, 800, 1000, 1200, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800]
+    seat, mkt, op, st = with_hist(idx, FAR, settles, seat_rows("甲", FAR, idx, nets))
+    r = rules()
+    r["campaign"]["max_units"] = 3
+    out = C.run(seat, mkt, op, st, ["甲"], r)
+    open_trades = [t for t in out["trades"] if t["exit_date"] is None]
+    assert len(open_trades) == 1
+    t = open_trades[0]
+    assert t["units"] == 3
+    pxs = [e["px"] for e in t["entries"]]
+    assert pxs[0] == 950            # 首枪
+    assert all(p <= 950 for p in pxs[1:])   # 多头跟批只许更低(摊好)
+    assert abs(t["entry_px"] - sum(pxs) / 3) < 0.01   # entry_px = 均价
+
+
+def test_跟批_价格劣于均价不加():
+    idx = bdays("2026-01-05", 16)
+    # 首枪同上;此后台阶继续攒,但价格一路高于均价 -> 不许加
+    settles = [1000, 990, 980, 970, 960, 950, 990, 995, 992, 991, 990, 990, 990, 990, 990, 990]
+    nets = [0, 0, 200, 400, 600, 600, 1200, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800, 1800]
+    seat, mkt, op, st = with_hist(idx, FAR, settles, seat_rows("甲", FAR, idx, nets))
+    r = rules()
+    r["campaign"]["max_units"] = 3
+    out = C.run(seat, mkt, op, st, ["甲"], r)
+    open_trades = [t for t in out["trades"] if t["exit_date"] is None]
+    assert len(open_trades) == 1
+    assert open_trades[0]["units"] == 1

@@ -18,7 +18,16 @@
     盈亏(prev_net x Δ结算 x 乘数,截至信号日前一日)>= max(0, 对侧 x share)。
     生猪多头人格 +1.4 亿对空头 +35.7 亿,被它挡掉 —— 该侧是套保/接盘,不是聪明钱。
   · 进场:区间激活起至区间尾后 tail 日内,结算 <= 批次成本(空镜像)且资格通过
-    -> 次日开盘;每区间至多一笔;资格不过也烧掉该区间(区间过时效不回头)。
+    -> 次日开盘;每区间首枪一笔;资格不过也烧掉该区间(区间过时效不回头)。
+  · **跟批加仓(DEC-135,2026-08-24 运营者拍板)**:同一区间内机构每多攒够一个
+    confirm 台阶算新一批;新批出现时若价格仍不劣于批次成本、且**优于我们当前
+    持仓均价**(做空=更高,只摊好不摊坏),跟加 1 单位;每战役最多 max_units 个。
+    缘起 LH2611 实盘:首枪 8/10 进 12,155,机构 8/14/8/17 又两批加到 12,3~12,4k,
+    一枪版被钉在他们位置最差的第一批上。回测(引擎口径,逐单位连乘取均):
+    50 战役 13 场多单位,加总 +131.7 -> +140.4pp,复利 +231.4% -> +261.5%,
+    t 2.66 -> 2.86,中位 +0.87 -> +1.38%,最差单笔 −4.1% 不变。
+    对拍:引擎与研究实现 51 场逐批成交日/出场原因完全一致(研究首版多出的
+    2 场是其陈旧变量 bug,已勘误——先前口头报过的 15 场/+129.1pp 作废)。
   · 出场:阵营|净| < 自进场峰值 x (1-unload) -> 次日开盘;或交割纪律
     (窗口止点前 exit_before_delivery 交易日)。无价格止损(运营者框架)。
   · 多仓并行是常态(生猪有仓日 65% 同时 >=2 笔,最多 5 笔——整条曲线的空头)。
@@ -166,6 +175,7 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
             idx = list(px.index)
             pos = None
             zone_fired_at = -1   # 已消费的区间(按区间**起点**下标标识)
+            max_units = int(cfg.get("max_units", 1))
             for i, t in enumerate(idx):
                 # —— 出场 ——
                 if pos is not None:
@@ -180,18 +190,24 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                     if reason is not None and i + 1 < len(idx):
                         fill = i + 1
                         p_out = _exec_px(opc, px, fill)
-                        booked = _compound(opc, px, side, pos["fill_i"], fill)
+                        rets = [_compound(opc, px, side, u["fill_i"], fill)
+                                for u in pos["units"]]
                         trades.append({
                             "side": "short" if side < 0 else "long",
-                            "entry_date": idx[pos["sig_i"]].strftime("%Y-%m-%d"),
+                            "entry_date": idx[pos["units"][0]["sig_i"]].strftime("%Y-%m-%d"),
                             "exit_date": t.strftime("%Y-%m-%d"),
-                            "entry_px": round(pos["entry_px"], 2), "exit_px": round(p_out, 2),
+                            "entry_px": round(float(np.mean([u["px"] for u in pos["units"]])), 2),
+                            "exit_px": round(p_out, 2),
                             "contract": c,
-                            "ret_pct": round(booked * 100, 2),
-                            "hold_days": i - pos["sig_i"],
+                            "ret_pct": round(float(np.mean(rets)) * 100, 2),
+                            "hold_days": i - pos["units"][0]["sig_i"],
                             "exit_reason": reason,
                             "batch_cost": round(pos["batch_cost"]),
-                            "_fill_i": pos["fill_i"], "_out_i": fill, "_c": c, "_side": side,
+                            "units": len(pos["units"]),
+                            "entries": [{"date": idx[u["fill_i"]].strftime("%Y-%m-%d"),
+                                         "px": round(u["px"], 2)} for u in pos["units"]],
+                            "_units": [dict(u) for u in pos["units"]],
+                            "_out_i": fill, "_c": c, "_side": side,
                         })
                         pos = None
                 # —— 进场机会(区间消费独立于持仓与资格,蓝本同规则)——
@@ -199,36 +215,57 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
                         and z_add.iloc[i] >= cfg["confirm"]
                         and dleft.iloc[i] > limit + 5 and i + 1 < len(idx)):
                     zone_id = int(z_start.iloc[i])
+                    pcx = float(px.iloc[i])
+                    ok_px = (pcx <= float(z_cost.iloc[i])) if side > 0 else (pcx >= float(z_cost.iloc[i]))
                     if zone_id > zone_fired_at:
-                        pcx = float(px.iloc[i])
-                        ok_px = (pcx <= float(z_cost.iloc[i])) if side > 0 else (pcx >= float(z_cost.iloc[i]))
                         if ok_px:
                             # 价格条件满足即消费该区间;已持仓/资格不过也不回头。
                             zone_fired_at = zone_id
                             if pos is None and _qualified(qual, side, t, cfg["share"]):
                                 fill = i + 1
-                                pos = {"sig_i": i, "fill_i": fill,
-                                       "entry_px": _exec_px(opc, px, fill),
+                                pos = {"units": [{"sig_i": i, "fill_i": fill,
+                                                  "px": _exec_px(opc, px, fill)}],
                                        "batch_cost": float(z_cost.iloc[i]),
+                                       "zone": zone_id,
+                                       "steps": 1,
                                        "peak": float(net.iloc[i]) if np.isfinite(net.iloc[i]) else 0.0}
+                    elif (pos is not None and pos.get("zone") == zone_id
+                          and len(pos["units"]) < max_units and ok_px):
+                        # 跟批(DEC-135):同区间每多攒够一个 confirm 台阶算新一批;
+                        # 只在价格优于当前均价时加 —— 摊好成本,不摊坏。
+                        k = int(z_add.iloc[i] // cfg["confirm"])
+                        if k > pos["steps"]:
+                            avg = float(np.mean([u["px"] for u in pos["units"]]))
+                            better = (pcx <= avg) if side > 0 else (pcx >= avg)
+                            if better:
+                                fill = i + 1
+                                pos["units"].append({"sig_i": i, "fill_i": fill,
+                                                     "px": _exec_px(opc, px, fill)})
+                            pos["steps"] = k
             # —— 未平仓与当日状态 ——
             i = len(idx) - 1
             t = idx[i]
             if pos is not None:
                 nn = float(net.iloc[i]) if np.isfinite(net.iloc[i]) else np.nan
-                booked = _compound(opc, px, side, pos["fill_i"], i, mark_settle=True)
+                rets = [_compound(opc, px, side, u["fill_i"], i, mark_settle=True)
+                        for u in pos["units"]]
                 unload = (1 - nn / pos["peak"]) if np.isfinite(nn) and pos["peak"] > 0 else None
                 trades.append({
                     "side": "short" if side < 0 else "long",
-                    "entry_date": idx[pos["sig_i"]].strftime("%Y-%m-%d"), "exit_date": None,
-                    "entry_px": round(pos["entry_px"], 2), "exit_px": None, "contract": c,
-                    "ret_pct": round(booked * 100, 2),
-                    "hold_days": i - pos["sig_i"], "exit_reason": None,
+                    "entry_date": idx[pos["units"][0]["sig_i"]].strftime("%Y-%m-%d"), "exit_date": None,
+                    "entry_px": round(float(np.mean([u["px"] for u in pos["units"]])), 2),
+                    "exit_px": None, "contract": c,
+                    "ret_pct": round(float(np.mean(rets)) * 100, 2),
+                    "hold_days": i - pos["units"][0]["sig_i"], "exit_reason": None,
                     "batch_cost": round(pos["batch_cost"]),
+                    "units": len(pos["units"]),
+                    "entries": [{"date": idx[u["fill_i"]].strftime("%Y-%m-%d"),
+                                 "px": round(u["px"], 2)} for u in pos["units"]],
                     "camp_net": int(nn) if np.isfinite(nn) else None,
                     "camp_peak": int(pos["peak"]),
                     "unload_pct": round(float(unload), 4) if unload is not None else None,
-                    "_fill_i": pos["fill_i"], "_out_i": None, "_c": c, "_side": side,
+                    "_units": [dict(u) for u in pos["units"]],
+                    "_out_i": None, "_c": c, "_side": side,
                 })
             # 观察列表:只报还活着的流(未到交割窗口)
             if dleft.iloc[i] > limit:
@@ -265,46 +302,52 @@ def run(seat: pd.DataFrame, mkt: pd.DataFrame, op: pd.DataFrame, st: pd.DataFram
     # —— 逐日净值(等权多仓)与逐笔一致性 ——
     all_idx = mkt.index
     mat = pd.DataFrame(index=all_idx)
+    col_of = []   # 每列属于哪笔战役(跟批后一笔战役可占多列)
     for k, tr in enumerate(trades):
         c, side = tr["_c"], tr["_side"]
         px = st[c].dropna()
         opc = (op[c] if c in op.columns else pd.Series(np.nan, index=px.index)).reindex(px.index)
-        i0 = tr["_fill_i"]
         i1 = tr["_out_i"] if tr["_out_i"] is not None else len(px.index) - 1
-        days = [j for j in range(i0, i1 + 1)
-                if np.isfinite(opc.iloc[j]) or j in (i0, i1)]
-        col = pd.Series(np.nan, index=all_idx)
-        prev = None
-        for j in days:
-            p = _exec_px(opc, px, j)
-            if prev is not None and prev[1] > 0:
-                col[px.index[j]] = side * (p / prev[1] - 1)
-            prev = (j, p)
-        # 成交那两天各扣一次单边成本(replay 同口径)
-        if len(days) >= 1:
-            col[px.index[days[0]]] = (0.0 if not np.isfinite(col[px.index[days[0]]]) else col[px.index[days[0]]]) - cost_bp
-        if tr["_out_i"] is not None and len(days) >= 2:
-            col[px.index[days[-1]]] = (col[px.index[days[-1]]] if np.isfinite(col[px.index[days[-1]]]) else 0.0) - cost_bp
-        mat[k] = col
+        for un, u in enumerate(tr["_units"]):
+            i0 = u["fill_i"]
+            days = [j for j in range(i0, i1 + 1)
+                    if np.isfinite(opc.iloc[j]) or j in (i0, i1)]
+            col = pd.Series(np.nan, index=all_idx)
+            prev = None
+            for j in days:
+                p = _exec_px(opc, px, j)
+                if prev is not None and prev[1] > 0:
+                    col[px.index[j]] = side * (p / prev[1] - 1)
+                prev = (j, p)
+            # 成交那两天各扣一次单边成本(replay 同口径)
+            if len(days) >= 1:
+                col[px.index[days[0]]] = (0.0 if not np.isfinite(col[px.index[days[0]]]) else col[px.index[days[0]]]) - cost_bp
+            if tr["_out_i"] is not None and len(days) >= 2:
+                col[px.index[days[-1]]] = (col[px.index[days[-1]]] if np.isfinite(col[px.index[days[-1]]]) else 0.0) - cost_bp
+            mat[len(col_of)] = col
+            col_of.append(k)
     daily = mat.mean(axis=1, skipna=True).fillna(0.0) if len(mat.columns) else pd.Series(0.0, index=all_idx)
     pos_count = mat.notna().sum(axis=1) if len(mat.columns) else pd.Series(0, index=all_idx)
 
-    # 一致性:每笔的逐日连乘(未扣成本)必须等于记账 ret_pct
+    # 一致性:每笔战役各单位逐日连乘的均值(未扣成本)必须等于记账 ret_pct
     for k, tr in enumerate(trades):
         if tr["_out_i"] is None:
             continue
-        col = mat[k].dropna()
-        # 把成本加回来再对
-        col = col.copy()
-        col.iloc[0] += cost_bp
-        col.iloc[-1] += cost_bp
-        by_day = float(np.prod(1 + col) - 1) * 100
+        unit_rets = []
+        for ci, owner in enumerate(col_of):
+            if owner != k:
+                continue
+            col = mat[ci].dropna().copy()
+            col.iloc[0] += cost_bp
+            col.iloc[-1] += cost_bp
+            unit_rets.append(float(np.prod(1 + col) - 1) * 100)
+        by_day = float(np.mean(unit_rets))
         if abs(by_day - tr["ret_pct"]) > 0.5:
             raise AssertionError(
                 f"campaign 逐日与逐笔对不上:{tr['contract']} {tr['entry_date']} "
                 f"逐笔 {tr['ret_pct']:+.2f} / 逐日 {by_day:+.2f}")
     for tr in trades:
-        for k in ("_fill_i", "_out_i", "_c", "_side"):
+        for k in ("_units", "_out_i", "_c", "_side"):
             tr.pop(k, None)
 
     q_last = {s: (float(qual[s].iloc[-1]) if len(qual[s]) else 0.0) for s in (+1, -1)}

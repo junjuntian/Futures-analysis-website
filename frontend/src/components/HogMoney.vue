@@ -46,6 +46,9 @@ interface HogTrade {
   exit_reason: string | null
   /** campaign(DEC-133)附加:批次成本与持仓中的阵营状态。旧产物没有。 */
   batch_cost?: number | null
+  /** 跟批加仓(DEC-135):本笔战役的单位数与各批成交明细;entry_px 为均价。 */
+  units?: number
+  entries?: Array<{ date: string; px: number }>
   camp_net?: number | null
   camp_peak?: number | null
   unload_pct?: number | null
@@ -452,8 +455,10 @@ const zRatio = computed(() => {
 
 const rows = computed(() => {
   const h = data.value?.history ?? []
-  // 新的在前:历史表看的是最近发生了什么
-  const sorted = [...h].reverse()
+  // 按**进场日期**从先到后排(运营者 2026-08-24 指定)。campaign 的多合约并行
+  // 让引擎产出顺序变成"按流分组",直接 reverse 会看起来像按出场日乱排。
+  const sorted = [...h].sort((a, b) => a.entry_date.localeCompare(b.entry_date)
+    || a.contract.localeCompare(b.contract))
   const start = (page.value - 1) * pageSize.value
   return sorted.slice(start, start + pageSize.value)
 })
@@ -704,8 +709,13 @@ const bySide = computed(() => {
               <tr v-for="t in data.campaign.positions" :key="t.contract + t.side">
                 <td>{{ t.contract }}</td>
                 <td><span class="side" :class="t.side">{{ sideText(t.side) }}</span></td>
-                <td>{{ t.entry_date }}</td>
-                <td class="num">{{ fmt(t.entry_px) }}</td>
+                <td>
+                  {{ t.entry_date }}
+                  <div v-if="(t.units ?? 1) > 1" class="units-detail">
+                    <span v-for="e in t.entries" :key="e.date">{{ e.date.slice(5) }}@{{ fmt(e.px) }}</span>
+                  </div>
+                </td>
+                <td class="num">{{ fmt(t.entry_px) }}<span v-if="(t.units ?? 1) > 1" class="units-badge">均·{{ t.units }}批</span></td>
                 <td class="num">{{ fmt(t.batch_cost) }}</td>
                 <td class="num" :class="pnlClass(t.ret_pct)">{{ pct(t.ret_pct) }}</td>
                 <td class="num">
@@ -889,7 +899,7 @@ const bySide = computed(() => {
             <td>{{ t.entry_date }}</td>
             <td>{{ t.exit_date ?? '持有中' }}</td>
             <td>{{ t.contract }}</td>
-            <td class="num">{{ fmt(t.entry_px) }}</td>
+            <td class="num">{{ fmt(t.entry_px) }}<span v-if="(t.units ?? 1) > 1" class="units-badge">×{{ t.units }}批</span></td>
             <td class="num">{{ fmt(t.exit_px) }}</td>
             <td class="num" :class="pnlClass(t.ret_pct)">{{ pct(t.ret_pct) }}</td>
             <td class="num">{{ t.hold_days }} 日</td>
@@ -1278,5 +1288,19 @@ const bySide = computed(() => {
 }
 .panel-note {
   margin-top: 4px;
+}
+
+/* 跟批加仓(DEC-135):批次标记与逐批明细 */
+.units-badge {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--tv-text-muted);
+}
+.units-detail {
+  font-size: 11px;
+  color: var(--tv-text-muted);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>
