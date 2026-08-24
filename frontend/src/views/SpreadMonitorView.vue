@@ -334,6 +334,49 @@ interface FundFlow {
 }
 const fundFlow = ref<FundFlow | null>(null)
 
+/**
+ * 玻纯「永安对冲簿」状态卡(DEC-142,展示级)。引擎在 pair_fgsa.json 里合成,
+ * 这里只读不算(DEC-104:判据/统计在引擎,前端只渲染)。
+ * 与资金流向并排:那个是"资金强弱轮动"的连续读数,这个是"对冲簿在不在场"的
+ * 离散状态 —— 永安在两品种主力净持仓反向时跟它方向持价差,同向不在场。
+ * **背景,不是进场信号**;丑话(知情上一档/利润前重后轻)在引擎 note 里,不抄第二份。
+ */
+interface HedgeBook {
+  member: string
+  data_date: string
+  state: 'opposite' | 'same' | null
+  direction: 'widen' | 'narrow' | null
+  fg_net: number | null
+  sa_net: number | null
+  fg_main: string
+  sa_main: string
+  seg_start: string | null
+  seg_days: number | null
+  seg_ret_pct: number | null
+  stats: { cum_pct: number; sharpe: number | null; max_dd_pct: number; in_market_pct: number }
+  note: string
+}
+const hedgeBook = ref<HedgeBook | null>(null)
+
+/** 翻成这一行自己的走扩/收窄 —— 与 fundFlowFor 同一个腿序陷阱,同一个守法。 */
+function hedgeBookFor(item: SpreadMonitorItem) {
+  const hb = hedgeBook.value!
+  if (hb.state !== 'opposite' || !hb.direction) {
+    return { on: false, widen: false, text: `永安两腿同向 · 不在场(玻 ${fmtNet(hb.fg_net)}/碱 ${fmtNet(hb.sa_net)})` }
+  }
+  const widen = (hb.direction === 'widen') === (item.instrument_1 === 'FG')
+  const legs = hb.direction === 'widen' ? `多${hb.fg_main} 空${hb.sa_main}` : `空${hb.fg_main} 多${hb.sa_main}`
+  return {
+    on: true,
+    widen,
+    text: `永安两边吃 · ${widen ? '做扩' : '做缩'}(${legs})第 ${hb.seg_days ?? '—'} 日`
+  }
+}
+
+function fmtNet(v: number | null): string {
+  return v === null ? '—' : v.toLocaleString('zh-CN')
+}
+
 /** 只认玻璃×纯碱这一个跨品种组合——信号是为它算的,别挂到别的行上去。 */
 function isFgSa(item: SpreadMonitorItem): boolean {
   if (!item.is_cross_variety) return false
@@ -412,7 +455,12 @@ function rollAt(item: SpreadMonitorItem): RollPressureState | null {
 async function loadFundFlow() {
   try {
     const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
-    if (res.ok) fundFlow.value = await res.json()
+    if (res.ok) {
+      const data = (await res.json()) as FundFlow & { hedge_book?: HedgeBook | null }
+      fundFlow.value = data
+      // 对冲簿卡与 pair 信号同一个 JSON(DEC-142);老 JSON 没有这个键 -> 不显示。
+      hedgeBook.value = data.hedge_book ?? null
+    }
   } catch {
     // 背景信息取不到就不显示,页面主体照常
   }
@@ -812,6 +860,25 @@ function openDetail(item: SpreadMonitorItem) {
                 </span>
                 <span class="pctile">强度 {{ fundFlow.z.toFixed(2) }}</span>
                 <span class="pctile flow-tip">背景参考,非进场信号</span>
+              </div>
+            </el-tooltip>
+
+            <!-- 玻纯「永安对冲簿」状态卡(DEC-142,展示级)。只挂 FG-SA 这一个组合;
+                 在场=永安两品种主力净持仓反向(历史约 31% 天数),方向跟它;
+                 丑话在引擎 note(tooltip)里。**背景,不是进场信号。** -->
+            <el-tooltip v-if="hedgeBook && isFgSa(item)" :content="hedgeBook.note" placement="top">
+              <div class="basis fund">
+                <span class="k">永安对冲簿</span>
+                <span class="v" :class="hedgeBookFor(item).on ? (hedgeBookFor(item).widen ? 'disc' : 'prem') : ''">
+                  {{ hedgeBookFor(item).text }}
+                </span>
+                <span class="pctile" v-if="hedgeBookFor(item).on">
+                  玻 {{ fmtNet(hedgeBook.fg_net) }} / 碱 {{ fmtNet(hedgeBook.sa_net) }}
+                </span>
+                <span class="pctile">
+                  回放 {{ hedgeBook.stats.cum_pct >= 0 ? '+' : '' }}{{ hedgeBook.stats.cum_pct }}% · 在场 {{ hedgeBook.stats.in_market_pct }}%
+                </span>
+                <span class="pctile flow-tip">展示级,不进判据</span>
               </div>
             </el-tooltip>
 

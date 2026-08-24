@@ -54,6 +54,10 @@ CURRENT: dict = {}
 
 # 各品种算好的信号表,供 FG-SA 配对信号复用(别再重算一遍)。
 SIG_CACHE: dict = {}
+# 玻纯对冲簿状态卡(DEC-142)要用的跨品种小缓存:run_one 跑 FG/SA 时各存一份
+# {ya: 永安主力净持仓, ret_open, main},pair_fgsa 末尾合成。与 SIG_CACHE 分开,
+# 不动它的形状(pair z 的 cache[c]["chg"] 依赖 sig 帧原样)。
+PAIR_EXTRA: dict = {}
 
 COST = 0.0005            # 单边手续费+滑点。逐日净值在成交那两天各扣一次。
 SPLIT: dict = {}         # 本轮品种的「跳空占比」,build_payload 算好给 _caveats 用
@@ -2225,6 +2229,113 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
 
 # ---------------------------------------------------------------- FG-SA 配对
 
+def _member_main_net(seat: pd.DataFrame, mkt: pd.DataFrame, member: str) -> pd.Series:
+    """某席位在**当日主力合约**上的可见净持仓(net_off,按合约 ffill)。
+
+    与 seat_follow_payload 里的循环同口径(那边还要顺手攒第二条序列,没抽公共函数,
+    改任何一边记得看另一边)。
+    """
+    sub = seat[seat["member_key"] == member]
+    sig = pd.Series(np.nan, index=mkt.index)
+    for c in dict.fromkeys(mkt["main"]):
+        if not isinstance(c, str):
+            continue
+        rows = sub[sub["contract"] == c]
+        if rows.empty:
+            continue
+        w = rows.pivot_table(index="trade_date", values="net_off", aggfunc="sum").iloc[:, 0]
+        days = mkt.index[mkt["main"] == c]
+        sig.loc[days] = w.reindex(days.union(w.index)).ffill().reindex(days).values
+    return sig
+
+
+def fgsa_hedge_book() -> dict | None:
+    """玻纯「永安对冲簿」状态卡(DEC-142,展示级,只显示不进判据)。
+
+    规则(REPORT_FGSA_LINK_v2,零参数):永安在 FG 主力与 SA 主力的净持仓**反向**时
+    (历史约 31% 的天数)跟它的方向持价差(多玻璃空纯碱 → 做多价差;反之做空);
+    同向或缺数据 → 不在场。执行工具 = 郑商所套利指令 SP FG-SA(玻璃在前纯碱在后)。
+    统计每次全量重算(扣 0.2%/翻转的保守成本),不写死数字。
+    **为什么是永安一家不是五家阵营**:阵营版同规则实测是死的(状态内日均 3bp 对
+    永安版 20bp)——五家合计的"反向"多半是成员间打架的噪音,单席位的对冲簿才是
+    真仓位表达;与 FG 单腿可跟(DEC-141)互证。
+    """
+    if not ({"FG", "SA"} <= set(PAIR_EXTRA)):
+        return None
+    fg, sa = PAIR_EXTRA["FG"], PAIR_EXTRA["SA"]
+    idx = fg["ret_open"].index.intersection(sa["ret_open"].index)
+    if not len(idx):
+        return None
+    f = np.sign(fg["ya"].reindex(idx))
+    s = np.sign(sa["ya"].reindex(idx))
+    pos = pd.Series(0.0, index=idx)
+    m = f.notna() & s.notna() & (f * s < 0)
+    pos[m] = f[m]
+    ret_sp = fg["ret_open"].reindex(idx).fillna(0) - sa["ret_open"].reindex(idx).fillna(0)
+    held = pos.shift(2)
+    turn = (pos.shift(2) != pos.shift(3)).astype(float)
+    daily = (held * ret_sp - turn * 0.002).dropna()
+    if not len(daily):
+        return None
+    eq = (1 + daily).cumprod()
+    stats = {
+        "cum_pct": round((float(eq.iloc[-1]) - 1) * 100, 1),
+        "sharpe": round(float(daily.mean() / daily.std() * np.sqrt(242)), 2) if daily.std() > 0 else None,
+        "max_dd_pct": round(float((eq / eq.cummax() - 1).min()) * 100, 1),
+        "in_market_pct": round(float((held != 0).mean() * 100), 1),
+        "yearly": {str(y): round((float(np.prod(1 + g)) - 1) * 100, 1)
+                   for y, g in daily.groupby(daily.index.year)},
+    }
+    # 在场段(方向恒定的连续区间;段收益按 T+1 对齐,展示用)
+    segs = []
+    i0, side = None, 0.0
+    vals = pos.values
+    for i in range(len(idx) + 1):
+        v = vals[i] if i < len(idx) else 0.0
+        if v != side:
+            if side != 0 and i0 is not None:
+                j0, j1 = min(i0 + 2, len(idx) - 1), min(i + 2, len(idx))
+                r = float(np.prod(1 + side * ret_sp.iloc[j0:j1])) - 1
+                segs.append({"start": idx[i0].strftime("%Y-%m-%d"),
+                             "end": idx[i - 1].strftime("%Y-%m-%d") if i < len(idx) or vals[-1] != side else None,
+                             "side": "widen" if side > 0 else "narrow",
+                             "days": i - i0, "ret_pct": round(r * 100, 2)})
+            i0, side = i, v
+    open_seg = bool(len(vals) and vals[-1] != 0)
+    if open_seg and segs:
+        segs[-1]["end"] = None
+    d = idx[-1]
+    fg_net = fg["ya"].reindex(idx).iloc[-1]
+    sa_net = sa["ya"].reindex(idx).iloc[-1]
+    state = None
+    if np.isfinite(fg_net) and np.isfinite(sa_net):
+        state = "opposite" if np.sign(fg_net) * np.sign(sa_net) < 0 else "same"
+    return {
+        "member": "永安期货",
+        "data_date": d.strftime("%Y-%m-%d"),
+        "state": state,
+        "direction": (None if state != "opposite"
+                      else ("widen" if fg_net > 0 else "narrow")),
+        "fg_net": None if not np.isfinite(fg_net) else int(fg_net),
+        "sa_net": None if not np.isfinite(sa_net) else int(sa_net),
+        "fg_main": str(fg["main"].iloc[-1]),
+        "sa_main": str(sa["main"].iloc[-1]),
+        "seg_start": segs[-1]["start"] if open_seg and segs else None,
+        "seg_days": segs[-1]["days"] if open_seg and segs else None,
+        "seg_ret_pct": segs[-1]["ret_pct"] if open_seg and segs else None,
+        "history": segs[-8:],
+        "stats": stats,
+        "note": ("**永安对冲簿(展示级,不进判据)**:永安在玻璃与纯碱主力的净持仓反向时"
+                 "(历史约 31% 的天数)跟它的方向持价差——它多玻璃空纯碱 → 做多价差,"
+                 "反之做空;同向就不在场。执行 = 郑商所套利指令 SP FG-SA(玻璃在前"
+                 "纯碱在后)。回放(扣 0.2%/翻转)与逐年见 stats,T+2 零衰减。"
+                 "**为什么是永安一家**:五家阵营版同规则是死的,单席位对冲簿才是真"
+                 "仓位表达。**丑话**:跨两轮共五个候选,全族校正 p=0.10,证据等级"
+                 "「知情上」;利润前重后轻(2020-22 赚大头,近三年只是没亏);"
+                 "2023/2025 是小亏年。验收 REPORT_FGSA_LINK_v2。"),
+    }
+
+
 def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
     """玻璃与纯碱的**相对**资金流向,预测 FG−SA 价差的走向。
 
@@ -2272,6 +2383,12 @@ def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
             "预测的是**价差方向**,不是某一条腿的方向,也没有出场规则。",
         ],
     }
+    # 永安对冲簿状态卡(DEC-142,展示级):算不出(材料缺)就 None,不拖垮 pair 信号。
+    try:
+        payload["hedge_book"] = fgsa_hedge_book()
+    except Exception as e:                      # noqa: BLE001
+        print(f"[pair] hedge_book 失败,置空:{e}", file=sys.stderr)
+        payload["hedge_book"] = None
     out = out_dir / "pair_fgsa.json"
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2321,6 +2438,10 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None
     SIG_CACHE[code] = sig
+    # 玻纯对冲簿(DEC-142):跨品种块在 pair_fgsa 里合成,这里只把单品种材料放进小缓存。
+    if code in ("FG", "SA"):
+        PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
+                            "ret_open": mkt["ret_open"], "main": mkt["main"]}
 
     out_path = out_dir / v["out"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
