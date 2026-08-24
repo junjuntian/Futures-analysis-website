@@ -316,6 +316,7 @@ jobs:
           # 生猪引擎:与金银分开的两个文件,信号形态不同(合计流向 vs 逐家共振),
           # 失败也各自隔离。漏装它线上不会报错,只会永远拿不到生猪信号。
           install -m 600 engine/hog_money.py "${RELEASE_BUNDLE}/engine/hog_money.py"
+          install -m 600 engine/campaign.py "${RELEASE_BUNDLE}/engine/campaign.py"
           # 伦敦金基线:重挫态判定的基准数据,随发布包走(手工文件会漂移,吃过亏)
           install -d -m 700 "${RELEASE_BUNDLE}/engine/data"
           install -m 600 engine/data/london_xau.csv "${RELEASE_BUNDLE}/engine/data/london_xau.csv"
@@ -913,6 +914,7 @@ jobs:
             etc/logrotate.d/futures-collector
             opt/futures-platform/smart-money/smart_money.py
             opt/futures-platform/smart-money/hog_money.py
+            opt/futures-platform/smart-money/campaign.py
           )
           for script in "$RELEASE_DIR"/backfill/*; do
             host_paths+=("opt/futures-platform/$(basename "$script")")
@@ -985,12 +987,23 @@ jobs:
               cp -a "$hog_live" "$superseded_dir/hog_money.py"
               echo "ENGINE_SUPERSEDED hog_money.py"
             fi
+            # campaign.py(DEC-133):hog_money 的策略子模块,漏装 = 线上
+            # import campaign 直接 ImportError,LH 引擎「保留上一版」不吭声。
+            camp_live=/opt/futures-platform/smart-money/campaign.py
+            if test -f "$camp_live" &&
+               ! cmp -s "$RELEASE_DIR/engine/campaign.py" "$camp_live"; then
+              install -d -m 700 "$superseded_dir"
+              cp -a "$camp_live" "$superseded_dir/campaign.py"
+              echo "ENGINE_SUPERSEDED campaign.py"
+            fi
             if ! test -f "$hog_live" ||
                ! cmp -s "$RELEASE_DIR/engine/hog_money.py" "$hog_live" ||
+               ! cmp -s "$RELEASE_DIR/engine/campaign.py" "$camp_live" 2>/dev/null ||
                ! cmp -s "$RELEASE_DIR/engine/smart_money.py" "$engine_live"; then
               # 引擎换了就得重算信号 —— 见下面 ENGINE_REFRESH 那段的说明。
               ENGINE_CHANGED=1
             fi
+            install -m 644 "$RELEASE_DIR/engine/campaign.py" "$camp_live"
             install -m 644 "$RELEASE_DIR/engine/hog_money.py" "$hog_live"
             # 指纹写进静态目录,前端拿它和 payload 里的比 —— 不一致就说明这份信号
             # 不是当前引擎算的(DEC-099)。用**文件指纹**不用 git sha:镜像会被复用,
