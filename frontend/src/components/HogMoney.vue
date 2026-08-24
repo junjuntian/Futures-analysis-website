@@ -165,7 +165,8 @@ interface HogPayload {
   /** 移仓强制流压力表(DEC-136,只有生猪有):散户多头剩仓 → 近月对次主力承压。
    *  只显示不进判据。可选:旧 JSON 与其他品种没有。 */
   roll_pressure?: RollPressureState | null
-  /** 单席位跟随第二引擎(DEC-139,只有焦煤有:跟华泰)。与主引擎并列、各管各仓。
+  /** 单席位跟随第二引擎(DEC-139 焦煤跟华泰;DEC-141 玻璃跟永安)。与主引擎并列、
+   *  各管各仓;席位名/统计/丑话全在 payload 里,这里不写死品种。
    *  可选:旧 JSON 与其他品种没有。 */
   seat_follow?: {
     member: string
@@ -694,7 +695,7 @@ const bySide = computed(() => {
         </div>
       </div>
 
-      <!-- 第二引擎:单席位跟随(DEC-139,焦煤跟华泰)。与主引擎并列,各管各仓。 -->
+      <!-- 第二引擎:单席位跟随(DEC-139 焦煤跟华泰 / DEC-141 玻璃跟永安)。与主引擎并列,各管各仓。 -->
       <div v-if="data.seat_follow" class="cards">
         <div class="card wide">
           <h3>
