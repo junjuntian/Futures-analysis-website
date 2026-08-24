@@ -51,9 +51,15 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
   const q = rp.hist_q1 !== null && rp.hist_q3 !== null
     ? `,历届锚点四分位 ${fmt(rp.hist_q1)}~${fmt(rp.hist_q3)} 手`
     : ''
-  const head = `${rp.main} 剩 ${rp.days_left} 日,散户多头剩仓 ${fmt(rp.retail_net)} 手${q}`
+  const head = `${rp.main} 剩 ${rp.days_left} 日,散户净剩仓 ${fmt(rp.retail_net)} 手${q}`
   if (rp.level === 'high') {
-    return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next});窗口内做多价差信号按 ⚠ 对待` }
+    // ⚡ 只认引擎的 entry_flag(DEC-104:判据在引擎算,前端只渲染)。
+    // 展示级品种(焦煤,criterion=False)level 照标 high,但 entry_flag 恒假:
+    // 高位只陈述承压,不给进场话术(REPORT_JM_THREE_GAPS_v1:判据无区分度)。
+    if (rp.entry_flag) {
+      return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next});窗口内做多价差信号按 ⚠ 对待` }
+    }
+    return { on: true, text: `${head} —— 处历届高位,近月对次主力承压(展示级,不进判据)` }
   }
   if (rp.level === 'low') {
     return { on: false, text: `${head} —— 处历届低位,历届低剩仓届价差常反涨,压力不明显` }

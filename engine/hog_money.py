@@ -421,6 +421,14 @@ VARIETIES = {
         # 要连吃十几段小亏;②五选一 Bonferroni p≈0.17,先验押在 IC 旁证上;
         # ③2026 年靠 6 月一波。
         "follow_seat": {"member": "华泰期货"},
+        # **移仓压力表·展示级(2026-08-24 运营者拍板,REPORT_JM_THREE_GAPS_v1)**。
+        # criterion=False:焦煤**只显示不进判据**,与生猪(DEC-137 ⚡判据)不同——
+        # 9 届样本高剩仓组 100% 届在跌(−1.86%),方向同生猪机制,但秩相关仅 −0.28、
+        # ≤10 日锚点翻号、PIT 判据无区分度(未触发届也 −1.04%,赢的是近月普跌基流)。
+        # step=4:焦煤主力 1/5/9 月,次主力 = +4 个月(生猪 +2,别共用默认值)。
+        # 观察项:JM2701 散户当前净空(历届锚点全净多,镜像分支零样本),若 11/12 月
+        # 锚点仍净空即镜像首个活体——到时是攒样本,不是改规则。
+        "roll_pressure": {"window": 30, "anchor": 20, "step": 4, "criterion": False},
         "out": "jm_signals.json",
         "backtest": "72 笔 净 +244.0%/胜率 59.7%/回撤 −13.9%/夏普 1.79"
                     "(2023-08 起,基准 +18.2%)(2026-08-23 开做多 + 机构出场,"
@@ -1421,7 +1429,8 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     """
     d = mkt.index[-1]
     main = str(mkt["main"].get(d))
-    nxt = next_main_contract(main)
+    step = int(cfg.get("step", 2))       # 生猪 +2 月,焦煤 +4 月(1/5/9 序列)
+    nxt = next_main_contract(main, step)
     dleft = int(mkt["dleft"].get(d, 0))
     have = [m for m in RULES["retail_seed"] if m in set(seat["member_key"])]
 
@@ -1456,7 +1465,7 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         r_net = retail_net_on(c, t0)
         if r_net is None:
             continue
-        n = next_main_contract(c)
+        n = next_main_contract(c, step)
         move_pct = None
         if n in st.columns:
             spread = (st[c] - st[n]).dropna()
@@ -1493,7 +1502,9 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     active = bool(dleft <= int(cfg.get("window", 30)))
     # 判据(DEC-137,运营者拍板):窗口内且散户剩仓处历届高位 -> ⚡压力进场·做空价差
     # (空近月多次主力);同窗口做多价差信号降级挂⚠。判据在引擎算,前端只渲染(DEC-104)。
-    entry_flag = bool(active and level == "high")
+    # criterion=False 的品种(焦煤)**展示级**:高位照标 level,⚡永不亮
+    # (REPORT_JM_THREE_GAPS_v1:9 届样本判据无区分度,不许升级)。
+    entry_flag = bool(active and level == "high" and cfg.get("criterion", True))
     return {
         "active": active,
         "entry_flag": entry_flag,
@@ -1509,7 +1520,15 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         "spread_now": spread_now,
         "anchor": anchor,
         "history": hist,
-        "note": ("散户多头(三家反向名单)集中在近月、窗口止点必须离场、小资金无承接,"
+        "note": ("散户(三家反向名单)带符号净剩仓到点必须离场:净多剩仓压近月、"
+                 "净空剩仓托近月。焦煤 9 届实测(REPORT_JM_THREE_GAPS_v1):高剩仓组"
+                 "价差 −1.86%(100% 的届在跌),低组 −0.25%,方向同生猪机制;"
+                 "但秩相关仅 −0.28(生猪 −0.53)、剩≤10 日锚点翻号,且判据无区分度"
+                 "(未触发届也平均 −1.04%,赢的是焦煤近月交割前普跌的基流)。"
+                 "**展示级:只显示,不进任何判据,⚡不亮**。历届锚点散户全为净多,"
+                 "净空分支零样本——JM2701 当前净空是首个潜在镜像活体,先攒样本。"
+                 if not cfg.get("criterion", True) else
+                 "散户多头(三家反向名单)集中在近月、窗口止点必须离场、小资金无承接,"
                  "近月相对次主力被压。历届锚点(剩≤%d日)实测:散户剩仓与其后价差变动"
                  "秩相关 −0.53,高剩仓组价差 −3.14%%(88%% 的届在跌),低剩仓组 −0.36%%;"
                  "散户没剩仓的届价差反而涨。**机构剩仓没有预测力(机构能慢慢移仓),"
