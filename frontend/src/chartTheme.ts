@@ -125,14 +125,28 @@ export function chartTokens(): ChartTokens {
 export function tooltipStyle() {
   const tokens = chartTokens()
   return {
-    // 钉在图表容器内。缺省 tooltip 跟随鼠标且允许出界,建仓过程行情图的
-    // 长小窗(行情+多空+净持仓九行)在图顶部悬停时上半截会被裁掉。
-    confine: true,
     // 挂到 body 上(DEC-132 加逐家明细后小窗变高):原先小窗是卡片的子元素,超出卡片
     // 底边的部分被 overflow 裁掉,K 线图上逐家那几行看不见(运营者 2026-08-24 报)。
-    // 挂 body 后不再被卡片裁剪;confine 仍按图表区定位,超出的部分盖在下一张卡片上
-    // 但完整可见。
     appendToBody: true,
+    // 自己定位,不用 confine:confine 把小窗按进图表区,而逐家明细让小窗**比图表区还高**,
+    // 按进去必然裁尾。规则:横向贴鼠标、越界翻到另一侧;纵向居中、贴不下就贴容器底、
+    // 还不够就向上探出容器顶 —— appendToBody 后探出的部分照样完整可见。
+    confine: false,
+    position(
+      point: [number, number],
+      _params: unknown,
+      _dom: unknown,
+      _rect: unknown,
+      size: { contentSize: [number, number]; viewSize: [number, number] }
+    ) {
+      const [w, h] = size.contentSize
+      const [vw, vh] = size.viewSize
+      let x = point[0] + 18
+      if (x + w > vw) x = Math.max(0, point[0] - w - 18)
+      let y = point[1] - h / 2
+      if (y + h > vh) y = vh - h
+      return [x, y]
+    },
     backgroundColor: tokens.tooltipBg,
     borderColor: tokens.tooltipBorder,
     textStyle: { color: tokens.tooltipText }
