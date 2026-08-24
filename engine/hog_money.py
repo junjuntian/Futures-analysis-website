@@ -267,6 +267,12 @@ VARIETIES = {
         # 和 DEC-121 一样是按磨底年判断开的门;席位规则在 2026 单独评全负(REPORT_LH_LOWS_v1)。
         # 只是提示,不进引擎持仓,不算进回测。
         "roll_bounce": {"since": "2026-01-01", "dleft_max": 22, "drop_min": 0.05},
+        # **移仓强制流压力表(DEC-136,2026-08-24)**:散户多头剩仓 + 剩时短 →
+        # 近月对次主力承压(REPORT_ROLL_PRESSURE_v1:dleft≤20 锚点秩相关 −0.53,
+        # 散户高剩仓组价差 −3.14%/88% 届在跌;**机构版被否**——机构能慢慢移仓,
+        # 不构成单边强制流,真正"必须交易且无承接"的是散户多头)。
+        # **只显示不进判据**:16 届样本、主断言被否后的第二枪、2609 刚出过反例。
+        "roll_pressure": {"window": 30, "anchor": 20},
         # **策略切换为逐合约战役(campaign,DEC-133,2026-08-24 运营者拍板)**:
         # 左侧批次进场(逢跌加仓区间确认 + 价<=批次成本)x 聪明钱份额资格
         # (方向历史战役盈亏 >= 对侧25%,把"多头人格=套保接盘"挡在门外)x
@@ -438,6 +444,8 @@ def use(code: str) -> dict:
     RULES["fixed_members"] = list(v["fixed_members"]) if v.get("fixed_members") else None
     # 换月反弹提示(DEC-123):只有生猪配;None = 不出这块。
     RULES["roll_bounce"] = dict(v["roll_bounce"]) if v.get("roll_bounce") else None
+    # 移仓压力表(DEC-136):只有生猪配;None = 不出这块。
+    RULES["roll_pressure"] = dict(v["roll_pressure"]) if v.get("roll_pressure") else None
     # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
     RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
     # 逐合约战役策略(DEC-133):strategy="campaign" 的品种,进出场与历史/统计
@@ -570,6 +578,12 @@ def _self_fingerprint() -> str:
         return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
     except OSError:
         return ""
+
+
+def contract_volumes(price: pd.DataFrame) -> pd.DataFrame:
+    """逐合约成交量(行=交易日,列=合约)。移仓压力表的"承接力"一栏用。"""
+    return (price.pivot_table(index="trade_date", columns="contract",
+                              values="volume", aggfunc="first").sort_index())
 
 
 def contract_prices(price: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1379,6 +1393,112 @@ def _f(v):
     return None if v is None or not np.isfinite(v) else round(float(v), 1)
 
 
+def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFrame,
+                          cfg: dict, vols: pd.DataFrame | None = None) -> dict:
+    """移仓强制流压力表(DEC-136)。**只显示,不进任何判据。**
+
+    机制(REPORT_ROLL_PRESSURE_v1):散户多头集中在近月、窗口止点必须离场、
+    小资金无承接 → 近月相对次主力被压。散户净多剩仓越大,交割前价差跌得越狠
+    (dleft≤20 锚点秩相关 −0.53;高剩仓组 −3.14%、88% 的届在跌;
+    散户没剩仓的届价差反而涨)。**机构版被否**:机构能买平近月+卖开次月同步移,
+    不构成单边强制流 —— 别把这块改成看机构剩仓,试过了没有预测力。
+
+    历届分布**每次实算不写死**(数字写死会随规则漂移,DEC-098 的教训);
+    当前届的散户剩仓与历届锚点分布(四分位)对照着显示,不拍二值结论。
+    """
+    d = mkt.index[-1]
+    main = str(mkt["main"].get(d))
+    nxt = next_main_contract(main)
+    dleft = int(mkt["dleft"].get(d, 0))
+    have = [m for m in RULES["retail_seed"] if m in set(seat["member_key"])]
+
+    def retail_net_on(contract: str, upto: pd.Timestamp) -> float | None:
+        sub = seat[(seat["member_key"].isin(have)) & (seat["contract"] == contract)
+                   & (seat["trade_date"] <= upto)]
+        if sub.empty:
+            return None
+        w = (sub.pivot_table(index="trade_date", columns="member_key",
+                             values="net_off", aggfunc="first").ffill())
+        v = float(w.iloc[-1].sum())
+        return v if np.isfinite(v) else None
+
+    # —— 历届锚点分布与逐届结果(全量重算,幂等)——
+    anchor = int(cfg.get("anchor", 20))
+    hist = []
+    seen = set()
+    for c in dict.fromkeys(mkt["main"]):
+        if not isinstance(c, str) or c == main or c in seen:
+            continue
+        seen.add(c)
+        # 锚点按**合约自己的**行情序列算:dleft<=anchor 时主力早已换到下一届,
+        # 用主力时段找锚点一届都找不齐(首版就是这么错的,16 届只剩 6 届)。
+        if c not in st.columns:
+            continue
+        px_c = st[c].dropna()
+        dl = pd.Series([days_to_window_end(c, t) for t in px_c.index], index=px_c.index)
+        hitrows = dl[(dl <= anchor) & (dl > 5)]
+        if not len(hitrows):
+            continue
+        t0 = hitrows.index[0]
+        r_net = retail_net_on(c, t0)
+        if r_net is None:
+            continue
+        n = next_main_contract(c)
+        move_pct = None
+        if n in st.columns:
+            spread = (st[c] - st[n]).dropna()
+            endrows = dl[dl <= 5]
+            t1 = endrows.index[0] if len(endrows) else px_c.index[-1]
+            s0, s1 = spread.asof(t0), spread.asof(t1)
+            base = px_c.asof(t0)
+            if np.isfinite(s0) and np.isfinite(s1) and np.isfinite(base) and base:
+                move_pct = round(float(s1 - s0) / float(base) * 100, 2)
+        hist.append({"main": c, "date": t0.strftime("%Y-%m-%d"),
+                     "retail_net": int(round(r_net)), "spread_move_pct": move_pct})
+    nets = sorted(h["retail_net"] for h in hist)
+
+    def q(arr, pctl):
+        return float(np.percentile(arr, pctl)) if arr else None
+
+    q1, med, q3 = q(nets, 25), q(nets, 50), q(nets, 75)
+
+    cur_retail = retail_net_on(main, d)
+    level = None
+    if cur_retail is not None and med is not None:
+        level = ("high" if q3 is not None and cur_retail >= q3
+                 else "low" if q1 is not None and cur_retail <= q1 else "mid")
+    vr = None
+    if vols is not None and main in vols.columns:
+        vv = vols[main].dropna()
+        if len(vv) >= 20:
+            vr = round(float(vv.rolling(5).mean().iloc[-1] / vv.rolling(20).mean().iloc[-1]), 2)
+    spread_now = None
+    if main in st.columns and nxt in st.columns:
+        sn = (st[main] - st[nxt]).dropna()
+        if len(sn):
+            spread_now = _f(sn.iloc[-1])
+    return {
+        "active": bool(dleft <= int(cfg.get("window", 30))),
+        "main": main, "next": nxt, "days_left": dleft,
+        "window": int(cfg.get("window", 30)),
+        "retail_net": None if cur_retail is None else int(round(cur_retail)),
+        "hist_q1": None if q1 is None else int(round(q1)),
+        "hist_med": None if med is None else int(round(med)),
+        "hist_q3": None if q3 is None else int(round(q3)),
+        "level": level,
+        "vol_ratio": vr,
+        "spread_now": spread_now,
+        "anchor": anchor,
+        "history": hist,
+        "note": ("散户多头(三家反向名单)集中在近月、窗口止点必须离场、小资金无承接,"
+                 "近月相对次主力被压。历届锚点(剩≤%d日)实测:散户剩仓与其后价差变动"
+                 "秩相关 −0.53,高剩仓组价差 −3.14%%(88%% 的届在跌),低剩仓组 −0.36%%;"
+                 "散户没剩仓的届价差反而涨。**机构剩仓没有预测力(机构能慢慢移仓),"
+                 "别把这块改成看机构**。只是背景,不进判据;16 届样本,2609 出过反例"
+                 "(磨底年反弹),攒实盘再议。" % anchor),
+    }
+
+
 def edge_split(sig: pd.DataFrame, mkt: pd.DataFrame,
                retail: pd.DataFrame | None) -> dict | None:
     """信号后第一天的超额,有多少落在**拿不到的隔夜跳空**里。
@@ -1592,7 +1712,8 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
 
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
-                  op: pd.DataFrame | None = None, st: pd.DataFrame | None = None) -> dict:
+                  op: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
+                  vols: pd.DataFrame | None = None) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
@@ -1803,6 +1924,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 换月反弹提示(DEC-123):只有生猪配了 roll_bounce;其余品种 None。
         "roll_bounce": (roll_bounce_payload(mkt, st, RULES["roll_bounce"])
                         if RULES.get("roll_bounce") and st is not None else None),
+        # 移仓压力表(DEC-136,只有生猪配):散户多头剩仓 → 近月承压。只显示。
+        "roll_pressure": (roll_pressure_payload(seat, mkt, st, RULES["roll_pressure"], vols)
+                          if RULES.get("roll_pressure") and st is not None else None),
         "members": members,
         # 一排合约小窗(DEC-134):逐合约的各家持仓,恒 5 个,近月起。
         "contracts_panel": contracts_panel(seat, grp, d, prev_d),
@@ -2019,7 +2143,8 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
             sig = attach_inst_exit(sig, seat, mkt, groups)
         if RULES["long_mode"] == "unload_bounce":
             sig = attach_bounce_long(sig, seat, mkt, groups)
-        payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st)
+        payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st,
+                                vols=contract_volumes(price_raw))
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None

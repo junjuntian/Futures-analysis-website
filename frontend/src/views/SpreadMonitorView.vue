@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { bounceHint, pickBounceDay, type BounceDay, type BounceState } from '../bounce-hint'
+import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
@@ -389,12 +390,23 @@ async function loadBounce() {
   try {
     const res = await fetch(`/smart-money/hog_signals.json?t=${Date.now()}`)
     if (!res.ok) return
-    const data = (await res.json()) as { bounce_long?: BounceState | null; bounce_history?: BounceDay[] | null }
+    const data = (await res.json()) as { bounce_long?: BounceState | null; bounce_history?: BounceDay[] | null
+      roll_pressure?: RollPressureState | null }
     bounce.value = data.bounce_long ?? null
     bounceHistory.value = data.bounce_history ?? []
+    rollPressure.value = data.roll_pressure ?? null
   } catch {
     // 背景信息取不到就不显示,页面主体照常
   }
+}
+
+/** 移仓压力(DEC-136):只挂在含近月主力那条腿的生猪跨月组合上,窗口内才显示。 */
+const rollPressure = ref<RollPressureState | null>(null)
+function rollAt(item: SpreadMonitorItem): RollPressureState | null {
+  const rp = rollPressure.value
+  if (!rp || !rp.active) return null
+  if (!isLhCalendar(item)) return null
+  return item.contract_1 === rp.main || item.contract_2 === rp.main ? rp : null
 }
 
 async function loadFundFlow() {
@@ -815,6 +827,15 @@ function openDetail(item: SpreadMonitorItem) {
                 </span>
                 <span v-if="bounceDate(item)" class="pctile">按 {{ bounceDate(item) }} 机构状态</span>
                 <span class="pctile flow-tip">背景参考,非进场信号</span>
+              </div>
+            </el-tooltip>
+            <el-tooltip v-if="rollAt(item)" :content="rollAt(item)!.note" placement="top">
+              <div class="basis fund">
+                <span class="k">移仓压力</span>
+                <span class="v" :class="rollPressureHint(rollAt(item)!).on ? 'disc' : 'prem'">
+                  {{ rollPressureHint(rollAt(item)!).text }}
+                </span>
+                <span class="pctile flow-tip">散户强制流,背景参考,非进场信号</span>
               </div>
             </el-tooltip>
 

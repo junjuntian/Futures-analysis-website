@@ -13,6 +13,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { entryGateText } from '../entry-gate'
 import { failureHint } from '../fetch-hint'
+import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { getSeatNetPosition, type MemberLeg as SeatCost,
   type FlowCode
 } from '../api'
@@ -158,6 +159,9 @@ interface HogPayload {
     history: Array<{ date: string; main: string; days_left: number; drop20: number; next: string
       next_px: number | null; next_ret20: number | null; days_seen: number }>
   } | null
+  /** 移仓强制流压力表(DEC-136,只有生猪有):散户多头剩仓 → 近月对次主力承压。
+   *  只显示不进判据。可选:旧 JSON 与其他品种没有。 */
+  roll_pressure?: RollPressureState | null
   history: HogTrade[]
   stats: {
     trades: number
@@ -821,6 +825,19 @@ const bySide = computed(() => {
         <p class="note">依据只有 2026 年这几次,不是全样本验证(DEC-123):磨底年到期前被砸狠的周期
           次主力有一轮反弹,砸得温和的周期没有。只是提示,不进系统持仓、不算进回测;磨底年过去要回头关掉。</p>
       </div>
+      <!-- 移仓压力表(DEC-136,生猪专用):散户多头剩仓 → 近月承压。只是背景。 -->
+      <div v-if="data.roll_pressure" class="caveat-box roll" :class="{ on: rollPressureHint(data.roll_pressure).on }">
+        <b>移仓压力(散户强制流):</b>{{ rollPressureHint(data.roll_pressure).text }}
+        <div class="roll-hist">
+          <span class="gray">历届锚点(剩≤{{ data.roll_pressure.anchor }}日时散户剩仓 → 其后价差变动):</span>
+          <span v-for="h in data.roll_pressure.history.slice(-8)" :key="h.main" class="chip">
+            {{ h.main }} {{ h.retail_net.toLocaleString('zh-CN') }}手
+            <i :class="pnlClass(h.spread_move_pct)">{{ h.spread_move_pct === null ? '—' : pct(h.spread_move_pct) }}</i>
+          </span>
+        </div>
+        <p class="note" v-html="mdBold(data.roll_pressure.note)"></p>
+      </div>
+
       <!-- 这三种提示都必须在首屏,不能藏进策略方案页 -->
       <div v-if="data.institution.just_flipped_long" class="caveat-box flip">
         <b>机构合计净持仓刚转为净多。</b>
