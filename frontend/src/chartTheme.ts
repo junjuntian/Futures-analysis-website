@@ -128,6 +128,11 @@ export function tooltipStyle() {
     // 钉在图表容器内。缺省 tooltip 跟随鼠标且允许出界,建仓过程行情图的
     // 长小窗(行情+多空+净持仓九行)在图顶部悬停时上半截会被裁掉。
     confine: true,
+    // 挂到 body 上(DEC-132 加逐家明细后小窗变高):原先小窗是卡片的子元素,超出卡片
+    // 底边的部分被 overflow 裁掉,K 线图上逐家那几行看不见(运营者 2026-08-24 报)。
+    // 挂 body 后不再被卡片裁剪;confine 仍按图表区定位,超出的部分盖在下一张卡片上
+    // 但完整可见。
+    appendToBody: true,
     backgroundColor: tokens.tooltipBg,
     borderColor: tokens.tooltipBorder,
     textStyle: { color: tokens.tooltipText }
