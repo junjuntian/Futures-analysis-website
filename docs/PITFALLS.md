@@ -46,6 +46,16 @@
   不列,线上 `import campaign` 直接 ImportError,而 run_one 捕获异常
   「保留上一版」——页面照常显示旧信号,**不会报错**。三处都要:发布包
   install、主机回滚备份清单、ENGINE_CHANGED 判定。
+- **自动化发布链脚本:每一环的产物 id 必须来自那一环自己的输出,失败必须
+  让后续环止步**(2026-08-24,DEC-138 首轮"部署成功"是假的):
+  `gh workflow run` 撞上 GitHub API 瞬断(EOF)没创建构建,preflight 正确
+  红了没 dispatch,但链条用 `&&`+管道把 preflight 的退出码吞了,又用
+  `gh run list --limit 1` 抓"最新部署 run"——抓到的是**上一轮**的 success,
+  于是整条链报「deploy=0 success」而生产一个字节没变。发现靠的是核对
+  payload 新字段全空。规矩:①dispatch 后的 run id 要么从 dispatch 输出
+  解析,要么校验 createdAt 晚于 dispatch 时刻;②preflight 是否放行要
+  grep 它的放行文案做显式分支;③链条报成功后,仍要用**产物本身**
+  (payload 字段/stable.env SHA)复核一次——这次正是这一步救的。
 - **改申报/契约只改了消费方**:生产方代码没进提交,值恒空回退。改任何"值"提交前
   全仓库 grep 旧值;生产方消费方同一笔提交。
 - **CI clippy 按 `-D warnings` 跑**:本地裸 `cargo clippy` 数 error 是 0 也可能挂
