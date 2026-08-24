@@ -322,26 +322,14 @@ const QUALIFIED_HINT =
   '41% 的行两侧同时是 100%,它筛不掉任何东西,留着只会让人以为资格是两条件把关。'
 
 /**
- * FG-SA 相对资金流向(DEC-087)。引擎按日写静态 JSON,这里只读不算。
- *
- * 为什么挂在这个页面:这条信号预测的是 **FG−SA 价差**的方向,而套利监控本来就
- * 盯着这个组合——它此前只看价差位置与历史分位,没有「资金在往哪边调」这一维。
- * 取不到就不显示,不影响页面主体。
- */
-interface FundFlow {
-  z: number
-  direction: string
-  note: string
-  data_date: string
-}
-const fundFlow = ref<FundFlow | null>(null)
-
-/**
  * 玻纯「永安对冲簿」状态卡(DEC-142,展示级)。引擎在 pair_fgsa.json 里合成,
  * 这里只读不算(DEC-104:判据/统计在引擎,前端只渲染)。
- * 与资金流向并排:那个是"资金强弱轮动"的连续读数,这个是"对冲簿在不在场"的
- * 离散状态 —— 永安在两品种主力净持仓反向时跟它方向持价差,同向不在场。
+ * 永安在两品种主力净持仓反向时跟它方向持价差,同向不在场。
  * **背景,不是进场信号**;丑话(知情上一档/利润前重后轻)在引擎 note 里,不抄第二份。
+ *
+ * 「资金流向」行(DEC-087)2026-08-25 运营者拍板**删除**(DEC-144):它当规则被
+ * 测死过(REPORT_FGSA_LINK_v1 C2),与过闸的对冲簿并排权重感等同会稀释信号;
+ * 引擎照算 pair_fgsa.json 的 z/note 留档,要挂回来只动这个文件。
  */
 interface HedgeBook {
   member: string
@@ -416,22 +404,9 @@ function isFgSa(item: SpreadMonitorItem): boolean {
   return [item.instrument_1, item.instrument_2].sort().join('-') === 'FG-SA'
 }
 
-/** 把「玻璃相对更强」翻成走扩/收窄 —— **以 0 轴为准**(运营者 2026-08-25 纠正)。
- *
- * 收窄 = 价差向 0 轴靠近,走扩 = 离开 0 轴,与价差此刻在 0 轴哪一侧有关:
- * 价差为负时玻璃更强(数值上行)是**收窄**,为正时才是走扩——原实现不看 0 轴,
- * 价差 −132 时写着「玻璃更强·走扩」,方向感是反的。
- * 腿序守法照旧:z 说的是玻璃相对纯碱,行价差是「腿1−腿2」,腿1 非 FG 时数值方向翻。 */
-function fundFlowFor(item: SpreadMonitorItem) {
-  const z = fundFlow.value?.z ?? 0
-  const up = z > 0 === (item.instrument_1 === 'FG')   // 行价差的数值方向
-  const sp = Number(item.spread)
-  const widen = Number.isFinite(sp) && sp !== 0 ? up === (sp > 0) : up
-  return {
-    widen,
-    text: `${z > 0 ? '玻璃' : '纯碱'}更强 · 价差倾向${widen ? '走扩(离0轴)' : '收窄(向0轴)'}`
-  }
-}
+// fundFlowFor(资金流向的走扩/收窄文案)随 DEC-144 一起删了。谁要恢复这行,记住
+// 0 轴口径(运营者 2026-08-25):收窄=价差向 0 轴靠近,与当前价差在哪一侧有关,
+// 不能拿 z 的符号直译成走扩——价差 −132 时"玻璃更强"是收窄。
 
 /**
  * 生猪「卸仓反弹」窗口(DEC-119)。引擎(DEC-118)按日写在 hog_signals.json 的
@@ -492,9 +467,9 @@ async function loadFundFlow() {
   try {
     const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
     if (res.ok) {
-      const data = (await res.json()) as FundFlow & { hedge_book?: HedgeBook | null }
-      fundFlow.value = data
+      const data = (await res.json()) as { hedge_book?: HedgeBook | null }
       // 对冲簿卡与 pair 信号同一个 JSON(DEC-142);老 JSON 没有这个键 -> 不显示。
+      // z/direction 那部分(资金流向行)DEC-144 已从页面删除,引擎照写留档。
       hedgeBook.value = data.hedge_book ?? null
       // 腿成本另取自净持仓成本引擎(见 loadHedgeCosts 注释),失败只影响 @成本 一截。
       void loadHedgeCosts()
@@ -887,20 +862,7 @@ function openDetail(item: SpreadMonitorItem) {
               </div>
             </el-tooltip>
 
-            <!-- FG-SA 的资金流向背景(DEC-087)。只挂在玻璃×纯碱这一个跨品种组合上:
-                 这条信号预测的正是 FG−SA 价差的方向,而它是本平台唯一在监控的
-                 跨品种组合。与基差同一性质——**背景,不是交易信号**。 -->
-            <el-tooltip v-if="fundFlow && isFgSa(item)" :content="fundFlow.note" placement="top">
-              <div class="basis fund">
-                <span class="k">资金流向</span>
-                <span class="v" :class="fundFlowFor(item).widen ? 'disc' : 'prem'">
-                  {{ fundFlowFor(item).text }}
-                </span>
-                <span class="pctile">强度 {{ fundFlow.z.toFixed(2) }}</span>
-                <span class="pctile flow-tip">背景参考,非进场信号</span>
-              </div>
-            </el-tooltip>
-
+            <!-- 「资金流向」行(DEC-087)在这里挂过,DEC-144 删除——见 HedgeBook 注释。 -->
             <!-- 玻纯「永安对冲簿」状态卡(DEC-142,展示级)。只挂 FG-SA 这一个组合;
                  在场=永安两品种主力净持仓反向(历史约 31% 天数),方向跟它;
                  丑话在引擎 note(tooltip)里。**背景,不是进场信号。** -->
