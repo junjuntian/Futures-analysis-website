@@ -2149,7 +2149,12 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                         if RULES.get("follow_seat") else None),
         "members": members,
         # 一排合约小窗(DEC-134):逐合约的各家持仓,恒 5 个,近月起。
-        "contracts_panel": contracts_panel(seat, grp, d, prev_d),
+        # 括号变化改**较上一交易日**(DEC-146,2026-08-25 运营者拍板:「要改成相对
+        # 昨天变化,不要5日变化」——起因是玻璃永安 8/24 单日砍 1.3 万手,5 日窗却显
+        # +22,715,当日动作被窗口平均掉)。「组内各家」摘要卡仍是 sig_win 日口径,
+        # 两卡口径自此**有意不同**,前端注释各写各的。
+        "contracts_panel": contracts_panel(seat, grp, d,
+                                           mkt.index[-2] if len(mkt) > 1 else None),
         # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
         "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",

@@ -759,7 +759,9 @@ const bySide = computed(() => {
         </div>
       </div>
       <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
-        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、{{ data.signal.win }} 日变化、
+        <!-- DEC-146:五窗括号=较上一交易日(单日动作要看得见);「组内各家」摘要卡
+             仍是 {{ data.signal.win }} 日口径,两卡有意不同,别再改回一致。 -->
+        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、较昨日变化、
         净持仓成本(推算,按结算价推,不是成交均价)。合约到期自动滑出、新合约自动补上,恒 5 个。
       </p>
 
