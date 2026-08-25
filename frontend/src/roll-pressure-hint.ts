@@ -17,8 +17,12 @@ export interface RollPressureState {
   /** 判据(DEC-137,引擎算):窗口内且散户剩仓处历届高位 = ⚡压力进场·做空价差。 */
   entry_flag?: boolean
   suppress_long?: boolean
+  /** 镜像判据(DEC-145,只有鸡蛋配):净空剩仓处历届低位 = ⚡做多价差。老 JSON 没有。 */
+  entry_flag_long?: boolean
+  suppress_short?: boolean
   main: string
-  next: string
+  /** 次主力。鸡蛋主力序列不规则,当前届由引擎按量能选,选不出为 null。 */
+  next: string | null
   days_left: number
   window: number
   retail_net: number | null
@@ -57,11 +61,16 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
     // 展示级品种(焦煤,criterion=False)level 照标 high,但 entry_flag 恒假:
     // 高位只陈述承压,不给进场话术(REPORT_JM_THREE_GAPS_v1:判据无区分度)。
     if (rp.entry_flag) {
-      return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next});窗口内做多价差信号按 ⚠ 对待` }
+      return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next ?? '次主力'});窗口内做多价差信号按 ⚠ 对待` }
     }
     return { on: true, text: `${head} —— 处历届高位,近月对次主力承压(展示级,不进判据)` }
   }
   if (rp.level === 'low') {
+    // 镜像分支(DEC-145,只有鸡蛋配 mirror):散户**净空**剩仓处历届低位 =
+    // 到点被迫买平托近月 → ⚡做多价差。生猪/焦煤 entry_flag_long 恒假,走下面老文案。
+    if (rp.entry_flag_long) {
+      return { on: true, text: `${head} —— ⚡ 压力进场 · 做多价差(多 ${rp.main} 空 ${rp.next ?? '次主力'});窗口内做空价差信号按 ⚠ 对待` }
+    }
     return { on: false, text: `${head} —— 处历届低位,历届低剩仓届价差常反涨,压力不明显` }
   }
   return { on: false, text: `${head} —— 处历届中位,压力一般` }

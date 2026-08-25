@@ -405,6 +405,27 @@ VARIETIES = {
         "long_enabled": True,
         "long_needs_dip": False,  # 价不劣于成本本身就是「不追高」,再叠 dip 是双重计数
         "signal_source": "cost",
+        # **移仓压力表·判据级+镜像(DEC-145,2026-08-25 运营者拍板)**。
+        # 鸡蛋是这块证据最强的品种(REPORT_JD_MODEL_v1):27 届(样本最大),
+        # ≤20/≤10 两档锚点秩相关同号 −0.32;判据 PIT 触发 11 届 +3.04%/胜 82%,
+        # 未触发届仅 +0.41% —— 区分度是真的(焦煤"未触发也在跌"的基流问题不存在)。
+        # mirror=True:散户净空届占 19%(生猪 0%),净空剩仓→到点买平托近月→
+        # ⚡做多价差,4 触发 3 胜 —— 双向机制全平台首证。
+        # 不配 step:鸡蛋主力序列不规则(28 届/3 年,+1/+2 月混着来),历届次主力
+        # 用真实主力序列继任,当前届按 20 日均量选。window 25:鸡蛋一届只有六七周,
+        # ≤30 档锚点实测无信息(秩相关 −0.04),窗口开太早全是噪音。
+        "roll_pressure": {
+            "window": 25, "anchor": 20, "criterion": True, "mirror": True,
+            "note": ("散户(三家反向名单)带符号净剩仓到点必须离场:净多剩仓压近月、"
+                     "净空剩仓托近月。鸡蛋 27 届实测(REPORT_JD_MODEL_v1,样本最大):"
+                     "锚点剩≤20/≤10 日秩相关同号 −0.32,高剩仓组价差 −1.59%,低组 −0.42%。"
+                     "**判据(DEC-145,双向)**:窗口内净多剩仓≥历届 Q3 → ⚡做空价差"
+                     "(空近月多次主力);净空剩仓≤历届 Q1 → ⚡做多价差(多近月空次主力,"
+                     "鸡蛋散户 19% 的届净空,镜像分支全平台首证 4 触发 3 胜);每届一次,"
+                     "持到交割纪律日。PIT 回测触发 11 届 +3.04%/胜 82%,未触发届仅 "
+                     "+0.41%(区分度真)。**丑话**:单轮测试;+10.2/+9.4 两届贡献大头;"
+                     "镜像分支仅 4 例;证据等级同 DEC-137 知情上。"),
+        },
         "out": "jd_signals.json",
         "backtest": "34 笔 净 +48.9%/胜率 64.7%/回撤 −8.9%/夏普 1.23"
                     "(2023-08 起;恒定做空基准 +61.6%/夏普 1.14/回撤 −20.1% —— "
@@ -1453,9 +1474,27 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     """
     d = mkt.index[-1]
     main = str(mkt["main"].get(d))
-    step = int(cfg.get("step", 2))       # 生猪 +2 月,焦煤 +4 月(1/5/9 序列)
-    nxt = next_main_contract(main, step)
+    # 次主力:配了 step 用月份算术(生猪 +2,焦煤 +4);没配(鸡蛋,主力序列不规则)
+    # 当前届按 20 日均量在更远月里选,历届一律用真实主力序列的继任(见下)。
+    if "step" in cfg:
+        nxt = next_main_contract(main, int(cfg["step"]))
+    else:
+        nxt = None
+        if vols is not None:
+            def _ym(c):
+                raw = "".join(ch for ch in str(c) if ch.isdigit())
+                return int(raw) if raw else 0
+            best_v = 0.0
+            for c in vols.columns:
+                if not isinstance(c, str) or c == main or _ym(c) <= _ym(main):
+                    continue
+                vv = vols[c].dropna().tail(20)
+                mv = float(vv.mean()) if len(vv) else 0.0
+                if mv > best_v:
+                    nxt, best_v = c, mv
     dleft = int(mkt["dleft"].get(d, 0))
+    mains_seq = [c for c in dict.fromkeys(mkt["main"]) if isinstance(c, str)]
+    nxt_of = {c: mains_seq[i + 1] for i, c in enumerate(mains_seq[:-1])}
     have = [m for m in RULES["retail_seed"] if m in set(seat["member_key"])]
 
     def retail_net_on(contract: str, upto: pd.Timestamp) -> float | None:
@@ -1489,7 +1528,11 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         r_net = retail_net_on(c, t0)
         if r_net is None:
             continue
-        n = next_main_contract(c, step)
+        # 历届次主力 = 主力序列里的继任(生猪/焦煤下等价于月份算术;鸡蛋序列不规则,
+        # 算术会指到从没当过主力的合约)。继任缺失(最新一届)退回算术。
+        n = nxt_of.get(c) or (next_main_contract(c, int(cfg["step"])) if "step" in cfg else None)
+        if n is None:
+            continue
         move_pct = None
         if n in st.columns:
             spread = (st[c] - st[n]).dropna()
@@ -1528,11 +1571,21 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     # (空近月多次主力);同窗口做多价差信号降级挂⚠。判据在引擎算,前端只渲染(DEC-104)。
     # criterion=False 的品种(焦煤)**展示级**:高位照标 level,⚡永不亮
     # (REPORT_JM_THREE_GAPS_v1:9 届样本判据无区分度,不许升级)。
-    entry_flag = bool(active and level == "high" and cfg.get("criterion", True))
+    # mirror=True 的品种(鸡蛋,DEC-145):镜像分支——散户**净空**剩仓处历届低位
+    # -> ⚡压力进场·做多价差(多近月空次主力,被迫方到点买平托近月)。
+    # 生猪不配 mirror:历届零净空样本,分支无从验证(REPORT_ROLL_PRESSURE_v1)。
+    crit = cfg.get("criterion", True)
+    entry_flag = bool(active and level == "high" and crit
+                      and cur_retail is not None and cur_retail > 0)
+    entry_flag_long = bool(cfg.get("mirror") and active and level == "low" and crit
+                           and cur_retail is not None and cur_retail < 0)
     return {
         "active": active,
         "entry_flag": entry_flag,
         "suppress_long": entry_flag,
+        # 镜像分支(DEC-145,只有配 mirror 的品种可能为 True):⚡做多价差。
+        "entry_flag_long": entry_flag_long,
+        "suppress_short": entry_flag_long,
         "main": main, "next": nxt, "days_left": dleft,
         "window": int(cfg.get("window", 30)),
         "retail_net": None if cur_retail is None else int(round(cur_retail)),
@@ -1544,7 +1597,10 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         "spread_now": spread_now,
         "anchor": anchor,
         "history": hist,
-        "note": ("散户(三家反向名单)带符号净剩仓到点必须离场:净多剩仓压近月、"
+        # 研究引证是品种专属的:配了 note 用配置的(鸡蛋),否则按 criterion 落回
+        # 生猪判据版/焦煤展示版。统计数字(分位/历届表)本身全实算。
+        "note": cfg.get("note") or (
+                 "散户(三家反向名单)带符号净剩仓到点必须离场:净多剩仓压近月、"
                  "净空剩仓托近月。焦煤 9 届实测(REPORT_JM_THREE_GAPS_v1):高剩仓组"
                  "价差 −1.86%(100% 的届在跌),低组 −0.25%,方向同生猪机制;"
                  "但秩相关仅 −0.28(生猪 −0.53)、剩≤10 日锚点翻号,且判据无区分度"

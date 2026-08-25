@@ -95,6 +95,7 @@ onMounted(() => {
   void load()
   void loadFundFlow()
   void loadBounce()
+  void loadJdRoll()
 })
 watch([threshold, tradeDate, historyMode], () => void load())
 
@@ -448,19 +449,33 @@ async function loadBounce() {
       roll_pressure?: RollPressureState | null }
     bounce.value = data.bounce_long ?? null
     bounceHistory.value = data.bounce_history ?? []
-    rollPressure.value = data.roll_pressure ?? null
+    rollPressures.value.LH = data.roll_pressure ?? null
   } catch {
     // 背景信息取不到就不显示,页面主体照常
   }
 }
 
-/** 移仓压力(DEC-136):只挂在含近月主力那条腿的生猪跨月组合上,窗口内才显示。 */
-const rollPressure = ref<RollPressureState | null>(null)
+/** 移仓压力:挂在含近月主力那条腿的跨月组合上,窗口内才显示。
+ *  生猪(DEC-136/137,⚡做空价差)+ 鸡蛋(DEC-145,判据级双向含镜像⚡做多价差);
+ *  焦煤展示级只在品种页,不进套利监控(REPORT_JM_THREE_GAPS_v1:判据无区分度,
+ *  这里的行内位是给"可操作"的信号留的)。 */
+const rollPressures = ref<Record<string, RollPressureState | null>>({ LH: null, JD: null })
 function rollAt(item: SpreadMonitorItem): RollPressureState | null {
-  const rp = rollPressure.value
+  if (item.is_cross_variety) return null
+  const rp = rollPressures.value[item.instrument_1] ?? null
   if (!rp || !rp.active) return null
-  if (!isLhCalendar(item)) return null
   return item.contract_1 === rp.main || item.contract_2 === rp.main ? rp : null
+}
+
+async function loadJdRoll() {
+  try {
+    const res = await fetch(`/smart-money/jd_signals.json?t=${Date.now()}`)
+    if (!res.ok) return
+    const data = (await res.json()) as { roll_pressure?: RollPressureState | null }
+    rollPressures.value.JD = data.roll_pressure ?? null
+  } catch {
+    // 背景信息取不到就不显示,页面主体照常
+  }
 }
 
 async function loadFundFlow() {
