@@ -1,4 +1,5 @@
-"""玻璃/纯碱完整模型套装(PLAN_FGSA_MODEL_v1)。跑法:python research/run_fgsa_model.py [FG|SA]"""
+"""玻璃/纯碱完整模型套装(PLAN_FGSA_MODEL_v1;JD 档按 PLAN_JD_MODEL_v1 加)。
+跑法:python research/run_fgsa_model.py [FG|SA|JD]"""
 import sys, pathlib, io
 import numpy as np, pandas as pd
 
@@ -7,7 +8,7 @@ import hog_money as H
 import campaign as C
 
 code = sys.argv[1] if len(sys.argv) > 1 else "FG"
-K = {"FG": 0.87, "SA": 1.18}[code]           # 规模系数,预注册写死
+K = {"FG": 0.87, "SA": 1.18, "JD": 0.37}[code]   # 规模系数,预注册写死(JD 见 PLAN_JD_MODEL_v1)
 D = pathlib.Path(__file__).resolve().parent / "data"
 OUT = pathlib.Path(__file__).resolve().parent / "out"
 price = H.clean_price(pd.read_csv(D / f"{code.lower()}_price.csv.gz"))
@@ -18,6 +19,11 @@ v = H.use(code)
 _rs = pd.Timestamp(H.RULES["replay_start"])
 price = price[price["trade_date"] >= _rs]
 seat = seat[seat["trade_date"] >= _rs]
+# 采集坏日整体剔除(JD 2026-07-31/08-03/08-05:akshare 只有结算价,量/仓/开盘全缺
+# 且每合约重复 3 行)——留着会让 campaign 逐日矩阵与逐笔对不上(两边索引不一致)。
+_ok_days = price.dropna(subset=["open_interest"])["trade_date"].unique()
+price = price[price["trade_date"].isin(_ok_days)]
+seat = seat[seat["trade_date"].isin(_ok_days)]
 mkt = H.main_series(price)
 op, st = H.contract_prices(price)
 mkt = mkt[mkt.index >= pd.Timestamp(H.RULES["replay_start"])]
