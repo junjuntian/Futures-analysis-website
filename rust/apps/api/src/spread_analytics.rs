@@ -1897,11 +1897,10 @@ pub async fn query_seat_net_position(
     // (与 report_cache 同一取舍)。序列化失败不该拖垮请求——直接原样返回。
     match serde_json::to_value(&response) {
         Ok(value) => {
-            state
-                .net_position_cache
-                .write()
-                .await
-                .insert((context.workspace_id(), cache_key), (version, value.clone()));
+            state.net_position_cache.write().await.insert(
+                (context.workspace_id(), cache_key),
+                (version, value.clone()),
+            );
             Ok(Json(ApiResponse::new(value, request_id)).into_response())
         }
         Err(_) => Ok(Json(ApiResponse::new(response, request_id)).into_response()),
