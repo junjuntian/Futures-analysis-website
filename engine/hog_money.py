@@ -1956,6 +1956,13 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
         o2c = mkt["o2c"].iloc[-1]
         b_mark = b * (1 + (o2c if np.isfinite(o2c) else 0.0))
         runs[-1]["ret_pct"] = round(s_ * (b_mark / a - 1) * 100, 2)
+    # 出场日/出场价 = 下一段的翻向日/进场价——反手在同一个次日开盘上完成,老仓的
+    # 出场成交与新仓的进场成交是同一口价(DEC-150 二改:历史页与主引擎同规格)。
+    # 最后一段持有中为 None。
+    for r_, nx_ in zip(runs, runs[1:]):
+        r_["exit_date"], r_["exit_px"] = nx_["date"], nx_["entry_px"]
+    if runs:
+        runs[-1]["exit_date"] = runs[-1]["exit_px"] = None
     # 扣成本净值(单边 0.05%,翻转日双边)
     turn = (pos.shift(2) != pos.shift(3)).astype(float)
     daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()
@@ -1980,8 +1987,9 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
         "entry_px": runs[-1]["entry_px"] if runs else None,
         "flipped_today": bool(cur_side is not None and prev_side is not None
                               and cur_side != prev_side),
-        # 40 段:历史信号页第二引擎表(DEC-150)要全屏看;今日卡仍只取尾 8。
-        "history": runs[-40:],
+        # 全量段(DEC-150 二改,运营者:「所有的信号…全部一样」):历史页翻页看全史;
+        # 今日卡仍只取尾 8。67 段量级,payload 增量无害。
+        "history": runs,
         "stats": stats,
         # 研究引证(相关/组合夏普/丑话)是品种专属的,配置给 note 就用配置的;
         # 不给就落回焦煤华泰版(DEC-139 首发品种)。统计数字本身全部实算不写死。

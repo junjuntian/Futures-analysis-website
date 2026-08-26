@@ -197,7 +197,9 @@ interface HogPayload {
     entry_px: number | null
     flipped_today: boolean
     history: Array<{ date: string; side: 'long' | 'short'; contract: string
-      entry_px: number | null; hold_days: number; ret_pct: number; open: boolean }>
+      entry_px: number | null; hold_days: number; ret_pct: number; open: boolean
+      /** DEC-150 二改:引擎给的出场日/出场价(=下一段翻向日的同一口开盘);老 JSON 没有。 */
+      exit_date?: string | null; exit_px?: number | null }>
     stats: { cum_pct: number; sharpe: number | null; max_dd_pct: number; flips: number
       yearly: Record<string, number> }
     note: string
@@ -280,12 +282,46 @@ const tab = ref<'today' | 'history' | 'group' | 'rules'>('today')
 // 的品种(焦煤华泰/玻璃永安)出现按钮;换品种时归位主引擎。
 const histEngine = ref<'main' | 'second'>('main')
 
-/** 第二引擎翻转段,**倒序**(最新在上,运营者的历史表铁律)+ 补出场日 = 下一段翻向日。 */
-const secondRows = computed(() => {
+/** 第二引擎翻转段,**倒序**(最新在上,运营者的历史表铁律)。出场日/价引擎已给
+ *  (DEC-150 二改);老 JSON 没有时前端补出场日=下一段翻向日。 */
+const secondSorted = computed(() => {
   const h = data.value?.seat_follow?.history ?? []
   return h
-    .map((seg, i) => ({ ...seg, exit_date: h[i + 1]?.date ?? null }))
+    .map((seg, i) => ({
+      ...seg,
+      exit_date: seg.exit_date ?? h[i + 1]?.date ?? null,
+      exit_px: seg.exit_px ?? h[i + 1]?.entry_px ?? null
+    }))
     .reverse()
+})
+// 与主引擎同一套翻页(运营者 2026-08-26:「还有底下的翻页,全部一样」),状态各管各的。
+const page2 = ref(1)
+const pageSize2 = ref(20)
+const secondRows = computed(() => {
+  const start = (page2.value - 1) * pageSize2.value
+  return secondSorted.value.slice(start, start + pageSize2.value)
+})
+const total2 = computed(() => secondSorted.value.length)
+function changeSize2(size: number) {
+  pageSize2.value = size
+  page2.value = 1
+}
+
+/** 第二引擎的多空分栏统计(与主引擎三卡同构;只算已平段,持有中那段不进)。 */
+const secondBySide = computed(() => {
+  const closed = (data.value?.seat_follow?.history ?? []).filter((s) => !s.open)
+  const calc = (list: typeof closed) => {
+    if (!list.length) return null
+    const cum = (list.reduce((acc, s) => acc * (1 + s.ret_pct / 100), 1) - 1) * 100
+    const win = (list.filter((s) => s.ret_pct > 0).length / list.length) * 100
+    const avg = list.reduce((acc, s) => acc + s.ret_pct, 0) / list.length
+    return { n: list.length, cum, win, avg }
+  }
+  return {
+    all: calc(closed),
+    short: calc(closed.filter((s) => s.side === 'short')),
+    long: calc(closed.filter((s) => s.side === 'long'))
+  }
 })
 // 鸡蛋(DEC-112)进场走机构成本信号,策略方案与进场条件的文案都要换一套。
 const isCost = computed(() => data.value?.rules.signal_source === 'cost')
@@ -339,6 +375,7 @@ const costsByContract = ref<Record<string, Record<string, SeatCost>>>({})
 onMounted(async () => {
   void loadEngineFingerprint()
   histEngine.value = 'main'   // 换品种回到主引擎视图(DEC-150)
+  page2.value = 1
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
     const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
@@ -983,6 +1020,28 @@ const bySide = computed(() => {
     <!-- ------------------------------------------------ 历史信号 -->
     <!-- 主/第二引擎两套历史各占一屏,按钮互切,不重叠(DEC-150)。 -->
     <template v-else-if="tab === 'history' && histEngine === 'second' && data.seat_follow">
+      <!-- 与主引擎同规格(DEC-150 二改,运营者:「不要少做…全部一样」):三卡+对比+全量表+翻页。 -->
+      <div class="cards">
+        <div v-if="secondBySide.all" class="card">
+          <h3>全部 {{ secondBySide.all.n }} 段<span class="badge ok">跟{{ data.seat_follow.member.slice(0, 2) }}翻转段</span></h3>
+          <div class="kv"><span class="k">累计(毛)</span><span class="v" :class="pnlClass(secondBySide.all.cum)">{{ pct(secondBySide.all.cum) }}</span></div>
+          <div class="kv"><span class="k">胜率</span><span class="v">{{ secondBySide.all.win.toFixed(1) }}%</span></div>
+          <div class="kv"><span class="k">单段均值</span><span class="v">{{ pct(secondBySide.all.avg) }}</span></div>
+        </div>
+        <div v-if="secondBySide.short" class="card">
+          <h3>做空 {{ secondBySide.short.n }} 段</h3>
+          <div class="kv"><span class="k">累计(毛)</span><span class="v" :class="pnlClass(secondBySide.short.cum)">{{ pct(secondBySide.short.cum) }}</span></div>
+          <div class="kv"><span class="k">胜率</span><span class="v">{{ secondBySide.short.win.toFixed(1) }}%</span></div>
+          <div class="kv"><span class="k">单段均值</span><span class="v">{{ pct(secondBySide.short.avg) }}</span></div>
+        </div>
+        <div v-if="secondBySide.long" class="card">
+          <h3>做多 {{ secondBySide.long.n }} 段</h3>
+          <div class="kv"><span class="k">累计(毛)</span><span class="v" :class="pnlClass(secondBySide.long.cum)">{{ pct(secondBySide.long.cum) }}</span></div>
+          <div class="kv"><span class="k">胜率</span><span class="v">{{ secondBySide.long.win.toFixed(1) }}%</span></div>
+          <div class="kv"><span class="k">单段均值</span><span class="v">{{ pct(secondBySide.long.avg) }}</span></div>
+        </div>
+      </div>
+
       <div class="card wide compare">
         <h3>
           第二引擎 · 跟{{ data.seat_follow.member }} — 回放(扣成本)
@@ -1010,7 +1069,7 @@ const bySide = computed(() => {
       <table class="tbl">
         <thead>
           <tr><th>方向</th><th>翻向日(进场)</th><th>出场(下一次翻向)</th><th>合约</th>
-            <th class="num">进场价</th><th class="num">段收益</th><th class="num">持有</th></tr>
+            <th class="num">进场价</th><th class="num">出场价</th><th class="num">段收益</th><th class="num">持有</th></tr>
         </thead>
         <tbody>
           <tr v-for="(s, i) in secondRows" :key="i">
@@ -1019,15 +1078,27 @@ const bySide = computed(() => {
             <td>{{ s.exit_date ?? (s.open ? '持有中' : '—') }}</td>
             <td>{{ s.contract }}</td>
             <td class="num">{{ fmt(s.entry_px) }}</td>
+            <td class="num">{{ fmt(s.exit_px) }}</td>
             <td class="num" :class="pnlClass(s.ret_pct)">{{ pct(s.ret_pct) }}</td>
             <td class="num">{{ s.hold_days }} 日</td>
           </tr>
         </tbody>
       </table>
+      <div class="pager">
+        <el-pagination
+          v-model:current-page="page2"
+          :page-size="pageSize2"
+          :page-sizes="[10, 20, 30, 50]"
+          :total="total2"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @size-change="changeSize2"
+        />
+      </div>
       <p class="note">
-        {{ data.seat_follow.member }}的翻转段全按**净持仓方向翻向日**切分,进出场都在翻向次日开盘,
-        没有别的出场规则。表内段收益为毛收益;上方统计为扣成本口径(0.1%/翻转)。
-        全历史 {{ data.seat_follow.stats.flips }} 段,此处显示最近 {{ secondRows.length }} 段。
+        {{ data.seat_follow.member }}的翻转段全按**净持仓方向翻向日**切分,出场与下一段进场是
+        翻向次日开盘的**同一口价**(反手),没有别的出场规则。表内段收益为毛收益;
+        「回放(扣成本)」那行统计为扣成本口径(0.1%/翻转)。全历史 {{ total2 }} 段全部在此,可翻页。
       </p>
     </template>
     <template v-else-if="tab === 'history'">
