@@ -58,12 +58,23 @@ pub struct SpreadAnalyticsState {
     /// `.clear()` 整体失效兜住。缓存的是 serde_json::Value 而不是响应结构体,
     /// 免去给整棵响应类型树加 Clone。
     pub report_cache: ReportCache,
+    /// 净持仓查询缓存(DEC-148,2026-08-25 运营者:「刷新一遍就要重新计算…应该跟
+    /// 总览的那个图一样,每天数据采集完成之后算完一遍,后续采集数据之前不用重算」)。
+    /// 与 report_cache 同一设计(DEC-078):版本查询毫秒级,保护的是逐「席位×合约」
+    /// 的成本推算。键含完整查询参数——五窗/品种页每天敲的是同一批键,天然全命中。
+    pub net_position_cache: NetPositionCache,
 }
 
 /// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日),
 /// 值=(算这份时的数据版本, 已序列化响应)。版本见 `report_data_version`。
 type ReportCache =
     Arc<tokio::sync::RwLock<HashMap<(Uuid, Date), (Option<OffsetDateTime>, serde_json::Value)>>>;
+
+/// 净持仓缓存:键=(工作区, 规范化查询串 instrument|members|contract|trade_date),
+/// 值=(算这份时的数据版本, 已序列化响应)。版本一变逐键失效;条目数由真实查询
+/// 组合决定(单人面板,量级几十),不设淘汰。
+type NetPositionCache =
+    Arc<tokio::sync::RwLock<HashMap<(Uuid, String), (Option<OffsetDateTime>, serde_json::Value)>>>;
 
 /// 后台预热的巡检间隔。每次只做一条 `report_data_version` 轻查询,
 /// **版本没变就什么都不做**——所以间隔短不等于费 CPU。
@@ -1529,6 +1540,46 @@ pub async fn query_seat_net_position(
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_uppercase);
 
+    // **数据没变就一直用这份**(DEC-148,设计同 report_cache/DEC-078)。
+    // 版本锚 = 本工作区席位数据最新交易日的 report_data_version:采集落库(新一天
+    // 或同日重采)版本即变,所有键下一次访问自动重算;贵的是它保护的成本推算。
+    let cache_key = format!(
+        "{instrument}|{}|{}|{}",
+        members.join(","),
+        contract.as_deref().unwrap_or(""),
+        as_of.map(|d| d.to_string()).unwrap_or_default()
+    );
+    let version = match database::spread_analytics::seat_trade_dates(
+        &state.auth.pool,
+        context.workspace_id(),
+        None,
+        1,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?
+    .into_iter()
+    .next()
+    {
+        Some(anchor) => database::spread_analytics::report_data_version(
+            &state.auth.pool,
+            context.workspace_id(),
+            anchor,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?,
+        None => None,
+    };
+    if version.is_some()
+        && let Some((cached_version, value)) = state
+            .net_position_cache
+            .read()
+            .await
+            .get(&(context.workspace_id(), cache_key.clone()))
+        && *cached_version == version
+    {
+        return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
+    }
+
     let all_members = database::spread_analytics::seat_members(
         &state.auth.pool,
         context.workspace_id(),
@@ -1828,24 +1879,33 @@ pub async fn query_seat_net_position(
             .to_string()
     });
 
-    Ok(Json(ApiResponse::new(
-        SeatNetPositionResponse {
-            instrument,
-            contract,
-            is_variety_total,
-            members,
-            all_members,
-            contracts,
-            price_series_kind,
-            price_multiplier,
-            days,
-            latest_trade_date,
-            latest_members,
-            member_series,
-        },
-        request_id,
-    ))
-    .into_response())
+    let response = SeatNetPositionResponse {
+        instrument,
+        contract,
+        is_variety_total,
+        members,
+        all_members,
+        contracts,
+        price_series_kind,
+        price_multiplier,
+        days,
+        latest_trade_date,
+        latest_members,
+        member_series,
+    };
+    // 写缓存(DEC-148):存序列化后的 Value,免去给整棵响应类型树加 Clone
+    // (与 report_cache 同一取舍)。序列化失败不该拖垮请求——直接原样返回。
+    match serde_json::to_value(&response) {
+        Ok(value) => {
+            state
+                .net_position_cache
+                .write()
+                .await
+                .insert((context.workspace_id(), cache_key), (version, value.clone()));
+            Ok(Json(ApiResponse::new(value, request_id)).into_response())
+        }
+        Err(_) => Ok(Json(ApiResponse::new(response, request_id)).into_response()),
+    }
 }
 
 /// 解析逗号分隔的会员名，顺带去重。
@@ -2460,6 +2520,9 @@ pub async fn save_overview_report_levels(
     .map_err(|_| SpreadApiError::Internal(request_id))?;
     // 压力位进了响应上半,保存后整体失效缓存,立即可见。
     state.report_cache.write().await.clear();
+    // 净持仓缓存一并清(DEC-148):手工写虽不影响它的计算,统一失效省一次
+    // 「为什么这两个缓存行为不一样」的排查。
+    state.net_position_cache.write().await.clear();
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -2515,6 +2578,9 @@ pub async fn save_overview_report_seat_groups(
     .map_err(|_| SpreadApiError::Internal(request_id))?;
     // 席位组决定响应下半的全部行,保存后整体失效缓存。
     state.report_cache.write().await.clear();
+    // 净持仓缓存一并清(DEC-148):手工写虽不影响它的计算,统一失效省一次
+    // 「为什么这两个缓存行为不一样」的排查。
+    state.net_position_cache.write().await.clear();
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
