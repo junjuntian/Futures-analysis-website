@@ -45,6 +45,8 @@ interface HogTrade {
   ret_pct: number
   hold_days: number
   exit_reason: string | null
+  /** 换月接力(DEC-147):本笔是上一合约交割纪律出场后接回来的,值=来源合约。老 JSON 没有。 */
+  rolled_from?: string | null
   /** campaign(DEC-133)附加:批次成本与持仓中的阵营状态。旧产物没有。 */
   batch_cost?: number | null
   /** 跟批加仓(DEC-135):本笔战役的单位数与各批成交明细;entry_px 为均价。 */
@@ -783,7 +785,7 @@ const bySide = computed(() => {
               <th>散户接盘</th></tr></thead>
             <tbody>
               <tr v-for="t in data.campaign.positions" :key="t.contract + t.side">
-                <td>{{ t.contract }}</td>
+                <td>{{ t.contract }}<span v-if="t.rolled_from" class="units-badge" :title="`交割纪律出场后自 ${t.rolled_from} 接力(机构无出货信号,DEC-147)`">接力</span></td>
                 <td><span class="side" :class="t.side">{{ sideText(t.side) }}</span></td>
                 <td>
                   {{ t.entry_date }}
@@ -1003,7 +1005,7 @@ const bySide = computed(() => {
             <td><span class="side" :class="t.side">{{ sideText(t.side) }}</span></td>
             <td>{{ t.entry_date }}</td>
             <td>{{ t.exit_date ?? '持有中' }}</td>
-            <td>{{ t.contract }}</td>
+            <td>{{ t.contract }}<span v-if="t.rolled_from" class="units-badge" :title="`交割纪律出场后自 ${t.rolled_from} 接力(机构无出货信号,DEC-147)`">接力</span></td>
             <td class="num">{{ fmt(t.entry_px) }}<span v-if="(t.units ?? 1) > 1" class="units-badge">×{{ t.units }}批</span></td>
             <td class="num">{{ fmt(t.exit_px) }}</td>
             <td class="num" :class="pnlClass(t.ret_pct)">{{ pct(t.ret_pct) }}</td>

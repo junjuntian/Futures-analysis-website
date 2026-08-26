@@ -98,6 +98,10 @@ RULES = {
     # (生猪 8/14 平 LH2609、同日开 LH2611 @12,425)。运营者:除非触发**新的**进场信号。
     # 「新」= 该方向的进场信号至少消失过一天再出现;反方向不受限。
     "rearm_after_delivery": True,
+    # 换月接力(DEC-147 候选):交割纪律出场当天若无任何真实出场理由,次日开盘在新
+    # 主力同向接回。**默认关**,按品种在 VARIETIES 打开(回测证据先行);
+    # 与 rearm_after_delivery 分工见 replay() 内注释。
+    "roll_continue": False,
     # **做多支路默认关闭**(2026-08-19 运营者拍板)。三条依据:
     #   ① 一年选人口径下多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),
     #      还贡献了全表最差的 −7.4%;关掉后夏普 1.96 → 2.39。
@@ -465,6 +469,12 @@ VARIETIES = {
         # **三条丑话**(页面照挂):①肥尾——66 段胜率 41%,利润的 130% 在 5 个长趋势段,
         # 要连吃十几段小亏;②五选一 Bonferroni p≈0.17,先验押在 IC 旁证上;
         # ③2026 年靠 6 月一波。
+        # **换月接力开(DEC-147,2026-08-25 运营者指出 8/17 案)**:JM2609 纪律出场
+        # +6.71% 当天机构零出货信号,2701 主升接不回来。接力条件与 DEC-131 的分工见
+        # replay() 注释。回放:三年仅触发 2 次(+226.5%→+228.2%,夏普回撤不变)——
+        # 对历史近中性,修的是机制:交割是日历,机构没撤就不该丢仓(七点第 7 条的
+        # 对偶命题)。8/17 案接力后 = JM2701 多 @1528.5。
+        "roll_continue": True,
         "follow_seat": {"member": "华泰期货"},
         # **移仓压力表·展示级(2026-08-24 运营者拍板,REPORT_JM_THREE_GAPS_v1)**。
         # criterion=False:焦煤**只显示不进判据**,与生猪(DEC-137 ⚡判据)不同——
@@ -500,6 +510,8 @@ def use(code: str) -> dict:
     RULES["cost_need_adding"] = v.get("cost_need_adding", False)
     RULES["cost_min_age"] = v.get("cost_min_age", 0)
     RULES["exit_mode"] = v.get("exit_mode", "retail")
+    # 换月接力(DEC-147 候选):按品种打开,默认关。
+    RULES["roll_continue"] = bool(v.get("roll_continue", False))
     RULES["long_mode"] = v.get("long_mode", "flow")
     RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
     # 做多腿起始日(DEC-124):None = 全程;给了日期就只在该日起允许做多进场(之前只做空)。
@@ -1274,6 +1286,8 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
     trades, side, entry_i, entry_c, pending = [], 0, None, None, None
     # 临近交割强平后的「待重新触发」方向(DEC-131):0 = 不限;±1 = 该方向要等信号消失一天再出现。
     rearm = 0
+    # 换月接力标记:本笔是从哪个合约接力来的(None = 正常进场)。
+    roll_from = None
     pos = pd.Series(0.0, index=idx)
     for i, d in enumerate(idx):
         z = z_out.get(d, np.nan)
@@ -1318,11 +1332,39 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
                 "ret_pct": round(booked * 100, 2),
                 "hold_days": i - entry_i,
                 "exit_reason": reason,
+                "rolled_from": roll_from,
                 "_i": entry_i, "_j": i, "_c": entry_c, "_fill": j,
             })
-            if reason == "临近交割" and RULES.get("rearm_after_delivery", True):
-                rearm = side
-            side, pending = 0, None
+            roll_from = None
+            # 换月接力(DEC-147 候选,默认关):交割纪律是**日历事件不是观点**——
+            # 运营者 2026-08-25 指出 JM2609 8/17 纪律出场 +6.71% 时机构零出货信号,
+            # 趋势没走完的仓被日历砍掉后接不回来(进场端要等全新触发)。
+            # 接力条件 = 当天除交割外**没有任何真实出场理由**(机构未触发/未止损/
+            # 未反向/未消退),且新主力可进、有成交价 → 次日开盘同向接回,
+            # 视作同一轮持仓的延续(trade 记 rolled_from)。
+            # 与 DEC-131 的分工:131 管「进场信号驱动的续仓」(状态型信号没断不算
+            # 新信号,那是**进场端**的事);接力由「出场条件未触发」驱动,是**出场端**
+            # 的延续,只在配 roll_continue=True 的品种生效,两者不冲突。
+            c_roll = main.get(d)
+            can_roll = (reason == "临近交割" and RULES.get("roll_continue")
+                        and isinstance(c_roll, str) and c_roll != entry_c
+                        and days_to_window_end(c_roll, d) > RULES["exit_before_delivery"]
+                        and np.isfinite(px(c_roll, i + 1, "open"))
+                        and not (extra_exit is not None and bool(extra_exit.get(d, False)))
+                        and cum > -RULES["stop"]
+                        and not ((not disable_reverse) and np.isfinite(z)
+                                 and side * z <= -RULES["enter"])
+                        and not (np.isfinite(z) and abs(z) <= RULES["exit_z"]
+                                 and side * z <= 0))
+            if can_roll:
+                roll_from = entry_c
+                entry_i, entry_c = i, c_roll
+                pending = None
+                # side 保持;rearm 不设——接力不是新进场,轮不到 DEC-131 管。
+            else:
+                if reason == "临近交割" and RULES.get("rearm_after_delivery", True):
+                    rearm = side
+                side, pending = 0, None
         ze = z_in.get(d, np.nan)
         c_now = main.get(d)
         # 交割窗口内不进场:只挡不进。换月之后主力是新合约,剩余天数回到 90 多天,
@@ -1361,7 +1403,8 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
             "entry_date": idx[entry_i].strftime("%Y-%m-%d"), "exit_date": None,
             "entry_px": _f(p_in), "exit_px": None, "contract": entry_c,
             "ret_pct": round(cum * 100, 2), "hold_days": len(idx) - 1 - entry_i,
-            "exit_reason": None, "_i": entry_i, "_j": None, "_c": entry_c, "_fill": None,
+            "exit_reason": None, "rolled_from": roll_from,
+            "_i": entry_i, "_j": None, "_c": entry_c, "_fill": None,
         })
 
     # ---- 逐日净值 ----
