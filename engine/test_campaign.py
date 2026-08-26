@@ -191,14 +191,16 @@ def test_contracts_panel_到期滑出_近月排序_未上榜(monkeypatch=None):
     prev = pd.Timestamp("2026-08-17")
     rows = []
     # 六个活跃合约 + 一个已到期的(2607 止点在 2026-06,应被剔除)
+    # 逐腿列(DEC-149):甲 = 空单从 80 加到 130(加空 50)、多单 20→30;
+    # 净变化 −40 = 多变(+10) − 空变(+50),恒等式在断言里钉住。
     for c in ("LH2607", "LH2609", "LH2611", "LH2701", "LH2703", "LH2705", "LH2707"):
         rows.append({"member_key": "甲", "contract": c, "trade_date": d,
-                     "net": -100.0, "net_off": -100.0})
+                     "net": -100.0, "net_off": -100.0, "long_q": 30.0, "short_q": 130.0})
         rows.append({"member_key": "甲", "contract": c, "trade_date": prev,
-                     "net": -60.0, "net_off": -60.0})
+                     "net": -60.0, "net_off": -60.0, "long_q": 20.0, "short_q": 80.0})
     # 乙只在 2611 上有行,且只有今天
     rows.append({"member_key": "乙", "contract": "LH2611", "trade_date": d,
-                 "net": 50.0, "net_off": 50.0})
+                 "net": 50.0, "net_off": 50.0, "long_q": 50.0, "short_q": 0.0})
     seat = pd.DataFrame(rows)
     panel = H.contracts_panel(seat, ["甲", "乙"], d, prev)
     names = [p["contract"] for p in panel]
@@ -207,7 +209,11 @@ def test_contracts_panel_到期滑出_近月排序_未上榜(monkeypatch=None):
     jia = next(m for m in p2611["members"] if m["member"] == "甲")
     yi = next(m for m in p2611["members"] if m["member"] == "乙")
     assert jia["net"] == -100 and jia["change"] == -40 and jia["on_board"]
+    # DEC-149 逐腿:加空 50、加多 10;净变 = 多变 − 空变。
+    assert jia["change_long"] == 10 and jia["change_short"] == 50
+    assert jia["change"] == jia["change_long"] - jia["change_short"]
     assert yi["net"] == 50 and yi["on_board"]
+    assert yi["change_long"] is None and yi["change_short"] is None  # 昨天没行=不可知
     p2701 = next(p for p in panel if p["contract"] == "LH2701")
     yi2 = next(m for m in p2701["members"] if m["member"] == "乙")
     assert yi2["on_board"] is False

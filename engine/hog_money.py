@@ -1865,13 +1865,32 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
         members = []
         for m in grp:
             now_rows = today[today["member_key"] == m]
+            was_rows = (prev[prev["member_key"] == m] if prev is not None else None)
             now = float(now_rows["net"].sum()) if len(now_rows) else 0.0
-            was = (float(prev[prev["member_key"] == m]["net"].sum())
-                   if prev is not None and len(prev[prev["member_key"] == m]) else np.nan)
+            was = (float(was_rows["net"].sum())
+                   if was_rows is not None and len(was_rows) else np.nan)
+
+            # 逐腿变化(DEC-149,运营者 2026-08-26):净空席位的净变化 "(−11,988)"
+            # 实际是**加空**,读起来却像在减——分腿写清(多±X/空±X)才无歧义。
+            # 某腿任一天掉榜(NaN)= 该腿变化不可知,给 None,前端退回净变化显示。
+            def leg_chg(col: str):
+                # 帧里没有腿列(研究夹具/极简调用)= 不可知,与掉榜同待遇。
+                if col not in now_rows.columns or (was_rows is not None and col not in was_rows.columns):
+                    return None
+                if not len(now_rows) or was_rows is None or not len(was_rows):
+                    return None
+                a = now_rows[col].sum(min_count=1)
+                b = was_rows[col].sum(min_count=1)
+                if not (np.isfinite(a) and np.isfinite(b)):
+                    return None
+                return round(float(a - b))
+
             members.append({
                 "member": m,
                 "net": round(now),
                 "change": None if not np.isfinite(was) else round(now - was),
+                "change_long": leg_chg("long_q"),
+                "change_short": leg_chg("short_q"),
                 "on_board": bool(len(now_rows)),
             })
         out.append({"contract": c,

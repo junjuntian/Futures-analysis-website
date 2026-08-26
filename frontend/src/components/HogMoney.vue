@@ -33,7 +33,24 @@ interface MemberLeg {
   member: string
   net: number
   change: number | null
+  /** 逐腿变化(DEC-149,五窗专属;组内各家卡不给):多单/空单各自较昨日的增减。
+   *  掉榜日该腿不可知为 null。老 JSON 没有这两个键。 */
+  change_long?: number | null
+  change_short?: number | null
   on_board: boolean
+}
+
+/** 五窗括号文案(DEC-149):分腿写清「多+X 空+Y」——净空席位的净变化 "(−1万)"
+ *  实际是加空,按净数显示会读反。腿数据不可知时退回净变化,两头都没有就不显示。 */
+function panelChg(m: MemberLeg): string | null {
+  const parts: string[] = []
+  if (m.change_long) parts.push(`多${m.change_long > 0 ? '+' : ''}${fmt(m.change_long)}`)
+  if (m.change_short) parts.push(`空${m.change_short > 0 ? '+' : ''}${fmt(m.change_short)}`)
+  if (parts.length) return parts.join(' ')
+  if (m.change_long != null || m.change_short != null) return null // 腿已知且都没动
+  if (m.change !== null && m.change !== undefined && m.change !== 0)
+    return `净${m.change > 0 ? '+' : ''}${fmt(m.change)}` // 两腿都不可知才退回净数
+  return null
 }
 interface HogTrade {
   side: 'short' | 'long'
@@ -751,8 +768,9 @@ const bySide = computed(() => {
             <span class="v">
               <template v-if="m.on_board">
                 <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
-                <span v-if="m.change !== null && m.change !== 0" :class="pnlClass(m.change)">
-                  ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})</span>
+                <!-- DEC-149:分腿写变化(多±/空±),净数会把"加空"读成"在减"。 -->
+                <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)">
+                  ({{ panelChg(m) }})</span>
                 <span class="cost">{{ memberCost(c.contract, m.member) }}</span>
               </template>
               <span v-else class="gray">未上榜</span>
@@ -763,7 +781,8 @@ const bySide = computed(() => {
       <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
         <!-- DEC-146:五窗括号=较上一交易日(单日动作要看得见);「组内各家」摘要卡
              仍是 {{ data.signal.win }} 日口径,两卡有意不同,别再改回一致。 -->
-        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、较昨日变化、
+        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、较昨日**逐腿**变化
+        (多±X=多单增减,空±X=空单增减;掉榜腿不可知时退回净变化,标「净」)、
         净持仓成本(推算,按结算价推,不是成交均价)。合约到期自动滑出、新合约自动补上,恒 5 个。
       </p>
 
