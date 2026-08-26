@@ -275,6 +275,18 @@ interface HogPayload {
 const data = ref<HogPayload | null>(null)
 const error = ref('')
 const tab = ref<'today' | 'history' | 'group' | 'rules'>('today')
+// 历史信号页的引擎切换(DEC-150,运营者 2026-08-26:「把华泰的历史信号放进去,
+// 标注清楚,单独做个第二引擎按钮,两个历史信号就不重叠」)。只有配了 seat_follow
+// 的品种(焦煤华泰/玻璃永安)出现按钮;换品种时归位主引擎。
+const histEngine = ref<'main' | 'second'>('main')
+
+/** 第二引擎翻转段,**倒序**(最新在上,运营者的历史表铁律)+ 补出场日 = 下一段翻向日。 */
+const secondRows = computed(() => {
+  const h = data.value?.seat_follow?.history ?? []
+  return h
+    .map((seg, i) => ({ ...seg, exit_date: h[i + 1]?.date ?? null }))
+    .reverse()
+})
 // 鸡蛋(DEC-112)进场走机构成本信号,策略方案与进场条件的文案都要换一套。
 const isCost = computed(() => data.value?.rules.signal_source === 'cost')
 // 生猪(DEC-133)整套换成逐合约战役:多仓并行,进出场文案与策略方案页全换。
@@ -326,6 +338,7 @@ const costsByContract = ref<Record<string, Record<string, SeatCost>>>({})
 
 onMounted(async () => {
   void loadEngineFingerprint()
+  histEngine.value = 'main'   // 换品种回到主引擎视图(DEC-150)
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
     const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
@@ -968,6 +981,55 @@ const bySide = computed(() => {
     </template>
 
     <!-- ------------------------------------------------ 历史信号 -->
+    <!-- 主/第二引擎两套历史各占一屏,按钮互切,不重叠(DEC-150)。 -->
+    <template v-else-if="tab === 'history' && histEngine === 'second' && data.seat_follow">
+      <div class="card wide compare">
+        <h3>
+          第二引擎 · 跟{{ data.seat_follow.member }} — 回放(扣成本)
+          <button class="eng-btn" @click="histEngine = 'main'">◂ 返回主引擎</button>
+        </h3>
+        <table class="cmp">
+          <thead><tr><th></th><th class="num">累计</th><th class="num">夏普</th><th class="num">最大回撤</th><th class="num">翻转</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>跟{{ data.seat_follow.member.slice(0, 2) }}(单跑)</td>
+              <td class="num" :class="pnlClass(data.seat_follow.stats.cum_pct)">{{ pct(data.seat_follow.stats.cum_pct) }}</td>
+              <td class="num"><b>{{ data.seat_follow.stats.sharpe }}</b></td>
+              <td class="num"><b>{{ pct(data.seat_follow.stats.max_dd_pct) }}</b></td>
+              <td class="num">{{ data.seat_follow.stats.flips }} 次</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="chips" style="margin-top:6px">
+          <span v-for="(v, y) in data.seat_follow.stats.yearly" :key="y" class="chip">
+            {{ y }} <b :class="pnlClass(v)">{{ pct(v) }}</b></span>
+        </div>
+        <p class="note">{{ data.seat_follow.note }}</p>
+      </div>
+
+      <table class="tbl">
+        <thead>
+          <tr><th>方向</th><th>翻向日(进场)</th><th>出场(下一次翻向)</th><th>合约</th>
+            <th class="num">进场价</th><th class="num">段收益</th><th class="num">持有</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(s, i) in secondRows" :key="i">
+            <td><span class="side" :class="s.side">{{ sideText(s.side) }}</span></td>
+            <td>{{ s.date }}</td>
+            <td>{{ s.exit_date ?? (s.open ? '持有中' : '—') }}</td>
+            <td>{{ s.contract }}</td>
+            <td class="num">{{ fmt(s.entry_px) }}</td>
+            <td class="num" :class="pnlClass(s.ret_pct)">{{ pct(s.ret_pct) }}</td>
+            <td class="num">{{ s.hold_days }} 日</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        {{ data.seat_follow.member }}的翻转段全按**净持仓方向翻向日**切分,进出场都在翻向次日开盘,
+        没有别的出场规则。表内段收益为毛收益;上方统计为扣成本口径(0.1%/翻转)。
+        全历史 {{ data.seat_follow.stats.flips }} 段,此处显示最近 {{ secondRows.length }} 段。
+      </p>
+    </template>
     <template v-else-if="tab === 'history'">
       <div class="cards">
         <div class="card">
@@ -993,7 +1055,13 @@ const bySide = computed(() => {
       <!-- 基准对比:三年单边熊市里,什么都不做地持有空单本身就有 +99% 复利。
            不摆出来,上面那个累计收益会被当成策略的本事。 -->
       <div class="card wide compare">
-        <h3>与「{{ data.compare.benchmark_name }}」比</h3>
+        <h3>
+          与「{{ data.compare.benchmark_name }}」比
+          <!-- 第二引擎入口(DEC-150):只有配了 seat_follow 的品种(焦煤/玻璃)出现。 -->
+          <button v-if="data.seat_follow" class="eng-btn" @click="histEngine = 'second'">
+            第二引擎 · 跟{{ data.seat_follow.member.slice(0, 2) }} ▸
+          </button>
+        </h3>
         <table class="cmp">
           <thead><tr><th></th><th class="num">累计</th><th class="num">夏普</th><th class="num">最大回撤</th></tr></thead>
           <tbody>
@@ -1353,6 +1421,13 @@ const bySide = computed(() => {
 
 .glog { padding: 8px 0; border-bottom: 1px solid var(--tv-border); font-size: 13px; }
 .glog b { margin-right: 12px; }
+/* 第二引擎切换按钮(DEC-150):挂在对比卡标题右侧,主/第二两套历史互切不重叠。 */
+.eng-btn {
+  float: right; font-size: 13px; padding: 3px 12px; cursor: pointer;
+  border: 1px solid var(--el-color-primary, #409eff); color: var(--el-color-primary, #409eff);
+  background: transparent; border-radius: 4px;
+}
+.eng-btn:hover { background: var(--el-color-primary-light-9, #ecf5ff); }
 .chip { display: inline-flex; align-items: baseline; gap: 4px; margin-right: 8px;
   background: var(--tv-bg); border: 1px solid var(--tv-border);
   border-radius: 4px; padding: 2px 8px; font-size: 12px; }

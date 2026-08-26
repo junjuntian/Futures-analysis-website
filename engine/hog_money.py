@@ -1980,7 +1980,8 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
         "entry_px": runs[-1]["entry_px"] if runs else None,
         "flipped_today": bool(cur_side is not None and prev_side is not None
                               and cur_side != prev_side),
-        "history": runs[-12:],
+        # 40 段:历史信号页第二引擎表(DEC-150)要全屏看;今日卡仍只取尾 8。
+        "history": runs[-40:],
         "stats": stats,
         # 研究引证(相关/组合夏普/丑话)是品种专属的,配置给 note 就用配置的;
         # 不给就落回焦煤华泰版(DEC-139 首发品种)。统计数字本身全部实算不写死。
