@@ -1549,13 +1549,16 @@ const bySide = computed(() => {
   margin-top: 16px;
 }
 
-/* 合约小窗(DEC-134;DEC-151 改版):一行一窗做宽(vs 对照表要横向空间),
-   全部活跃合约纵向排。旧的 3 列网格随 DEC-151 作废。 */
+/* 合约小窗(DEC-134;DEC-151 改版):一行两窗(运营者 2026-08-28 验收时追加:
+   「一行两窗,不然界面太长了」),窄屏收一列。旧的 3 列网格随 DEC-151 作废。 */
 .panel-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
+}
+@media (max-width: 1100px) {
+  .panel-row { grid-template-columns: minmax(0, 1fr); }
 }
 .panel-card {
   min-width: 0;
