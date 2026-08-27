@@ -1860,11 +1860,43 @@ def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
     return pd.DataFrame({"net": s, "chg": chg, "rz": rz}), have
 
 
+def zone_band(hi: pd.Series, lo: pd.Series, last: float, days: int = 5) -> dict | None:
+    """筹码地图的两条带(DEC-152,运营者 2026-08-28 口径)。
+
+    **低带**(5 日最低两天的低点)= 多单进场 / 空单出场;**高带**(最高两天的高点)=
+    空单进场 / 多单出场。
+
+    带的两端**都是盘面真出现过的价**,不是算出来的百分比 —— 第一版拿"高低差×20%"
+    凑带宽,运营者当场否掉(2026-08-28):「你的筹码位置有点怪,因为大部分时间到不了
+    924 以上,基本都能到 900 附近,可以看 5 日的最低最高价」。用最低/最高的**两天**
+    而不是一天,带宽就由 K 线分布自己决定:震荡收敛时带窄,拉开时带宽,不用调参。
+    成本锚(机构最优空/多成本)在前端叠加:成本走净持仓引擎,引擎侧拿不到(DEC-143)。
+    """
+    h = hi.dropna().tail(days)
+    lw = lo.dropna().tail(days)
+    if len(h) < 2 or len(lw) < 2:
+        return None
+    lows = sorted(float(x) for x in lw)                    # 升序:最低在前
+    highs = sorted((float(x) for x in h), reverse=True)    # 降序:最高在前
+    if not (np.isfinite(lows[0]) and np.isfinite(highs[0])) or highs[0] <= lows[0]:
+        return None
+    return {
+        "days": int(min(len(h), len(lw))),
+        "high": round(highs[0], 1), "low": round(lows[0], 1),
+        # 高带 = [次高日高点, 最高日高点];低带 = [最低日低点, 次低日低点]。
+        "high_band": [round(highs[1], 1), round(highs[0], 1)],
+        "low_band": [round(lows[0], 1), round(lows[1], 1)],
+        "last": None if not np.isfinite(last) else round(float(last), 1),
+    }
+
+
 def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
                     prev_d: pd.Timestamp | None, limit: int | None = None,
                     retail: list | None = None,
                     oi: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
-                    mult: float | None = None, sink_cfg: dict | None = None) -> list[dict]:
+                    mult: float | None = None, sink_cfg: dict | None = None,
+                    hi: pd.DataFrame | None = None, lo: pd.DataFrame | None = None,
+                    close: pd.DataFrame | None = None) -> list[dict]:
     """合约小窗(DEC-134;DEC-151 改版,运营者 2026-08-28):**全部活跃合约开窗**
     (不再截 5 个),每窗:机构 5 家 vs 五大散户席位(retail_panel)对照,窗头挂
     沉淀资金。成本仍由前端走净持仓接口取(DEC-143 口径)。
@@ -1939,9 +1971,19 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
                 amount = notional * rate if rate else notional
                 sink = {"yi": round(amount / 1e8, 2), "rate": rate,
                         "oi": int(o_)}
+        # 筹码地图两条带(DEC-152):只用该合约自己的 5 日 K 线,取不到就 None。
+        zones = None
+        if hi is not None and lo is not None and c in hi.columns and c in lo.columns:
+            last_px = np.nan
+            if close is not None and c in close.columns:
+                last_px = close[c].asof(d)
+            if not np.isfinite(last_px) and st is not None and c in st.columns:
+                last_px = st[c].asof(d)
+            zones = zone_band(hi[c].loc[:d], lo[c].loc[:d], last_px)
         out.append({"contract": c,
                     "days_left": int(days_to_window_end(c, d)),
                     "sink": sink,
+                    "zones": zones,
                     "members": members,
                     "retail": retail_rows})
     return out
@@ -2055,7 +2097,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
                   op: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
                   vols: pd.DataFrame | None = None,
-                  oi: pd.DataFrame | None = None) -> dict:
+                  oi: pd.DataFrame | None = None,
+                  hi: pd.DataFrame | None = None, lo: pd.DataFrame | None = None,
+                  close: pd.DataFrame | None = None) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
@@ -2279,7 +2323,8 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "contracts_panel": contracts_panel(
             seat, grp, d, mkt.index[-2] if len(mkt) > 1 else None,
             retail=[m for m in RULES.get("retail_panel", []) if m in set(seat["member_key"])],
-            oi=oi, st=st, mult=RULES.get("multiplier"), sink_cfg=RULES.get("sink")),
+            oi=oi, st=st, mult=RULES.get("multiplier"), sink_cfg=RULES.get("sink"),
+            hi=hi, lo=lo, close=close),
         # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
         "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",
@@ -2632,7 +2677,15 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                                 # (trade_date 已保证是时间型,asof 才可用)。
                                 oi=price.pivot_table(index="trade_date", columns="contract",
                                                      values="open_interest",
-                                                     aggfunc="first").sort_index())
+                                                     aggfunc="first").sort_index(),
+                                # 筹码地图的 5 日高低与收盘(DEC-152)。
+                                hi=price.pivot_table(index="trade_date", columns="contract",
+                                                     values="high_price", aggfunc="max").sort_index(),
+                                lo=price.pivot_table(index="trade_date", columns="contract",
+                                                     values="low_price", aggfunc="min").sort_index(),
+                                close=price.pivot_table(index="trade_date", columns="contract",
+                                                        values="close_price",
+                                                        aggfunc="first").sort_index())
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None

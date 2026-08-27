@@ -168,6 +168,12 @@ interface HogPayload {
     days_left: number
     /** 沉淀资金(DEC-151):持仓×结算×点值×费率;rate=null 时 yi 是名义市值。老 JSON 没有。 */
     sink?: { yi: number; rate: number | null; oi: number } | null
+    /** 筹码地图两条带(DEC-152):5 日高低 + 带宽 20%。老 JSON 没有。 */
+    zones?: {
+      days: number; high: number; low: number
+      high_band: [number, number]; low_band: [number, number]
+      last: number | null
+    } | null
     members: MemberLeg[]
     /** 五大散户席位对照列(DEC-151)。老 JSON 没有。 */
     retail?: MemberLeg[]
@@ -423,6 +429,44 @@ onMounted(async () => {
  * ——那说明有合约的成本不可知(建仓当日无结算价、或数据起点之前就持有),
  * 不能让人以为这个均价覆盖了全部持仓。
  */
+/**
+ * 筹码地图(DEC-152,2026-08-28 运营者定;**展示级,不进任何判据**)。
+ *
+ * 运营者原话:「观察每天的波动,看机构席位的空单成本以及多单成本,不管多单和空单,
+ * 筹码要优于机构,尽量买到最优筹码位置,提高容错率」。
+ *   · 带 = 引擎给的 5 日高/低带(zone_band);高带=空进场/多出场,低带=多进场/空出场。
+ *   · **锚 = 机构侧(左列五家)的最优成本**(运营者选定:「空单选机构最优成本」)——
+ *     做空成本越高越优取 max、做多成本越低越优取 min;散户列只作对手参考不当锚。
+ *   · 优劣 = 现价与锚比:做空现价 ≥ 锚 = 筹码优于机构(卖得比它贵),做多反之。
+ * 成本取自净持仓引擎(DEC-143 口径),掉榜/不可知的家自动跳过。
+ */
+function chipAnchor(contract: string, members: MemberLeg[], side: 'short' | 'long') {
+  let best: { member: string; cost: number } | null = null
+  for (const m of members) {
+    if (!m.on_board) continue
+    if (side === 'short' ? m.net >= 0 : m.net <= 0) continue // 只认站在这一边的家
+    const c = costsByContract.value[contract]?.[m.member]
+    if (!c || c.missing) continue
+    const raw = side === 'short' ? c.short_cost : c.long_cost
+    if (raw === null) continue
+    const v = Number(raw)
+    if (!Number.isFinite(v)) continue
+    if (!best || (side === 'short' ? v > best.cost : v < best.cost)) {
+      best = { member: m.member, cost: v }
+    }
+  }
+  return best
+}
+
+/** 现价筹码是否优于机构锚。锚缺失(该向机构全掉榜/成本不可知)时返回 null 不下判断。 */
+function chipEdge(last: number | null | undefined, anchor: { cost: number } | null, side: 'short' | 'long') {
+  if (last === null || last === undefined || !anchor) return null
+  return side === 'short' ? last >= anchor.cost : last <= anchor.cost
+}
+
+/** 带的文案。两端相同(两天同高/同低)时只写一个价,别显示 "900~900"。 */
+const band = (b: [number, number]) => (b[0] === b[1] ? `${fmt(b[0])}` : `${fmt(b[0])}~${fmt(b[1])}`)
+
 /** vs 对照表的成本格(DEC-151):数字带 @ 前缀,「掉榜/不可知」原样,没有就空着。 */
 function costText(contract: string, name: string): string {
   const t = memberCost(contract, name)
@@ -862,6 +906,41 @@ const bySide = computed(() => {
               <template v-else><td class="k"></td><td class="num"></td><td class="num cost"></td></template>
             </tr>
           </table>
+          <!-- 筹码地图(DEC-152,展示级):高带=空进场/多出场,低带=多进场/空出场;
+               锚=机构侧最优成本,✓=现价筹码优于机构。仓位由运营者自定,这里不标层数。 -->
+          <div v-if="c.zones" class="chip-map">
+            <div class="chip-line">
+              <span class="chip-side short">空</span>
+              <span>进场 <b>{{ band(c.zones.high_band) }}</b></span>
+              <span class="sep">·</span>
+              <span>出场 {{ band(c.zones.low_band) }}</span>
+              <template v-if="chipAnchor(c.contract, c.members, 'short')">
+                <span class="sep">·</span>
+                <span class="anchor">机构最优空 @{{ chipAnchor(c.contract, c.members, 'short')!.cost.toFixed(0) }}
+                  <i>{{ chipAnchor(c.contract, c.members, 'short')!.member.slice(0, 2) }}</i></span>
+                <span :class="chipEdge(c.zones.last, chipAnchor(c.contract, c.members, 'short'), 'short') ? 'edge-ok' : 'edge-no'">
+                  {{ chipEdge(c.zones.last, chipAnchor(c.contract, c.members, 'short'), 'short') ? '✓ 现价筹码更优' : '✗ 不如机构' }}
+                </span>
+              </template>
+            </div>
+            <div class="chip-line">
+              <span class="chip-side long">多</span>
+              <span>进场 <b>{{ band(c.zones.low_band) }}</b></span>
+              <span class="sep">·</span>
+              <span>出场 {{ band(c.zones.high_band) }}</span>
+              <template v-if="chipAnchor(c.contract, c.members, 'long')">
+                <span class="sep">·</span>
+                <span class="anchor">机构最优多 @{{ chipAnchor(c.contract, c.members, 'long')!.cost.toFixed(0) }}
+                  <i>{{ chipAnchor(c.contract, c.members, 'long')!.member.slice(0, 2) }}</i></span>
+                <span :class="chipEdge(c.zones.last, chipAnchor(c.contract, c.members, 'long'), 'long') ? 'edge-ok' : 'edge-no'">
+                  {{ chipEdge(c.zones.last, chipAnchor(c.contract, c.members, 'long'), 'long') ? '✓ 现价筹码更优' : '✗ 不如机构' }}
+                </span>
+              </template>
+            </div>
+            <div class="chip-line gray">
+              现价 {{ fmt(c.zones.last) }} · 近 {{ c.zones.days }} 日 {{ fmt(c.zones.low) }}~{{ fmt(c.zones.high) }}
+            </div>
+          </div>
         </div>
       </div>
       <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
@@ -1617,6 +1696,36 @@ const bySide = computed(() => {
   .panel-vs td { padding: 4px 3px; }
   .panel-vs .k { width: 52px; }
 }
+/* 筹码地图(DEC-152) */
+.chip-map {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--el-border-color-lighter, #ebeef5);
+  font-size: 12.5px;
+  color: var(--el-text-color-regular, #606266);
+}
+.chip-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 1.9;
+}
+.chip-line.gray { color: var(--el-text-color-secondary, #909399); }
+.chip-side {
+  display: inline-block;
+  min-width: 20px;
+  text-align: center;
+  border-radius: 3px;
+  font-size: 12px;
+  padding: 0 4px;
+}
+.chip-side.short { background: #e8f7ef; color: #18a058; }
+.chip-side.long { background: #fdecec; color: #d03050; }
+.chip-map .sep { color: var(--el-text-color-placeholder, #c0c4cc); }
+.chip-map .anchor i { font-style: normal; color: var(--el-text-color-secondary, #909399); }
+.chip-map .edge-ok { color: #18a058; }
+.chip-map .edge-no { color: var(--el-text-color-placeholder, #c0c4cc); }
 .panel-card .cost {
   margin-left: 6px;
   font-size: 12px;
