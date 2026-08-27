@@ -131,6 +131,10 @@ RULES = {
     # 名单**跨品种固定、不逐品种重选**:这正是它相对「找聪明钱」的优势所在——
     # 没有挑人的过拟合,新品种可直接套用。加人反而变差(实测四家不如三家)。
     "retail_seed": ["东方财富", "平安期货", "徽商期货"],
+    # 五窗对照用的五大散户席位(DEC-151,2026-08-28 运营者指定,=席位页「散户席位」
+    # 收藏组)。与 retail_seed(三家,进散户反向/压力表判据)**是两份名单**:
+    # retail_seed 动判据不许随便加人(四家实测更差),这五家只做五窗展示对照。
+    "retail_panel": ["东方财富", "方正中期", "徽商期货", "平安期货", "中信建投"],
     # 共振 = 聪明钱流向与散户反向流向同号。
     #
     # **现行策略(方案 C)就是用它进出场** —— 见下面 `signal_source = "resonance"`。
@@ -337,6 +341,10 @@ VARIETIES = {
         # 同策略回放 2026 两组都是 0 笔(成本进场门自 2025-10 起没开过,见 DEC-129 如实记),换人对 2026 回测无影响。
         # since 写最近一个交易日 08-21(拍板日 08-23 是周日,写 08-23 要到 08-24 的数据才生效)。
         "group_overrides": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}}],
+        # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
+        # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
+        # 其余品种没配费率 → 窗头显示名义市值;要同款口径给一句费率即可。
+        "sink": {"rate": 0.18, "near_rate": 0.20, "near_days": 22},
         # **第二引擎:跟永安(DEC-141,2026-08-24 运营者拍板)**。与现行引擎并列各管各仓,
         # 相关 +0.31,50/50 组合夏普 0.84 > 现行 0.64 > 永安 0.73,回撤 −26.4% 比两台
         # 单跑都浅(REPORT_FGSA_MODEL_v1)。为什么是永安:五家全测唯一过初筛
@@ -517,6 +525,8 @@ def use(code: str) -> dict:
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 换月接力(DEC-147 候选):按品种打开,默认关。
     RULES["roll_continue"] = bool(v.get("roll_continue", False))
+    # 沉淀资金费率(DEC-151):配了才乘,没配窗头给名义市值。
+    RULES["sink"] = dict(v["sink"]) if v.get("sink") else None
     RULES["long_mode"] = v.get("long_mode", "flow")
     RULES["long_unload_min"] = v.get("long_unload_min", 0.50)
     # 做多腿起始日(DEC-124):None = 全程;给了日期就只在该日起允许做多进场(之前只做空)。
@@ -1839,15 +1849,22 @@ def retail_series(seat: pd.DataFrame, dates: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
-                    prev_d: pd.Timestamp | None, limit: int = 5) -> list[dict]:
-    """一排合约小窗(DEC-134,运营者 2026-08-24):从近月起,组内还看得到持仓的
-    5 个合约,逐合约给各家净持仓与变化。**多合约开战**的观察面 —— 单合约成本列
-    已撤(跨合约价差大,单点成本没意义),成本按合约由前端走净持仓接口取。
+                    prev_d: pd.Timestamp | None, limit: int | None = None,
+                    retail: list | None = None,
+                    oi: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
+                    mult: float | None = None, sink_cfg: dict | None = None) -> list[dict]:
+    """合约小窗(DEC-134;DEC-151 改版,运营者 2026-08-28):**全部活跃合约开窗**
+    (不再截 5 个),每窗:机构 5 家 vs 五大散户席位(retail_panel)对照,窗头挂
+    沉淀资金。成本仍由前端走净持仓接口取(DEC-143 口径)。
 
-    活跃 = 近 7 个自然日内组内任何一家在该合约上有行,且未过窗口止点;
-    到期/看不到持仓自动滑出,新合约有行了自动补上,恒保持 limit 个。
-    口径与「组内各家」卡完全一致:今天的行求和、change 对 sig_win 天前。"""
-    sub = seat[seat["member_key"].isin(grp)]
+    活跃 = 近 7 个自然日内(机构组或散户五家)任何一家在该合约上有行,且未过窗口
+    止点;到期/看不到持仓自动滑出,新合约有行了自动补上。
+    沉淀资金 = 全市场持仓 × 结算 × 点值 × 保证金率(sink_cfg 配了费率才乘;
+    临近交割 near_days 内用 near_rate;没配费率给名义市值,rate=None 标明)。
+    费率是配置的近似,不是交易所实时费率 —— FG 18%/20% 与运营者行情软件逐格对过。"""
+    retail = retail or []
+    everyone = list(dict.fromkeys(list(grp) + retail))
+    sub = seat[seat["member_key"].isin(everyone)]
     recent = sub[sub["trade_date"] >= d - pd.Timedelta(days=7)]
     cands = []
     for c in recent["contract"].unique():
@@ -1857,45 +1874,64 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
             continue
         cands.append(c)
     cands.sort(key=lambda c: c[-4:])
+    if limit is not None:
+        cands = cands[:limit]
+
+    def member_row(today, prev, m):
+        now_rows = today[today["member_key"] == m]
+        was_rows = (prev[prev["member_key"] == m] if prev is not None else None)
+        now = float(now_rows["net"].sum()) if len(now_rows) else 0.0
+        was = (float(was_rows["net"].sum())
+               if was_rows is not None and len(was_rows) else np.nan)
+
+        # 逐腿变化(DEC-149):某腿任一天掉榜/帧缺腿列 = 不可知给 None。
+        def leg_chg(col: str):
+            if col not in now_rows.columns or (was_rows is not None and col not in was_rows.columns):
+                return None
+            if not len(now_rows) or was_rows is None or not len(was_rows):
+                return None
+            a = now_rows[col].sum(min_count=1)
+            b = was_rows[col].sum(min_count=1)
+            if not (np.isfinite(a) and np.isfinite(b)):
+                return None
+            return round(float(a - b))
+
+        return {
+            "member": m,
+            "net": round(now),
+            "change": None if not np.isfinite(was) else round(now - was),
+            "change_long": leg_chg("long_q"),
+            "change_short": leg_chg("short_q"),
+            "on_board": bool(len(now_rows)),
+        }
+
     out = []
-    for c in cands[:limit]:
+    for c in cands:
         today = sub[(sub["trade_date"] == d) & (sub["contract"] == c)]
         prev = (sub[(sub["trade_date"] == prev_d) & (sub["contract"] == c)]
                 if prev_d is not None else None)
-        members = []
-        for m in grp:
-            now_rows = today[today["member_key"] == m]
-            was_rows = (prev[prev["member_key"] == m] if prev is not None else None)
-            now = float(now_rows["net"].sum()) if len(now_rows) else 0.0
-            was = (float(was_rows["net"].sum())
-                   if was_rows is not None and len(was_rows) else np.nan)
-
-            # 逐腿变化(DEC-149,运营者 2026-08-26):净空席位的净变化 "(−11,988)"
-            # 实际是**加空**,读起来却像在减——分腿写清(多±X/空±X)才无歧义。
-            # 某腿任一天掉榜(NaN)= 该腿变化不可知,给 None,前端退回净变化显示。
-            def leg_chg(col: str):
-                # 帧里没有腿列(研究夹具/极简调用)= 不可知,与掉榜同待遇。
-                if col not in now_rows.columns or (was_rows is not None and col not in was_rows.columns):
-                    return None
-                if not len(now_rows) or was_rows is None or not len(was_rows):
-                    return None
-                a = now_rows[col].sum(min_count=1)
-                b = was_rows[col].sum(min_count=1)
-                if not (np.isfinite(a) and np.isfinite(b)):
-                    return None
-                return round(float(a - b))
-
-            members.append({
-                "member": m,
-                "net": round(now),
-                "change": None if not np.isfinite(was) else round(now - was),
-                "change_long": leg_chg("long_q"),
-                "change_short": leg_chg("short_q"),
-                "on_board": bool(len(now_rows)),
-            })
+        members = [member_row(today, prev, m) for m in grp]
+        retail_rows = [member_row(today, prev, m) for m in retail]
+        # 沉淀资金(DEC-151):量价缺哪个都不硬算,置 None 前端不显示。
+        sink = None
+        if oi is not None and st is not None and mult and c in oi.columns and c in st.columns:
+            o_ = oi[c].asof(d)
+            px_ = st[c].asof(d)
+            if np.isfinite(o_) and np.isfinite(px_) and o_ > 0 and px_ > 0:
+                notional = float(o_) * float(px_) * float(mult)
+                rate = None
+                if sink_cfg and sink_cfg.get("rate"):
+                    near = days_to_window_end(c, d) <= int(sink_cfg.get("near_days", 22))
+                    rate = float(sink_cfg.get("near_rate", sink_cfg["rate"]) if near
+                                 else sink_cfg["rate"])
+                amount = notional * rate if rate else notional
+                sink = {"yi": round(amount / 1e8, 2), "rate": rate,
+                        "oi": int(o_)}
         out.append({"contract": c,
                     "days_left": int(days_to_window_end(c, d)),
-                    "members": members})
+                    "sink": sink,
+                    "members": members,
+                    "retail": retail_rows})
     return out
 
 
@@ -2006,7 +2042,8 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
                   op: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
-                  vols: pd.DataFrame | None = None) -> dict:
+                  vols: pd.DataFrame | None = None,
+                  oi: pd.DataFrame | None = None) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
@@ -2224,13 +2261,13 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "seat_follow": (seat_follow_payload(seat, mkt, RULES["follow_seat"])
                         if RULES.get("follow_seat") else None),
         "members": members,
-        # 一排合约小窗(DEC-134):逐合约的各家持仓,恒 5 个,近月起。
-        # 括号变化改**较上一交易日**(DEC-146,2026-08-25 运营者拍板:「要改成相对
-        # 昨天变化,不要5日变化」——起因是玻璃永安 8/24 单日砍 1.3 万手,5 日窗却显
-        # +22,715,当日动作被窗口平均掉)。「组内各家」摘要卡仍是 sig_win 日口径,
-        # 两卡口径自此**有意不同**,前端注释各写各的。
-        "contracts_panel": contracts_panel(seat, grp, d,
-                                           mkt.index[-2] if len(mkt) > 1 else None),
+        # 合约小窗(DEC-134→146→151):全部活跃合约开窗,机构 vs 五大散户对照,
+        # 窗头沉淀资金;括号变化=较上一交易日(DEC-146),「组内各家」摘要卡仍是
+        # sig_win 日口径,两卡口径**有意不同**。
+        "contracts_panel": contracts_panel(
+            seat, grp, d, mkt.index[-2] if len(mkt) > 1 else None,
+            retail=[m for m in RULES.get("retail_panel", []) if m in set(seat["member_key"])],
+            oi=oi, st=st, mult=RULES.get("multiplier"), sink_cfg=RULES.get("sink")),
         # 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单。
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
         "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",
@@ -2578,7 +2615,12 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         if RULES["long_mode"] == "unload_bounce":
             sig = attach_bounce_long(sig, seat, mkt, groups)
         payload = build_payload(sig, mkt, seat, groups, log, cuts, op, st,
-                                vols=contract_volumes(price_raw))
+                                vols=contract_volumes(price_raw),
+                                # 沉淀资金要全市场持仓(DEC-151);用 clean 后的行情表
+                                # (trade_date 已保证是时间型,asof 才可用)。
+                                oi=price.pivot_table(index="trade_date", columns="contract",
+                                                     values="open_interest",
+                                                     aggfunc="first").sort_index())
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None

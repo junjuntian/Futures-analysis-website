@@ -202,9 +202,14 @@ def test_contracts_panel_到期滑出_近月排序_未上榜(monkeypatch=None):
     rows.append({"member_key": "乙", "contract": "LH2611", "trade_date": d,
                  "net": 50.0, "net_off": 50.0, "long_q": 50.0, "short_q": 0.0})
     seat = pd.DataFrame(rows)
-    panel = H.contracts_panel(seat, ["甲", "乙"], d, prev)
+    panel = H.contracts_panel(seat, ["甲", "乙"], d, prev, retail=["乙"])
     names = [p["contract"] for p in panel]
-    assert names == ["LH2609", "LH2611", "LH2701", "LH2703", "LH2705"]  # 2607 到期剔除,2707 超出 5 个
+    # DEC-151:不再截 5 个——全部活跃合约开窗(2607 到期仍剔除)。
+    assert names == ["LH2609", "LH2611", "LH2701", "LH2703", "LH2705", "LH2707"]
+    # 散户对照列(DEC-151):与机构行同构。
+    assert [r["member"] for r in panel[0]["retail"]] == ["乙"]
+    # 没给量价表,沉淀资金置 None 不硬算。
+    assert panel[0]["sink"] is None
     p2611 = next(p for p in panel if p["contract"] == "LH2611")
     jia = next(m for m in p2611["members"] if m["member"] == "甲")
     yi = next(m for m in p2611["members"] if m["member"] == "乙")

@@ -163,7 +163,15 @@ interface HogPayload {
   members: MemberLeg[]
   /** 一排合约小窗(DEC-134):近月起、组内还看得到持仓的 5 个合约,逐合约各家持仓。
    *  到期/看不到持仓自动滑出,新合约自动补上。**可选**:旧 JSON 没有。 */
-  contracts_panel?: Array<{ contract: string; days_left: number; members: MemberLeg[] }>
+  contracts_panel?: Array<{
+    contract: string
+    days_left: number
+    /** 沉淀资金(DEC-151):持仓×结算×点值×费率;rate=null 时 yi 是名义市值。老 JSON 没有。 */
+    sink?: { yi: number; rate: number | null; oi: number } | null
+    members: MemberLeg[]
+    /** 五大散户席位对照列(DEC-151)。老 JSON 没有。 */
+    retail?: MemberLeg[]
+  }>
   /** `manual`/`replace`(DEC-129):运营者点名换人写的那一条,只管到下次重选。 */
   group_log: Array<{ date: string; members: string[]; alpha: Record<string, number | null>
     manual?: boolean; replace?: Record<string, string> }>
@@ -390,11 +398,14 @@ onMounted(async () => {
   const p = data.value
   if (!p?.members.length) return
   const contracts = (p.contracts_panel ?? []).map((c) => c.contract)
+  // 成本要机构+散户两列一起取(DEC-151);名单从面板第一窗读,引擎给什么取什么。
+  const panelNames = new Set(p.members.map((m) => m.member))
+  for (const r of p.contracts_panel?.[0]?.retail ?? []) panelNames.add(r.member)
   await Promise.all(contracts.map(async (contract) => {
     try {
       const { data: net } = await getSeatNetPosition({
         instrument: props.instrument,
-        members: p.members.map((m) => m.member),
+        members: [...panelNames],
         contract
       })
       costsByContract.value[contract] =
@@ -412,6 +423,12 @@ onMounted(async () => {
  * ——那说明有合约的成本不可知(建仓当日无结算价、或数据起点之前就持有),
  * 不能让人以为这个均价覆盖了全部持仓。
  */
+/** vs 对照表的成本格(DEC-151):数字带 @ 前缀,「掉榜/不可知」原样,没有就空着。 */
+function costText(contract: string, name: string): string {
+  const t = memberCost(contract, name)
+  return t === '—' ? '' : /^\d/.test(t) ? '@' + t : t
+}
+
 function memberCost(contract: string, name: string): string {
   const c = costsByContract.value[contract]?.[name]
   if (!c) return '—'
@@ -805,35 +822,54 @@ const bySide = computed(() => {
       <!-- 一排合约小窗(DEC-134,运营者 2026-08-24):多合约开战,逐合约看
            各家持仓与该合约上的成本。到期/看不到持仓自动滑出,恒 5 个。
            金银不在此组件,天然不受影响。 -->
+      <!-- DEC-151(2026-08-28 样式经运营者确认):全部活跃合约开窗、一行一窗做宽,
+           机构 5 家 vs 五大散户对照(散户同款净多/净空变化),窗头挂沉淀资金。 -->
       <div v-if="data.contracts_panel && data.contracts_panel.length" class="panel-row">
-        <div v-for="c in data.contracts_panel" :key="c.contract" class="card panel-card">
+        <div v-for="c in data.contracts_panel" :key="c.contract" class="card panel-card wide">
           <h3>
             {{ c.contract }}
             <span class="panel-days" :class="{ near: c.days_left <= (data.rules.exit_before_delivery ?? 10) * 2 }">
               剩 {{ c.days_left }} 日
             </span>
-          </h3>
-          <div v-for="m in c.members" :key="m.member" class="kv">
-            <span class="k">{{ m.member.slice(0, 4) }}</span>
-            <span class="v">
-              <template v-if="m.on_board">
-                <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
-                <!-- DEC-149:分腿写变化(多±/空±),净数会把"加空"读成"在减"。 -->
-                <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)">
-                  ({{ panelChg(m) }})</span>
-                <span class="cost">{{ memberCost(c.contract, m.member) }}</span>
-              </template>
-              <span v-else class="gray">未上榜</span>
+            <span v-if="c.sink" class="panel-sink">
+              {{ c.sink.rate ? '沉淀资金' : '名义市值' }} <b>{{ c.sink.yi }} 亿</b>
+              <span class="cost">{{ c.sink.rate ? `(持仓×现价×点值×${(c.sink.rate * 100).toFixed(0)}%,推算)` : '(未配费率)' }}</span>
             </span>
-          </div>
+          </h3>
+          <table class="panel-vs">
+            <tr v-for="(m, i) in c.members" :key="m.member">
+              <td class="k">{{ m.member.slice(0, 4) }}</td>
+              <td class="num">
+                <template v-if="m.on_board">
+                  <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
+                  <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)"> ({{ panelChg(m) }})</span>
+                </template>
+                <span v-else class="gray">未上榜</span>
+              </td>
+              <td class="num cost">{{ m.on_board ? costText(c.contract, m.member) : '' }}</td>
+              <td class="vs-cell">vs</td>
+              <template v-if="c.retail?.[i]">
+                <td class="k">{{ c.retail[i].member.slice(0, 4) }}</td>
+                <td class="num">
+                  <template v-if="c.retail[i].on_board">
+                    <span :class="c.retail[i].net > 0 ? 'red' : c.retail[i].net < 0 ? 'green' : ''">{{ fmt(c.retail[i].net) }}</span>
+                    <span v-if="panelChg(c.retail[i])" :class="pnlClass(c.retail[i].change ?? 0)"> ({{ panelChg(c.retail[i]) }})</span>
+                  </template>
+                  <span v-else class="gray">未上榜</span>
+                </td>
+                <td class="num cost">{{ c.retail[i].on_board ? costText(c.contract, c.retail[i].member) : '' }}</td>
+              </template>
+              <template v-else><td class="k"></td><td class="num"></td><td class="num cost"></td></template>
+            </tr>
+          </table>
         </div>
       </div>
       <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
-        <!-- DEC-146:五窗括号=较上一交易日(单日动作要看得见);「组内各家」摘要卡
-             仍是 {{ data.signal.win }} 日口径,两卡有意不同,别再改回一致。 -->
-        每格:该家在**这个合约**上的净持仓(正红=净多,负绿=净空)、较昨日变化
-        (随方向表述:净多+X=净多增了 X,净空+X=净空增了 X——加空不再显示成负号)、
-        净持仓成本(推算,按结算价推,不是成交均价)。合约到期自动滑出、新合约自动补上,恒 5 个。
+        每窗:左=跟踪席位,右=五大散户席位(东方财富/方正中期/徽商/平安/中信建投),
+        各给净持仓(正红=净多,负绿=净空)、较昨日变化(净多+X=净多增了 X,净空+X=净空增了 X)、
+        @净持仓成本(推算,按结算价推,不是成交均价)。窗头沉淀资金=全市场持仓×现价×点值×保证金率
+        (费率为品种配置的近似,非交易所实时;未配费率的品种给名义市值)。
+        **全部活跃合约开窗**,到期自动滑出、新合约自动补上。
       </p>
 
       <!-- 逐合约战役(DEC-133,生猪):多仓并行 —— 顶部状态条只显示最新一笔,
@@ -1513,20 +1549,13 @@ const bySide = computed(() => {
   margin-top: 16px;
 }
 
-/* 合约小窗(DEC-134):恒 5 个,固定 3 列 = 两排(3+2,运营者拍板)。
-   ⚠ .card 基类带 min-width:290px,四列时每列只有 ~276px,卡片会撑破轨道
-   互相压盖(2026-08-24 线上实拍抓到的),.panel-card 必须把它盖掉。 */
+/* 合约小窗(DEC-134;DEC-151 改版):一行一窗做宽(vs 对照表要横向空间),
+   全部活跃合约纵向排。旧的 3 列网格随 DEC-151 作废。 */
 .panel-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 12px;
-}
-@media (max-width: 1100px) {
-  .panel-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 720px) {
-  .panel-row { grid-template-columns: minmax(0, 1fr); }
 }
 .panel-card {
   min-width: 0;
@@ -1552,6 +1581,38 @@ const bySide = computed(() => {
 }
 .panel-days.near {
   color: #e6a23c;
+}
+/* DEC-151:窗头沉淀资金(右对齐)与 vs 对照表 */
+.panel-sink {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: normal;
+  color: var(--el-text-color-regular, #606266);
+}
+.panel-vs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.panel-vs td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--el-border-color-extra-light, #f5f7fa);
+  white-space: nowrap;
+}
+.panel-vs .k { color: var(--el-text-color-regular, #606266); width: 64px; }
+.panel-vs .num { text-align: right; }
+.panel-vs .vs-cell {
+  color: var(--el-text-color-placeholder, #c0c4cc);
+  text-align: center;
+  width: 40px;
+  font-size: 12px;
+  border-left: 1px dashed var(--el-border-color-lighter, #ebeef5);
+  border-right: 1px dashed var(--el-border-color-lighter, #ebeef5);
+}
+@media (max-width: 720px) {
+  .panel-vs { font-size: 12.5px; }
+  .panel-vs td { padding: 4px 3px; }
+  .panel-vs .k { width: 52px; }
 }
 .panel-card .cost {
   margin-left: 6px;
