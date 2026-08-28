@@ -1870,11 +1870,13 @@ def zone_band(hi: pd.Series, lo: pd.Series, last: float, days: int = 5) -> dict 
     凑带宽,运营者当场否掉(2026-08-28):「你的筹码位置有点怪,因为大部分时间到不了
     924 以上,基本都能到 900 附近,可以看 5 日的最低最高价」。
 
-    **口径二改(同日,运营者:改成"经常能到的位置")**:带取**去掉最极端一天之后的
-    两天** —— 低带 = 第 2、3 低的低点,高带 = 第 2、3 高的高点。最低/最高那天多半是
-    插针,一周只摸一次,挂在那儿等于不成交;次低次高才是"大部分时间都能到"的价位,
-    容错率也高。极值仍在 high/low 里给,逐日明细在 lows/highs 里给(页面列出来,
-    要改成哪两天一眼可指)。
+    **口径三改(同日定稿,运营者「按你的建议定」)——两条带有意不对称**:
+      · **低带 = 第 3、4 低的低点**(FG2701 = 899~906):它是多单进场/空单出场,
+        要的是**确定接得到货**,挂在插针价(最低那天)上等于不成交。
+      · **高带 = 最高两天的高点**(FG2701 = 926~932):它是空单进场/多单出场,
+        进场挂在**更优的一侧**没有损失 —— 挂不上只是不成交,挂上就是最优筹码。
+    这一版正好复现运营者手算的 900~905 / 922~932(盘面无 900、905 整数价)。
+    极值仍在 high/low 里给,逐日明细在 lows/highs 里给(页面列出来,要挪档一眼可指)。
     成本锚(机构最优空/多成本)在前端叠加:成本走净持仓引擎,引擎侧拿不到(DEC-143)。
     """
     h = hi.dropna().tail(days)
@@ -1885,9 +1887,14 @@ def zone_band(hi: pd.Series, lo: pd.Series, last: float, days: int = 5) -> dict 
     highs = sorted((float(x) for x in h), reverse=True)    # 降序:最高在前
     if not (np.isfinite(lows[0]) and np.isfinite(highs[0])) or highs[0] <= lows[0]:
         return None
-    # 够 3 天就去掉极端那天取第 2、3;只有 2 天时退回极值两天(不硬造)。
-    lo_band = [lows[1], lows[2]] if len(lows) >= 3 else [lows[0], lows[1]]
-    hi_band = [highs[2], highs[1]] if len(highs) >= 3 else [highs[1], highs[0]]
+    # 低带优先第 3、4 低;天数不够就逐级退回,不硬造价位。
+    if len(lows) >= 4:
+        lo_band = [lows[2], lows[3]]
+    elif len(lows) == 3:
+        lo_band = [lows[1], lows[2]]
+    else:
+        lo_band = [lows[0], lows[1]]
+    hi_band = [highs[1], highs[0]]                         # 高带恒取最高两天
     return {
         "days": int(min(len(h), len(lw))),
         "high": round(highs[0], 1), "low": round(lows[0], 1),
