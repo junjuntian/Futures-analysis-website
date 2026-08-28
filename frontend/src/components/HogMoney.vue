@@ -392,6 +392,9 @@ onMounted(async () => {
   void loadEngineFingerprint()
   histEngine.value = 'main'   // 换品种回到主引擎视图(DEC-150)
   page2.value = 1
+  followPlan.value = null
+  followCosts.value = {}
+  void loadFollowPlan()
   try {
     // 与金银同一条路:引擎写静态 JSON,nginx 直接服务。带时间戳绕开缓存。
     const res = await fetch(`/smart-money/${FILES[props.instrument]}?t=${Date.now()}`)
@@ -467,6 +470,58 @@ function chipEdge(last: number | null | undefined, anchor: { cost: number } | nu
 }
 
 /** 带的文案。两端相同(两天同高/同低)时只写一个价,别显示 "900~900"。 */
+/**
+ * 「永安跟随策略」(DEC-154,展示级,**不是下单指令**)。引擎在 pair_fgsa.json 里
+ * 按永安当日真实结构等比缩到运营者资金,这里只渲染 + 补各腿的永安持仓成本
+ * (成本走净持仓引擎,DEC-143;SA 腿不在本页 payload 里,单独取)。
+ */
+interface FollowPlan {
+  state: 'opposite' | 'same'
+  member: string
+  capital?: number
+  use_pct?: number
+  fg_net: number
+  sa_net: number
+  legs: Array<{ contract: string; instrument: string; side: 'long' | 'short'
+    lots: number; px: number; member_net: number; value_wan: number }>
+  margin?: number; margin_pct?: number; notional_wan?: number; leverage?: number
+  fg_net_wan?: number; sa_net_wan?: number
+  net_exposure_wan?: number; net_exposure_pct?: number; net_of_notional_pct?: number
+  risk_same?: number; risk_spread?: number
+  note: string
+}
+const followPlan = ref<FollowPlan | null>(null)
+/** 各腿的永安持仓成本(键=合约),各腿单独取,不依赖它恰好在五窗里。 */
+const followCosts = ref<Record<string, string>>({})
+
+async function loadFollowPlan() {
+  if (props.instrument !== 'FG') return          // 跨品种方案挂在玻璃页
+  try {
+    const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
+    if (!res.ok) return
+    const data = (await res.json()) as { follow_plan?: FollowPlan | null }
+    followPlan.value = data.follow_plan ?? null
+  } catch {
+    return                                       // 取不到就不显示这张卡
+  }
+  const plan = followPlan.value
+  if (!plan?.legs?.length) return
+  await Promise.all(plan.legs.map(async (lg) => {
+    try {
+      const { data: net } = await getSeatNetPosition({
+        instrument: lg.instrument, members: [plan.member], contract: lg.contract
+      })
+      // 不标类型:本文件的 MemberLeg 是五窗那个,与接口返回的同名类型不是一回事。
+      const m = net.latest_members.find((x) => x.member === plan.member)
+      if (!m || m.missing) return
+      const raw = lg.side === 'long' ? m.long_cost : m.short_cost
+      if (raw !== null) followCosts.value[lg.contract] = Number(raw).toFixed(0)
+    } catch {
+      // 单腿成本取不到就不显示那一个
+    }
+  }))
+}
+
 const band = (b: [number, number]) => (b[0] === b[1] ? `${fmt(b[0])}` : `${fmt(b[0])}~${fmt(b[1])}`)
 
 /** vs 对照表的成本格(DEC-151):数字带 @ 前缀,「掉榜/不可知」原样,没有就空着。 */
@@ -875,6 +930,44 @@ const bySide = computed(() => {
       <!-- DEC-151(2026-08-28 样式经运营者确认):全部活跃合约开窗、一行一窗做宽,
            机构 5 家 vs 五大散户对照(散户同款净多/净空变化),窗头挂沉淀资金。 -->
       <div v-if="data.contracts_panel && data.contracts_panel.length" class="panel-row">
+        <!-- 永安跟随策略(DEC-154):与合约窗同宽,排在第一格;随永安持仓每日自动变。 -->
+        <div v-if="followPlan" class="card panel-card wide">
+          <h3>
+            {{ followPlan.member }}跟随策略
+            <span class="panel-sink" v-if="followPlan.capital">
+              总资金 <b>{{ (followPlan.capital / 10000).toFixed(0) }} 万</b>
+              <span class="cost">· 保证金 {{ followPlan.use_pct }}%</span>
+            </span>
+          </h3>
+          <template v-if="followPlan.state === 'opposite'">
+            <table class="panel-vs">
+              <tr v-for="lg in followPlan.legs" :key="lg.contract">
+                <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
+                <td class="num"><b>{{ lg.lots }} 手</b></td>
+                <td class="num cost">@{{ lg.px }}</td>
+                <td class="num cost">永安 {{ fmt(lg.member_net) }}<template v-if="followCosts[lg.contract]"> @{{ followCosts[lg.contract] }}</template></td>
+              </tr>
+            </table>
+            <div class="chip-map">
+              <div class="chip-line">
+                保证金 <b>{{ ((followPlan.margin ?? 0) / 10000).toFixed(1) }} 万</b>({{ followPlan.margin_pct }}%)
+                <span class="sep">·</span> 名义 {{ followPlan.notional_wan }} 万 <span class="sep">·</span> 杠杆 {{ followPlan.leverage }} 倍
+              </div>
+              <div class="chip-line">
+                玻璃净 <span :class="pnlClass(followPlan.fg_net_wan ?? 0)">{{ followPlan.fg_net_wan }} 万</span>
+                <span class="sep">·</span> 纯碱净 <span :class="pnlClass(followPlan.sa_net_wan ?? 0)">{{ followPlan.sa_net_wan }} 万</span>
+              </div>
+              <div class="chip-line">
+                <b>风险敞口 {{ followPlan.net_exposure_wan }} 万</b>
+                <span class="cost">(本金 {{ followPlan.net_exposure_pct }}% · 总名义 {{ followPlan.net_of_notional_pct }}%)</span>
+              </div>
+              <div class="chip-line gray">
+                单日:同涨跌 1% → {{ followPlan.risk_same }} 元 · 价差反向各 1% → ±{{ followPlan.risk_spread }} 元
+              </div>
+            </div>
+          </template>
+          <p class="note" v-html="mdBold(followPlan.note)"></p>
+        </div>
         <div v-for="c in data.contracts_panel" :key="c.contract" class="card panel-card wide">
           <h3>
             {{ c.contract }}
@@ -1651,7 +1744,9 @@ const bySide = computed(() => {
 }
 .panel-card {
   min-width: 0;
-  overflow: hidden;
+  /* 焦煤价是四位数(@1585),一行两窗时会顶宽 —— 裁切会把成本切成 "@158"
+     (运营者 2026-08-28 实拍)。改为需要时横向滚动,不许裁掉数字。 */
+  overflow-x: auto;
 }
 .panel-card h3 {
   display: flex;
@@ -1687,11 +1782,11 @@ const bySide = computed(() => {
   font-size: 13.5px;
 }
 .panel-vs td {
-  padding: 4px 6px;
+  padding: 3px 4px;
   border-bottom: 1px solid var(--el-border-color-extra-light, #f5f7fa);
   white-space: nowrap;
 }
-.panel-vs .k { color: var(--el-text-color-regular, #606266); width: 64px; }
+.panel-vs .k { color: var(--el-text-color-regular, #606266); width: 56px; }
 .panel-vs .num { text-align: right; }
 .panel-vs .vs-cell {
   color: var(--el-text-color-placeholder, #c0c4cc);
@@ -1737,8 +1832,8 @@ const bySide = computed(() => {
 .chip-map .edge-ok { color: #18a058; }
 .chip-map .edge-no { color: var(--el-text-color-placeholder, #c0c4cc); }
 .panel-card .cost {
-  margin-left: 6px;
-  font-size: 12px;
+  margin-left: 4px;
+  font-size: 11.5px;
   color: var(--el-text-color-secondary, #909399);
 }
 .panel-note {

@@ -2497,6 +2497,106 @@ def _member_main_net(seat: pd.DataFrame, mkt: pd.DataFrame, member: str) -> pd.S
     return sig
 
 
+# 跟随方案的默认参数(DEC-154,2026-08-28 运营者:「总资金 50 万」)。
+# 保证金率是**估算**(交易所 FG 9%/SA 8% + 期货公司加收 2%),运营者给实际值就改这里;
+# use=0.35 是三档里的"中",留 65% 现金应对价差反向(实测最坏日 ±2.1%)。
+FOLLOW_PLAN = {"capital": 500000.0, "use": 0.35, "margin": {"FG": 0.11, "SA": 0.10},
+               "mult": {"FG": 20.0, "SA": 20.0}}
+
+
+def follow_plan_payload(cfg: dict | None = None) -> dict | None:
+    """「永安跟随策略」建议仓位(DEC-154,展示级,**不是下单指令**)。
+
+    按永安**当日真实结构**等比缩放到运营者的资金:FG 取它净多最大的合约作多腿、
+    净空最大的作空腿,SA 取绝对值最大的合约代表纯碱那条腿;比例照抄它的手数比,
+    再按保证金预算缩放。永安改仓位,这里第二天自动跟着改。
+
+    只在**对冲态**(FG 净方向与 SA 净方向相反)给方案 —— 同向时它不是在做对冲簿,
+    这套配比没有意义(DEC-142 同一个状态门)。
+    """
+    cfg = {**FOLLOW_PLAN, **(cfg or {})}
+    if not ({"FG", "SA"} <= set(PAIR_EXTRA)):
+        return None
+    ya = {k: PAIR_EXTRA[k].get("ya_all") or {} for k in ("FG", "SA")}
+    px = {k: PAIR_EXTRA[k].get("px_all") or {} for k in ("FG", "SA")}
+    if not ya["FG"] or not ya["SA"]:
+        return None
+    fg_net = sum(ya["FG"].values())
+    sa_net = sum(ya["SA"].values())
+    if fg_net * sa_net >= 0:
+        return {"state": "same", "member": "永安期货", "fg_net": int(round(fg_net)),
+                "sa_net": int(round(sa_net)), "legs": [],
+                "note": "永安当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
+                        "等它回到一多一空的对冲态再看。"}
+    # 选腿:**手数比例照各方向的合计**(永安的纯碱空单分散在 7 个合约,只取单一最大腿
+    # 会把对冲腿低估一半、净敞口从 8% 虚增到 44%);**下单合约**取该方向持仓最大的那个
+    # (流动性最好)。三条腿 = FG 顺向 / FG 反向 / SA。
+    def pick(d, sign):
+        cand = {c: v for c, v in d.items() if v * sign > 0}
+        return max(cand, key=lambda c: abs(cand[c])) if cand else None
+
+    def tot(d, sign):
+        return sum(v for v in d.values() if v * sign > 0)
+    fg_sign = 1.0 if fg_net > 0 else -1.0
+    legs_raw = []
+    for c, k, w in ((pick(ya["FG"], fg_sign), "FG", tot(ya["FG"], fg_sign)),
+                    (pick(ya["FG"], -fg_sign), "FG", tot(ya["FG"], -fg_sign)),
+                    (pick(ya["SA"], -fg_sign), "SA", sum(ya["SA"].values()))):
+        if c and c in px[k] and w:
+            legs_raw.append((c, k, w))
+    if len(legs_raw) < 2:
+        return None
+    base = min(abs(w) for _, _, w in legs_raw)              # 以最小的一方向合计为 1
+    unit = [(c, k, w / base) for c, k, w in legs_raw]
+    per_group = sum(abs(u) * cfg["mult"][k] * px[k][c] * cfg["margin"][k] for c, k, u in unit)
+    if per_group <= 0:
+        return None
+    groups = cfg["capital"] * cfg["use"] / per_group
+    legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
+    for c, k, u in unit:
+        lots = int(round(groups * abs(u)))
+        if lots <= 0:
+            continue
+        val = lots * cfg["mult"][k] * px[k][c]
+        sd = 1.0 if u > 0 else -1.0
+        margin += val * cfg["margin"][k]
+        notional += val
+        net_val += sd * val
+        legs.append({"contract": c, "instrument": k,
+                     "side": "long" if sd > 0 else "short", "lots": lots,
+                     "px": round(px[k][c], 1),
+                     "member_net": int(round(ya[k][c])),
+                     "value_wan": round(val / 1e4, 1)})
+    if not legs:
+        return None
+    fg_val = sum((1 if lg["side"] == "long" else -1) * lg["lots"] * cfg["mult"]["FG"] * lg["px"]
+                 for lg in legs if lg["instrument"] == "FG")
+    sa_val = sum((1 if lg["side"] == "long" else -1) * lg["lots"] * cfg["mult"]["SA"] * lg["px"]
+                 for lg in legs if lg["instrument"] == "SA")
+    return {
+        "state": "opposite", "member": "永安期货",
+        "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
+        "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)),
+        "legs": legs,
+        "margin": int(round(margin)), "margin_pct": round(margin / cfg["capital"] * 100, 1),
+        "notional_wan": round(notional / 1e4),
+        "leverage": round(notional / cfg["capital"], 1),
+        "fg_net_wan": round(fg_val / 1e4, 1), "sa_net_wan": round(sa_val / 1e4, 1),
+        "net_exposure_wan": round(net_val / 1e4, 1),
+        "net_exposure_pct": round(abs(net_val) / cfg["capital"] * 100),
+        # 占总名义:与永安自己的中性度直接可比(它 8/27 是 8.1%)。
+        "net_of_notional_pct": round(abs(net_val) / notional * 100, 1) if notional else None,
+        # 单日损益两情形:玻纯同涨跌 1%(对冲生效)/ 价差反向各 1%(最坏)
+        "risk_same": int(round(net_val * 0.01)),
+        "risk_spread": int(round((abs(fg_val) + abs(sa_val)) * 0.01)),
+        "note": ("按永安**当日真实持仓比例**等比缩到 %d 万,保证金用 %d%%(留足现金扛价差反向)。"
+                 "它改仓位,这里第二天自动跟着改。**这是展示不是下单指令**:手数取整有偏差,"
+                 "保证金率按估算(FG %d%%/SA %d%%),实际以你的账户为准;建仓用筹码地图分批挂,"
+                 "别一次打满。" % (cfg["capital"] / 1e4, cfg["use"] * 100,
+                                   cfg["margin"]["FG"] * 100, cfg["margin"]["SA"] * 100)),
+    }
+
+
 def fgsa_hedge_book() -> dict | None:
     """玻纯「永安对冲簿」状态卡(DEC-142,展示级,只显示不进判据)。
 
@@ -2645,6 +2745,11 @@ def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
     except Exception as e:                      # noqa: BLE001
         print(f"[pair] hedge_book 失败,置空:{e}", file=sys.stderr)
         payload["hedge_book"] = None
+    try:
+        payload["follow_plan"] = follow_plan_payload()
+    except Exception as e:                      # noqa: BLE001
+        print(f"[pair] follow_plan 失败,置空:{e}", file=sys.stderr)
+        payload["follow_plan"] = None
     out = out_dir / "pair_fgsa.json"
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2712,8 +2817,17 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
     # 单独算」):前端拿浏览器登录态调 /seats/net-position,显示的就是净持仓页同一台
     # 成本引擎的同一个数。引擎只出状态与净持仓(net_off 口径)。
     if code in ("FG", "SA"):
+        _d = mkt.index[-1]
+        _rows = seat[(seat["member_key"] == "永安期货") & (seat["trade_date"] <= _d)]
+        _last = (_rows.sort_values("trade_date").groupby("contract")["net_off"].last()
+                 if len(_rows) else pd.Series(dtype=float))
         PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
-                            "ret_open": mkt["ret_open"], "main": mkt["main"]}
+                            "ret_open": mkt["ret_open"], "main": mkt["main"],
+                            # 跟随方案(DEC-154)要逐腿:最新日永安在各合约的净持仓 + 结算价。
+                            "ya_all": {c: float(v) for c, v in _last.items()
+                                       if isinstance(c, str) and np.isfinite(v) and v},
+                            "px_all": {c: float(st[c].asof(_d)) for c in st.columns
+                                       if isinstance(c, str) and np.isfinite(st[c].asof(_d))}}
 
     out_path = out_dir / v["out"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
