@@ -1779,19 +1779,22 @@ const bySide = computed(() => {
 .panel-vs {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13.5px;
+  /* 12.5px:焦煤/生猪是四~五位数价(@1585、11860),13.5px 时一行两窗放不下,
+     会触发兜底滚动条(运营者 2026-08-28 质疑"其他窗口也这样呢")。压到 12.5 后
+     常规宽度下各品种都能整行放下,滚动条只在极窄屏出现。 */
+  font-size: 12.5px;
 }
 .panel-vs td {
-  padding: 3px 4px;
+  padding: 3px 3px;
   border-bottom: 1px solid var(--el-border-color-extra-light, #f5f7fa);
   white-space: nowrap;
 }
-.panel-vs .k { color: var(--el-text-color-regular, #606266); width: 56px; }
+.panel-vs .k { color: var(--el-text-color-regular, #606266); width: 52px; }
 .panel-vs .num { text-align: right; }
 .panel-vs .vs-cell {
   color: var(--el-text-color-placeholder, #c0c4cc);
   text-align: center;
-  width: 40px;
+  width: 28px;
   font-size: 12px;
   border-left: 1px dashed var(--el-border-color-lighter, #ebeef5);
   border-right: 1px dashed var(--el-border-color-lighter, #ebeef5);
@@ -1832,8 +1835,8 @@ const bySide = computed(() => {
 .chip-map .edge-ok { color: #18a058; }
 .chip-map .edge-no { color: var(--el-text-color-placeholder, #c0c4cc); }
 .panel-card .cost {
-  margin-left: 4px;
-  font-size: 11.5px;
+  margin-left: 3px;
+  font-size: 11px;
   color: var(--el-text-color-secondary, #909399);
 }
 .panel-note {
