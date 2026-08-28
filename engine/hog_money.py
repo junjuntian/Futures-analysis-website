@@ -2530,9 +2530,19 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
                 "note": "永安当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
                         "等它回到一多一空的对冲态再看。"}
     # 选腿:**手数比例照各方向的合计**(永安的纯碱空单分散在 7 个合约,只取单一最大腿
-    # 会把对冲腿低估一半、净敞口从 8% 虚增到 44%);**下单合约**取该方向持仓最大的那个
-    # (流动性最好)。三条腿 = FG 顺向 / FG 反向 / SA。
-    def pick(d, sign):
+    # 会把对冲腿低估一半、净敞口从 8% 虚增到 44%);**下单合约优先当日主力**
+    # (运营者 2026-08-28:「纯碱空腿选 SA2701」——主力盘口最深,挂得上才谈得上筹码),
+    # 主力上没有该方向持仓时才退回持仓最大的那个合约。
+    # 实际效果:FG 多腿=主力 FG2701(永安多单也压在这)、FG 空腿=主力方向不对→退回
+    # 最大空腿 FG2611、SA 腿=主力 SA2701。三条腿 = FG 顺向 / FG 反向 / SA。
+    mains = {k: (PAIR_EXTRA[k].get("main").iloc[-1]
+                 if PAIR_EXTRA[k].get("main") is not None and len(PAIR_EXTRA[k]["main"]) else None)
+             for k in ("FG", "SA")}
+
+    def pick(d, sign, kind=None):
+        m = mains.get(kind)
+        if isinstance(m, str) and d.get(m, 0.0) * sign > 0:
+            return m                                        # 主力方向对得上,优先主力
         cand = {c: v for c, v in d.items() if v * sign > 0}
         return max(cand, key=lambda c: abs(cand[c])) if cand else None
 
@@ -2540,9 +2550,9 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
         return sum(v for v in d.values() if v * sign > 0)
     fg_sign = 1.0 if fg_net > 0 else -1.0
     legs_raw = []
-    for c, k, w in ((pick(ya["FG"], fg_sign), "FG", tot(ya["FG"], fg_sign)),
-                    (pick(ya["FG"], -fg_sign), "FG", tot(ya["FG"], -fg_sign)),
-                    (pick(ya["SA"], -fg_sign), "SA", sum(ya["SA"].values()))):
+    for c, k, w in ((pick(ya["FG"], fg_sign, "FG"), "FG", tot(ya["FG"], fg_sign)),
+                    (pick(ya["FG"], -fg_sign, "FG"), "FG", tot(ya["FG"], -fg_sign)),
+                    (pick(ya["SA"], -fg_sign, "SA"), "SA", sum(ya["SA"].values()))):
         if c and c in px[k] and w:
             legs_raw.append((c, k, w))
     if len(legs_raw) < 2:
