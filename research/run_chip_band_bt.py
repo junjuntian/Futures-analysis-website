@@ -6,6 +6,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "engine"))
 import hog_money as H
 
 code = sys.argv[1] if len(sys.argv) > 1 else "FG"
+COST_ONE = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0005   # 单边成本
 D = pathlib.Path(__file__).resolve().parent / "data"
 OUT = pathlib.Path(__file__).resolve().parent / "out"
 price = H.clean_price(pd.read_csv(D / f"{code.lower()}_price.csv.gz"))
@@ -28,7 +29,7 @@ for i, d in enumerate(idx):
     lo_hi_band.iloc[i] = [z["low_band"][1], z["high_band"][0], z["last"]]
 
 ret = mkt["ret_open"].fillna(0)
-COST = 0.0005
+COST = COST_ONE
 
 def perf(d):
     d = pd.Series(d).dropna()
@@ -39,7 +40,7 @@ def perf(d):
             float(d.mean() / d.std() * np.sqrt(242)) if d.std() > 0 else np.nan,
             float((eq / eq.cummax() - 1).min()) * 100)
 
-L = [f"{v['name']} 筹码带区间回测(样本 {idx[0].date()} ~ {idx[-1].date()};带=线上 zone_band 口径)", ""]
+L = [f"{v['name']} 筹码带区间回测(样本 {idx[0].date()}~{idx[-1].date()};单边成本 {COST*100:.4f}%)", ""]
 rng = np.random.default_rng(71)
 for name, hold_mid in (("F1 进带反转·带外空仓", False), ("F2 进带反转·中间持有", True)):
     pos = pd.Series(0.0, index=idx)

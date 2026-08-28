@@ -5,6 +5,7 @@ import numpy as np, pandas as pd
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "engine"))
 import hog_money as H
 
+TURN_COST = float(sys.argv[1]) if len(sys.argv) > 1 else 0.002   # 每次换腿的双腿来回成本
 D = pathlib.Path(__file__).resolve().parent / "data"
 OUT = pathlib.Path(__file__).resolve().parent / "out"
 price = H.clean_price(pd.read_csv(D / "fg_price.csv.gz"))
@@ -62,7 +63,7 @@ for i, d in enumerate(idx):
              and np.isfinite(P[c].asof(d)) and H.days_to_window_end(c, d) > 0]
     active[d] = max(cands, key=ym) if cands else None
 
-L = [f"玻璃跨月对冲簿(样本 {idx[0].date()} ~ {idx[-1].date()},n={len(idx)})", ""]
+L = [f"玻璃跨月对冲簿(样本 {idx[0].date()} ~ {idx[-1].date()};换腿成本 {TURN_COST*100:.3f}%)", ""]
 rng = np.random.default_rng(61)
 results = {}
 for src_name, members in (("永安", ["永安期货"]), ("阵营", GRP)):
@@ -113,7 +114,7 @@ for src_name, members in (("永安", ["永安期货"]), ("阵营", GRP)):
         p_pl = float((np.array(sh_l) >= sh).mean()) if np.isfinite(sh) else 1.0
         _, sh_t2, _ = perf(pos.shift(3) * ret_sp)
         turn = (pos.shift(2) != pos.shift(3)).astype(float)
-        cum_n, sh_n, _ = perf(held * ret_sp - turn * 0.002)
+        cum_n, sh_n, _ = perf(held * ret_sp - turn * TURN_COST)
         ys = {y: (np.prod(1 + g) - 1) * 100 for y, g in base.groupby(base.index.year)}
         ok = p_pl < 0.05 and (np.isfinite(sh_t2) and sh_t2 >= 0.8 * sh) and cum_n > 0
         results[f"{src_name}|{cand}"] = base
