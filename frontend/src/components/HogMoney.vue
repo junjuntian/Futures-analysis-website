@@ -172,6 +172,8 @@ interface HogPayload {
     zones?: {
       days: number; high: number; low: number
       high_band: [number, number]; low_band: [number, number]
+      /** 逐日明细(DEC-152 二改):低点升序 / 高点降序,页面列出来供核口径。老 JSON 没有。 */
+      lows?: number[]; highs?: number[]
       last: number | null
     } | null
     members: MemberLeg[]
@@ -942,7 +944,11 @@ const bySide = computed(() => {
               </template>
             </div>
             <div class="chip-line gray">
-              现价 {{ fmt(c.zones.last) }} · 近 {{ c.zones.days }} 日 {{ fmt(c.zones.low) }}~{{ fmt(c.zones.high) }}
+              现价 {{ fmt(c.zones.last) }} · 近 {{ c.zones.days }} 日
+              <template v-if="c.zones.lows?.length">
+                低 {{ c.zones.lows.map((x) => fmt(x)).join('·') }} · 高 {{ c.zones.highs?.map((x) => fmt(x)).join('·') }}
+              </template>
+              <template v-else>{{ fmt(c.zones.low) }}~{{ fmt(c.zones.high) }}</template>
             </div>
           </div>
         </div>

@@ -1868,8 +1868,13 @@ def zone_band(hi: pd.Series, lo: pd.Series, last: float, days: int = 5) -> dict 
 
     带的两端**都是盘面真出现过的价**,不是算出来的百分比 —— 第一版拿"高低差×20%"
     凑带宽,运营者当场否掉(2026-08-28):「你的筹码位置有点怪,因为大部分时间到不了
-    924 以上,基本都能到 900 附近,可以看 5 日的最低最高价」。用最低/最高的**两天**
-    而不是一天,带宽就由 K 线分布自己决定:震荡收敛时带窄,拉开时带宽,不用调参。
+    924 以上,基本都能到 900 附近,可以看 5 日的最低最高价」。
+
+    **口径二改(同日,运营者:改成"经常能到的位置")**:带取**去掉最极端一天之后的
+    两天** —— 低带 = 第 2、3 低的低点,高带 = 第 2、3 高的高点。最低/最高那天多半是
+    插针,一周只摸一次,挂在那儿等于不成交;次低次高才是"大部分时间都能到"的价位,
+    容错率也高。极值仍在 high/low 里给,逐日明细在 lows/highs 里给(页面列出来,
+    要改成哪两天一眼可指)。
     成本锚(机构最优空/多成本)在前端叠加:成本走净持仓引擎,引擎侧拿不到(DEC-143)。
     """
     h = hi.dropna().tail(days)
@@ -1880,12 +1885,17 @@ def zone_band(hi: pd.Series, lo: pd.Series, last: float, days: int = 5) -> dict 
     highs = sorted((float(x) for x in h), reverse=True)    # 降序:最高在前
     if not (np.isfinite(lows[0]) and np.isfinite(highs[0])) or highs[0] <= lows[0]:
         return None
+    # 够 3 天就去掉极端那天取第 2、3;只有 2 天时退回极值两天(不硬造)。
+    lo_band = [lows[1], lows[2]] if len(lows) >= 3 else [lows[0], lows[1]]
+    hi_band = [highs[2], highs[1]] if len(highs) >= 3 else [highs[1], highs[0]]
     return {
         "days": int(min(len(h), len(lw))),
         "high": round(highs[0], 1), "low": round(lows[0], 1),
-        # 高带 = [次高日高点, 最高日高点];低带 = [最低日低点, 次低日低点]。
-        "high_band": [round(highs[1], 1), round(highs[0], 1)],
-        "low_band": [round(lows[0], 1), round(lows[1], 1)],
+        "high_band": [round(min(hi_band), 1), round(max(hi_band), 1)],
+        "low_band": [round(min(lo_band), 1), round(max(lo_band), 1)],
+        # 逐日明细(低点升序 / 高点降序):页面列出来供运营者核口径。
+        "lows": [round(x, 1) for x in lows],
+        "highs": [round(x, 1) for x in highs],
         "last": None if not np.isfinite(last) else round(float(last), 1),
     }
 
