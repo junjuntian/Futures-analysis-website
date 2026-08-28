@@ -810,8 +810,10 @@ const bySide = computed(() => {
             <span class="v">
               <template v-if="m.on_board">
                 {{ fmt(m.net) }} 手
-                <span v-if="m.change !== null" :class="pnlClass(m.change)">
-                  ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})
+                <!-- DEC-153:与五窗同一套方向表述(净多+X/净空+X),净数会把加空读成在减。
+                     口径不同仍保留:这里是 sig_win 日变化,五窗是较昨日(DEC-146)。 -->
+                <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)">
+                  ({{ panelChg(m) }})
                 </span>
               </template>
               <span v-else class="gray">当日未上榜</span>
@@ -820,7 +822,9 @@ const bySide = computed(() => {
           <p class="note">
             <template v-if="isFixedGroup">席位组是运营者拍板的**固定名单**(DEC-122),不滚动重选。</template>
             <template v-else>席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。</template>
-            这是**全品种合约合计**;逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
+            这是**全品种合约合计**;括号=较 {{ data.signal.win }} 日前变化
+            (净多+X=净多增了 X,净空+X=净空增了 X;下面那排小窗是**较昨日**,口径有意不同)。
+            逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
           </p>
         </div>
       </div>
