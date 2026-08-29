@@ -75,7 +75,7 @@ echo "PHASE4A_E2E_STAGE import_channel_absent"
 
 # 点值:八个品种都必须有,而且鸡蛋必须是 10 而不是交易单位 5。
 # 这一条单列是因为它错了不会报错,只会让盈亏差一倍。
-test "$(psql_value -c "select count(*) from instruments where price_multiplier is not null and code in ('AU','AG','JD','LH','JM','AP','FG','SA')")" = 8
+test "$(psql_value -c "select count(*) from instruments where price_multiplier is not null and code in ('AU','AG','JD','LH','JM','AP','FG','SA')")" = 8   # 铁矿石 I 另计(202608280001),这条断言只钉原八品种
 test "$(psql_value -c "select price_multiplier::int from instruments where code='JD' limit 1")" = 10
 echo "PHASE4A_E2E_STAGE price_multipliers_intact"
 

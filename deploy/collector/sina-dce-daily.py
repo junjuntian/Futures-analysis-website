@@ -47,7 +47,8 @@ SINA_ENDPOINT = (
 # 比自己按月份推一遍再靠请求失败去试要少几十次请求，也不会漏掉新挂的合约。
 EASTMONEY_CATALOG = "https://futsse-static.eastmoney.com/redis?msgid=114"
 EASTMONEY_VARIETY = "https://futsse-static.eastmoney.com/redis?msgid=114_{vtype}"
-WANT = ("JM", "JD", "LH")
+# 2026-08-28 加铁矿石 I(运营者要求)。新浪日线端点实测有全历史,东财品种表 vtype=13。
+WANT = ("JM", "JD", "LH", "I")
 COLUMNS = [
     "exchange",
     "instrument",

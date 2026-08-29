@@ -83,6 +83,15 @@ on conflict (workspace_id, exchange_id, code) do update set
     price_tick = excluded.price_tick,
     updated_at = now();
 
+-- 新品种的点值兜底(2026-08-28)。instruments 行由上面这段按采集到的目录创建,
+-- 而 price_multiplier 由迁移 seed —— **新加的品种(铁矿石 I)在迁移跑完之后才
+-- 第一次出现**,于是点值永远是 null,净持仓页会因此不算盈亏(设计上宁可少一条
+-- 曲线也不乘错倍数)。这里按同一份合约规格补,只补空值、不覆盖已有值。
+-- 规格来源与 rust/migrations/202608100003 / 202608280001 同,改一处要改三处。
+update instruments set price_multiplier = spec.m, updated_at = now()
+  from (values ('I', 100::numeric)) as spec(code, m)     -- 铁矿石 100 吨/手
+ where upper(instruments.code) = spec.code and instruments.price_multiplier is null;
+
 -- 合约。
 insert into contracts (
     id, workspace_id, instrument_id, code, delivery_month, listed_at, expires_at, source_record_id)

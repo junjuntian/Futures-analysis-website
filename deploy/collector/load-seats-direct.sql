@@ -113,11 +113,14 @@ select
    and s.trade_date is not null
    and length(trim(coalesce(s.seat_name, ''))) > 0
    and coalesce(s.volume, s.long_position, s.short_position) is not null
-   -- 只装八品种。采集器可能带回整个交易所的榜,全灌进来会让席位页的品种
+   -- 只装白名单品种。采集器可能带回整个交易所的榜,全灌进来会让席位页的品种
    -- 下拉冒出一堆只有几天历史的品种,点进去是空图——空图比没有这个选项更糟,
    -- 它看起来像是数据坏了。
+   -- 2026-08-28 运营者要求加铁矿石 I(大商所,100 吨/手);同批要改的还有
+   -- sina-dce-daily.py 的 WANT(行情)与 instruments.price_multiplier(点值),
+   -- 三处齐了才有完整的一个品种 —— 只加这里的话席位有数、图上没有价。
    and upper(regexp_replace(s.contract_code, '[0-9]+$', ''))
-       in ('AU','AG','JD','LH','JM','AP','FG','SA')
+       in ('AU','AG','JD','LH','JM','AP','FG','SA','I')
    -- 合约代码必须是四位月份的规范形状,否则不属于这张表。
    and upper(s.contract_code) ~ '^[A-Z]{1,2}[0-9]{4}$'
 on conflict (workspace_id, trade_date, exchange, instrument, contract,
