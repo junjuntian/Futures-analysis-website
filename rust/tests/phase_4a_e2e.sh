@@ -175,6 +175,20 @@ fi
 test "$(psql_value -c "select count(*) from seat_history")" = "$seats_after_first"
 echo "PHASE4A_E2E_STAGE idempotent"
 
+# 中金所席位(DEC-158):生产多了一段 CFFEX 直灌,验收同样要走一遍——
+# 文件名与来源标签逐字同 run-collector.sh,preflight 的漂移守卫盯着两边。
+# 采集环节在上面产 CSV 的那步已含 CFFEX(DEFAULT_EXCHANGES);节假日文件缺席
+# 时 CSV 不存在,跳过不失败,与生产的 CFFEX_SEATS_EMPTY 分支同一态度。
+CFFEX_SEAT_CSV="$CSV_DIR/CFFEX-seat_positions_v1-$COLLECTION_DATE.csv"
+if test -s "$CFFEX_SEAT_CSV"; then
+  load_one "$CFFEX_SEAT_CSV" load-seats-direct.sql "-v source_code=cffex_seats_v1 -v expect_date=$COLLECTION_DATE"     >>"$EVIDENCE_DIR/load.log" 2>&1
+  cffex_after_first=$(psql_value -c "select count(*) from seat_history where source = 'cffex_seats_v1'")
+  test "$cffex_after_first" -gt 0
+  load_one "$CFFEX_SEAT_CSV" load-seats-direct.sql "-v source_code=cffex_seats_v1 -v expect_date=$COLLECTION_DATE"     >>"$EVIDENCE_DIR/load.log" 2>&1
+  test "$(psql_value -c "select count(*) from seat_history where source = 'cffex_seats_v1'")" = "$cffex_after_first"
+  echo "PHASE4A_E2E_STAGE cffex_seats_idempotent"
+fi
+
 # ---- 既有数据没被弄坏 ----
 test "$(psql_value -c "select count(*) from seat_history")" -ge "$seats_before"
 test "$(psql_value -c "select count(*) from price_history")" -ge "$prices_before"

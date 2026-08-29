@@ -187,6 +187,10 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/futures-offsite-backup.cron"
           install -m 600 deploy/collector/sina-dce-daily.py \
             "${RELEASE_BUNDLE}/deploy/collector/sina-dce-daily.py"
+          install -m 600 deploy/collector/cffex-daily.py \
+            "${RELEASE_BUNDLE}/deploy/collector/cffex-daily.py"
+          install -m 600 deploy/collector/ine-daily.py \
+            "${RELEASE_BUNDLE}/deploy/collector/ine-daily.py"
           install -m 600 deploy/collector/load-dce-daily.sql \
             "${RELEASE_BUNDLE}/deploy/collector/load-dce-daily.sql"
           install -m 600 deploy/collector/load-seats-direct.sql \
@@ -224,6 +228,7 @@ jobs:
           install -m 600 backfill/sanhe_to_csv.py "${RELEASE_BUNDLE}/backfill/sanhe_to_csv.py"
           install -m 600 backfill/sina_dce_gap.py "${RELEASE_BUNDLE}/backfill/sina_dce_gap.py"
           install -m 600 backfill/load_history.py "${RELEASE_BUNDLE}/backfill/load_history.py"
+          install -m 600 backfill/cffex_backfill.py "${RELEASE_BUNDLE}/backfill/cffex_backfill.py"
           install -m 600 backfill/sina_coverage.py "${RELEASE_BUNDLE}/backfill/sina_coverage.py"
           install -m 600 backfill/sina_fields.py "${RELEASE_BUNDLE}/backfill/sina_fields.py"
           install -m 600 backfill/sanhe_survey_all.py "${RELEASE_BUNDLE}/backfill/sanhe_survey_all.py"

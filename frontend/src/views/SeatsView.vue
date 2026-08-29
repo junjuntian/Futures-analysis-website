@@ -385,7 +385,10 @@ const pnlInstrument = ref('')
 const pnlStart = ref('')
 const pnlEnd = ref('')
 const pnlInstruments = ref<string[]>([])
-const pnlCards = ref<{ title: string; items: PnlBreakdownItem[] }[]>([])
+// 每张卡记住**自己**的模式:member 卡的行是品种代码(要翻中文),instrument 卡的
+// 行是席位名(本来就是中文)。渲染若跟着当前选择框走,切换品种的瞬间旧 member 卡
+// 会退化成裸代码 AU/FG——运营者 2026-08-30 抓的就是这个。
+const pnlCards = ref<{ title: string; mode: 'member' | 'instrument'; items: PnlBreakdownItem[] }[]>([])
 const loadingPnl = ref(false)
 
 /** 默认区间:最近 5 个交易日。
@@ -413,7 +416,11 @@ async function loadPnl() {
       const res = await getSeatPnlBreakdown({ instrument: pnlInstrument.value, ...range })
       pnlInstruments.value = res.data.all_instruments
       pnlCards.value = [
-        { title: `${varietyLabel(pnlInstrument.value)} · 全部席位`, items: res.data.items },
+        {
+          title: `${varietyLabel(pnlInstrument.value)} · 全部席位`,
+          mode: 'instrument',
+          items: res.data.items,
+        },
       ]
     } else {
       // 一家一张卡。接口一次只认一家,勾了几家就并发取几份(与席位持仓同款)。
@@ -428,6 +435,7 @@ async function loadPnl() {
       if (results.length) pnlInstruments.value = results[0].data.all_instruments
       pnlCards.value = results.map((res, i) => ({
         title: members[i],
+        mode: 'member' as const,
         items: res.data.items,
       }))
     }
@@ -1312,7 +1320,7 @@ const latestDailyPnl = computed(() => {
         <el-empty v-if="!card.items.length" description="区间内没有可计算的持仓" />
         <div v-else class="pnl-rows">
           <div v-for="item in card.items" :key="item.key" class="pnl-row">
-            <span class="pnl-key">{{ pnlInstrument ? item.key : varietyLabel(item.key) }}</span>
+            <span class="pnl-key">{{ card.mode === 'instrument' ? item.key : varietyLabel(item.key) }}</span>
             <div class="pnl-bar-track">
               <div
                 class="pnl-bar"
