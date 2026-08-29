@@ -138,7 +138,7 @@ def test_non_dce_official_source_recovers_from_transient_response() -> None:
 #  attempted live — operator decision 2026-08-13, see the runner skip.)
 
 
-def test_the_default_exchange_set_is_only_the_three_that_carry_the_eight_varieties() -> None:
+def test_the_default_exchange_set_carries_only_exchanges_with_live_varieties() -> None:
     # 八个品种全在上期所(AU/AG)、郑商所(AP/FG/SA)、大商所(JD/JM/LH)。
     # 中金所与广期所一个都没有:2026-08-13 查生产,它们采了三个月、进 canonical
     # 1590 行,而页面读的宽表里是 0 行——采回来当场被品种范围过滤掉,只留下
@@ -148,6 +148,9 @@ def test_the_default_exchange_set_is_only_the_three_that_carry_the_eight_varieti
     # 顺序反了就是又白采三个月。
     from futures_collector.sources import DEFAULT_EXCHANGES, SOURCES
 
-    assert set(DEFAULT_EXCHANGES) == {"DCE", "SHFE", "CZCE"}
+    # 2026-08-30 起 CFFEX 回到默认集(DEC-158):上证50 IH 立项,「先有品种再加
+    # 交易所」的顺序这次是对的。INE 有意不在:SC 原油只有行情没有席位排名,
+    # 行情走 ine-daily.py 直灌,不经 collector。
+    assert set(DEFAULT_EXCHANGES) == {"DCE", "SHFE", "CZCE", "CFFEX"}
     # 仍然定义着,`--exchange GFEX` 可用——停的是默认采集,不是采集能力。
     assert {"GFEX", "CFFEX"} <= set(SOURCES)

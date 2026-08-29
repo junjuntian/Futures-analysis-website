@@ -89,7 +89,10 @@ on conflict (workspace_id, exchange_id, code) do update set
 -- 曲线也不乘错倍数)。这里按同一份合约规格补,只补空值、不覆盖已有值。
 -- 规格来源与 rust/migrations/202608100003 / 202608280001 同,改一处要改三处。
 update instruments set price_multiplier = spec.m, updated_at = now()
-  from (values ('I', 100::numeric)) as spec(code, m)     -- 铁矿石 100 吨/手
+  from (values ('I', 100::numeric),      -- 铁矿石 100 吨/手
+               ('IH', 300::numeric),     -- 上证50 300 元/点
+               ('SC', 1000::numeric)     -- 原油 1000 桶/手
+       ) as spec(code, m)
  where upper(instruments.code) = spec.code and instruments.price_multiplier is null;
 
 -- 合约。

@@ -183,6 +183,55 @@ else
   echo "DCE_DAILY_SKIPPED missing $DCE_SCRIPT" >&2
 fi
 
+# 中金所席位直灌(DEC-158,上证50 IH)。与 DCE 段同构:collector 官方源
+# (akshare get_cffex_rank_table,带增减量)采到 CSV,load-seats-direct.sql 装载
+# ——那份 SQL 的品种白名单只放 IH,其余中金所品种(IF/IC/IM/T...)原地过滤。
+# 官方源挂了 collector 自动落东财兜底,所以 source_code 用中性的 cffex_seats_v1。
+CFFEX_SEATS_LOAD="$previous_release_dir/deploy/collector/load-seats-direct.sql"
+if [ -r "$CFFEX_SEATS_LOAD" ]; then
+  if "${COMPOSE[@]}" run --rm --no-deps        -v "$CSV_DIR":/tmp/emit        collector --date "$COLLECTION_DATE" --exchange CFFEX --dataset seats --emit-csv /tmp/emit; then
+    cffex_csv="$CSV_DIR/CFFEX-seat_positions_v1-$COLLECTION_DATE.csv"
+    if [ -s "$cffex_csv" ]; then
+      postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+      docker cp "$cffex_csv" "$postgres_id":/tmp/direct.csv
+      "${COMPOSE[@]}" exec -T postgres         psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1         -v expect_date="$COLLECTION_DATE" -v source_code=cffex_seats_v1 < "$CFFEX_SEATS_LOAD"
+    else
+      echo "CFFEX_SEATS_EMPTY $COLLECTION_DATE 没有席位数据" >&2
+    fi
+  else
+    COLLECTION_STATUS=1
+    echo "CFFEX_SEATS_FAILED 中金所席位今天没采到,日更其余步骤继续" >&2
+  fi
+fi
+
+# 中金所行情直灌(DEC-158)。不走新浪:新浪对中金所合约结算价恒为 0(实测),
+# 而盯市按 DEC-073 必须用结算价;cffex-daily.py 读交易所官网逐日文件,结算齐全。
+# 装载复用 load-dce-daily.sql(通用装载,按 product_instrument_scope 过滤品种;
+# \copy 固定读 /tmp/price_dce_daily.csv,所以 docker cp 时改成那个名字)。
+CFFEX_SCRIPT="$previous_release_dir/deploy/collector/cffex-daily.py"
+if [ -r "$CFFEX_SCRIPT" ] && [ -r "$DCE_LOAD" ]; then
+  if "${COMPOSE[@]}" run --rm --no-deps        -v "$CFFEX_SCRIPT":/tmp/cffex-daily.py:ro        -v /opt/futures-platform/load:/tmp/load        --entrypoint python collector /tmp/cffex-daily.py --out /tmp/load/price_cffex_daily.csv; then
+    postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+    docker cp /opt/futures-platform/load/price_cffex_daily.csv "$postgres_id":/tmp/price_dce_daily.csv
+    "${COMPOSE[@]}" exec -T postgres       psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$DCE_LOAD"
+  else
+    echo "CFFEX_DAILY_FAILED 中金所行情今天不前进" >&2
+  fi
+fi
+
+# 能源中心 SC 原油行情直灌(DEC-158)。SC **只有行情没有席位**(能源中心不公布
+# 原油逐会员排名),消费方是套利页;新浪的 SC 结算价有真值,走通用日线端点。
+INE_SCRIPT="$previous_release_dir/deploy/collector/ine-daily.py"
+if [ -r "$INE_SCRIPT" ] && [ -r "$DCE_LOAD" ]; then
+  if "${COMPOSE[@]}" run --rm --no-deps        -v "$INE_SCRIPT":/tmp/ine-daily.py:ro        -v /opt/futures-platform/load:/tmp/load        --entrypoint python collector /tmp/ine-daily.py --out /tmp/load/price_ine_daily.csv; then
+    postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+    docker cp /opt/futures-platform/load/price_ine_daily.csv "$postgres_id":/tmp/price_dce_daily.csv
+    "${COMPOSE[@]}" exec -T postgres       psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 < "$DCE_LOAD"
+  else
+    echo "INE_DAILY_FAILED 原油行情今天不前进" >&2
+  fi
+fi
+
 # 这里原本有一步「投影」：把 market_prices / seat_positions（导入通道的中转表）
 # 搬进 price_history / seat_history（页面读的宽表）。上面几步现在直接写宽表，
 # 中转表也已随 DEC-049 删除，这座桥两岸都没了。

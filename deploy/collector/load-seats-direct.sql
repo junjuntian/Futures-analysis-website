@@ -120,7 +120,9 @@ select
    -- sina-dce-daily.py 的 WANT(行情)与 instruments.price_multiplier(点值),
    -- 三处齐了才有完整的一个品种 —— 只加这里的话席位有数、图上没有价。
    and upper(regexp_replace(s.contract_code, '[0-9]+$', ''))
-       in ('AU','AG','JD','LH','JM','AP','FG','SA','I')
+       in ('AU','AG','JD','LH','JM','AP','FG','SA','I','IH')
+   -- SC 原油**有意不在**:能源中心不公布原油逐会员持仓排名(东财 2026-08-28
+   -- 全市场榜 INE 只有 nr/lu/bc),SC 是行情-only 品种,只进套利页。
    -- 合约代码必须是四位月份的规范形状,否则不属于这张表。
    and upper(s.contract_code) ~ '^[A-Z]{1,2}[0-9]{4}$'
 on conflict (workspace_id, trade_date, exchange, instrument, contract,

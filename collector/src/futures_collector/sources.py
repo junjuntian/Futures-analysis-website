@@ -127,7 +127,9 @@ SOURCES: dict[str, ExchangeSource] = {
 #
 # 保留在 SOURCES 里而不是删掉:`--exchange GFEX` 仍然可用。将来真要做那两家的
 # 品种时,把它加回这个集合即可,不用重新写采集器。
-DEFAULT_EXCHANGES: tuple[str, ...] = ("DCE", "SHFE", "CZCE")
+# 2026-08-30 加 CFFEX(DEC-158,上证50 IH):catalog/calendar 会顺带建中金所的
+# exchanges/instruments 行;席位与行情各有直灌段(run-collector.sh)。
+DEFAULT_EXCHANGES: tuple[str, ...] = ("DCE", "SHFE", "CZCE", "CFFEX")
 
 
 # Eastmoney publishes the same member-level 龙虎榜 the exchanges do, but as one
