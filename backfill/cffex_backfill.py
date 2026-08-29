@@ -27,6 +27,19 @@ from pathlib import Path
 
 import requests
 
+# 生产 VPS 实测:cffex.com.cn 的 AAAA 记录是黑洞,requests 每个请求先等 IPv6
+# 连接超时(~12 秒)才回落 IPv4——curl 有并行探测所以只要 0.7 秒。一天一个请求
+# 的回填被拖成 9 小时。强制只解析 IPv4,回到 0.7 秒/请求。
+import socket
+_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only(host, port, family=0, *args, **kwargs):
+    return _getaddrinfo(host, port, socket.AF_INET, *args, **kwargs)
+
+
+socket.getaddrinfo = _ipv4_only
+
 LISTED = date(2015, 4, 16)  # IH 上市日
 PACE = 0.6
 SEAT_URL = "http://www.cffex.com.cn/sj/ccpm/{ym}/{dd}/IH_1.csv"
