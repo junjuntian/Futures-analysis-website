@@ -9,5 +9,15 @@
 -- **不断言行数**:铁矿石可能要等下一次 catalog 采集才第一次出现,那时这条迁移
 -- 早跑完了 —— 所以 load-catalog-direct.sql 末尾有一段同规格的兜底补写,
 -- 两处配合才保证「无论谁先到,点值都会补上」。改点值要同时改那两处。
+
+begin;
+
 update instruments set price_multiplier = 100, updated_at = now()
  where upper(code) = 'I' and (price_multiplier is null or price_multiplier <> 100);
+
+insert into schema_versions (version, description)
+values ('202608280001',
+        'Iron ore (I) price multiplier: 100 tonnes per lot, seeded for the newly whitelisted DCE variety')
+on conflict (version) do nothing;
+
+commit;
