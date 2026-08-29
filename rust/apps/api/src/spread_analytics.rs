@@ -4164,7 +4164,7 @@ mod tests {
                 inferred: false,
                 settlement: None,
             };
-        let rows = vec![
+        let rows = [
             mk(date!(2026 - 08 - 20), "10", "0"),
             mk(date!(2026 - 08 - 22), "4", "0"),
         ];
@@ -4192,7 +4192,7 @@ mod tests {
     #[test]
     fn pnl_breakdown_does_not_invent_positions_before_first_row() {
         use time::macros::date;
-        let rows = vec![database::spread_analytics::SeatNetPositionRow {
+        let rows = [database::spread_analytics::SeatNetPositionRow {
             member_key: "永安期货".to_string(),
             contract: "FG2701".to_string(),
             trade_date: date!(2026 - 08 - 22),
