@@ -399,6 +399,39 @@ export function getSeatNetPosition(options: {
   return getJson(`/api/v1/spread-analytics/seats/net-position?${params.toString()}`)
 }
 
+/** 盈亏商品(DEC-157):区间逐日盯市盈亏。member 模式=该席位逐品种;instrument 模式=该品种逐席位。 */
+export interface PnlBreakdownItem {
+  key: string
+  pnl: string
+  known_days: number
+  filled_days: number
+  no_multiplier: boolean
+}
+
+export interface SeatPnlResponse {
+  mode: 'member' | 'instrument'
+  member: string | null
+  instrument: string | null
+  start_date: string
+  end_date: string
+  items: PnlBreakdownItem[]
+  all_instruments: string[]
+}
+
+export function getSeatPnlBreakdown(options: {
+  member?: string
+  instrument?: string
+  startDate: string
+  endDate: string
+}): Promise<ApiEnvelope<SeatPnlResponse>> {
+  const params = new URLSearchParams()
+  if (options.member) params.set('member', options.member)
+  if (options.instrument) params.set('instrument', options.instrument)
+  params.set('start_date', options.startDate)
+  params.set('end_date', options.endDate)
+  return getJson(`/api/v1/spread-analytics/seats/pnl-breakdown?${params.toString()}`)
+}
+
 export function getSeatFavorites(): Promise<ApiEnvelope<SeatFavorite[]>> {
   return getJson('/api/v1/spread-analytics/seats/member-favorites')
 }

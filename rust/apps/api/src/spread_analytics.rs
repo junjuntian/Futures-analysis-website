@@ -35,7 +35,7 @@ use std::{
 };
 use time::{Date, OffsetDateTime, UtcOffset};
 use tracing::warn;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -1907,6 +1907,382 @@ pub async fn query_seat_net_position(
     }
 }
 
+/// 盈亏商品(DEC-157,运营者 2026-08-30):区间逐日盯市盈亏的两种切片。
+///
+/// - 传 `member` 不传 `instrument`:该席位在**每个品种**上的区间盈亏;
+/// - 传 `instrument`:该品种**所有上过榜席位**的区间盈亏。
+///
+/// 口径 = 净持仓页的 `daily_pnl` 一字不差(同一个 `build_cost_series`),只多一条
+/// 运营者拍板的规则:**掉榜日沿用上次持仓继续盯市**(净持仓页按「未知」处理,这里
+/// 按他 2026-08-30 的拍板填前值,`filled_days` 如实报有多少天是这么推算的)。
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct SeatPnlQuery {
+    pub member: Option<String>,
+    pub instrument: Option<String>,
+    /// 区间首日(含)。
+    pub start_date: String,
+    /// 区间末日(含)。
+    pub end_date: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PnlBreakdownItem {
+    /// member 模式下是品种代码,instrument 模式下是席位名。
+    pub key: String,
+    /// 区间盈亏(元,四舍五入到个位)。区间内一天数据都没有时不出现在列表里。
+    pub pnl: String,
+    /// 区间内真实上榜、盈亏按官方持仓算出的交易日数。
+    pub known_days: i64,
+    /// 区间内按「沿用上次持仓」推算的交易日数。界面要把它写在明面上。
+    pub filled_days: i64,
+    /// 品种没有配置点值:盈亏算不了(如实列出而不是悄悄消失)。
+    pub no_multiplier: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeatPnlResponse {
+    /// "member" 或 "instrument"。
+    pub mode: String,
+    pub member: Option<String>,
+    pub instrument: Option<String>,
+    pub start_date: String,
+    pub end_date: String,
+    /// 按盈亏从大到小。
+    pub items: Vec<PnlBreakdownItem>,
+    /// 库里有席位数据的全部品种,品种下拉用。
+    pub all_instruments: Vec<String>,
+}
+
+/// 一家席位在一个品种上的区间盯市盈亏。
+///
+/// 输入是该席位的榜上行(按合约分组)与该品种全部合约的结算价矩阵。逐合约:
+/// 以**结算价日历**为轴,从该席位首次上榜那天起,榜上有行用官方持仓,没有就沿用
+/// 前值(运营者拍板;`build_cost_series` 自身把缺失当未知,所以填充在这里做,
+/// 净持仓页的口径不受影响)。然后整段喂进 `build_cost_series`,取区间内
+/// `daily_pnl` 求和 —— 序列从首日喂而不是从区间头,成本与前日结算才接得上。
+fn interval_mtm_pnl(
+    rows: &[&database::spread_analytics::SeatNetPositionRow],
+    settlements: &BTreeMap<String, BTreeMap<Date, Decimal>>,
+    factor: Decimal,
+    start: Date,
+    end: Date,
+) -> Option<(Decimal, i64, i64)> {
+    let mut by_contract: BTreeMap<&str, BTreeMap<Date, Decimal>> = BTreeMap::new();
+    for row in rows {
+        let net = parse_decimal(&row.long_position) - parse_decimal(&row.short_position);
+        by_contract
+            .entry(row.contract.as_str())
+            .or_default()
+            .insert(row.trade_date, net);
+    }
+    let mut total = Decimal::ZERO;
+    let mut known: BTreeSet<Date> = BTreeSet::new();
+    let mut filled: BTreeSet<Date> = BTreeSet::new();
+    let mut any = false;
+    for (contract, on_board) in &by_contract {
+        let Some(px) = settlements.get(*contract) else {
+            continue;
+        };
+        let Some(first) = on_board.keys().next().copied() else {
+            continue;
+        };
+        let mut points: Vec<DailyPosition> = Vec::new();
+        let mut last_net: Option<Decimal> = None;
+        for (date, settle) in px.range(first..=end) {
+            let net = match on_board.get(date) {
+                Some(value) => {
+                    last_net = Some(*value);
+                    if *date >= start {
+                        known.insert(*date);
+                    }
+                    *value
+                }
+                None => {
+                    let Some(carried) = last_net else { continue };
+                    // 已经归零的仓位不再当「沿用」——零盯到天荒地老只会
+                    // 把 filled_days 撑大,盈亏一分不差。
+                    if carried != Decimal::ZERO && *date >= start {
+                        filled.insert(*date);
+                    }
+                    carried
+                }
+            };
+            points.push(DailyPosition {
+                trade_date: *date,
+                net_position: Some(net),
+                settlement: Some(*settle),
+            });
+        }
+        for point in build_cost_series(&points, factor) {
+            if point.trade_date >= start
+                && point.trade_date <= end
+                && let Some(pnl) = point.daily_pnl
+            {
+                total += pnl;
+                any = true;
+            }
+        }
+    }
+    any.then_some((total, known.len() as i64, filled.len() as i64))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/spread-analytics/seats/pnl-breakdown",
+    params(SeatPnlQuery),
+    security(("session_cookie" = [])),
+    responses(
+        (status = 200, body = SeatPnlResponse),
+        (status = 400, body = SpreadErrorBody),
+        (status = 401, body = SpreadErrorBody),
+        (status = 403, body = SpreadErrorBody)
+    )
+)]
+pub async fn query_seat_pnl_breakdown(
+    State(state): State<Arc<SpreadAnalyticsState>>,
+    headers: HeaderMap,
+    Query(query): Query<SeatPnlQuery>,
+) -> Result<Response, SpreadApiError> {
+    let request_id = Uuid::now_v7();
+    let context = read_context(&state, &headers, request_id).await?;
+    let start = parse_trade_date(query.start_date.trim(), request_id)?;
+    let end = parse_trade_date(query.end_date.trim(), request_id)?;
+    if start > end {
+        return Err(SpreadApiError::Validation("invalid_date_range", request_id));
+    }
+    let instrument = query
+        .instrument
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+    if let Some(code) = instrument.as_deref()
+        && !code.chars().all(|c| c.is_ascii_uppercase())
+    {
+        return Err(SpreadApiError::Validation("invalid_instrument", request_id));
+    }
+    let member = query
+        .member
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if instrument.is_none() && member.is_none() {
+        return Err(SpreadApiError::Validation("missing_selector", request_id));
+    }
+
+    // 缓存(DEC-148 同款):版本锚 = 席位数据最新交易日的数据版本。
+    let cache_key = format!(
+        "pnl|{}|{}|{start}|{end}",
+        member.as_deref().unwrap_or(""),
+        instrument.as_deref().unwrap_or("")
+    );
+    let version = match database::spread_analytics::seat_trade_dates(
+        &state.auth.pool,
+        context.workspace_id(),
+        None,
+        1,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?
+    .into_iter()
+    .next()
+    {
+        Some(anchor) => database::spread_analytics::report_data_version(
+            &state.auth.pool,
+            context.workspace_id(),
+            anchor,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?,
+        None => None,
+    };
+    if version.is_some()
+        && let Some((cached_version, value)) = state
+            .net_position_cache
+            .read()
+            .await
+            .get(&(context.workspace_id(), cache_key.clone()))
+        && *cached_version == version
+    {
+        return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
+    }
+
+    let all_instruments =
+        database::spread_analytics::list_seat_instruments(&state.auth.pool, context.workspace_id())
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+
+    let mut items: Vec<PnlBreakdownItem> = Vec::new();
+    let mode;
+    if let Some(code) = instrument.as_deref() {
+        // 品种模式:该品种所有上过榜的席位,一次取数、内存分组 —— 逐家发查询
+        // 是上百次往返。
+        mode = "instrument";
+        let members = database::spread_analytics::seat_members(
+            &state.auth.pool,
+            context.workspace_id(),
+            Some(code),
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        let factor = load_pnl_factor(&state, &context, code, request_id).await?;
+        let settlements = load_settlement_matrix(&state, &context, code, request_id).await?;
+        let rows = database::spread_analytics::load_seat_net_positions(
+            &state.auth.pool,
+            context.workspace_id(),
+            code,
+            &members,
+            None,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        let mut by_member: BTreeMap<&str, Vec<&database::spread_analytics::SeatNetPositionRow>> =
+            BTreeMap::new();
+        for row in &rows {
+            by_member
+                .entry(row.member_key.as_str())
+                .or_default()
+                .push(row);
+        }
+        for (name, member_rows) in by_member {
+            let Some(factor) = factor else {
+                items.push(PnlBreakdownItem {
+                    key: name.to_string(),
+                    pnl: "0".to_string(),
+                    known_days: 0,
+                    filled_days: 0,
+                    no_multiplier: true,
+                });
+                continue;
+            };
+            if let Some((pnl, known, filled)) =
+                interval_mtm_pnl(&member_rows, &settlements, factor, start, end)
+            {
+                items.push(PnlBreakdownItem {
+                    key: name.to_string(),
+                    pnl: pnl.round_dp(0).to_string(),
+                    known_days: known,
+                    filled_days: filled,
+                    no_multiplier: false,
+                });
+            }
+        }
+    } else {
+        // 席位模式:该席位持有过的每个品种各算一格。
+        mode = "member";
+        let name = member.clone().unwrap_or_default();
+        let owned = database::spread_analytics::load_member_instruments(
+            &state.auth.pool,
+            context.workspace_id(),
+            &name,
+        )
+        .await
+        .map_err(|_| SpreadApiError::Internal(request_id))?;
+        for code in owned {
+            let factor = load_pnl_factor(&state, &context, &code, request_id).await?;
+            let rows = database::spread_analytics::load_seat_net_positions(
+                &state.auth.pool,
+                context.workspace_id(),
+                &code,
+                std::slice::from_ref(&name),
+                None,
+            )
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
+            let Some(factor) = factor else {
+                items.push(PnlBreakdownItem {
+                    key: code,
+                    pnl: "0".to_string(),
+                    known_days: 0,
+                    filled_days: 0,
+                    no_multiplier: true,
+                });
+                continue;
+            };
+            let settlements = load_settlement_matrix(&state, &context, &code, request_id).await?;
+            let refs: Vec<&database::spread_analytics::SeatNetPositionRow> = rows.iter().collect();
+            if let Some((pnl, known, filled)) =
+                interval_mtm_pnl(&refs, &settlements, factor, start, end)
+            {
+                items.push(PnlBreakdownItem {
+                    key: code,
+                    pnl: pnl.round_dp(0).to_string(),
+                    known_days: known,
+                    filled_days: filled,
+                    no_multiplier: false,
+                });
+            }
+        }
+    }
+    // 赚得多的在上;同额按名称稳定排。
+    items.sort_by(|a, b| {
+        let pa: Decimal = a.pnl.parse().unwrap_or_default();
+        let pb: Decimal = b.pnl.parse().unwrap_or_default();
+        pb.cmp(&pa).then_with(|| a.key.cmp(&b.key))
+    });
+
+    let response = SeatPnlResponse {
+        mode: mode.to_string(),
+        member,
+        instrument,
+        start_date: start.to_string(),
+        end_date: end.to_string(),
+        items,
+        all_instruments,
+    };
+    match serde_json::to_value(&response) {
+        Ok(value) => {
+            state.net_position_cache.write().await.insert(
+                (context.workspace_id(), cache_key),
+                (version, value.clone()),
+            );
+            Ok(Json(ApiResponse::new(value, request_id)).into_response())
+        }
+        Err(_) => Ok(Json(ApiResponse::new(response, request_id)).into_response()),
+    }
+}
+
+async fn load_pnl_factor(
+    state: &Arc<SpreadAnalyticsState>,
+    context: &auth::AuthContext,
+    instrument: &str,
+    request_id: Uuid,
+) -> Result<Option<Decimal>, SpreadApiError> {
+    Ok(database::spread_analytics::instrument_price_multiplier(
+        &state.auth.pool,
+        context.workspace_id(),
+        instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?
+    .as_deref()
+    .and_then(|value| value.parse().ok()))
+}
+
+async fn load_settlement_matrix(
+    state: &Arc<SpreadAnalyticsState>,
+    context: &auth::AuthContext,
+    instrument: &str,
+    request_id: Uuid,
+) -> Result<BTreeMap<String, BTreeMap<Date, Decimal>>, SpreadApiError> {
+    let mut settlements: BTreeMap<String, BTreeMap<Date, Decimal>> = BTreeMap::new();
+    for row in database::spread_analytics::load_instrument_settlements(
+        &state.auth.pool,
+        context.workspace_id(),
+        instrument,
+    )
+    .await
+    .map_err(|_| SpreadApiError::Internal(request_id))?
+    {
+        settlements
+            .entry(row.contract)
+            .or_default()
+            .insert(row.trade_date, parse_decimal(&row.settlement));
+    }
+    Ok(settlements)
+}
+
 /// 解析逗号分隔的会员名，顺带去重。
 ///
 /// **去重不是整洁癖**：同一家选两次会被逐日加两遍，合计直接翻倍，而图上看不出任何
@@ -3770,6 +4146,80 @@ pub use monitor::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 盈亏商品的掉榜沿用口径(DEC-157):掉榜那天按上次持仓继续盯市,
+    /// 且 `filled_days` 如实计数;回榜后接回官方值。
+    /// 场景:净多 10 手,8/20 上榜@100,8/21 掉榜(结算 103),8/22 回榜@106 减到 4 手。
+    /// 逐日盯市 = 8/21: 10×3×5 = 150;8/22: 10×3×5 = 150(变动按当日结算,先涨后减)。
+    #[test]
+    fn pnl_breakdown_carries_position_through_off_board_days() {
+        use time::macros::date;
+        let mk =
+            |d: Date, long: &str, short: &str| database::spread_analytics::SeatNetPositionRow {
+                member_key: "永安期货".to_string(),
+                contract: "FG2701".to_string(),
+                trade_date: d,
+                long_position: long.to_string(),
+                short_position: short.to_string(),
+                inferred: false,
+                settlement: None,
+            };
+        let rows = vec![
+            mk(date!(2026 - 08 - 20), "10", "0"),
+            mk(date!(2026 - 08 - 22), "4", "0"),
+        ];
+        let refs: Vec<&database::spread_analytics::SeatNetPositionRow> = rows.iter().collect();
+        let mut px: BTreeMap<Date, Decimal> = BTreeMap::new();
+        px.insert(date!(2026 - 08 - 20), Decimal::from(100));
+        px.insert(date!(2026 - 08 - 21), Decimal::from(103));
+        px.insert(date!(2026 - 08 - 22), Decimal::from(106));
+        let mut settlements = BTreeMap::new();
+        settlements.insert("FG2701".to_string(), px);
+        let (pnl, known, filled) = interval_mtm_pnl(
+            &refs,
+            &settlements,
+            Decimal::from(5),
+            date!(2026 - 08 - 20),
+            date!(2026 - 08 - 22),
+        )
+        .expect("interval should produce pnl");
+        assert_eq!(pnl, Decimal::from(300), "150 + 150");
+        assert_eq!(known, 2, "8/20 与 8/22 真实上榜");
+        assert_eq!(filled, 1, "8/21 掉榜,按沿用推算");
+    }
+
+    /// 席位首次上榜之前的日子不参与:没有「上次持仓」可沿用,不能凭空造仓。
+    #[test]
+    fn pnl_breakdown_does_not_invent_positions_before_first_row() {
+        use time::macros::date;
+        let rows = vec![database::spread_analytics::SeatNetPositionRow {
+            member_key: "永安期货".to_string(),
+            contract: "FG2701".to_string(),
+            trade_date: date!(2026 - 08 - 22),
+            long_position: "10".to_string(),
+            short_position: "0".to_string(),
+            inferred: false,
+            settlement: None,
+        }];
+        let refs: Vec<&database::spread_analytics::SeatNetPositionRow> = rows.iter().collect();
+        let mut px: BTreeMap<Date, Decimal> = BTreeMap::new();
+        px.insert(date!(2026 - 08 - 20), Decimal::from(100));
+        px.insert(date!(2026 - 08 - 21), Decimal::from(103));
+        px.insert(date!(2026 - 08 - 22), Decimal::from(106));
+        let mut settlements = BTreeMap::new();
+        settlements.insert("FG2701".to_string(), px);
+        let result = interval_mtm_pnl(
+            &refs,
+            &settlements,
+            Decimal::from(5),
+            date!(2026 - 08 - 20),
+            date!(2026 - 08 - 22),
+        );
+        // 首日建仓当天没有前日结算,当日盈亏不可知;更早的天不存在——
+        // 整个区间一天都算不出,如实回 None(界面上这家就不出现),
+        // 而不是把 8/20、8/21 当成持了 10 手去编两天盈亏。
+        assert!(result.is_none());
+    }
 
     fn bday(
         day: Date,

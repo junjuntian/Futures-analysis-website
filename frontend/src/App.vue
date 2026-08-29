@@ -99,6 +99,7 @@ function handleCommand(command: string) {
                顶部那组选择,分开成两个页面就意味着选了席位过去还得再选一次。
                现在是席位页的第二个子页。 -->
           <el-menu-item index="/seats?tab=building">净持仓</el-menu-item>
+          <el-menu-item index="/seats?tab=pnl">盈亏商品</el-menu-item>
         </el-sub-menu>
         <el-menu-item index="/smart-money-view">
           <span class="nav-emoji">💰</span>

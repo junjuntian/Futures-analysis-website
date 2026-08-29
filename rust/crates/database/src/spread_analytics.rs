@@ -2701,6 +2701,73 @@ pub struct SeatNetPositionRow {
     pub settlement: Option<String>,
 }
 
+/// 某品种全部合约的逐日结算价(盈亏商品页用,DEC-157)。
+///
+/// 掉榜日按运营者拍板「沿用上次持仓」继续盯市 —— 那天该席位在 seat_history 里
+/// 一行都没有,结算价必须另取。多源收敛口径与 `seat_net_positions_sql` 的 px CTE
+/// 一字不差:同一天两条曲线要用同一个价。
+pub struct ContractSettlementRow {
+    pub contract: String,
+    pub trade_date: Date,
+    pub settlement: String,
+}
+
+pub async fn load_instrument_settlements(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    instrument: &str,
+) -> Result<Vec<ContractSettlementRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let sql = format!(
+        "select distinct on (contract, trade_date)
+                contract, trade_date, settlement_price::text as settlement
+           from price_history
+          where workspace_id = $1 and instrument = $2 and contract is not null
+            and settlement_price is not null and settlement_price > 0
+          order by contract, trade_date, {price_rank}, source",
+        price_rank = PRICE_SOURCE_RANK,
+    );
+    let rows = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(instrument)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ContractSettlementRow {
+            contract: row.get("contract"),
+            trade_date: row.get("trade_date"),
+            settlement: row.get("settlement"),
+        })
+        .collect())
+}
+
+/// 席位数据里出现过的全部品种(盈亏商品页的品种下拉用)。
+///
+/// 口径同 `load_member_instruments`,只是不限会员:排除品种合计行与回榜反推行,
+/// 后者是我们自己造的数据,不该让一个品种只因反推行而出现在选择器里。
+pub async fn list_seat_instruments(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_workspace(&mut tx, workspace_id).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        "select distinct instrument from seat_history
+          where workspace_id = $1
+            and not is_variety_total and rank_type in ('long', 'short')
+            and source <> 'reboard_inferred'
+          order by instrument",
+    )
+    .bind(workspace_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 /// 净持仓页的取数 SQL。提成函数与 [`building_days_sql`] 同一个理由（测试要断言它本身）。
 fn seat_net_positions_sql() -> String {
     format!(

@@ -48,6 +48,7 @@ use uuid::Uuid;
         spread_analytics::query_member_instruments,
         spread_analytics::save_template_note,
         spread_analytics::query_seat_net_position,
+        spread_analytics::query_seat_pnl_breakdown,
         spread_analytics::list_seat_member_favorites,
         spread_analytics::create_seat_member_favorite,
         spread_analytics::delete_seat_member_favorite,
@@ -301,6 +302,10 @@ fn router(
             get(spread_analytics::query_seat_net_position),
         )
         .route(
+            "/api/v1/spread-analytics/seats/pnl-breakdown",
+            get(spread_analytics::query_seat_pnl_breakdown),
+        )
+        .route(
             "/api/v1/spread-analytics/seats/member-favorites",
             get(spread_analytics::list_seat_member_favorites)
                 .post(spread_analytics::create_seat_member_favorite),
@@ -435,6 +440,7 @@ mod tests {
             ("/api/v1/spread-analytics/seats/member-instruments", "get"),
             ("/api/v1/spread-analytics/monitor/template-note", "put"),
             ("/api/v1/spread-analytics/seats/net-position", "get"),
+            ("/api/v1/spread-analytics/seats/pnl-breakdown", "get"),
             ("/api/v1/spread-analytics/seats/member-favorites", "get"),
             ("/api/v1/spread-analytics/seats/member-favorites", "post"),
             (

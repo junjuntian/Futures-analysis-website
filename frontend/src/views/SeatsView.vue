@@ -11,6 +11,8 @@ import {
   getSeatFavorites,
   getSeatMemberInstruments,
   getSeatNetPosition,
+  getSeatPnlBreakdown,
+  type PnlBreakdownItem,
   getSeatPositions,
   type SeatContractCost,
   getSpreadVarieties,
@@ -93,7 +95,7 @@ function isNotTradingDay(day: Date) {
   const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`
   return !availableDateSet.value.has(key)
 }
-const tab = ref<'positions' | 'building'>('positions')
+const tab = ref<'positions' | 'building' | 'pnl'>('positions')
 
 // 席位持仓
 const instrumentFilter = ref<string[]>([])
@@ -353,6 +355,7 @@ async function loadVarietyNames() {
 
 onMounted(() => {
   if (route.query.tab === 'building') tab.value = 'building'
+  if (route.query.tab === 'pnl') tab.value = 'pnl'
   loadVarietyNames()
   loadFavorites()
   loadPositions()
@@ -365,14 +368,85 @@ watch(
   () => {
     loadPositions()
     if (tab.value === 'building') loadBuilding()
+    if (tab.value === 'pnl') loadPnl()
   },
   { deep: true }
 )
 watch(tab, (value) => {
+  if (value === 'pnl') loadPnl()
   router.replace({ query: { ...route.query, tab: value } })
   if (value === 'building') loadBuilding()
 })
 watch([buildingInstrument, buildingContract], () => loadBuilding())
+
+// 盈亏商品(DEC-157):区间逐日盯市。品种留空 = 按席位模式(共用选择器里勾中的
+// 每家各一张卡);选了品种 = 该品种全部席位排行,此时勾选的席位只影响别的子页。
+const pnlInstrument = ref('')
+const pnlStart = ref('')
+const pnlEnd = ref('')
+const pnlInstruments = ref<string[]>([])
+const pnlCards = ref<{ title: string; items: PnlBreakdownItem[] }[]>([])
+const loadingPnl = ref(false)
+
+/** 默认区间:最近 5 个交易日(availableDates 升序,取尾5)。 */
+function defaultPnlRange() {
+  const dates = availableDates.value
+  if (!dates.length) return
+  if (!pnlEnd.value) pnlEnd.value = dates[dates.length - 1]
+  if (!pnlStart.value) pnlStart.value = dates[Math.max(0, dates.length - 5)]
+}
+
+async function loadPnl() {
+  defaultPnlRange()
+  if (!pnlStart.value || !pnlEnd.value) return
+  const range = { startDate: pnlStart.value, endDate: pnlEnd.value }
+  loadingPnl.value = true
+  try {
+    if (pnlInstrument.value) {
+      const res = await getSeatPnlBreakdown({ instrument: pnlInstrument.value, ...range })
+      pnlInstruments.value = res.data.all_instruments
+      pnlCards.value = [
+        { title: `${varietyLabel(pnlInstrument.value)} · 全部席位`, items: res.data.items },
+      ]
+    } else {
+      // 一家一张卡。接口一次只认一家,勾了几家就并发取几份(与席位持仓同款)。
+      const members = selected.value
+      if (!members.length) {
+        pnlCards.value = []
+        return
+      }
+      const results = await Promise.all(
+        members.map((member) => getSeatPnlBreakdown({ member, ...range }))
+      )
+      if (results.length) pnlInstruments.value = results[0].data.all_instruments
+      pnlCards.value = results.map((res, i) => ({
+        title: members[i],
+        items: res.data.items,
+      }))
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '盈亏商品读取失败')
+  } finally {
+    loadingPnl.value = false
+  }
+}
+
+/** 条形宽度:同卡内按绝对值最大的那根归一。 */
+function pnlBarWidth(items: PnlBreakdownItem[], item: PnlBreakdownItem) {
+  const max = Math.max(...items.map((x) => Math.abs(Number(x.pnl) || 0)), 1)
+  return `${Math.max(2, (Math.abs(Number(item.pnl) || 0) / max) * 100).toFixed(1)}%`
+}
+
+function pnlText(value: string) {
+  const n = Number(value) || 0
+  const abs = Math.abs(n)
+  const wan = abs >= 10000 ? `${(n / 10000).toFixed(abs >= 1000000 ? 0 : 1)} 万` : `${Math.round(n)}`
+  return n >= 0 ? `+${wan}` : `-${wan.replace('-', '')}`
+}
+
+watch([pnlInstrument, pnlStart, pnlEnd], () => {
+  if (tab.value === 'pnl') loadPnl()
+})
 
 /** 所选那几家当天持有的品种（并集），用于「筛选商品显示」。 */
 const instruments = computed(() =>
@@ -1164,15 +1238,95 @@ const latestDailyPnl = computed(() => {
         <el-radio-group v-model="tab">
           <el-radio-button value="positions">席位持仓</el-radio-button>
           <el-radio-button value="building">净持仓</el-radio-button>
+          <el-radio-button value="pnl">盈亏商品</el-radio-button>
         </el-radio-group>
       </div>
     </el-card>
 
     <!-- 一家没勾时两个子页都没东西可画。**空着是允许的状态**（清空是为了重挑，
          不该被自动塞回一家），所以要有人出来说一句，而不是留一片空白让人以为坏了。 -->
-    <el-card v-if="!selected.length" shadow="never">
+    <el-card v-if="tab !== 'pnl' && !selected.length" shadow="never">
       <el-empty description="先在上面选几个席位" />
     </el-card>
+
+    <!-- 盈亏商品(DEC-157):区间逐日盯市。不选品种 = 勾中的每家席位各一张
+         逐品种卡;选了品种 = 该品种全部席位排行(此时勾选不影响本页)。 -->
+    <template v-if="tab === 'pnl'">
+      <el-card shadow="never" class="filter-card">
+        <div class="pnl-controls">
+          <el-select
+            v-model="pnlInstrument"
+            clearable
+            placeholder="按席位看(或选一个品种)"
+            style="width: 220px"
+          >
+            <el-option
+              v-for="code in pnlInstruments"
+              :key="code"
+              :label="varietyLabel(code)"
+              :value="code"
+            />
+          </el-select>
+          <el-date-picker
+            v-model="pnlStart"
+            type="date"
+            style="width: 150px"
+            placeholder="起始日"
+            value-format="YYYY-MM-DD"
+            :clearable="false"
+            :disabled-date="isNotTradingDay"
+          />
+          <span class="pnl-range-dash">至</span>
+          <el-date-picker
+            v-model="pnlEnd"
+            type="date"
+            style="width: 150px"
+            placeholder="截止日"
+            value-format="YYYY-MM-DD"
+            :clearable="false"
+            :disabled-date="isNotTradingDay"
+          />
+        </div>
+      </el-card>
+      <el-card v-if="!pnlInstrument && !selected.length" shadow="never">
+        <el-empty description="先在上面选几个席位,或在左上选一个品种" />
+      </el-card>
+      <el-card
+        v-for="card in pnlCards"
+        v-else
+        :key="card.title"
+        shadow="never"
+        v-loading="loadingPnl"
+      >
+        <template #header>
+          <span class="pnl-card-title">{{ card.title }} 盈亏分布(估)</span>
+          <span class="pnl-card-sub">{{ pnlStart }} 至 {{ pnlEnd }} · 逐日盯市 · 掉榜沿用上次持仓</span>
+        </template>
+        <el-empty v-if="!card.items.length" description="区间内没有可计算的持仓" />
+        <div v-else class="pnl-rows">
+          <div v-for="item in card.items" :key="item.key" class="pnl-row">
+            <span class="pnl-key">{{ pnlInstrument ? item.key : varietyLabel(item.key) }}</span>
+            <div class="pnl-bar-track">
+              <div
+                class="pnl-bar"
+                :class="Number(item.pnl) >= 0 ? 'win' : 'loss'"
+                :style="{ width: pnlBarWidth(card.items, item) }"
+              />
+            </div>
+            <span class="pnl-value" :class="Number(item.pnl) >= 0 ? 'red' : 'green'">
+              {{ item.no_multiplier ? '未配点值' : pnlText(item.pnl) }}
+            </span>
+            <span class="pnl-days">
+              <template v-if="!item.no_multiplier">
+                {{ item.known_days }} 天<template v-if="item.filled_days"
+                  > · 含推算 {{ item.filled_days }} 天</template
+                >
+              </template>
+            </span>
+          </div>
+        </div>
+      </el-card>
+    </template>
 
     <!-- 席位持仓按家分段：榜单的「名次」与「增减量」是逐家公布的，加起来没有
          意义，所以勾了几家就列几段，不合并。要看合计去净持仓子页。 -->
@@ -1697,5 +1851,68 @@ h2 .muted {
   font-weight: 700;
   line-height: 16px;
   cursor: help;
+}
+.pnl-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pnl-range-dash {
+  color: var(--el-text-color-secondary);
+}
+.pnl-card-title {
+  font-weight: 600;
+}
+.pnl-card-sub {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.pnl-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pnl-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 110px 150px;
+  align-items: center;
+  gap: 10px;
+}
+.pnl-key {
+  font-size: 13px;
+  text-align: right;
+}
+.pnl-bar-track {
+  height: 14px;
+  background: var(--el-fill-color-lighter);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.pnl-bar {
+  height: 100%;
+  border-radius: 3px;
+}
+.pnl-bar.win {
+  background: var(--el-color-danger);
+}
+.pnl-bar.loss {
+  background: var(--el-color-success);
+}
+.pnl-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  text-align: right;
+}
+.pnl-value.red {
+  color: var(--el-color-danger);
+}
+.pnl-value.green {
+  color: var(--el-color-success);
+}
+.pnl-days {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>
