@@ -388,9 +388,12 @@ const pnlInstruments = ref<string[]>([])
 const pnlCards = ref<{ title: string; items: PnlBreakdownItem[] }[]>([])
 const loadingPnl = ref(false)
 
-/** 默认区间:最近 5 个交易日(availableDates 升序,取尾5)。 */
+/** 默认区间:最近 5 个交易日。
+ * availableDates 是**倒序**的(最新在前,历史表一律倒序的平台惯例)——上线首日
+ * 按升序尾巴取,默认区间落在了 2008-01(黄金数据的第一天)而且起止倒挂,
+ * 后端 invalid_date_range 直接拒。这里先排序再取,不赌接口的顺序。 */
 function defaultPnlRange() {
-  const dates = availableDates.value
+  const dates = [...availableDates.value].sort()
   if (!dates.length) return
   if (!pnlEnd.value) pnlEnd.value = dates[dates.length - 1]
   if (!pnlStart.value) pnlStart.value = dates[Math.max(0, dates.length - 5)]
@@ -399,6 +402,10 @@ function defaultPnlRange() {
 async function loadPnl() {
   defaultPnlRange()
   if (!pnlStart.value || !pnlEnd.value) return
+  // 手选也可能把起止点反,后端会拒;前端直接掉个头,别把错误弹给人看。
+  if (pnlStart.value > pnlEnd.value) {
+    ;[pnlStart.value, pnlEnd.value] = [pnlEnd.value, pnlStart.value]
+  }
   const range = { startDate: pnlStart.value, endDate: pnlEnd.value }
   loadingPnl.value = true
   try {
