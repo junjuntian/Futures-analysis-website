@@ -522,6 +522,18 @@ async function loadFollowPlan() {
   }))
 }
 
+/** 散户三家「合计变化」的方向文案(DEC-155):口径同 panelChg,按合计净持仓方向说。 */
+const retailTotalChg = computed(() => {
+  const r = data.value?.retail
+  if (!r || r.change === null || r.change === undefined) return '—'
+  if (r.change === 0) return '0 手'
+  const mag = fmt(Math.abs(r.change))
+  const net = r.net ?? 0
+  if (net > 0) return `净多${r.change > 0 ? '+' : '-'}${mag} 手`
+  if (net < 0) return `净空${r.change < 0 ? '+' : '-'}${mag} 手`
+  return `${r.change > 0 ? '+' : ''}${fmt(r.change)} 手`
+})
+
 const band = (b: [number, number]) => (b[0] === b[1] ? `${fmt(b[0])}` : `${fmt(b[0])}~${fmt(b[1])}`)
 
 /** vs 对照表的成本格(DEC-151):数字带 @ 前缀,「掉榜/不可知」原样,没有就空着。 */
@@ -1160,13 +1172,15 @@ const bySide = computed(() => {
             <span class="v" :class="(data.retail.net ?? 0) > 0 ? 'red' : 'green'">
               {{ fmt(data.retail.net) }} 手</span></div>
           <div class="kv"><span class="k">{{ data.signal.win }} 日变化</span>
-            <span class="v" :class="pnlClass(-(data.retail.change ?? 0))">{{ fmt(data.retail.change) }} 手</span></div>
+            <span class="v" :class="pnlClass(-(data.retail.change ?? 0))">{{ retailTotalChg }}</span></div>
           <div v-for="m in data.retail.members" :key="m.member" class="kv">
             <span class="k">　{{ m.member }}</span>
             <span class="v">
               <template v-if="m.on_board">{{ fmt(m.net) }} 手
-                <span v-if="m.change !== null" :class="pnlClass(-m.change)">
-                  ({{ m.change >= 0 ? '+' : '' }}{{ fmt(m.change) }})</span>
+                <!-- DEC-155:与五窗/组内各家同一套方向表述。**颜色仍反着**(散户加多=看跌),
+                     只有文案改成净多±/净空±,别把这里的 pnlClass(-m.change) 一起改了。 -->
+                <span v-if="panelChg(m)" :class="pnlClass(-(m.change ?? 0))">
+                  ({{ panelChg(m) }})</span>
               </template>
               <span v-else class="gray">当日未上榜</span>
             </span>
