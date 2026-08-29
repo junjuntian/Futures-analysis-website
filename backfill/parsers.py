@@ -10,7 +10,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-WANT = {"AP", "FG", "SA", "AU", "AG", "JM", "JD", "LH"}
+WANT = {"AP", "FG", "SA", "AU", "AG", "I", "IH", "SC", "JM", "JD", "LH"}
 # 这里曾有一张 LISTED_YEAR（品种上市年）表，用来给三位郑商所代码补世纪。
 # 那条规则是错的，见 normalise_contract 的说明——锚点必须是交易日。表已删除：
 # 留着一份写着错误规则的现成数据，下一个人很容易「顺手」再用上它。
@@ -31,6 +31,10 @@ EXCHANGE_BY_VARIETY = {
     "SA": "CZCE",
     "AU": "SHFE",
     "AG": "SHFE",
+    # DEC-158 三个新品种。
+    "I": "DCE",
+    "IH": "CFFEX",
+    "SC": "INE",
 }
 VARIETY_BY_NAME = {
     "沪金": "AU",
@@ -43,6 +47,10 @@ VARIETY_BY_NAME = {
     "焦煤": "JM",
     "鸡蛋": "JD",
     "生猪": "LH",
+    # DEC-158:铁矿石(三禾同名);上证50/原油为将来备着,三禾有没有另说。
+    "铁矿石": "I",
+    "上证50": "IH",
+    "原油": "SC",
 }
 
 # 自证：每个要处理的品种都得有交易所。少配一个不会报错，只会把那个品种的行

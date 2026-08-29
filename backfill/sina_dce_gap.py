@@ -74,12 +74,16 @@ def main() -> int:
     ap.add_argument("--from-date", default="2025-01-01")
     ap.add_argument("--to-date", default="2026-12-31")
     ap.add_argument("--out", default="/opt/futures-platform/load/price_dce_gap.csv")
+    # DEC-158:铁矿石回填要拉 2019-2025(新浪只留 2019 起),年份跟着起止日期走。
+    ap.add_argument("--varieties", default="JM,JD,LH")
     args = ap.parse_args()
 
+    y0 = int(args.from_date[2:4])
+    y1 = int(args.to_date[2:4]) + 2  # 远月合约挂到起始年 +1~2 年
     candidates = [
         f"{variety}{year}{month:02d}"
-        for variety in ("JM", "JD", "LH")
-        for year in (25, 26, 27)
+        for variety in [v.strip().upper() for v in args.varieties.split(",") if v.strip()]
+        for year in range(y0, y1 + 1)
         for month in range(1, 13)
     ]
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

@@ -16,7 +16,8 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 import pandas as pd
 
-WANT = {"JM", "JD", "LH"}
+# 默认三品种;--want 可覆盖(DEC-158 铁矿石回填加 I,文件名如 i_2018.xlsx)。
+DEFAULT_WANT = "JM,JD,LH"
 COLUMNS = [
     "exchange",
     "instrument",
@@ -73,15 +74,23 @@ def pick(row, names):
     return None
 
 
+def read_table(path):
+    """xlsx/xls 走 pandas.read_excel;2013-2016 打包里的 csv 是 GBK。
+    dtype=str 与原版一致:下游按字符串清洗,让 pandas 自作聪明转数值会毁掉它。"""
+    if path.suffix == ".csv":
+        return pd.read_csv(path, encoding="gbk", dtype=str)
+    return pd.read_excel(path, dtype=str)
+
+
 def rows_from(path):
-    frame = pd.read_excel(path, dtype=str)
+    frame = read_table(path)
     # 交易所的表头带前后空格，不 strip 的话下面的列名匹配全部落空。
     frame.columns = [str(c).strip() for c in frame.columns]
     out = []
     for _, raw in frame.iterrows():
         row = {k: v for k, v in raw.items()}
         contract = str(pick(row, ALIASES["contract"]) or "").strip().upper()
-        if not re.fullmatch(r"[A-Z]{1,2}\d{4}", contract) or contract[:2] not in WANT:
+        if not re.fullmatch(r"[A-Z]{1,2}\d{4}", contract):
             continue
         stamp = re.sub(r"\D", "", str(pick(row, ALIASES["trade_date"]) or ""))[:8]
         if len(stamp) != 8:
@@ -99,7 +108,7 @@ def rows_from(path):
         out.append(
             [
                 "DCE",
-                contract[:2],
+                "".join(c for c in contract if c.isalpha()),
                 contract,
                 f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:]}",
                 opening,
@@ -125,12 +134,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="/srv/dce-history")
     ap.add_argument("--out", default="/srv/load/price_dce.csv")
+    ap.add_argument("--want", default=DEFAULT_WANT)
     args = ap.parse_args()
 
+    want = {v.strip().upper() for v in args.want.split(",") if v.strip()}
+    # 文件名形如 jm_2013.xlsx / i_2018.xlsx:按下划线取品种码,别按前两个字符
+    # (单字码品种 i 会带上下划线永远匹配不上,而且悄无声息)。
     files = sorted(
         p
         for p in Path(args.dir).iterdir()
-        if p.suffix in (".xlsx", ".xls") and p.stem[:2].upper() in WANT
+        if p.suffix in (".xlsx", ".xls", ".csv") and p.stem.split("_")[0].upper() in want
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     total = failed = 0

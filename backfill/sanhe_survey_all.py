@@ -22,7 +22,13 @@ import requests
 OUT = Path("/opt/futures-platform/sanhe-seats")
 # 八个品种。与 backfill/parsers.py 的 VARIETY_BY_NAME 一致；那边是权威，改这里
 # 之前先看那张表，名字对不上会静默地把整个品种漏掉。
-WANT = {"焦煤", "鸡蛋", "生猪", "苹果", "玻璃", "纯碱", "黄金", "白银"}
+# 默认八品种;环境变量 SANHE_WANT(逗号分隔中文名)可覆盖 —— DEC-158 铁矿石
+# 普查用 SANHE_WANT=铁矿石,不动八品种的既有名单文件。
+WANT = set(
+    v.strip() for v in os.environ.get(
+        "SANHE_WANT", "焦煤,鸡蛋,生猪,苹果,玻璃,纯碱,黄金,白银"
+    ).split(",") if v.strip()
+)
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"

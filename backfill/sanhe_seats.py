@@ -30,13 +30,23 @@ from pathlib import Path
 import requests
 
 ROOT = Path("/opt/futures-platform/sanhe-seats")
-RAW = ROOT / "raw"
+# 铁矿石单采必须换目录(SANHE_RAW_DIR):采集按 (日期, 会员) 存文件、内容只含
+# WANT 品种——落进八品种的 raw/ 会把同名文件**覆盖成只剩铁矿石**,而 scope
+# 检查恰恰会放行这次覆盖(它只认本 scope)。
+RAW = Path(os.environ.get("SANHE_RAW_DIR", str(ROOT / "raw")))
 # 八个品种，**用三禾的叫法**：它管黄金叫「沪金」、白银叫「沪银」，而交易所与东财
 # 写「黄金」「白银」。写错了不会报错，只会让金银一行都采不到。
 # 解析侧由 parsers.VARIETY_BY_NAME 把这两个名字映回 AU/AG。
-WANT = {"焦煤", "鸡蛋", "生猪", "苹果", "玻璃", "纯碱", "沪金", "沪银"}
+# 默认八品种(三禾叫法);SANHE_WANT 覆盖(DEC-158 铁矿石=「铁矿石」,三禾同名)。
+WANT = set(
+    v.strip() for v in os.environ.get(
+        "SANHE_WANT", "焦煤,鸡蛋,生猪,苹果,玻璃,纯碱,沪金,沪银"
+    ).split(",") if v.strip()
+)
 # 写进每个文件，标明这一份是按哪个品种集合采的。见模块 docstring。
-SCOPE = "eight-varieties-v1"
+# scope 随品种集合走:铁矿石单采标 iron-ore-v1,与八品种的文件互不冒充
+# (见模块 docstring:没有标记,「文件已存在就跳过」会把部分品种的当成采全了)。
+SCOPE = os.environ.get("SANHE_SCOPE", "eight-varieties-v1")
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
