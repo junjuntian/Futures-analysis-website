@@ -68,6 +68,32 @@
   去动 workflow 的 permissions 或换 token。生产在这种失败下不受影响:镜像还没拉,
   切换没发生,`stable.env` 仍指向旧发布。
 
+### 部署验收 phase5a「jm 09-01 cache hit」在北京时间零点附近会假失败(2026-08-23)
+
+现象:deploy-futures 在 16:05 UTC(北京 00:05)验收失败 `PHASE5A_E2E_FAIL http_label=jm 09-01 cache hit expected=200 actual=503`,
+证据 live-combo-hit.json 是 `spread_provider_unavailable retry_after 58s` —— 第二次同样的查询没命中缓存、打到上游被限流。
+第一次查询在零点前、第二次在零点后,缓存键跟着日期变了。自动回滚 ROLLBACK_PASS,生产停在上一版,无损。
+**处置:避开北京 23:55~00:10 部署;撞上了直接重新 dispatch 即可(本次重跑即过)。** 与业务改动无关,别去改代码。
+
+
+### 部署窗口内的「研究提交」也是提交(2026-08-25,DEC-145 首次部署被拦)
+
+镜像建在 5eb6bba,部署跑到一半时往分支推了一个"纯研究附录"提交(23556f3),
+deploy-futures 的版本一致性校验(`test "$acceptance_sha" = "$GITHUB_SHA"`)直接拒绝,
+部署步骤全部跳过(生产无影响,门起了作用)。教训:**零提交铁律不分提交内容**——
+research/docs 的提交一样会动 HEAD,一样触发拒绝;部署链在后台跑的时候,任何
+`git push` 都要等它落地。返工成本 = 重建镜像 + 重跑整条链(约 20 分钟)。
+连带认知:失败 run 里 Step 10(registry 凭据校验)的 SSH 报错是**果不是因**
+(Step 6 装密钥被跳过了),看失败先看**第一个** failure 的步骤,别被最后一个骗走。
+
+### `git push | tail -1` 又吞了一次推送失败(2026-08-26,DEC-149 二改)
+
+远端有部署流水线的自动 LATEST 提交,push 被拒(非快进),`| tail -1` 让链条
+当没事继续——带着**没推上去的代码**跑完 CI/镜像,到 preflight 才被拦。
+与「发布链假成功」是同一类病:**发布链一律 `set -o pipefail` 开头**,任何
+`cmd | tail/grep` 后面接 `&&` 都默认有这个坑。写进链条模板,不靠记性。
+
+
 ## 三、生产服务器(qh)运维
 
 - **cron 的 `CRON_TZ=Asia/Shanghai` 在这台机器上不生效**(三例):写北京时间会按
@@ -598,28 +624,3 @@
   排查方向直接引偏,能一眼定位靠的是它旁边那个 `HTTP 403`。**状态码能分流就照它
   分流,分不出来就说分不出来**,别给一个听着笃定的错方向。同类:前端 `catch` 把
   根因吞掉,守卫静默失效(engine.json 那次)。
-
-## 部署验收 phase5a「jm 09-01 cache hit」在北京时间零点附近会假失败(2026-08-23)
-
-现象:deploy-futures 在 16:05 UTC(北京 00:05)验收失败 `PHASE5A_E2E_FAIL http_label=jm 09-01 cache hit expected=200 actual=503`,
-证据 live-combo-hit.json 是 `spread_provider_unavailable retry_after 58s` —— 第二次同样的查询没命中缓存、打到上游被限流。
-第一次查询在零点前、第二次在零点后,缓存键跟着日期变了。自动回滚 ROLLBACK_PASS,生产停在上一版,无损。
-**处置:避开北京 23:55~00:10 部署;撞上了直接重新 dispatch 即可(本次重跑即过)。** 与业务改动无关,别去改代码。
-
-
-## 部署窗口内的「研究提交」也是提交(2026-08-25,DEC-145 首次部署被拦)
-
-镜像建在 5eb6bba,部署跑到一半时往分支推了一个"纯研究附录"提交(23556f3),
-deploy-futures 的版本一致性校验(`test "$acceptance_sha" = "$GITHUB_SHA"`)直接拒绝,
-部署步骤全部跳过(生产无影响,门起了作用)。教训:**零提交铁律不分提交内容**——
-research/docs 的提交一样会动 HEAD,一样触发拒绝;部署链在后台跑的时候,任何
-`git push` 都要等它落地。返工成本 = 重建镜像 + 重跑整条链(约 20 分钟)。
-连带认知:失败 run 里 Step 10(registry 凭据校验)的 SSH 报错是**果不是因**
-(Step 6 装密钥被跳过了),看失败先看**第一个** failure 的步骤,别被最后一个骗走。
-
-## `git push | tail -1` 又吞了一次推送失败(2026-08-26,DEC-149 二改)
-
-远端有部署流水线的自动 LATEST 提交,push 被拒(非快进),`| tail -1` 让链条
-当没事继续——带着**没推上去的代码**跑完 CI/镜像,到 preflight 才被拦。
-与「发布链假成功」是同一类病:**发布链一律 `set -o pipefail` 开头**,任何
-`cmd | tail/grep` 后面接 `&&` 都默认有这个坑。写进链条模板,不靠记性。
