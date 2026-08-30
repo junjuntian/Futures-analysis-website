@@ -114,7 +114,7 @@ def main() -> int:
                 writer.writerow(
                     [
                         "DCE",
-                        symbol[:2],
+                        "".join(c for c in symbol if c.isalpha()),  # 单字码品种(I1601)不能切前两位,dce_to_csv 同款坑
                         symbol,
                         day,
                         bar.get("o") or "",
