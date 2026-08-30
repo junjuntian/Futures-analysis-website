@@ -23,7 +23,9 @@
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -38,11 +40,12 @@ RAW = Path(os.environ.get("SANHE_RAW_DIR", str(ROOT / "raw")))
 # 写「黄金」「白银」。写错了不会报错，只会让金银一行都采不到。
 # 解析侧由 parsers.VARIETY_BY_NAME 把这两个名字映回 AU/AG。
 # 默认八品种(三禾叫法);SANHE_WANT 覆盖(DEC-158 铁矿石=「铁矿石」,三禾同名)。
-WANT = set(
-    v.strip() for v in os.environ.get(
-        "SANHE_WANT", "焦煤,鸡蛋,生猪,苹果,玻璃,纯碱,沪金,沪银"
-    ).split(",") if v.strip()
-)
+# SANHE_WANT=ALL 时**存全量**(2026-08-30 运营者「找更快的方法」):三禾按会员
+# 回整份 positions(73 品种),过滤只是丢数据——存全量后铁矿石/IH/将来任何品种
+# 共用同一次长跑,不必逐品种重采。
+_want_raw = os.environ.get("SANHE_WANT", "焦煤,鸡蛋,生猪,苹果,玻璃,纯碱,沪金,沪银")
+WANT_ALL = _want_raw.strip().upper() == "ALL"
+WANT = set(v.strip() for v in _want_raw.split(",") if v.strip())
 # 写进每个文件，标明这一份是按哪个品种集合采的。见模块 docstring。
 # scope 随品种集合走:铁矿石单采标 iron-ore-v1,与八品种的文件互不冒充
 # (见模块 docstring:没有标记,「文件已存在就跳过」会把部分品种的当成采全了)。
@@ -59,6 +62,9 @@ HEADERS = {
     "User-Agent": UA,
 }
 PACE = float(os.environ.get("SANHE_PACE", "1.2"))
+WORKERS = int(os.environ.get("SANHE_WORKERS", "1"))
+_fail_streak = 0
+_fail_lock = threading.Lock()
 
 
 def post(path, data=None):
@@ -146,46 +152,55 @@ def main() -> int:
         )
         if day.weekday() < 5
     ]
-    issued = kept = 0
+    counters = {"issued": 0, "kept": 0}
+    lock = threading.Lock()
+
+    def fetch_one(day_dir, stamp, broker):
+        """一个 (日, 会员)。并发下每线程自带 pace,等效速率 = WORKERS / PACE。"""
+        global _fail_streak
+        target = day_dir / f"{broker}.json"
+        if already_full(target):
+            return 0
+        time.sleep(PACE)
+        try:
+            payload = post("broker_positions.php", {"broker": broker, "date": stamp})
+        except Exception as error:  # noqa: BLE001
+            print(f"FAIL {stamp} {broker} {type(error).__name__}", flush=True)
+            with _fail_lock:
+                _fail_streak += 1
+                if _fail_streak >= 8:
+                    # 连续失败多半是被限速:硬冲只会把三禾窗口烧掉,退出让人看日志。
+                    raise SystemExit(f"连续失败 {_fail_streak} 次,疑似限速,停下")
+            return 0
+        with _fail_lock:
+            _fail_streak = 0
+        with lock:
+            counters["issued"] += 1
+        data = payload.get("data") or {}
+        allpos = data.get("positions") or {}
+        mine = dict(allpos) if WANT_ALL else {k: v for k, v in allpos.items() if k in WANT}
+        if not mine:
+            return 0
+        target.write_text(
+            json.dumps({"date": data.get("date"), "broker": data.get("broker"),
+                        "scope": SCOPE, "positions": mine}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        with lock:
+            counters["kept"] += 1
+        return 1
+
     for index, day in enumerate(days, start=1):
         stamp = day.isoformat()
         day_dir = RAW / stamp
         day_dir.mkdir(parents=True, exist_ok=True)
-        found = 0
-        for broker in brokers:
-            target = day_dir / f"{broker}.json"
-            if already_full(target):
-                continue
-            time.sleep(PACE)
-            try:
-                payload = post(
-                    "broker_positions.php", {"broker": broker, "date": stamp}
-                )
-            except Exception as error:  # noqa: BLE001
-                print(f"FAIL {stamp} {broker} {type(error).__name__}", flush=True)
-                continue
-            issued += 1
-            data = payload.get("data") or {}
-            mine = {k: v for k, v in (data.get("positions") or {}).items() if k in WANT}
-            if mine:
-                target.write_text(
-                    json.dumps(
-                        {
-                            "date": data.get("date"),
-                            "broker": data.get("broker"),
-                            "scope": SCOPE,
-                            "positions": mine,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
-                found += 1
-                kept += 1
-        print(
-            f"{stamp} ({index}/{len(days)}) 命中 {found}，累计写出 {kept}", flush=True
-        )
-    print(f"\n请求 {issued} 次，写出 {kept} 个文件", flush=True)
+        if WORKERS <= 1:
+            found = sum(fetch_one(day_dir, stamp, b) for b in brokers)
+        else:
+            with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+                found = sum(pool.map(lambda b: fetch_one(day_dir, stamp, b), brokers))
+        print(f"{stamp} ({index}/{len(days)}) 命中 {found}，累计写出 {counters['kept']}", flush=True)
+    print(f"请求 {counters['issued']} 次，写出 {counters['kept']} 个文件", flush=True)
     return 0
 
 
