@@ -3050,18 +3050,28 @@ fn parse_decimal(value: &str) -> Decimal {
 /// 前腿是先到期的那条，价差就是它减去后腿——运营者定的口径。组合的命名本身
 /// 已经表达了这个顺序（09-01 是九月腿在前），所以这里按 leg1/leg2 取，
 /// 真正的腿序校验仍由 `calculate_windowed_analytics` 做，不在这里重复一遍。
-fn own_engine_legs(request: &FreeSpreadQueryRequest) -> Option<(String, u8, u8)> {
-    let instrument = request.leg1.symbol.trim().to_ascii_uppercase();
-    if instrument.is_empty() || instrument != request.leg2.symbol.trim().to_ascii_uppercase() {
-        // 两条腿必须同品种：跨品种价差不是这个引擎在算的东西。
+fn own_engine_legs(request: &FreeSpreadQueryRequest) -> Option<(String, u8, String, u8)> {
+    // **跨品种自 DEC-161 起放行**(2026-08-30 运营者:自由价差要能选 FG09-SA09)。
+    // 原来只认同品种,理由写的是「跨品种价差不是这个引擎在算的东西」——但这个引擎
+    // 做的就是「两条腿收盘价相减」,跨品种一样算得出,套利监控里 FG-SA 也一直在算。
+    // **报价单位可比与否由使用者判断**(玻纯同为元/吨、点值同 20;换成 IH 与 FG
+    // 相减就没有意义),页面已把这句话摆在明面上。
+    let front_inst = request.leg1.symbol.trim().to_ascii_uppercase();
+    let back_inst = request.leg2.symbol.trim().to_ascii_uppercase();
+    if front_inst.is_empty() || back_inst.is_empty() {
         return None;
     }
     let front = request.leg1.month.trim().parse::<u8>().ok()?;
     let back = request.leg2.month.trim().parse::<u8>().ok()?;
-    if !(1..=12).contains(&front) || !(1..=12).contains(&back) || front == back {
+    if !(1..=12).contains(&front) || !(1..=12).contains(&back) {
         return None;
     }
-    Some((instrument, front, back))
+    // 同品种同月份 = 同一条合约,价差恒为 0,拦下来。跨品种同月份是合法的
+    // (FG09-SA09 正是运营者要的那一组)。
+    if front_inst == back_inst && front == back {
+        return None;
+    }
+    Some((front_inst, front, back_inst, back))
 }
 
 #[utoipa::path(
@@ -3169,15 +3179,15 @@ async fn load_own_series(
     workspace_id: Uuid,
     request_id: Uuid,
 ) -> Result<CachedFetch<ProviderSeries>, SpreadApiError> {
-    let (instrument, front, back) = own_engine_legs(request).ok_or(SpreadApiError::Validation(
-        "invalid_leg_selection",
-        request_id,
-    ))?;
+    let (front_inst, front, back_inst, back) = own_engine_legs(request).ok_or(
+        SpreadApiError::Validation("invalid_leg_selection", request_id),
+    )?;
     let rows = database::spread_analytics::load_own_spread_points(
         &state.auth.pool,
         workspace_id,
-        &instrument,
+        &front_inst,
         front,
+        &back_inst,
         back,
     )
     .await
@@ -3198,7 +3208,8 @@ async fn load_own_series(
     let fetched_at = OffsetDateTime::now_utc();
     let payload_hash = sha256_json(&json!({
         "engine": SELF_SOURCE_CODE,
-        "instrument": instrument,
+        "instrument": front_inst,
+        "back_instrument": back_inst,
         "front_month": front,
         "back_month": back,
         "point_count": points.len(),
@@ -4373,16 +4384,27 @@ mod tests {
 
     #[test]
     fn own_engine_reads_the_variety_and_both_months_from_the_request() {
-        let (instrument, front, back) =
+        let (front_inst, front, back_inst, back) =
             own_engine_legs(&own_request(("jm", "09"), ("jm", "01"))).expect("09-01 是合法组合");
         // 前腿是先到期的那条，价差就是它减后腿。
-        assert_eq!((instrument.as_str(), front, back), ("JM", 9, 1));
+        assert_eq!(
+            (front_inst.as_str(), front, back_inst.as_str(), back),
+            ("JM", 9, "JM", 1)
+        );
     }
 
     #[test]
-    fn own_engine_refuses_a_cross_variety_pair() {
-        // 跨品种价差不是这个引擎在算的东西；放行只会算出一个没有意义的数。
-        assert!(own_engine_legs(&own_request(("jm", "09"), ("jd", "01"))).is_none());
+    fn own_engine_accepts_a_cross_variety_pair() {
+        // DEC-161:跨品种放行(FG09-SA09 是运营者要的那一组,套利监控一直在算它)。
+        let (fi, f, bi, b) =
+            own_engine_legs(&own_request(("fg", "09"), ("sa", "09"))).expect("FG09-SA09 应合法");
+        assert_eq!((fi.as_str(), f, bi.as_str(), b), ("FG", 9, "SA", 9));
+    }
+
+    #[test]
+    fn own_engine_refuses_the_same_contract_twice() {
+        // 同品种同月份 = 同一条合约,价差恒 0。
+        assert!(own_engine_legs(&own_request(("jm", "09"), ("jm", "09"))).is_none());
     }
 
     #[test]

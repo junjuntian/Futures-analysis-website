@@ -2039,14 +2039,17 @@ pub async fn own_contract_months(
 const OWN_SPREAD_POINTS_SQL: &str = "with years as (
              select generate_series(
                  (select min(extract(year from trade_date))::int from price_history
-                   where workspace_id = $1 and instrument = $2),
+                   where workspace_id = $1 and instrument in ($2, $4)),
                  (select max(extract(year from trade_date))::int + 1 from price_history
-                   where workspace_id = $1 and instrument = $2)
+                   where workspace_id = $1 and instrument in ($2, $4))
              ) as y
          ), legs as (
+             -- 后腿年份:月份大于前腿=同年(01-05);小于=次年(09-01);
+             -- **相等=同年**——那只可能是跨品种(FG09-SA09),同品种同月已在
+             -- own_engine_legs 拒掉。DEC-161 起两条腿的品种可以不同。
              select $2 || lpad((y % 100)::text, 2, '0') || lpad($3::text, 2, '0') as front,
-                    $2 || lpad(((case when $4 > $3 then y else y + 1 end) % 100)::text, 2, '0')
-                       || lpad($4::text, 2, '0') as back
+                    $4 || lpad(((case when $5 >= $3 then y else y + 1 end) % 100)::text, 2, '0')
+                       || lpad($5::text, 2, '0') as back
                from years
          ), one_row_per_day as (
              -- 同一合约同一天可能有不止一行：回填按交易所年度文件写，日更按每日接口
@@ -2061,7 +2064,7 @@ const OWN_SPREAD_POINTS_SQL: &str = "with years as (
              select distinct on (contract, trade_date)
                     contract, trade_date, close_price
                from price_history
-              where workspace_id = $1 and instrument = $2 and close_price is not null
+              where workspace_id = $1 and instrument in ($2, $4) and close_price is not null
               order by contract, trade_date,
                        case
                            when source like '%_official%' then 0  -- 交易所年度文件
@@ -2090,16 +2093,18 @@ const OWN_SPREAD_POINTS_SQL: &str = "with years as (
 pub async fn load_own_spread_points(
     pool: &PgPool,
     workspace_id: Uuid,
-    instrument: &str,
+    front_instrument: &str,
     front_month: u8,
+    back_instrument: &str,
     back_month: u8,
 ) -> Result<Vec<OwnSpreadPoint>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     set_workspace(&mut tx, workspace_id).await?;
     let rows = sqlx::query(OWN_SPREAD_POINTS_SQL)
         .bind(workspace_id)
-        .bind(instrument)
+        .bind(front_instrument)
         .bind(i32::from(front_month))
+        .bind(back_instrument)
         .bind(i32::from(back_month))
         .fetch_all(&mut *tx)
         .await?;

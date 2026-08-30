@@ -57,6 +57,10 @@ const markets = computed(() => {
 })
 
 const canQuery = computed(() => Object.values(legs).every((leg) => leg.variety && leg.symbol && leg.month))
+/** 两腿品种不同 = 跨品种(DEC-161 起放行),提示报价单位需可比。 */
+const crossVariety = computed(
+  () => !!legs.leg1.symbol && !!legs.leg2.symbol && legs.leg1.symbol !== legs.leg2.symbol
+)
 const title = computed(() => result.value
   ? `价差走势 · ${result.value.query.leg1.symbol.toLowerCase()} ${result.value.query.leg1.month}−${result.value.query.leg2.symbol.toLowerCase()} ${result.value.query.leg2.month}`
   : '价差走势')
@@ -201,7 +205,7 @@ function describeError(error: unknown) {
       // 自研引擎下这条的含义变了：不是上游改了格式，而是这两条腿凑不出完整窗口。
       spread_provider_contract_changed: '这两条腿的历史数据不足以切出完整的年度窗口',
       provider_selection_invalid: '这个品种我们自己还没有行情数据',
-      invalid_leg_selection: '两条腿必须同品种、且月份不同',
+      invalid_leg_selection: '同一条合约不能减自己：同品种时两腿月份要不同',
       favorite_exists: '该组合已在收藏中'
     }
     return known[error.code] ?? `请求失败（${error.code}）`
@@ -323,6 +327,17 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 跨品种价差(DEC-161):引擎照算两腿收盘价之差,但**可比与否要人来判断** ——
+         玻纯同为元/吨、点值同 20 所以相减有意义;拿 IH(指数点·300)去减 FG 就没有。 -->
+    <el-alert
+      v-if="crossVariety"
+      class="quality-alert"
+      type="info"
+      :closable="false"
+      show-icon
+      title="跨品种价差:两腿报价单位需可比"
+      description="引擎只做「前腿收盘价 − 后腿收盘价」。玻璃与纯碱同为元/吨、点值同为 20,相减有意义;若两腿单位或点值不同(如指数点 vs 元/吨),得到的数没有交易含义。"
+    />
     <el-alert v-if="errorMessage" :title="errorMessage" type="error" :closable="false" show-icon>
       <template #default>
         <el-button text :icon="RefreshRight" @click="runQuery">重试当前组合</el-button>
