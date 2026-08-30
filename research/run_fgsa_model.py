@@ -8,7 +8,7 @@ import hog_money as H
 import campaign as C
 
 code = sys.argv[1] if len(sys.argv) > 1 else "FG"
-K = {"FG": 0.87, "SA": 1.18, "JD": 0.37}[code]   # 规模系数,预注册写死(JD 见 PLAN_JD_MODEL_v1)
+K = {"FG": 0.87, "SA": 1.18, "JD": 0.37, "IH": 0.123}[code]   # 规模系数,预注册写死(JD/IH 见各自 PLAN)
 D = pathlib.Path(__file__).resolve().parent / "data"
 OUT = pathlib.Path(__file__).resolve().parent / "out"
 price = H.clean_price(pd.read_csv(D / f"{code.lower()}_price.csv.gz"))
@@ -169,6 +169,12 @@ else:
                  f"  旁证IC t {r['t_ic']:+.2f}{'(显著)' if abs(r['t_ic'])>2 else '(不显著,仅回测支持)'}")
 L.append("")
 
+# ============================== C. 压力表 ==============================
+if code == "IH":
+    # 现金交割:实物交割前散户强制流的机制前提不存在,PLAN_IH_MODEL_v1 预注册不测。
+    L.append("── C. 移仓压力表:IH 现金交割,机制前提不存在,预注册不测 ──")
+    io.open(OUT / f"{code.lower()}_model.txt", "w", encoding="utf-8").write(chr(10).join(L))
+    raise SystemExit(0)
 # ============================== C. 压力表 ==============================
 L.append("── C. 移仓压力表(散户带符号剩仓 vs 交割前近−次价差,step=+4)──")
 RETAIL = [m for m in H.RULES["retail_seed"] if m in set(seat["member_key"])]
