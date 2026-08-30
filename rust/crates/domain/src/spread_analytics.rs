@@ -292,9 +292,28 @@ pub fn calculate_windowed_analytics(
         // The upstream series splices in same-year pairs such as
         // jm2609-jm2601 near the January expiry; those are the reverse
         // combination (01-09) and must not be mixed into this one.
+        //
+        // DEC-161: cross-variety pairs (FG2609-SA2609) legitimately share a
+        // delivery month — neither leg is "the later one". Only a same-variety
+        // pair can be judged by delivery order alone; across varieties the
+        // reverse combination is a strictly earlier back leg.
+        let same_instrument = {
+            let instrument_of = |code: &str| {
+                code.chars()
+                    .take_while(|ch| ch.is_ascii_alphabetic())
+                    .collect::<String>()
+            };
+            instrument_of(&pair.0) == instrument_of(&pair.1)
+        };
         let leg_order_mismatch = match (from, to) {
             (Some(from), Some(to)) => {
-                (to.delivery_year, to.delivery_month) <= (from.delivery_year, from.delivery_month)
+                let front = (from.delivery_year, from.delivery_month);
+                let back = (to.delivery_year, to.delivery_month);
+                if same_instrument {
+                    back <= front
+                } else {
+                    back < front
+                }
             }
             _ => false,
         };
@@ -813,6 +832,48 @@ mod tests {
             from_code: from.to_string(),
             to_code: to.to_string(),
         }
+    }
+
+    /// DEC-161:跨品种同月(FG2609-SA2609)两腿同时到期,是合法组合。
+    /// 修复前腿序校验用 `<=`,把它全判成反向组合剔光 —— 生产实测
+    /// 1632 个点保留 0 个。
+    #[test]
+    fn keeps_a_cross_variety_pair_that_shares_a_delivery_month() {
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "FG2609".into(),
+            contract("FG2609", 2026, 9, date!(2026 - 08 - 31)),
+        );
+        contracts.insert(
+            "SA2609".into(),
+            contract("SA2609", 2026, 9, date!(2026 - 08 - 31)),
+        );
+        let points = vec![
+            point(date!(2026 - 08 - 26), -120.0, "fg2609", "sa2609"),
+            point(date!(2026 - 08 - 27), -118.0, "fg2609", "sa2609"),
+        ];
+        let out = calculate_windowed_analytics(&points, &contracts, None).expect("跨品种应算得出");
+        assert_eq!(out.continuous_points.len(), 2, "两点都该保留,一个都不能剔");
+    }
+
+    /// 反向的跨品种组合(后腿严格早于前腿)仍要剔掉。
+    #[test]
+    fn still_drops_a_cross_variety_pair_whose_back_leg_expires_first() {
+        let mut contracts = HashMap::new();
+        contracts.insert(
+            "FG2609".into(),
+            contract("FG2609", 2026, 9, date!(2026 - 08 - 31)),
+        );
+        contracts.insert(
+            "SA2605".into(),
+            contract("SA2605", 2026, 5, date!(2026 - 04 - 30)),
+        );
+        let points = vec![point(date!(2026 - 03 - 02), -120.0, "fg2609", "sa2605")];
+        let out = calculate_windowed_analytics(&points, &contracts, None).expect("应算得出");
+        assert!(
+            out.continuous_points.is_empty(),
+            "后腿先到期=反向组合,该剔掉"
+        );
     }
 
     #[test]
