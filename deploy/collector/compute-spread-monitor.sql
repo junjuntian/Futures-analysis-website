@@ -18,7 +18,10 @@ begin;
 --   黄金 AU / 白银 AG 不做套利（它们在库里是给机构资金模块用的）
 -- 腿序照套利页规则：先到期的减后到期的。跨品种同月没有先后，固定玻璃 − 纯碱。
 create temp table monitor_scope (instrument text primary key);
-insert into monitor_scope values ('JD'), ('LH'), ('JM'), ('AP'), ('FG'), ('SA');
+-- DEC-160(2026-08-30 运营者:三个新品种要进套利监控):I/IH/SC 入列。
+-- 金银仍不在:跨月监控是商品逻辑,金银页有自己的策略引擎。
+insert into monitor_scope values ('JD'), ('LH'), ('JM'), ('AP'), ('FG'), ('SA'),
+                                 ('I'), ('IH'), ('SC');
 
 -- 主力月份。运营者 2026-08-12 明确：玻璃、纯碱、焦煤的主力合约是 1、5、9 月。
 -- 非主力月份的合约成交稀疏，价差是几手撮出来的，报出来也没法交易。
@@ -34,7 +37,10 @@ create temp table main_month (instrument text, mm int, pair_mode text);
 insert into main_month values
     ('FG', 1, 'both'), ('FG', 5, 'both'), ('FG', 9, 'both'),
     ('SA', 1, 'both'), ('SA', 5, 'both'), ('SA', 9, 'both'),
-    ('JM', 1, 'either'), ('JM', 5, 'either'), ('JM', 9, 'either');
+    ('JM', 1, 'either'), ('JM', 5, 'either'), ('JM', 9, 'either'),
+    -- 铁矿石主力循环 1/5/9,模式同焦煤 either(至少一腿主力月)。
+    -- IH/SC 有意不配:月月连续换主力,liquid 层的持仓量前 6 就是对的口径。
+    ('I', 1, 'either'), ('I', 5, 'either'), ('I', 9, 'either');
 
 -- **必须按来源去重。** 同一合约同一天在多个源下各有一行（郑商所 08-11 就同时有
 -- czce_official 与 akshare_v1），不去重的后果有两个，一个吵一个哑：
