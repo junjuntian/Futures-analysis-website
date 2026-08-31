@@ -978,7 +978,10 @@ const bySide = computed(() => {
                 <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
                 <td class="num"><b>{{ lg.lots }} 手</b></td>
                 <td class="num cost">@{{ lg.px }}</td>
-                <td class="num cost">永安 {{ fmt(lg.member_net) }}<template v-if="followCosts[lg.contract]"> @{{ followCosts[lg.contract] }}</template></td>
+                <!-- 席位名读 followPlan.member,**不能写死**:这张卡从 DEC-168 起也给
+                     东证跑焦煤,写死「永安」会让东证的持仓顶着永安的名字(2026-08-31
+                     上线后 Chrome 实机第一眼就看出来了)。 -->
+                <td class="num cost">{{ followPlan.member.replace('期货', '') }} {{ fmt(lg.member_net) }}<template v-if="followCosts[lg.contract]"> @{{ followCosts[lg.contract] }}</template></td>
               </tr>
             </table>
             <div class="chip-map">
