@@ -67,6 +67,19 @@ assert set(VARIETY_BY_NAME.values()) <= WANT, (
 )
 
 
+def wanted_from(variety, exchange):
+    """这一行该不该从**这个源**收下。
+
+    WANT 只回答「这个品种我们要不要」，不回答「从哪个源要」。把两者当成一件事，
+    上期所的文件就会把上期能源(INE)的原油也收进来：sc 挂在 shfe.com.cn 上，
+    但它是 INE 的品种，行情由 ine-daily.py 单采。于是同一根 SC 合约被写两份，
+    其中一份 exchange 还标成 SHFE——交易所是 price_history/seat_history 身份键
+    的一部分，两行不会互相去重，页面上一个合约出现两次而两边数字都对，正是
+    EXCHANGE_BY_VARIETY 注释里警告过的那种最难看出来的错。
+    """
+    return variety in WANT and EXCHANGE_BY_VARIETY.get(variety) == exchange
+
+
 def num(text):
     """A number as the exchanges write it, or empty."""
     if text is None:
@@ -275,8 +288,14 @@ def shfe_market(path):
     for row in payload.get("o_curinstrument") or []:
         product = str(row.get("PRODUCTID") or "").strip()
         month = str(row.get("DELIVERYMONTH") or "").strip()
+        # `sc_tas` 与 `sc_f` 去掉后缀是同一个 SC。TAS(结算价交易)合约与主合约
+        # 同代码同交割月，价格字段却是**基差**不是价——收下就是两行撞同一个身份键。
+        # 2026-08-31 实测:upsert 因此整批中止(ON CONFLICT DO UPDATE command cannot
+        # affect row a second time)，当天 SHFE 与 CZCE 的行情和席位一起被挡在库外。
+        if product.endswith("_tas"):
+            continue
         variety = re.sub(r"_.*$", "", product).upper()
-        if variety not in WANT or not month.isdigit():
+        if not wanted_from(variety, "SHFE") or not month.isdigit():
             continue
         contract = f"{variety}{month}"
         turnover = num(row.get("TURNOVER"))
@@ -319,7 +338,9 @@ def shfe_seats(path):
         if not m:
             continue
         variety = m.group(1).upper()
-        if variety not in WANT:
+        # 与行情同一把尺子。上期所的席位文件今天不含 sc，但「今天不含」不是护栏:
+        # 品种一变、上游一改口径，它就会顺着 WANT 无声流进来。
+        if not wanted_from(variety, "SHFE"):
             continue
         contract = None if total else f"{variety}{m.group(2)}"
         rank = str(row.get("RANK") or "").strip()
