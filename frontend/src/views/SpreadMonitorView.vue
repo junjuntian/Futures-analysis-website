@@ -643,6 +643,10 @@ function openDetail(item: SpreadMonitorItem) {
 
     <el-card shadow="never" class="controls">
       <div class="control-row">
+        <!-- popper-class 与日历同一个理由(2026-08-31 运营者报「点了没反应」):
+             el-select 的下拉同样传送到 body、同样带进场过渡,连点时卡在
+             opacity≈0 —— 面板已展开(输入框聚焦、箭头朝上)但看不见。
+             当初只给日历关了过渡,**这两个下拉漏了**,是同一个 bug 的另一半。 -->
         <el-select
           v-model="varietyFilter"
           multiple
@@ -650,12 +654,13 @@ function openDetail(item: SpreadMonitorItem) {
           collapse-tags-tooltip
           clearable
           placeholder="全部品种"
+          popper-class="spread-select-popper"
           style="width: 220px"
         >
           <el-option v-for="code in varieties" :key="code" :label="label(code)" :value="code" />
         </el-select>
 
-        <el-select v-model="threshold" style="width: 190px">
+        <el-select v-model="threshold" popper-class="spread-select-popper" style="width: 190px">
           <el-option v-for="opt in THRESHOLDS" :key="opt.value" :label="opt.label" :value="opt.value" />
         </el-select>
 
@@ -1101,8 +1106,11 @@ function openDetail(item: SpreadMonitorItem) {
 </template>
 
 <style>
-/* 交易日日历的 popper(传送到 body,scoped 管不到):关掉过渡,避免连点时卡在 opacity 0。 */
-.spread-date-popper.el-popper {
+/* 交易日日历与两个下拉的 popper(传送到 body,scoped 管不到):关掉过渡,
+   避免连点时卡在 opacity 0。日历 2026-08-23 先修,下拉 2026-08-31 补上——
+   同一个根因分两次才修全,教训是「同类组件要一次扫干净」。 */
+.spread-date-popper.el-popper,
+.spread-select-popper.el-popper {
   transition: none !important;
   opacity: 1 !important;
   transform: none !important;

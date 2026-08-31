@@ -361,3 +361,22 @@ body {
 .num-down {
   color: var(--tv-down);
 }
+
+/* 下拉/日历面板「点了没反应」的通用修复(2026-08-31)。
+ *
+ * 症状:输入框已聚焦、箭头已朝上(面板确实展开了),但列表看不见,或要等好几秒
+ * 才慢慢显出来。根因是 Element Plus 的 popper 进场过渡(el-zoom-in-top)在连点/
+ * 快速切换时被打断,卡在 enter-active 且 opacity≈0 —— 元素 display:block 但透明。
+ *
+ * 这个 bug 报过两次:2026-08-23 套利监控的交易日日历、2026-08-31 同页的品种下拉。
+ * 前两次都是逐个加 popper-class 修单点,于是同一个病在别的页面继续潜伏
+ * (全站还有 30 处下拉没防护)。这里一次扫干净:所有 select / date-picker 的
+ * popper 都不要进场过渡。代价是没有淡入动画,换来的是面板必然可见 —— 这个
+ * 取舍对一个自用工具是显然的。
+ */
+.el-select__popper.el-popper,
+.el-picker__popper.el-popper {
+  transition: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
