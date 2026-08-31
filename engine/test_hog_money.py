@@ -1130,8 +1130,10 @@ class TestRearmAfterDelivery:
 class Test跨月跟随方案:
     """DEC-168 的跨月跟随卡。钉的是两件**错了不会报错、只会给个看着合理的数**的事。
 
-    夹具用运营者 2026-08-31 在焦煤净持仓页看到的东证真实结构,因为这一条的正确
+    夹具用运营者 2026-08-31 在焦煤净持仓页看到的**东证**真实结构,因为这一条的正确
     与否**唯一的判据就是"和那页对不对得上"**:多 5,775 / 空 10,059、比例 1:1.74。
+    (卡上跟的席位 2026-09-01 已由东证换成中泰,见 CAL_FOLLOW;这里仍用东证那组数
+    当夹具 —— 夹具要的是"能用纸笔核对的真实结构",跟当前跟谁无关,换人不该让测试变红。)
     """
 
     DZ = {"JM2610": -6151.0, "JM2611": -3739.0, "JM2612": 1001.0,
@@ -1171,3 +1173,22 @@ class Test跨月跟随方案:
     def test_单边不给方案(self):
         p = H.cal_follow_plan_payload("JM", {"JM2701": 3547.0}, self.PX)
         assert p["state"] == "trend" and not p["legs"], p
+
+    def test_远近标签按合约月份不按多空(self):
+        """2026-09-01:原来写死「多=远月、空=近月」,只对「多远空近」型成立。
+
+        换成中泰这种**多近空远**的席位(当日 多 JM2610 7,345 / 空 JM2701 12,568),
+        两个标签会整个标反 —— 而这张卡是给人照着下单看的,标反比不标更糟。
+        """
+        zt = {"JM2610": 7345.0, "JM2612": 711.0, "JM2701": -12568.0, "JM2702": 148.0}
+        p = H.cal_follow_plan_payload("JM", zt, self.PX)
+        assert p["state"] == "spread", p
+        by_side = {lg["side"]: lg["contract"] for lg in p["legs"]}
+        assert by_side["long"] == "JM2610" and by_side["short"] == "JM2701", p["legs"]
+        # 多腿在近月 → 多腿那条 split 必须叫「近月净」
+        labels = {lg["side"]: sp["label"] for lg, sp in zip(p["legs"], p["splits"])}
+        assert labels["long"] == "近月净" and labels["short"] == "远月净", p["splits"]
+        # 对照:东证是多远空近,标签正好相反
+        q = H.cal_follow_plan_payload("JM", self.DZ, self.PX)
+        qlabels = {lg["side"]: sp["label"] for lg, sp in zip(q["legs"], q["splits"])}
+        assert qlabels["long"] == "远月净" and qlabels["short"] == "近月净", q["splits"]

@@ -2643,8 +2643,18 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
 # 的一半。**这是估算**:交易所对跨期套利指令有保证金优惠,真实占用会更低,
 # 卡面照 FOLLOW_PLAN 的老规矩把「按估算」写在明面上,以运营者账户为准。
 CAL_FOLLOW = {
-    "JM": {"member": "东证期货", "capital": 500000.0, "use": 0.35,
-           "margin": 0.12, "mult": 60.0},
+    # 2026-09-01 运营者拍板由东证换成中泰。理由与丑话都在 `caveat` 里,原样印在卡上。
+    # 换人依据:`REPORT_JM_CAL_PICK_v1` —— 按「它做跨月的那些天价差赚不赚」排,
+    # 东证是 −8,125 万(日均 −53.5 万),中信更差(−9,947 万,16 家垫底),
+    # 中泰 +1.80 亿(日均 +86.1 万)、跨月天数 209 天全场最多、100% 在榜。
+    "JM": {"member": "中泰期货", "capital": 500000.0, "use": 0.35,
+           "margin": 0.12, "mult": 60.0,
+           "caveat": "**丑话**:中泰做跨月的 209 天里价差 +1.80 亿(日均 +86 万,"
+                     "全场最多的跨月天数、100% 在榜),但**利润几乎全在 2026 一年、"
+                     "四年里只有两年为正**;而 2026 同时是东证 −1.09 亿、中信 −1.03 亿"
+                     "的一年 —— 那更像曲线一次大移动有人站对边,不是重复出现的本事。"
+                     "它也是我从 57 家里事后挑的,事前选不选得出是另一回事"
+                     "(REPORT_JM_CAL_PICK_v1)。"},
 }
 # 两腿手数悬殊到什么程度就不算套利(运营者 2026-08-31:「正常套利是 1:2、1:1,
 # 最多 1:3,超过 1:3 的就算纯趋势」)。**与净持仓页跨月结构那段同一个常数**
@@ -2708,11 +2718,11 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
             return main                                   # 主力方向对得上,优先主力
         return max(d, key=lambda c: abs(d[c]))
 
-    far_c, near_c = pick(longs), pick(shorts)
+    long_c, short_c = pick(longs), pick(shorts)
     mult, margin_rate = cfg["mult"], cfg["margin"]
     # 以手数少的那一方向为 1,另一方向按合计比例放大 —— 与玻纯版同一套。
-    unit = [(far_c, "long", long_tot / min(long_tot, short_tot)),
-            (near_c, "short", short_tot / min(long_tot, short_tot))]
+    unit = [(long_c, "long", long_tot / min(long_tot, short_tot)),
+            (short_c, "short", short_tot / min(long_tot, short_tot))]
     per_group = sum(u * mult * px_all[c] * margin_rate for c, _, u in unit)
     if per_group <= 0:
         return None
@@ -2732,7 +2742,12 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
                      "px": round(px_all[c], 1),
                      "member_net": int(round((longs if side == "long" else shorts)[c])),
                      "value_wan": round(val / 1e4, 1)})
-        splits.append({"label": ("远月净" if side == "long" else "近月净"),
+        # **远近由合约月份定,不是由多空定**(2026-09-01)。原来写死「多=远月、
+        # 空=近月」,那只对「多远空近」型对得上;换成中泰这种**多近空远**的席位,
+        # 两个标签会整个标反 —— 而这张卡是给人照着下单看的,标反比不标更糟。
+        later = long_c > short_c            # 合约代码同长度,字典序即时间序
+        is_far = (side == "long") == later
+        splits.append({"label": ("远月净" if is_far else "近月净"),
                        "wan": round(sd * val / 1e4, 1)})
     if len(legs) < 2:
         return None
@@ -2754,10 +2769,9 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
         "note": ("按%s**当日真实持仓比例**等比缩到 %d 万,保证金用 %d%%(留足现金扛价差反向)。"
                  "它改仓位,这里第二天自动跟着改。**这是展示不是下单指令**:手数取整有偏差,"
                  "保证金率按估算(%s %d%% 单边,跨期套利指令实际占用更低),实际以你的账户为准;"
-                 "建仓用筹码地图分批挂,别一次打满。**跟随价值未获验证**:焦煤上按席位做跨月的"
-                 "回测 31 家全扫零家过闸(REPORT_JM_CAL_BOOK_v1),这张卡只是把它的结构"
-                 "等比摆给你看。"
-                 % (member, cfg["capital"] / 1e4, cfg["use"] * 100, code, cfg["margin"] * 100)),
+                 "建仓用筹码地图分批挂,别一次打满。"
+                 % (member, cfg["capital"] / 1e4, cfg["use"] * 100, code, cfg["margin"] * 100)
+                 + (cfg.get("caveat") or "")),
     }
 
 
