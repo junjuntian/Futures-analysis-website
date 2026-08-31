@@ -351,11 +351,28 @@ describe('席位多选框', () => {
           { contract: 'JM2610', net_lots: '-6151', cost: '1508.93', cost_lots: '6151' },
           { contract: 'JM2701', net_lots: '3547', cost: '1568.64', cost_lots: '3547' }
         ],
-        long_lots: '3547',
-        short_lots: '6151',
+        long_lots: '5775',
+        short_lots: '10059',
         shape: 'far_long',
         far_leg: 'JM2701',
         near_leg: 'JM2610',
+        ratio: '1.74',
+        missing: false
+      },
+      {
+        // 1:3 门槛挡掉的那一类:国泰君安当天多 35,739 / 空 342(1:104),
+        // 后端判 trend —— 这一行**不该出现在页面上**。
+        member: '国泰君安',
+        legs: [
+          { contract: 'JM2701', net_lots: '26330', cost: null, cost_lots: '0' },
+          { contract: 'JM2705', net_lots: '-342', cost: null, cost_lots: '0' }
+        ],
+        long_lots: '35739',
+        short_lots: '342',
+        shape: 'trend',
+        far_leg: 'JM2701',
+        near_leg: 'JM2705',
+        ratio: '104.50',
         missing: false
       }
     ] as never
@@ -367,7 +384,10 @@ describe('席位多选框', () => {
     expect(text).toContain('跨月结构')
     expect(text).toContain('多远月 · 空近月')
     expect(text).toContain('JM2701 / JM2610')
+    expect(text).toContain('1 : 1.74')
     expect(text).toContain('不构成跟随建议')
+    // 超过 1:3 的那家整行不渲染 —— 只查会员名,别查手数(手数字串可能在别处出现)。
+    expect(text).not.toContain('国泰君安')
     BUILDING.latest_structure = []
     BUILDING.instrument = 'AU' as never
     BUILDING.contracts = ['AU2612'] as never

@@ -1502,11 +1502,26 @@ pub struct MemberStructureItem {
     /// 主多腿 / 主空腿的合约代码，界面直接写「多 JM2701 / 空 JM2610」。
     pub far_leg: Option<String>,
     pub near_leg: Option<String>,
+    /// 强腿 ÷ 弱腿，保留两位。界面写成「1 : 1.74」。弱腿为 0 时为空
+    /// （那是纯单边，比不出来，`shape` 已经是 `trend`）。
+    pub ratio: Option<String>,
     /// 这家当天不在榜：结构**未知**，不是「没有结构」。
     pub missing: bool,
 }
 
-/// 由两条主腿的合约代码判结构。**判据放后端**，前端只把它翻成人话。
+/// 两条腿手数悬殊到什么程度就不算套利了：**弱腿不足强腿的 1/3**。
+///
+/// 运营者 2026-08-31 定的行业口径：「正常套利是 1:2、1:1，最多 1:3，超过 1:3 的
+/// 就算纯趋势」。**1:3 本身算套利（取等号），过了才不算。**
+///
+/// 这个门槛不是拍脑袋来的，它挡掉的是一类真实的误判：2026-08-31 焦煤那天，
+/// 国泰君安多 35,739 / 空 342（1:104）、永安 33,144 / 1,388（1:24）、
+/// 海通 358 / 8,663（1:24）——三家都是重仓单边**挂了一条零头腿**，只按「两侧
+/// 月份谁远谁近」判会把它们全标成跨月簿。加上门槛之后当天只剩东证（1:1.74）
+/// 与中信（1:2.76），那两家才是真在做价差。
+const SPREAD_MAX_RATIO: i64 = 3;
+
+/// 由两条主腿的合约代码 + 两侧手数判结构。**判据放后端**，前端只把它翻成人话。
 ///
 /// 合约代码同品种同长度（`JM2610` / `JM2701`），末四位就是年月，字典序即时间序 ——
 /// 跨年也对：`2610 < 2701`。**别把它当成「取后两位比月份」**，那样 12 月与次年 1 月
@@ -1514,15 +1529,30 @@ pub struct MemberStructureItem {
 ///
 /// 远近用两侧**各自手数最大的那条腿**（主腿），与 `research/run_jm_cal_book.py`
 /// 的 E2「忠实结构」同口径；换一种口径，页面和研究报告就没法互相印证。
-pub fn classify_structure(far: Option<&str>, near: Option<&str>) -> &'static str {
+///
+/// 返回 `trend` 的那些**界面不显示**：只挂一条零头腿的重仓单边，不是套利簿。
+pub fn classify_structure(
+    far: Option<&str>,
+    near: Option<&str>,
+    long_lots: Decimal,
+    short_lots: Decimal,
+) -> &'static str {
+    if long_lots.is_zero() && short_lots.is_zero() {
+        return "flat";
+    }
+    // 只有一侧有腿 = 纯单边，弱腿为 0，比例上也过不去，归到同一类。
+    let weak = long_lots.min(short_lots);
+    let strong = long_lots.max(short_lots);
+    if weak * Decimal::from(SPREAD_MAX_RATIO) < strong {
+        return "trend";
+    }
     match (far, near) {
         // 同一个合约不可能既是主多腿又是主空腿（逐合约已经净掉），排在最后兜底。
         (Some(f), Some(n)) if f > n => "far_long",
         (Some(f), Some(n)) if f < n => "far_short",
         (Some(_), Some(_)) => "far_long",
-        (Some(_), None) => "one_way_long",
-        (None, Some(_)) => "one_way_short",
-        (None, None) => "flat",
+        // 走到这里说明手数比例过关却缺一条主腿，理论上不可能；归 trend 是安全侧。
+        _ => "trend",
     }
 }
 
@@ -1934,7 +1964,9 @@ pub async fn query_seat_net_position(
                         .filter(|l| l.1 < Decimal::ZERO)
                         .min_by(|a, b| a.1.cmp(&b.1))
                         .map(|l| l.0.clone());
-                    let shape = classify_structure(far.as_deref(), near.as_deref()).to_string();
+                    let shape =
+                        classify_structure(far.as_deref(), near.as_deref(), long_lots, short_lots)
+                            .to_string();
                     MemberStructureItem {
                         member: member.clone(),
                         legs: legs
@@ -1951,6 +1983,15 @@ pub async fn query_seat_net_position(
                         shape,
                         far_leg: far,
                         near_leg: near,
+                        ratio: {
+                            let weak = long_lots.min(short_lots);
+                            let strong = long_lots.max(short_lots);
+                            if weak.is_zero() {
+                                None
+                            } else {
+                                Some((strong / weak).round_dp(2).to_string())
+                            }
+                        },
                         missing: member_days
                             .get(member)
                             .and_then(|days| days.get(&date))
@@ -4329,28 +4370,45 @@ mod tests {
     /// 东证在焦煤上主多腿 JM2701、主空腿 JM2610 —— 多远月空近月。
     #[test]
     fn classify_structure_reads_contract_codes_as_time_order() {
-        assert_eq!(
-            classify_structure(Some("JM2701"), Some("JM2610")),
-            "far_long"
-        );
-        assert_eq!(
-            classify_structure(Some("JM2610"), Some("JM2701")),
-            "far_short"
-        );
+        // 手数取运营者当天看到的真实值:东证 多 5,775 / 空 10,059(1:1.74,过门槛)。
+        let dz = |f, n| classify_structure(f, n, Decimal::from(5775), Decimal::from(10059));
+        assert_eq!(dz(Some("JM2701"), Some("JM2610")), "far_long");
+        assert_eq!(dz(Some("JM2610"), Some("JM2701")), "far_short");
         // 跨年:26 年 12 月 vs 27 年 1 月。**按字典序整串比才对**;
         // 只取后两位当月份会把 12 判成比 01 远,方向整个反过来。
+        assert_eq!(dz(Some("JM2701"), Some("JM2612")), "far_long");
+        assert_eq!(dz(Some("JM2612"), Some("JM2701")), "far_short");
         assert_eq!(
-            classify_structure(Some("JM2701"), Some("JM2612")),
-            "far_long"
+            classify_structure(None, None, Decimal::ZERO, Decimal::ZERO),
+            "flat"
         );
-        assert_eq!(
-            classify_structure(Some("JM2612"), Some("JM2701")),
-            "far_short"
-        );
-        // 单边与空仓
-        assert_eq!(classify_structure(Some("JM2701"), None), "one_way_long");
-        assert_eq!(classify_structure(None, Some("JM2610")), "one_way_short");
-        assert_eq!(classify_structure(None, None), "flat");
+    }
+
+    /// 1:3 门槛(运营者 2026-08-31:「正常套利是 1:2、1:1,最多 1:3,超过 1:3 的
+    /// 就算纯趋势,不显示」)。样本全部取自当天焦煤生产数据。
+    #[test]
+    fn classify_structure_rejects_one_sided_books_beyond_one_to_three() {
+        let c = |l: i64, s: i64| {
+            classify_structure(
+                Some("JM2701"),
+                Some("JM2610"),
+                Decimal::from(l),
+                Decimal::from(s),
+            )
+        };
+        // 过门槛的两家:东证 1:1.74、中信 1:2.76
+        assert_eq!(c(5775, 10059), "far_long");
+        assert_eq!(c(25844, 9354), "far_long");
+        // 挡掉的三家:国泰君安 1:104、永安 1:23.9、海通 1:24.2 —— 重仓单边挂零头腿
+        assert_eq!(c(35739, 342), "trend");
+        assert_eq!(c(33144, 1388), "trend");
+        assert_eq!(c(358, 8663), "trend");
+        // **1:3 取等号算套利**,过了才不算。
+        assert_eq!(c(1000, 3000), "far_long");
+        assert_eq!(c(1000, 3001), "trend");
+        // 只有一条腿 = 纯单边
+        assert_eq!(c(5000, 0), "trend");
+        assert_eq!(c(0, 5000), "trend");
     }
 
     /// 盈亏商品的掉榜沿用口径(DEC-157):掉榜那天按上次持仓继续盯市,

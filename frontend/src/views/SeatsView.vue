@@ -952,8 +952,8 @@ const latestLegs = computed(() =>
 const SHAPE_TEXT: Record<MemberStructure['shape'], string> = {
   far_long: '多远月 · 空近月',
   far_short: '多近月 · 空远月',
-  one_way_long: '单边净多',
-  one_way_short: '单边净空',
+  // 下面两种在界面上不出现(structureRows 已滤掉),留着是为了类型完整。
+  trend: '纯趋势',
   flat: '当日无净持仓'
 }
 
@@ -969,13 +969,19 @@ const SHAPE_TEXT: Record<MemberStructure['shape'], string> = {
  */
 const structureRows = computed(() =>
   latestStructure.value
-    .filter((item) => item.missing || item.legs.length > 0)
+    // **只留真套利簿**。运营者 2026-08-31 定的口径:「正常套利是 1:2、1:1,最多 1:3,
+    // 超过 1:3 的就算纯趋势」——后端据此判出 `trend`,这里直接不渲染。
+    // 挡掉的是重仓单边**挂一条零头腿**的那种:当天焦煤上国泰君安 1:104、
+    // 永安 1:23.9、海通 1:24.2 三家都会被只按月份判的旧规则误标成跨月簿。
+    // 掉榜那家仍然留着:结构**未知**不是「没有结构」,与本页别处三态口径一致。
+    .filter((item) => item.missing || (item.shape !== 'trend' && item.shape !== 'flat'))
     .map((item) => ({
       member: item.member,
       missing: item.missing,
       shape: item.shape,
       shapeText: SHAPE_TEXT[item.shape] ?? item.shape,
-      // 跨月(两侧都有腿)才值得标出来;单边就是普通持仓,不必强调。
+      // 两腿手数比,写成「1 : 1.74」。摆在结构标签旁边,让人一眼看出这个簿有多平衡。
+      ratio: item.ratio ? `1 : ${item.ratio}` : null,
       spread: item.far_leg && item.near_leg ? `${item.far_leg} / ${item.near_leg}` : null,
       longs: item.legs
         .filter((leg) => Number(leg.net_lots) > 0)
@@ -1632,14 +1638,17 @@ const latestDailyPnl = computed(() => {
                 这里拆到合约，看得出一家是在做跨月对冲还是单边持仓。
                 <b>只展示结构，不构成跟随建议</b>——跟随席位跨月簿的回测在焦煤上 31
                 家全扫零家过闸。@成本为推算口径，与上面同一台成本引擎。
+                <b>两腿手数悬殊超过 1:3 的不在这里出现</b>：那是重仓单边挂了一条零头腿，
+                属于纯趋势，不是套利簿。
               </p>
               <div v-for="row in structureRows" :key="row.member" class="structure-row">
                 <div class="structure-head">
                   <b>{{ row.member }}</b>
                   <span v-if="row.missing" class="warn">当日掉榜，结构未知</span>
                   <template v-else>
-                    <span :class="row.spread ? 'tag' : 'tag muted'">{{ row.shapeText }}</span>
+                    <span class="tag">{{ row.shapeText }}</span>
                     <span v-if="row.spread" class="muted">{{ row.spread }}</span>
+                    <span v-if="row.ratio" class="muted">{{ row.ratio }}</span>
                   </template>
                 </div>
                 <div v-if="!row.missing && row.longs.length" class="structure-legs">

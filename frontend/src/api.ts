@@ -391,17 +391,19 @@ export interface MemberContractLeg {
 /**
  * 一家席位当天的跨月结构。**判定 `shape` 在后端算**,前端只负责把它翻成人话。
  *
- * far_long=多远月空近月(正向跨月簿)、far_short=多近月空远月、
- * one_way_long/one_way_short=单边、flat=当日净持仓全为零。
+ * far_long=多远月空近月、far_short=多近月空远月、flat=当日净持仓全为零、
+ * **trend=纯趋势(两腿悬殊过 1:3,或只有一条腿)——界面不显示**。
  */
 export interface MemberStructure {
   member: string
   legs: MemberContractLeg[]
   long_lots: string
   short_lots: string
-  shape: 'far_long' | 'far_short' | 'one_way_long' | 'one_way_short' | 'flat'
+  shape: 'far_long' | 'far_short' | 'trend' | 'flat'
   far_leg: string | null
   near_leg: string | null
+  /** 强腿 ÷ 弱腿,保留两位;弱腿为 0 时为 null。 */
+  ratio: string | null
   missing: boolean
 }
 
