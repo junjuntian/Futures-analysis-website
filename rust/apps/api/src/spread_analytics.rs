@@ -1457,6 +1457,75 @@ pub struct MemberLegItem {
     pub inferred: bool,
 }
 
+/// 一家席位在**某一个合约**上的净持仓与成本，「跨月结构」那排用。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberContractLeg {
+    pub contract: String,
+    /// 净持仓：正 = 净多，负 = 净空。**逐合约先净掉**——同一合约上多空两栏
+    /// 都有数是常态（一家会员名下多个客户），净掉之后才是它在这个月份上的真实方向。
+    pub net_lots: String,
+    /// 这条腿的加权成本（推算口径，与合计、逐家同一台成本引擎）。
+    pub cost: Option<String>,
+    /// 成本覆盖到的手数。小于 `net_lots` 的绝对值时，均价只是已知部分的均价。
+    pub cost_lots: String,
+}
+
+/// 一家席位当天的**跨月结构**（2026-08-31 运营者要求）。
+///
+/// 净持仓页原本只到「这家多 5,775 手、空 10,059 手」。那两个数其实已经是
+/// **逐合约净持仓按符号分组求和**，但页面没说，看的人会以为是多空两栏直接加总，
+/// 更看不出这 5,775 在哪个月、10,059 在哪个月——**而那正是判断一家在不在做
+/// 跨月套利的唯一依据**。运营者从这两个数认出东证在焦煤上空近月多远月，
+/// 这一排就是把他那次心算固化下来。
+///
+/// **只做结构展示，不含跟随建议**：`REPORT_JM_CAL_BOOK_v1` 实测，跟随席位的
+/// 跨月簿在焦煤上 31 家全扫零家过闸（东证扣成本三年 −15.0%）。结构本身有信息，
+/// 拿它当信号没有依据。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberStructureItem {
+    pub member: String,
+    /// 按合约月份升序（近月在前）。只含净持仓非零的合约。
+    pub legs: Vec<MemberContractLeg>,
+    /// 净多那些腿的手数之和，与 `MemberLegItem::long_lots` 必然相等（同源）。
+    pub long_lots: String,
+    pub short_lots: String,
+    /// 结构判定，**在后端算**（判据一律不放前端，前端只渲染）：
+    /// - `far_long`  多腿在远月、空腿在近月 —— 正向跨月簿（东证这一型）
+    /// - `far_short` 多腿在近月、空腿在远月 —— 反向
+    /// - `one_way_long` / `one_way_short` 只有一个方向，不是跨月
+    /// - `flat` 当天净持仓全为零
+    ///
+    /// 远近的比较用**两侧各自最大的那条腿**（主腿），与
+    /// `research/run_jm_cal_book.py` 的 E2「忠实结构」口径一致；换一种口径
+    /// 两边数字就没法互相印证。
+    pub shape: String,
+    /// 主多腿 / 主空腿的合约代码，界面直接写「多 JM2701 / 空 JM2610」。
+    pub far_leg: Option<String>,
+    pub near_leg: Option<String>,
+    /// 这家当天不在榜：结构**未知**，不是「没有结构」。
+    pub missing: bool,
+}
+
+/// 由两条主腿的合约代码判结构。**判据放后端**，前端只把它翻成人话。
+///
+/// 合约代码同品种同长度（`JM2610` / `JM2701`），末四位就是年月，字典序即时间序 ——
+/// 跨年也对：`2610 < 2701`。**别把它当成「取后两位比月份」**，那样 12 月与次年 1 月
+/// 会判反。
+///
+/// 远近用两侧**各自手数最大的那条腿**（主腿），与 `research/run_jm_cal_book.py`
+/// 的 E2「忠实结构」同口径；换一种口径，页面和研究报告就没法互相印证。
+pub fn classify_structure(far: Option<&str>, near: Option<&str>) -> &'static str {
+    match (far, near) {
+        // 同一个合约不可能既是主多腿又是主空腿（逐合约已经净掉），排在最后兜底。
+        (Some(f), Some(n)) if f > n => "far_long",
+        (Some(f), Some(n)) if f < n => "far_short",
+        (Some(_), Some(_)) => "far_long",
+        (Some(_), None) => "one_way_long",
+        (None, Some(_)) => "one_way_short",
+        (None, None) => "flat",
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SeatNetPositionResponse {
     pub instrument: String,
@@ -1478,6 +1547,9 @@ pub struct SeatNetPositionResponse {
     /// 一并回出来免得两边各自判断「哪天算最新」。没有数据时为空。
     pub latest_trade_date: Option<String>,
     pub latest_members: Vec<MemberLegItem>,
+    /// 最新一天逐家的**跨月结构**(2026-08-31 运营者)。选定单合约时为空数组:
+    /// 一个合约谈不上跨月,这时该看的是别的档。
+    pub latest_structure: Vec<MemberStructureItem>,
     /// 逐家×逐日的多空手数与成本(DEC-132,运营者 2026-08-24:小窗里悬停到哪天就要看
     /// 哪天各家的多空单与成本推算)。`legs` 与 `days` **按下标对齐**;那天这家掉榜或
     /// 交易所未公布时为 null。字段名故意短(l/lc/s/sc):十家×几千天,长名字白白翻倍体积。
@@ -1622,6 +1694,7 @@ pub async fn query_seat_net_position(
     let mut latest_trade_date: Option<String> = None;
     let mut member_series: Vec<MemberSeriesItem> = Vec::new();
     let mut latest_members: Vec<MemberLegItem> = Vec::new();
+    let mut latest_structure: Vec<MemberStructureItem> = Vec::new();
     if !members.is_empty() {
         let rows = database::spread_analytics::load_seat_net_positions(
             &state.auth.pool,
@@ -1706,6 +1779,28 @@ pub async fn query_seat_net_position(
                 .map(|day| (day.trade_date, day))
                 .collect();
 
+        // 「跨月结构」那排(2026-08-31):**每个「席位 × 合约」单独再跑一遍同一台
+        // 成本引擎**。合计、逐家、逐合约三层因此同源——分项加起来必然等于上一层,
+        // 不会出现「结构那排说多 5,775、上面那排说多 5,800」这种自相矛盾。
+        // 只在品种汇总档算:选定单合约时结构无从谈起。
+        let contract_days: BTreeMap<
+            (String, String),
+            HashMap<Date, domain::seat_cost::VarietyDay>,
+        > = if contract.is_some() {
+            BTreeMap::new()
+        } else {
+            by_seat_contract
+                .iter()
+                .map(|(key, series)| {
+                    let by_date = build_variety_series(std::slice::from_ref(series), pnl_factor)
+                        .into_iter()
+                        .map(|day| (day.trade_date, day))
+                        .collect();
+                    (key.clone(), by_date)
+                })
+                .collect()
+        };
+
         // 逐家再算一遍，供摘要下面那排「各家各自多少手、成本多少」。
         //
         // 分组维度换成「席位」，喂进去的还是同一批 (席位×合约) 序列、同一个
@@ -1789,6 +1884,77 @@ pub async fn query_seat_net_position(
                         inferred: inferred_by_date
                             .get(&date)
                             .is_some_and(|set| set.contains(member)),
+                    }
+                })
+                .collect();
+
+            // 跨月结构:把每家当天各合约的净持仓摊开,近月在前。
+            latest_structure = members
+                .iter()
+                .map(|member| {
+                    let mut legs: Vec<(String, Decimal, Option<Decimal>, Decimal)> = contract_days
+                        .iter()
+                        .filter(|((m, _), _)| m == member)
+                        .filter_map(|((_, c), days)| {
+                            let day = days.get(&date)?;
+                            let net = day.net_position;
+                            if net.is_zero() {
+                                return None;
+                            }
+                            // 该合约当天是净多还是净空,成本就取对应那一侧 ——
+                            // 逐合约净掉之后只可能是一侧,取错侧会拿到另一批持仓的均价。
+                            let (cost, cost_lots) = if net > Decimal::ZERO {
+                                (day.long_cost, day.long_cost_lots)
+                            } else {
+                                (day.short_cost, day.short_cost_lots)
+                            };
+                            Some((c.clone(), net, cost, cost_lots))
+                        })
+                        .collect();
+                    // 合约代码同品种同长度,末尾四位就是年月,按整串升序即近月在前。
+                    legs.sort_by(|a, b| a.0.cmp(&b.0));
+                    let long_lots: Decimal = legs
+                        .iter()
+                        .filter(|l| l.1 > Decimal::ZERO)
+                        .map(|l| l.1)
+                        .sum();
+                    let short_lots: Decimal = legs
+                        .iter()
+                        .filter(|l| l.1 < Decimal::ZERO)
+                        .map(|l| -l.1)
+                        .sum();
+                    // 主腿 = 两侧各自手数最大的那一条,与 run_jm_cal_book.py 的 E2 同口径。
+                    let far = legs
+                        .iter()
+                        .filter(|l| l.1 > Decimal::ZERO)
+                        .max_by(|a, b| a.1.cmp(&b.1))
+                        .map(|l| l.0.clone());
+                    let near = legs
+                        .iter()
+                        .filter(|l| l.1 < Decimal::ZERO)
+                        .min_by(|a, b| a.1.cmp(&b.1))
+                        .map(|l| l.0.clone());
+                    let shape = classify_structure(far.as_deref(), near.as_deref()).to_string();
+                    MemberStructureItem {
+                        member: member.clone(),
+                        legs: legs
+                            .into_iter()
+                            .map(|(contract, net, cost, cost_lots)| MemberContractLeg {
+                                contract,
+                                net_lots: net.to_string(),
+                                cost: cost.map(|v| v.round_dp(2).to_string()),
+                                cost_lots: cost_lots.to_string(),
+                            })
+                            .collect(),
+                        long_lots: long_lots.to_string(),
+                        short_lots: short_lots.to_string(),
+                        shape,
+                        far_leg: far,
+                        near_leg: near,
+                        missing: member_days
+                            .get(member)
+                            .and_then(|days| days.get(&date))
+                            .is_none(),
                     }
                 })
                 .collect();
@@ -1891,6 +2057,7 @@ pub async fn query_seat_net_position(
         days,
         latest_trade_date,
         latest_members,
+        latest_structure,
         member_series,
     };
     // 写缓存(DEC-148):存序列化后的 Value,免去给整棵响应类型树加 Clone
@@ -4157,6 +4324,34 @@ pub use monitor::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 跨月结构判定(2026-08-31)。样本取自运营者当天看到的真实结构:
+    /// 东证在焦煤上主多腿 JM2701、主空腿 JM2610 —— 多远月空近月。
+    #[test]
+    fn classify_structure_reads_contract_codes_as_time_order() {
+        assert_eq!(
+            classify_structure(Some("JM2701"), Some("JM2610")),
+            "far_long"
+        );
+        assert_eq!(
+            classify_structure(Some("JM2610"), Some("JM2701")),
+            "far_short"
+        );
+        // 跨年:26 年 12 月 vs 27 年 1 月。**按字典序整串比才对**;
+        // 只取后两位当月份会把 12 判成比 01 远,方向整个反过来。
+        assert_eq!(
+            classify_structure(Some("JM2701"), Some("JM2612")),
+            "far_long"
+        );
+        assert_eq!(
+            classify_structure(Some("JM2612"), Some("JM2701")),
+            "far_short"
+        );
+        // 单边与空仓
+        assert_eq!(classify_structure(Some("JM2701"), None), "one_way_long");
+        assert_eq!(classify_structure(None, Some("JM2610")), "one_way_short");
+        assert_eq!(classify_structure(None, None), "flat");
+    }
 
     /// 盈亏商品的掉榜沿用口径(DEC-157):掉榜那天按上次持仓继续盯市,
     /// 且 `filled_days` 如实计数;回榜后接回官方值。
