@@ -98,9 +98,28 @@ def main() -> int:
     # 每日增量:只解析文件名日期 >= SINCE 的原始文件(文件名即 YYYYMMDD 戳)。
     # 全量回填不带此参,行为不变。
     ap.add_argument("--since", default="")
+    # 下面三个都只为「按需取一部分」而加，全部留空时行为与从前一字不差。
+    #
+    # --sanhe-dir:三禾原始目录。日更那份只存三个大商所品种(`raw`)，2026-08-30 起
+    #   另起 `raw-all` 存全部品种全部会员——同一套解析器，两个目录。
+    # --want:只要这几个品种。**必要而非方便**:raw-all 里躺着 73 个品种，其中
+    #   金银/苹果/玻璃/纯碱在库里已有交易所官方席位(带名次、带增减)。三禾那份
+    #   不带名次，两份同日共存会让不做来源去重的下游把同一个会员算两遍。
+    # --until:只要这一天**之前**的。用来和已经在库的日更区间对齐，做到零重叠。
+    ap.add_argument("--sanhe-dir", default="")
+    ap.add_argument("--want", default="")
+    ap.add_argument("--until", default="")
     args = ap.parse_args()
     since_stamp = args.since.replace("-", "")
+    want = {v.strip().upper() for v in args.want.split(",") if v.strip()}
     OUT.mkdir(parents=True, exist_ok=True)
+
+    def keep(r):
+        if want and r["instrument"] not in want:
+            return False
+        if args.until and r["trade_date"] >= args.until:
+            return False
+        return True
 
     price_path = OUT / f"price_{args.what}.csv"
     seat_path = OUT / f"seat_{args.what}.csv"
@@ -145,6 +164,8 @@ def main() -> int:
                     continue
                 parsed += 1
                 for r in rows:
+                    if not keep(r):
+                        continue
                     writer.writerow(shape(r))
                     if writer is pw:
                         prices += 1
@@ -153,7 +174,8 @@ def main() -> int:
             print(f"  {sub}: {len(files)} 个文件", flush=True)
 
         if args.what in ("sanhe", "all"):
-            files = sorted(glob.glob(str(SANHE / "*" / "*.json")))
+            sanhe_dir = Path(args.sanhe_dir) if args.sanhe_dir else SANHE
+            files = sorted(glob.glob(str(sanhe_dir / "*" / "*.json")))
             if args.limit:
                 files = files[: args.limit]
             for path in files:
@@ -168,9 +190,11 @@ def main() -> int:
                     continue
                 parsed += 1
                 for r in rows:
+                    if not keep(r):
+                        continue
                     sw.writerow(seat_row(r))
                     seats += 1
-            print(f"  sanhe: {len(files)} 个文件", flush=True)
+            print(f"  sanhe: {len(files)} 个文件（{sanhe_dir}）", flush=True)
 
     print(f"\n解析 {parsed} 个文件，失败 {failed}")
     print(f"价格 {prices} 行 -> {price_path}")

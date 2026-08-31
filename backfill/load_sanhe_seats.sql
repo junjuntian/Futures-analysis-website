@@ -7,6 +7,11 @@
 -- **rank 一律为空**：三禾按会员组织，给的是该会员的真实持仓，比交易所的「前 20」
 -- 更全，代价是没有名次。空着是如实，不编。
 
+-- 用法(csv_path 必传，容器内路径)：
+--   psql … -v csv_path=/tmp/seat_sanhe.csv < backfill/load_sanhe_seats.sql
+-- 原来写死 '/tmp/seat_dce.csv'。名字是「大商所三品种」时代留下的，现在同一套
+-- 解析器也用来装铁矿石，写死的路径只会让下一个人往错的文件上灌。
+
 \set ON_ERROR_STOP on
 
 begin;
@@ -15,7 +20,7 @@ create temp table sanhe_stage (like seat_history);
 alter table sanhe_stage drop column id, drop column workspace_id, drop column loaded_at,
   drop column updated_at;
 
-\copy sanhe_stage from '/tmp/seat_dce.csv' with (format csv, header true, null '')
+\copy sanhe_stage from :'csv_path' with (format csv, header true, null '')
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
@@ -38,10 +43,16 @@ select gen_random_uuid(), w.id, s.*, now()
       -- 落在运营者看不见的地方，页面上是「几乎没有数据」，而库里躺着 380 万行。
       -- 这个错不报任何异常，是逐个 workspace 数行数才发现的。
       --
-      -- 判据用「有没有 market_prices」：每日采集以运营者的账号登录写入，
+      -- 判据用「哪个空间真有行情」：每日采集以运营者的账号登录写入，
       -- 有行情的那个空间必然是他在用的。
-      select m.workspace_id as id
-        from market_prices m
+      --
+      -- **原来读 market_prices，那张表已经不存在了**(DEC-049,导入通道拆除时
+      -- 随之删除)。这份脚本自那以后没再跑过，所以没人发现——照原样执行只会
+      -- 得到 `relation "market_prices" does not exist`。同一个判据现在落在
+      -- price_history 上，那正是直灌写入的目标表(run-official-seats 早已改过，
+      -- 这份漏了)。**手工装载脚本不在任何流水线里，改表结构时最容易漏掉它们。**
+      select p.workspace_id as id
+        from price_history p
        group by 1
        order by count(*) desc
        limit 1
@@ -56,6 +67,8 @@ on conflict (workspace_id, trade_date, exchange, instrument, contract,
 
 commit;
 
+-- 装完自查:**按品种×来源看区间**。要看的不是「有没有行」，是**同一个品种的两个
+-- 来源有没有重叠的日子**——重叠日会让不做来源去重的下游把同一个会员算两遍。
 select instrument as 品种, source as 来源, min(trade_date) as 起, max(trade_date) as 止,
        count(*) as 行数
   from seat_history
