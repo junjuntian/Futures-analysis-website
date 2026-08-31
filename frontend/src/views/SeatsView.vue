@@ -17,7 +17,6 @@ import {
   type SeatContractCost,
   getSpreadVarieties,
   type MemberLeg,
-  type MemberStructure,
   type NetPositionDay,
   type SeatFavorite,
   type SeatNetPositionResponse,
@@ -114,8 +113,6 @@ const days = ref<NetPositionDay[]>([])
 const memberSeries = ref<NonNullable<SeatNetPositionResponse['member_series']>>([])
 // 最新一天逐家的手数与均价，摘要下面那排用。后端连日期一起给。
 const latestMembers = ref<MemberLeg[]>([])
-/** 最新一天逐家的跨月结构(2026-08-31)。判定在后端算,这里只渲染。 */
-const latestStructure = ref<MemberStructure[]>([])
 const latestMembersDate = ref<string | null>(null)
 const multiplier = ref<string | null>(null)
 // 汇总档 K 线的口径。单合约档为 null（那是真实行情，没有口径可言）。
@@ -309,7 +306,6 @@ async function loadBuilding() {
     days.value = []
     memberSeries.value = []
     latestMembers.value = []
-    latestStructure.value = []
     latestMembersDate.value = null
     buildingContracts.value = []
     return
@@ -328,7 +324,6 @@ async function loadBuilding() {
     days.value = data.days
     memberSeries.value = data.member_series ?? []
     latestMembers.value = data.latest_members
-    latestStructure.value = data.latest_structure ?? []
     latestMembersDate.value = data.latest_trade_date
     buildingContracts.value = data.contracts
     priceSeriesKind.value = data.price_series_kind
@@ -343,7 +338,6 @@ async function loadBuilding() {
     days.value = []
     memberSeries.value = []
     latestMembers.value = []
-    latestStructure.value = []
     latestMembersDate.value = null
   } finally {
     loadingBuilding.value = false
@@ -946,58 +940,6 @@ const latestLegs = computed(() =>
       flat: !leg.missing && long === 0 && short === 0
     }
   })
-)
-
-/** 结构判定的人话。判定本身在后端算(shape 字段),这里只做翻译。 */
-const SHAPE_TEXT: Record<MemberStructure['shape'], string> = {
-  far_long: '多远月 · 空近月',
-  far_short: '多近月 · 空远月',
-  // 下面两种在界面上不出现(structureRows 已滤掉),留着是为了类型完整。
-  trend: '纯趋势',
-  flat: '当日无净持仓'
-}
-
-/**
- * 跨月结构那一段(2026-08-31 运营者要求)。
- *
- * 上面那排只说「这家多 5,775 手、空 10,059 手」——那两个数其实**已经是逐合约
- * 净持仓按符号分组求和**,但看不出多在哪个月、空在哪个月。运营者正是从这两个数
- * 认出东证在焦煤上空近月多远月,这一段就是把那次心算固化下来。
- *
- * **只展示结构,不给跟随建议**:REPORT_JM_CAL_BOOK_v1 实测,跟随席位跨月簿在焦煤上
- * 31 家全扫零家过闸(东证扣成本三年 −15.0%)。结构有信息,拿它当信号没有依据。
- */
-const structureRows = computed(() =>
-  latestStructure.value
-    // **只留真套利簿**。运营者 2026-08-31 定的口径:「正常套利是 1:2、1:1,最多 1:3,
-    // 超过 1:3 的就算纯趋势」——后端据此判出 `trend`,这里直接不渲染。
-    // 挡掉的是重仓单边**挂一条零头腿**的那种:当天焦煤上国泰君安 1:104、
-    // 永安 1:23.9、海通 1:24.2 三家都会被只按月份判的旧规则误标成跨月簿。
-    // 掉榜那家仍然留着:结构**未知**不是「没有结构」,与本页别处三态口径一致。
-    .filter((item) => item.missing || (item.shape !== 'trend' && item.shape !== 'flat'))
-    .map((item) => ({
-      member: item.member,
-      missing: item.missing,
-      shape: item.shape,
-      shapeText: SHAPE_TEXT[item.shape] ?? item.shape,
-      // 两腿手数比,写成「1 : 1.74」。摆在结构标签旁边,让人一眼看出这个簿有多平衡。
-      ratio: item.ratio ? `1 : ${item.ratio}` : null,
-      spread: item.far_leg && item.near_leg ? `${item.far_leg} / ${item.near_leg}` : null,
-      longs: item.legs
-        .filter((leg) => Number(leg.net_lots) > 0)
-        .map((leg) => ({
-          contract: leg.contract,
-          lots: lots(Number(leg.net_lots)),
-          cost: legCost(leg.cost, leg.cost_lots, String(Math.abs(Number(leg.net_lots))))
-        })),
-      shorts: item.legs
-        .filter((leg) => Number(leg.net_lots) < 0)
-        .map((leg) => ({
-          contract: leg.contract,
-          lots: lots(Math.abs(Number(leg.net_lots))),
-          cost: legCost(leg.cost, leg.cost_lots, String(Math.abs(Number(leg.net_lots))))
-        }))
-    }))
 )
 
 /**
@@ -1629,42 +1571,6 @@ const latestDailyPnl = computed(() => {
                 </template>
               </span>
             </div>
-            <!-- 跨月结构(2026-08-31 运营者):上面那排的两个数拆到合约。
-                 只说结构,不给跟随建议 —— 跟席位做跨月在焦煤上 31 家全扫零家过闸。 -->
-            <details v-if="structureRows.length" class="structure">
-              <summary>跨月结构 · 逐合约拆开</summary>
-              <p class="structure-note">
-                上面那排的「多 / 空」是<b>逐合约净持仓按符号分组求和</b>，不是多空两栏相加。
-                这里拆到合约，看得出一家是在做跨月对冲还是单边持仓。
-                <b>只展示结构，不构成跟随建议</b>——跟随席位跨月簿的回测在焦煤上 31
-                家全扫零家过闸。@成本为推算口径，与上面同一台成本引擎。
-                <b>两腿手数悬殊超过 1:3 的不在这里出现</b>：那是重仓单边挂了一条零头腿，
-                属于纯趋势，不是套利簿。
-              </p>
-              <div v-for="row in structureRows" :key="row.member" class="structure-row">
-                <div class="structure-head">
-                  <b>{{ row.member }}</b>
-                  <span v-if="row.missing" class="warn">当日掉榜，结构未知</span>
-                  <template v-else>
-                    <span class="tag">{{ row.shapeText }}</span>
-                    <span v-if="row.spread" class="muted">{{ row.spread }}</span>
-                    <span v-if="row.ratio" class="muted">{{ row.ratio }}</span>
-                  </template>
-                </div>
-                <div v-if="!row.missing && row.longs.length" class="structure-legs">
-                  <span class="up">多</span>
-                  <span v-for="leg in row.longs" :key="leg.contract" class="structure-leg">
-                    {{ leg.contract }} {{ leg.lots }} <i>@{{ leg.cost }}</i>
-                  </span>
-                </div>
-                <div v-if="!row.missing && row.shorts.length" class="structure-legs">
-                  <span class="down">空</span>
-                  <span v-for="leg in row.shorts" :key="leg.contract" class="structure-leg">
-                    {{ leg.contract }} {{ leg.lots }} <i>@{{ leg.cost }}</i>
-                  </span>
-                </div>
-              </div>
-            </details>
           </template>
           <SpreadChart
             :option="netOption"
@@ -1887,79 +1793,6 @@ h2 .muted {
 }
 .member-leg .warn {
   color: var(--tv-warn);
-}
-.structure {
-  margin-top: 10px;
-  border-top: 1px solid var(--el-border-color-lighter);
-  padding-top: 8px;
-}
-.structure > summary {
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--tv-text-secondary);
-  font-weight: 600;
-}
-.structure-note {
-  margin: 6px 0 10px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--el-text-color-secondary);
-}
-.structure-row {
-  margin-bottom: 10px;
-}
-.structure-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  margin-bottom: 2px;
-}
-.structure-head b {
-  color: var(--tv-text-secondary);
-  font-weight: 600;
-}
-.structure-head .tag {
-  font-size: 12px;
-  padding: 0 6px;
-  border-radius: 3px;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-regular);
-}
-.structure-head .tag.muted {
-  opacity: 0.65;
-}
-.structure-head .warn {
-  color: var(--tv-warn);
-  font-size: 12px;
-}
-.structure-legs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 12px;
-  font-size: 12px;
-  padding-left: 2px;
-}
-.structure-legs .up {
-  color: var(--tv-up);
-  font-weight: 600;
-}
-.structure-legs .down {
-  color: var(--tv-down);
-  font-weight: 600;
-}
-.structure-leg {
-  white-space: nowrap;
-  color: var(--el-text-color-regular);
-}
-.structure-leg i {
-  font-style: normal;
-  color: var(--el-text-color-secondary);
-}
-.structure-head .muted,
-.structure-legs .muted {
-  color: var(--el-text-color-secondary);
 }
 .seats h2 {
   margin: 0;

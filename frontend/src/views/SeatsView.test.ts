@@ -38,8 +38,7 @@ const BUILDING = {
   // 按接口补齐，不图省事——mock 缺字段会让组件在渲染期读到 undefined，
   // 表现是断言全绿、进程退出码却是 1（2026-08-18 踩过）。
   latest_trade_date: null,
-  latest_members: [],
-  latest_structure: []
+  latest_members: []
 }
 
 function stubFetch() {
@@ -303,97 +302,6 @@ describe('席位多选框', () => {
     const labels = options.map((option) => option.props('label') as string)
     expect(labels).toContain('高盛期货')
     expect(labels).not.toContain('中信')
-    wrapper.unmount()
-  })
-
-  /**
-   * 跨月结构那一段(2026-08-31 运营者要求)。数据取自当天生产上东证在焦煤的真实结构:
-   * 主多腿 JM2701 +3,547、主空腿 JM2610 −6,151 —— 多远月空近月。
-   *
-   * 盯两件事:①结构判定的**人话由 shape 字段决定**,前端不自己算(所以这里给
-   * 一个与手数「看起来矛盾」的组合也应照 shape 渲染);②那句「不构成跟随建议」
-   * 必须在,它是这一段能上线的前提(REPORT_JM_CAL_BOOK_v1:31 家全扫零家过闸)。
-   */
-  it('跨月结构按后端 shape 渲染，并写明不构成跟随建议', async () => {
-    localStorage.setItem('seats.members', '中信')
-    localStorage.setItem('seats.instrument', 'JM')
-    // 固件全部取自生产 2026-08-31 焦煤的真实数据(运营者截图那一天):
-    // 合计 多单 100,860 / 空单 29,806 / 净持仓 71,054;JM2701 当日 OHLC。
-    BUILDING.instrument = 'JM' as never
-    BUILDING.contracts = ['JM2701', 'JM2610'] as never
-    BUILDING.latest_trade_date = '2026-08-31' as never
-    BUILDING.days = [
-      {
-        trade_date: '2026-08-31',
-        open_price: '1629',
-        high_price: '1749',
-        low_price: '1625',
-        close_price: '1729',
-        net_position: '71054',
-        long_lots: '100860',
-        short_lots: '29806',
-        counted_members: ['东证期货'],
-        missing_members: [],
-        inferred_members: [],
-        unpublished: false,
-        daily_pnl: null,
-        cumulative_pnl: '0',
-        long_cost: null,
-        long_cost_lots: '0',
-        short_cost: null,
-        short_cost_lots: '0'
-      }
-    ] as never
-    BUILDING.latest_structure = [
-      {
-        member: '东证期货',
-        legs: [
-          { contract: 'JM2610', net_lots: '-6151', cost: '1508.93', cost_lots: '6151' },
-          { contract: 'JM2701', net_lots: '3547', cost: '1568.64', cost_lots: '3547' }
-        ],
-        long_lots: '5775',
-        short_lots: '10059',
-        shape: 'far_long',
-        far_leg: 'JM2701',
-        near_leg: 'JM2610',
-        ratio: '1.74',
-        missing: false
-      },
-      {
-        // 1:3 门槛挡掉的那一类:国泰君安当天多 35,739 / 空 342(1:104),
-        // 后端判 trend —— 这一行**不该出现在页面上**。
-        member: '国泰君安',
-        legs: [
-          { contract: 'JM2701', net_lots: '26330', cost: null, cost_lots: '0' },
-          { contract: 'JM2705', net_lots: '-342', cost: null, cost_lots: '0' }
-        ],
-        long_lots: '35739',
-        short_lots: '342',
-        shape: 'trend',
-        far_leg: 'JM2701',
-        near_leg: 'JM2705',
-        ratio: '104.50',
-        missing: false
-      }
-    ] as never
-    const wrapper = mountPage()
-    await flushPromises()
-    await flushPromises()
-
-    const text = wrapper.text()
-    expect(text).toContain('跨月结构')
-    expect(text).toContain('多远月 · 空近月')
-    expect(text).toContain('JM2701 / JM2610')
-    expect(text).toContain('1 : 1.74')
-    expect(text).toContain('不构成跟随建议')
-    // 超过 1:3 的那家整行不渲染 —— 只查会员名,别查手数(手数字串可能在别处出现)。
-    expect(text).not.toContain('国泰君安')
-    BUILDING.latest_structure = []
-    BUILDING.instrument = 'AU' as never
-    BUILDING.contracts = ['AU2612'] as never
-    BUILDING.latest_trade_date = null as never
-    BUILDING.days = [] as never
-    localStorage.removeItem('seats.instrument')
     wrapper.unmount()
   })
 })

@@ -2590,10 +2590,19 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
     per_group = sum(abs(u) * cfg["mult"][k] * px[k][c] * cfg["margin"][k] for c, k, u in unit)
     if per_group <= 0:
         return None
-    groups = cfg["capital"] * cfg["use"] / per_group
+    budget = cfg["capital"] * cfg["use"]
+    # 保证金**宁少不多**(运营者 2026-09-01):原来是四舍五入,手数一取整就可能超预算
+    # (焦煤那张 6/9 手实测 37.2%,而卡头写的是 35%)。改成保比例整体缩,
+    # 见 `_fit_within_budget` —— 两腿比例是这张卡的全部意义,不能为了取整把它改掉。
+    kind_of = {c: k for c, k, _ in unit}
+    sized = _fit_within_budget(
+        [(c, k, abs(u) * (budget / per_group)) for c, k, u in unit], budget,
+        lambda c, n: n * cfg["mult"][kind_of[c]] * px[kind_of[c]][c] * cfg["margin"][kind_of[c]])
+    if not sized:
+        return None
     legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
     for c, k, u in unit:
-        lots = int(round(groups * abs(u)))
+        lots = sized[c]
         if lots <= 0:
             continue
         val = lots * cfg["mult"][k] * px[k][c]
@@ -2657,9 +2666,31 @@ CAL_FOLLOW = {
                      "(REPORT_JM_CAL_PICK_v1)。"},
 }
 # 两腿手数悬殊到什么程度就不算套利(运营者 2026-08-31:「正常套利是 1:2、1:1,
-# 最多 1:3,超过 1:3 的就算纯趋势」)。**与净持仓页跨月结构那段同一个常数**
-# (rust/apps/api/src/spread_analytics.rs 的 SPREAD_MAX_RATIO),两处改要一起改。
+# 最多 1:3,超过 1:3 的就算纯趋势」)。**这个常数现在只有这一份**:净持仓页那段
+# 「跨月结构」曾共用它,2026-09-01 运营者说删掉,那边已随之移除(DEC-167 撤回)。
 CAL_MAX_RATIO = 3.0
+
+
+def _fit_within_budget(unit, budget, margin_of):
+    """把每条腿的手数取整到**保证金不超预算**(运营者 2026-09-01:「改成宁少不多」)。
+
+    为什么不直接向下取整:两腿手数本来就小(五到十手),各自 floor 会把比例也
+    一起改掉 —— 而这张卡的全部意义就在那个比例。做法改成**保比例整体缩**:
+    先按四舍五入定手数,超预算就把整体规模缩 2% 再算一遍,直到不超为止。
+    比例基本不动,只是仓位小一点。
+
+    `unit` 是 [(合约, 方向, 相对份额)],`margin_of(合约, 手数)` 给该腿的保证金占用。
+    返回 {合约: 手数};缩到有腿为 0 就返回 None(资金撑不起这个配比)。
+    """
+    scale = 1.0
+    for _ in range(60):
+        lots = {c: int(round(scale * u)) for c, _, u in unit}
+        if any(v <= 0 for v in lots.values()):
+            return None
+        if sum(margin_of(c, v) for c, v in lots.items()) <= budget:
+            return lots
+        scale *= 0.98
+    return None
 
 
 def cal_follow_plan_payload(code: str, net_by_contract: dict, px_all: dict,
@@ -2726,11 +2757,16 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
     per_group = sum(u * mult * px_all[c] * margin_rate for c, _, u in unit)
     if per_group <= 0:
         return None
-    groups = cfg["capital"] * cfg["use"] / per_group
+    budget = cfg["capital"] * cfg["use"]
+    sized = _fit_within_budget(
+        [(c, side, groups_u * (budget / per_group)) for c, side, groups_u in unit],
+        budget, lambda c, n: n * mult * px_all[c] * margin_rate)
+    if not sized:
+        return None
     legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
     splits = []
-    for c, side, u in unit:
-        lots = int(round(groups * u))
+    for c, side, _u in unit:
+        lots = sized[c]
         if lots <= 0:
             continue
         val = lots * mult * px_all[c]

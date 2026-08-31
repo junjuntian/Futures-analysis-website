@@ -376,35 +376,6 @@ export interface SeatNetPositionResponse {
   /** `days` 最后一天的日期，由后端一并给出，免得两边各判一次「哪天算最新」。 */
   latest_trade_date: string | null
   latest_members: MemberLeg[]
-  /** 最新一天逐家的跨月结构。选定单合约时后端给空数组;老产物没有这个字段。 */
-  latest_structure?: MemberStructure[]
-}
-
-/** 一家席位在某个合约上的净持仓与成本(逐合约已净掉,正=净多负=净空)。 */
-export interface MemberContractLeg {
-  contract: string
-  net_lots: string
-  cost: string | null
-  cost_lots: string
-}
-
-/**
- * 一家席位当天的跨月结构。**判定 `shape` 在后端算**,前端只负责把它翻成人话。
- *
- * far_long=多远月空近月、far_short=多近月空远月、flat=当日净持仓全为零、
- * **trend=纯趋势(两腿悬殊过 1:3,或只有一条腿)——界面不显示**。
- */
-export interface MemberStructure {
-  member: string
-  legs: MemberContractLeg[]
-  long_lots: string
-  short_lots: string
-  shape: 'far_long' | 'far_short' | 'trend' | 'flat'
-  far_leg: string | null
-  near_leg: string | null
-  /** 强腿 ÷ 弱腿,保留两位;弱腿为 0 时为 null。 */
-  ratio: string | null
-  missing: boolean
 }
 
 export interface SeatFavorite {

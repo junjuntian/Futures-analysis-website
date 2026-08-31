@@ -1192,3 +1192,17 @@ class Test跨月跟随方案:
         q = H.cal_follow_plan_payload("JM", self.DZ, self.PX)
         qlabels = {lg["side"]: sp["label"] for lg, sp in zip(q["legs"], q["splits"])}
         assert qlabels["long"] == "远月净" and qlabels["short"] == "近月净", q["splits"]
+
+    def test_保证金宁少不多绝不超预算(self):
+        """运营者 2026-09-01:「改成宁少不多」。
+
+        原来手数四舍五入,一取整就可能超预算 —— 中泰那张 6/9 手实测 37.2%,
+        而卡头写的是 35%。**一张讲仓位的卡,自己的两个数打架就没法用。**
+        这里按多组资金量扫一遍,保证金占比**永远 ≤ 卡头写的那个数**。
+        """
+        for cap in (200000.0, 500000.0, 1000000.0, 3000000.0):
+            p = H.cal_follow_plan_payload("JM", self.DZ, self.PX, {"capital": cap})
+            if p["state"] != "spread":
+                continue          # 资金太小撑不起两腿,那时不给方案,也算对
+            assert p["margin"] <= cap * 0.35 + 1, (cap, p["margin"], p["margin_pct"])
+            assert p["margin_pct"] <= 35.0, (cap, p["margin_pct"])
