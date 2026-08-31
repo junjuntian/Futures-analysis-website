@@ -7,10 +7,17 @@
 -- **rank 一律为空**：三禾按会员组织，给的是该会员的真实持仓，比交易所的「前 20」
 -- 更全，代价是没有名次。空着是如实，不编。
 
--- 用法(csv_path 必传，容器内路径)：
---   psql … -v csv_path=/tmp/seat_sanhe.csv < backfill/load_sanhe_seats.sql
--- 原来写死 '/tmp/seat_dce.csv'。名字是「大商所三品种」时代留下的，现在同一套
--- 解析器也用来装铁矿石，写死的路径只会让下一个人往错的文件上灌。
+-- 用法(先把 CSV 送进容器的这个**固定**路径)：
+--   docker cp load/seat_sanhe.csv <容器>:/tmp/seat_sanhe.csv
+--   psql … < backfill/load_sanhe_seats.sql
+--
+-- 路径为什么不做成参数:**`\copy` 是 psql 元命令，整行原样当参数，不做变量替换**
+-- (手册原话:neither variable interpolation nor backquote expansion are performed)。
+-- 2026-08-31 我改成 `\copy … from :'csv_path'` 并传了 -v，psql 把它当成一个名叫
+-- `:` 的文件,报 `:: No such file or directory`。改用服务端 COPY 才能插值，但那要
+-- pg_read_server_files 权限,不值得为一个路径去放权限。
+-- 原来写死的是 '/tmp/seat_dce.csv' —— 那是「只有大商所三品种」时代的名字,现在
+-- 同一套解析器也装铁矿石,沿用会让下一个人以为这脚本只管那三个品种。
 
 \set ON_ERROR_STOP on
 
@@ -20,7 +27,7 @@ create temp table sanhe_stage (like seat_history);
 alter table sanhe_stage drop column id, drop column workspace_id, drop column loaded_at,
   drop column updated_at;
 
-\copy sanhe_stage from :'csv_path' with (format csv, header true, null '')
+\copy sanhe_stage from '/tmp/seat_sanhe.csv' with (format csv, header true, null '')
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
