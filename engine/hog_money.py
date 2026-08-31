@@ -2636,6 +2636,131 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
     }
 
 
+# 跨月跟随方案的每品种配置(DEC-168)。
+#
+# **`margin` 是单边保证金率**,与 FOLLOW_PLAN 的 FG 9%/SA 8% 同口径。焦煤 12% =
+# 合约窗「沉淀资金」用的 24%(交易所最低保证金 × 双边,运营者逐格对过行情软件)
+# 的一半。**这是估算**:交易所对跨期套利指令有保证金优惠,真实占用会更低,
+# 卡面照 FOLLOW_PLAN 的老规矩把「按估算」写在明面上,以运营者账户为准。
+CAL_FOLLOW = {
+    "JM": {"member": "东证期货", "capital": 500000.0, "use": 0.35,
+           "margin": 0.12, "mult": 60.0},
+}
+# 两腿手数悬殊到什么程度就不算套利(运营者 2026-08-31:「正常套利是 1:2、1:1,
+# 最多 1:3,超过 1:3 的就算纯趋势」)。**与净持仓页跨月结构那段同一个常数**
+# (rust/apps/api/src/spread_analytics.rs 的 SPREAD_MAX_RATIO),两处改要一起改。
+CAL_MAX_RATIO = 3.0
+
+
+def cal_follow_plan_payload(code: str, net_by_contract: dict, px_all: dict,
+                            cfg: dict | None = None) -> dict | None:
+    """「某席位跨月跟随策略」建议仓位(DEC-168,展示级,**不是下单指令**)。
+
+    与玻纯那张卡(`follow_plan_payload`,DEC-154)**同一个模子**,只是两条腿从
+    「两个品种」换成「同品种的远月与近月」。运营者 2026-08-31 在焦煤净持仓页看出
+    东证在做空近月多远月,要的就是这张卡摆到机构资金页、和永安那张同一个位置。
+
+    选腿沿用玻纯那套已经踩过坑的规矩:
+      * **手数比例照各方向的合计**,不是单一最大腿 —— 永安的纯碱空单分散在 7 个
+        合约,只取最大腿会把对冲腿低估一半、净敞口虚增五倍(DEC-154 实测);
+      * **下单合约优先当日主力**,主力方向不对才退回该方向持仓最大的合约 ——
+        主力盘口最深,挂得上才谈得上筹码(运营者 2026-08-28)。
+
+    **不在套利态就不给方案**:两腿手数比超过 1:3 那是重仓单边挂了一条零头腿,
+    属于纯趋势(与净持仓页跨月结构同一个门槛)。
+    """
+    cfg = {**(CAL_FOLLOW.get(code) or {}), **(cfg or {})}
+    if not cfg or not net_by_contract or not px_all:
+        return None
+    member = cfg["member"]
+    longs = {c: v for c, v in net_by_contract.items() if v > 0 and c in px_all}
+    shorts = {c: v for c, v in net_by_contract.items() if v < 0 and c in px_all}
+    long_tot = sum(longs.values())
+    short_tot = -sum(shorts.values())
+    base = {"state": "trend", "member": member, "code": code,
+            "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
+            "long_lots": int(round(long_tot)), "short_lots": int(round(short_tot)),
+            "legs": []}
+    if not longs or not shorts:
+        base["note"] = ("%s 当前在%s上是**单边持仓**(只有一个方向),不是跨月套利簿,"
+                        "这套两腿配比不适用。" % (member, CURRENT.get("name", code)))
+        return base
+    weak, strong = min(long_tot, short_tot), max(long_tot, short_tot)
+    ratio = strong / weak if weak else float("inf")
+    if weak * CAL_MAX_RATIO < strong:
+        base["ratio"] = round(ratio, 2)
+        base["note"] = ("%s 当前两腿手数 %s:%s ≈ **1:%.1f**,超过 1:3 —— 那是重仓单边"
+                        "挂了一条零头腿,属于纯趋势不是套利簿,这套配比不适用。"
+                        "等它回到 1:3 以内再看。"
+                        % (member, f"{int(long_tot):,}", f"{int(short_tot):,}", ratio))
+        return base
+    return _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_all, ratio)
+
+
+def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_all, ratio):
+    """套利态下按资金缩放。拆出来只为让上面那段判据读起来是一条直线。"""
+    main = None
+    if CURRENT.get("_main_contract"):
+        main = CURRENT["_main_contract"]
+
+    def pick(d):
+        if isinstance(main, str) and main in d:
+            return main                                   # 主力方向对得上,优先主力
+        return max(d, key=lambda c: abs(d[c]))
+
+    far_c, near_c = pick(longs), pick(shorts)
+    mult, margin_rate = cfg["mult"], cfg["margin"]
+    # 以手数少的那一方向为 1,另一方向按合计比例放大 —— 与玻纯版同一套。
+    unit = [(far_c, "long", long_tot / min(long_tot, short_tot)),
+            (near_c, "short", short_tot / min(long_tot, short_tot))]
+    per_group = sum(u * mult * px_all[c] * margin_rate for c, _, u in unit)
+    if per_group <= 0:
+        return None
+    groups = cfg["capital"] * cfg["use"] / per_group
+    legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
+    splits = []
+    for c, side, u in unit:
+        lots = int(round(groups * u))
+        if lots <= 0:
+            continue
+        val = lots * mult * px_all[c]
+        sd = 1.0 if side == "long" else -1.0
+        margin += val * margin_rate
+        notional += val
+        net_val += sd * val
+        legs.append({"contract": c, "instrument": code, "side": side, "lots": lots,
+                     "px": round(px_all[c], 1),
+                     "member_net": int(round((longs if side == "long" else shorts)[c])),
+                     "value_wan": round(val / 1e4, 1)})
+        splits.append({"label": ("远月净" if side == "long" else "近月净"),
+                       "wan": round(sd * val / 1e4, 1)})
+    if len(legs) < 2:
+        return None
+    return {
+        "state": "spread", "member": member, "code": code,
+        "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
+        "long_lots": int(round(long_tot)), "short_lots": int(round(short_tot)),
+        "ratio": round(ratio, 2), "legs": legs, "splits": splits,
+        "margin": int(round(margin)), "margin_pct": round(margin / cfg["capital"] * 100, 1),
+        "notional_wan": round(notional / 1e4),
+        "leverage": round(notional / cfg["capital"], 1),
+        "net_exposure_wan": round(net_val / 1e4, 1),
+        "net_exposure_pct": round(abs(net_val) / cfg["capital"] * 100),
+        "net_of_notional_pct": round(abs(net_val) / notional * 100, 1) if notional else None,
+        # 单日损益两情形:两腿同涨跌 1%(对冲生效)/ 价差反向各 1%(最坏)
+        "risk_same": int(round(net_val * 0.01)),
+        "risk_spread": int(round(sum(abs(lg["lots"]) * cfg["mult"] * lg["px"]
+                                     for lg in legs) * 0.01)),
+        "note": ("按%s**当日真实持仓比例**等比缩到 %d 万,保证金用 %d%%(留足现金扛价差反向)。"
+                 "它改仓位,这里第二天自动跟着改。**这是展示不是下单指令**:手数取整有偏差,"
+                 "保证金率按估算(%s %d%% 单边,跨期套利指令实际占用更低),实际以你的账户为准;"
+                 "建仓用筹码地图分批挂,别一次打满。**跟随价值未获验证**:焦煤上按席位做跨月的"
+                 "回测 31 家全扫零家过闸(REPORT_JM_CAL_BOOK_v1),这张卡只是把它的结构"
+                 "等比摆给你看。"
+                 % (member, cfg["capital"] / 1e4, cfg["use"] * 100, code, cfg["margin"] * 100)),
+    }
+
+
 def fgsa_hedge_book() -> dict | None:
     """玻纯「永安对冲簿」状态卡(DEC-142,展示级,只显示不进判据)。
 
@@ -2855,10 +2980,40 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
     # 腿成本**不在引擎算**(运营者 2026-08-25:「成本直接引用净持仓的成本,不需要你
     # 单独算」):前端拿浏览器登录态调 /seats/net-position,显示的就是净持仓页同一台
     # 成本引擎的同一个数。引擎只出状态与净持仓(net_off 口径)。
+    # 跨月跟随方案(DEC-168):挂在品种自己的产物里,不像玻纯那张要等两个品种都跑完。
+    if code in CAL_FOLLOW:
+        _d = mkt.index[-1]
+        _m = CAL_FOLLOW[code]["member"]
+        # **只取当日那一行,不是「每个合约最后一次」**:后者会把 JM2309/JM2401 这些
+        # 早就到期的老合约按它们最后一天的持仓算进来,首测把东证的两腿从
+        # 5,775/10,059 撑成 10,391/13,724(比例 1:1.74 → 1:1.32)。口径与净持仓页
+        # 一致:那页也是只看选定交易日在榜的合约。
+        _rows = seat[(seat["member_key"] == _m) & (seat["trade_date"] == _d)]
+        _last = (_rows.groupby("contract")["net_off"].sum()
+                 if len(_rows) else pd.Series(dtype=float))
+        _net = {c: float(v) for c, v in _last.items()
+                if isinstance(c, str) and np.isfinite(v) and v}
+        _px = {c: float(st[c].asof(_d)) for c in st.columns
+               if isinstance(c, str) and np.isfinite(st[c].asof(_d))}
+        # 主力合约传给选腿逻辑:优先在主力上下单(盘口最深)。
+        CURRENT["_main_contract"] = (mkt["main"].iloc[-1]
+                                     if isinstance(mkt["main"].iloc[-1], str) else None)
+        try:
+            payload["follow_plan"] = cal_follow_plan_payload(code, _net, _px)
+        except Exception as e:                  # noqa: BLE001
+            print(f"[{code}] follow_plan 失败,置空:{e}", file=sys.stderr)
+            payload["follow_plan"] = None
+
     if code in ("FG", "SA"):
         _d = mkt.index[-1]
-        _rows = seat[(seat["member_key"] == "永安期货") & (seat["trade_date"] <= _d)]
-        _last = (_rows.sort_values("trade_date").groupby("contract")["net_off"].last()
+        # **只取当日那一行**(2026-08-31 修)。原来是 `<= _d` + 每合约取最后一次,
+        # 于是 FG1303(2013 年)、SA2005 这些**早已到期**的合约按它们最后一天的持仓
+        # 被一路带到今天:FG 129 个合约里只有 7 个是当日的,SA 更离谱 —— 卡上以为
+        # 永安还有 8,508 手玻璃…不,是纯碱多单,**当日真实是 0**。
+        # 注释本来就写着「最新日永安在各合约的净持仓」,实现没照办。
+        # 影响的是运营者照这张卡定的手数比例,不是显示噪音。
+        _rows = seat[(seat["member_key"] == "永安期货") & (seat["trade_date"] == _d)]
+        _last = (_rows.groupby("contract")["net_off"].sum()
                  if len(_rows) else pd.Series(dtype=float))
         PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
                             "ret_open": mkt["ret_open"], "main": mkt["main"],

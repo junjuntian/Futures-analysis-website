@@ -406,6 +406,7 @@ onMounted(async () => {
     error.value = `${e instanceof Error ? e.message : '读取信号数据失败'} — ${failureHint(e)}`
     return
   }
+  loadPlanFromPayload(data.value as { follow_plan?: FollowPlan | null } | null)
   const p = data.value
   if (!p?.members.length) return
   const contracts = (p.contracts_panel ?? []).map((c) => c.contract)
@@ -476,12 +477,18 @@ function chipEdge(last: number | null | undefined, anchor: { cost: number } | nu
  * (成本走净持仓引擎,DEC-143;SA 腿不在本页 payload 里,单独取)。
  */
 interface FollowPlan {
-  state: 'opposite' | 'same'
+  /** opposite/same = 玻纯跨品种版(DEC-154);spread/trend = 跨月版(DEC-168)。 */
+  state: 'opposite' | 'same' | 'spread' | 'trend'
   member: string
   capital?: number
   use_pct?: number
-  fg_net: number
-  sa_net: number
+  fg_net?: number
+  sa_net?: number
+  /** 跨月版:两腿手数与比例,以及分腿净值(玻纯版走 fg_net_wan/sa_net_wan)。 */
+  long_lots?: number
+  short_lots?: number
+  ratio?: number
+  splits?: Array<{ label: string; wan: number }>
   legs: Array<{ contract: string; instrument: string; side: 'long' | 'short'
     lots: number; px: number; member_net: number; value_wan: number }>
   margin?: number; margin_pct?: number; notional_wan?: number; leverage?: number
@@ -495,7 +502,10 @@ const followPlan = ref<FollowPlan | null>(null)
 const followCosts = ref<Record<string, string>>({})
 
 async function loadFollowPlan() {
-  if (props.instrument !== 'FG') return          // 跨品种方案挂在玻璃页
+  // 玻纯那张是**跨品种**方案,材料要两个品种都跑完才合成,所以单独挂在
+  // pair_fgsa.json 上;跨月版(DEC-168)两条腿都在同一个品种里,直接躺在本品种
+  // 自己的 payload 里,由 loadPlanFromPayload 接。
+  if (props.instrument !== 'FG') return
   try {
     const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
     if (!res.ok) return
@@ -504,6 +514,17 @@ async function loadFollowPlan() {
   } catch {
     return                                       // 取不到就不显示这张卡
   }
+  await loadFollowCosts()
+}
+
+/** 跨月版:方案就在本品种 payload 里,主数据到位之后调。 */
+function loadPlanFromPayload(payload: { follow_plan?: FollowPlan | null } | null) {
+  if (props.instrument === 'FG') return          // 玻璃页那张走 pair_fgsa,别互相覆盖
+  followPlan.value = payload?.follow_plan ?? null
+  void loadFollowCosts()
+}
+
+async function loadFollowCosts() {
   const plan = followPlan.value
   if (!plan?.legs?.length) return
   await Promise.all(plan.legs.map(async (lg) => {
@@ -945,13 +966,13 @@ const bySide = computed(() => {
         <!-- 永安跟随策略(DEC-154):与合约窗同宽,排在第一格;随永安持仓每日自动变。 -->
         <div v-if="followPlan" class="card panel-card wide">
           <h3>
-            {{ followPlan.member }}跟随策略
+            {{ followPlan.member }}跟随策略<template v-if="followPlan.ratio">（跨月 1 : {{ followPlan.ratio }}）</template>
             <span class="panel-sink" v-if="followPlan.capital">
               总资金 <b>{{ (followPlan.capital / 10000).toFixed(0) }} 万</b>
               <span class="cost">· 保证金 {{ followPlan.use_pct }}%</span>
             </span>
           </h3>
-          <template v-if="followPlan.state === 'opposite'">
+          <template v-if="followPlan.state === 'opposite' || followPlan.state === 'spread'">
             <table class="panel-vs">
               <tr v-for="lg in followPlan.legs" :key="lg.contract">
                 <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
@@ -965,7 +986,15 @@ const bySide = computed(() => {
                 保证金 <b>{{ ((followPlan.margin ?? 0) / 10000).toFixed(1) }} 万</b>({{ followPlan.margin_pct }}%)
                 <span class="sep">·</span> 名义 {{ followPlan.notional_wan }} 万 <span class="sep">·</span> 杠杆 {{ followPlan.leverage }} 倍
               </div>
-              <div class="chip-line">
+              <!-- 玻纯版是两个品种各自的净值;跨月版是远月腿/近月腿。引擎给 splits
+                   就照 splits 渲染,不在这里判品种 —— 加第三个品种时前端不必再改。 -->
+              <div class="chip-line" v-if="followPlan.splits?.length">
+                <template v-for="(sp, i) in followPlan.splits" :key="sp.label">
+                  <span v-if="i" class="sep">·</span>
+                  {{ sp.label }} <span :class="pnlClass(sp.wan)">{{ sp.wan }} 万</span>
+                </template>
+              </div>
+              <div class="chip-line" v-else>
                 玻璃净 <span :class="pnlClass(followPlan.fg_net_wan ?? 0)">{{ followPlan.fg_net_wan }} 万</span>
                 <span class="sep">·</span> 纯碱净 <span :class="pnlClass(followPlan.sa_net_wan ?? 0)">{{ followPlan.sa_net_wan }} 万</span>
               </div>

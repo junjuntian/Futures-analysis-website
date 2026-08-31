@@ -1125,3 +1125,49 @@ class TestRearmAfterDelivery:
         tr = H.replay(signals(idx, 3.0), mkt, op=op, st=st)[0]
         H.RULES["rearm_after_delivery"] = True
         assert any(t["side"] == "long" and t["contract"] == "LH2611" for t in tr), "关掉开关应照旧续仓"
+
+
+class Test跨月跟随方案:
+    """DEC-168 的跨月跟随卡。钉的是两件**错了不会报错、只会给个看着合理的数**的事。
+
+    夹具用运营者 2026-08-31 在焦煤净持仓页看到的东证真实结构,因为这一条的正确
+    与否**唯一的判据就是"和那页对不对得上"**:多 5,775 / 空 10,059、比例 1:1.74。
+    """
+
+    DZ = {"JM2610": -6151.0, "JM2611": -3739.0, "JM2612": 1001.0,
+          "JM2701": 3547.0, "JM2702": -169.0, "JM2705": 1227.0}
+    PX = {"JM2610": 1759.0, "JM2611": 1700.0, "JM2612": 1690.0,
+          "JM2701": 1696.0, "JM2702": 1690.0, "JM2705": 1650.0}
+
+    def setup_method(self):
+        H.use("JM")
+        H.CURRENT["_main_contract"] = "JM2701"
+
+    def test_两腿合计与净持仓页一致(self):
+        p = H.cal_follow_plan_payload("JM", self.DZ, self.PX)
+        assert p["state"] == "spread", p
+        # **比例照各方向的合计,不是单一最大腿**(DEC-154 在玻纯上踩过:只取最大腿
+        # 会把对冲腿低估一半)。5,775 / 10,059 正是净持仓页那两个数。
+        assert p["long_lots"] == 5775 and p["short_lots"] == 10059, p
+        assert p["ratio"] == 1.74, p
+
+    def test_下单合约优先主力方向对得上的那一侧(self):
+        p = H.cal_follow_plan_payload("JM", self.DZ, self.PX)
+        legs = {lg["side"]: lg["contract"] for lg in p["legs"]}
+        # 主力 JM2701 是净多 → 多腿用主力;空腿主力方向不对,退回最大空腿 JM2610。
+        assert legs == {"long": "JM2701", "short": "JM2610"}, p["legs"]
+
+    def test_超过一比三判纯趋势不给方案(self):
+        """运营者 2026-08-31:「最多 1:3,超过 1:3 的就算纯趋势」。"""
+        one_sided = {"JM2701": 35739.0, "JM2705": -342.0}      # 国泰君安当天 1:104
+        p = H.cal_follow_plan_payload("JM", one_sided, self.PX)
+        assert p["state"] == "trend" and not p["legs"], p
+        # 1:3 取等号仍算套利,过了才不算
+        assert H.cal_follow_plan_payload(
+            "JM", {"JM2701": 1000.0, "JM2610": -3000.0}, self.PX)["state"] == "spread"
+        assert H.cal_follow_plan_payload(
+            "JM", {"JM2701": 1000.0, "JM2610": -3001.0}, self.PX)["state"] == "trend"
+
+    def test_单边不给方案(self):
+        p = H.cal_follow_plan_payload("JM", {"JM2701": 3547.0}, self.PX)
+        assert p["state"] == "trend" and not p["legs"], p
