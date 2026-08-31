@@ -9,7 +9,7 @@
 
 ## 当前生产状态
 
-- **生产 = `1df284d`**(2026-08-31),站点 `https://shejimao.trade`,服务器别名 `qh`。
+- **生产 = `a812b8e`**(2026-08-31),站点 `https://shejimao.trade`,服务器别名 `qh`。
   这一行写的是**上一次成功部署的 SHA**,部署完之后用纯文档提交更新它;
   preflight 有门禁盯着这条等式(DEC-100),对不上就红。
 - 发布照 `docs/RELEASE_PROCESS.md`,必跑 `ops/preflight-deploy.sh --dispatch`。
