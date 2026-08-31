@@ -960,7 +960,7 @@ class TestFixedGroup:
 
     def test_生猪配了固定五家其余品种仍滚动(self):
         H.use("LH")
-        assert H.RULES["fixed_members"] == ["国泰君安", "东证期货", "东吴期货", "永安期货", "浙商期货"]
+        assert H.RULES["fixed_members"] == ["国泰君安", "东证期货", "东吴期货", "永安期货", "南华期货"]
         # 焦煤 DEC-125 固定过一天又改回滚动(DEC-126):固定名单弱的主因是失去按年重选
         for code in ("FG", "SA", "JD", "JM"):
             H.use(code)
