@@ -2971,9 +2971,18 @@ pub struct DataHealthDay {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DataHealthResponse {
-    /// 近期出现过的交易所全集，按代码排序。界面拿它当「该有几家」的基准——
+    /// 近期出现过的交易所全集，按代码排序。**只用来列行**,不是到齐判据。
     /// 从数据里推，不写死名单。
     pub expected_exchanges: Vec<String>,
+    /// **席位**该有几家、**行情**该有几家 —— 两边分开(2026-09-01 修)。
+    ///
+    /// 原来只有上面那个并集,而判据要求席位与行情**都**覆盖全集:INE(上期能源)
+    /// **按设计只有行情没有席位**(DEC-158:能源中心不披露原油席位排名),
+    /// 于是并集是 5、席位永远只有 4,「有缺口」从三品种上线那天起一直亮着 ——
+    /// **一个永远为真的告警等于没有告警**,运营者 2026-09-01 问「这个有缺口
+    /// 是什么意思」才发现。期望值必须按数据集各算各的。
+    pub expected_seat_exchanges: Vec<String>,
+    pub expected_price_exchanges: Vec<String>,
     /// 最近若干个交易日的席位数据，最新的在前。
     pub seats: Vec<DataHealthDay>,
     /// 同上，行情数据。
@@ -3022,10 +3031,21 @@ pub async fn query_data_health(
 
     let seats = to_health_days(seats);
     let prices = to_health_days(prices);
-    let mut expected: Vec<String> = seats
+    fn union_of(days: &[DataHealthDay]) -> Vec<String> {
+        let mut v: Vec<String> = days
+            .iter()
+            .flat_map(|day| day.exchanges.iter().cloned())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+    let seat_expected = union_of(&seats);
+    let price_expected = union_of(&prices);
+    let mut expected: Vec<String> = seat_expected
         .iter()
-        .chain(prices.iter())
-        .flat_map(|day| day.exchanges.iter().cloned())
+        .chain(price_expected.iter())
+        .cloned()
         .collect();
     expected.sort();
     expected.dedup();
@@ -3033,6 +3053,8 @@ pub async fn query_data_health(
     Ok(Json(ApiResponse::new(
         DataHealthResponse {
             expected_exchanges: expected,
+            expected_seat_exchanges: seat_expected,
+            expected_price_exchanges: price_expected,
             seats,
             prices,
         },

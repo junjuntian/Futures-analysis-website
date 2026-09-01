@@ -835,6 +835,10 @@ export interface DataHealthDay {
 export interface DataHealthResponse {
   /** 近期出现过的交易所全集,界面拿它当「该有几家」的基准(不写死名单)。 */
   expected_exchanges: string[]
+  /** 席位/行情各自该有几家 —— INE 只有行情没有席位,两边期望不同(2026-09-01)。
+   *  老产物没有这两个字段,前端取不到时退回并集(与修复前同行为)。 */
+  expected_seat_exchanges?: string[]
+  expected_price_exchanges?: string[]
   seats: DataHealthDay[]
   prices: DataHealthDay[]
 }

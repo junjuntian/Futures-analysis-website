@@ -59,7 +59,7 @@ describe('数据到齐判定', () => {
   ]
 
   it('三所齐才算到齐', () => {
-    const result = dayCompleteness(seats, prices, 3)
+    const result = dayCompleteness(seats, prices, 3, 3)
     expect(result).toEqual([
       { trade_date: '2026-08-12', complete: true },
       // 08-11 席位少了大商所:行情齐也不算到齐。
@@ -69,15 +69,31 @@ describe('数据到齐判定', () => {
 
   it('行情整天缺失也算不齐', () => {
     // 席位到了、行情没到,是真实发生过的情形(新浪那条链断掉时)。
-    expect(dayCompleteness(seats, [], 3)[0].complete).toBe(false)
+    expect(dayCompleteness(seats, [], 3, 3)[0].complete).toBe(false)
   })
 
   it('一家交易所都没见过时不算全绿', () => {
     // 空库的 expectedCount 是 0。少了这道判断,新装的站会显示一片绿,
     // 而实际上一行数据都没有。
-    expect(dayCompleteness([{ trade_date: '2026-08-12', exchanges: [] }], [], 0)).toEqual([
+    expect(dayCompleteness([{ trade_date: '2026-08-12', exchanges: [] }], [], 0, 0)).toEqual([
       { trade_date: '2026-08-12', complete: false }
     ])
+  })
+
+  it('行情多一家交易所(INE 只有行情没有席位)不算缺口', () => {
+    // **2026-09-01 实际发生的 bug**:期望值原来只有一个,取的是席位与行情的并集。
+    // INE(上期能源)按设计只有行情没有席位(DEC-158:能源中心不披露原油席位排名),
+    // 于是并集是 5、席位永远只有 4,判定恒为 false ——「有缺口」从三品种上线那天起
+    // 一直亮着。**一个永远为真的告警等于没有告警**,运营者问「这个有缺口是什么意思」
+    // 才发现。这条钉住:两边期望分开传,各自齐了就算齐。
+    const seatDays = [{ trade_date: '2026-09-01', exchanges: ['CFFEX', 'CZCE', 'DCE', 'SHFE'] }]
+    const priceDays = [
+      { trade_date: '2026-09-01', exchanges: ['CFFEX', 'CZCE', 'DCE', 'INE', 'SHFE'] }
+    ]
+    expect(dayCompleteness(seatDays, priceDays, 4, 5)[0].complete).toBe(true)
+    // 反面:真少一家席位时照样报缺口,别把门槛放松成永远为真
+    const missing = [{ trade_date: '2026-09-01', exchanges: ['CFFEX', 'CZCE', 'SHFE'] }]
+    expect(dayCompleteness(missing, priceDays, 4, 5)[0].complete).toBe(false)
   })
 
   it('只取最近 limit 天', () => {
@@ -85,6 +101,6 @@ describe('数据到齐判定', () => {
       trade_date: `2026-08-${String(20 - i).padStart(2, '0')}`,
       exchanges: ['A']
     }))
-    expect(dayCompleteness(many, many, 1)).toHaveLength(10)
+    expect(dayCompleteness(many, many, 1, 1)).toHaveLength(10)
   })
 })

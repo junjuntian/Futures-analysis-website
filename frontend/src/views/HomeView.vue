@@ -192,6 +192,10 @@ const exchangeRows = computed(() =>
     const price = dataHealth.value?.prices.find((day) => day.exchanges.includes(code))
     return {
       code,
+      // 这家交易所**根本不在席位期望里** = 按设计就没有席位(INE:能源中心不
+      // 披露原油席位排名,DEC-158)。要与「本该有、今天还没到」分开显示,
+      // 否则一个永久的「—」看着就像永久的缺口。
+      seatNotApplicable: !seatExpected.value.includes(code),
       name: EXCHANGE_NAMES[code] ?? code,
       seatDate: seat?.trade_date ?? null,
       priceDate: price?.trade_date ?? null,
@@ -201,9 +205,22 @@ const exchangeRows = computed(() =>
     }
   })
 )
-/** 最近 10 个交易日，每天席位与行情是否都覆盖了全部交易所。 */
+/** 席位/行情各自该有几家。**两边不同**:INE 只有行情没有席位(DEC-158)。
+ *  老产物没有这两个字段时退回并集,与修复前同行为。 */
+const seatExpected = computed(
+  () => dataHealth.value?.expected_seat_exchanges ?? expected.value
+)
+const priceExpected = computed(
+  () => dataHealth.value?.expected_price_exchanges ?? expected.value
+)
+/** 最近 10 个交易日，每天席位与行情是否都覆盖了**各自**该有的交易所。 */
 const recentDays = computed(() =>
-  dayCompleteness(dataHealth.value?.seats ?? [], dataHealth.value?.prices ?? [], expected.value.length)
+  dayCompleteness(
+    dataHealth.value?.seats ?? [],
+    dataHealth.value?.prices ?? [],
+    seatExpected.value.length,
+    priceExpected.value.length
+  )
 )
 const latestComplete = computed(() => recentDays.value[0]?.complete ?? false)
 const missingDays = computed(() => recentDays.value.filter((day) => !day.complete).length)
@@ -328,11 +345,23 @@ const missingDays = computed(() => recentDays.value.filter((day) => !day.complet
           </template>
           <div class="ov-rows">
             <div v-for="row in exchangeRows" :key="row.code" class="ov-row">
-              <span class="k">{{ row.name }} {{ row.code }} · 席位 / 行情</span>
+              <!-- 席位「按设计没有」与「本该有还没到」必须分开写:INE 那个永久的
+                   「—」看着就像永久的缺口,运营者 2026-09-01 正是被它问住的。 -->
+              <span class="k">
+                {{ row.name }} {{ row.code }} ·
+                <template v-if="row.seatNotApplicable">行情</template>
+                <template v-else>席位 / 行情</template>
+              </span>
               <span class="v">
-                {{ row.seatDate ?? '—' }}
-                <template v-if="row.priceDate !== row.seatDate"> / {{ row.priceDate ?? '—' }}</template>
-                <span v-if="row.seatAt" class="ov-arrival">{{ row.seatAt }} 到达</span>
+                <template v-if="row.seatNotApplicable">
+                  {{ row.priceDate ?? '—' }}
+                  <span class="ov-arrival">交易所不公布席位</span>
+                </template>
+                <template v-else>
+                  {{ row.seatDate ?? '—' }}
+                  <template v-if="row.priceDate !== row.seatDate"> / {{ row.priceDate ?? '—' }}</template>
+                  <span v-if="row.seatAt" class="ov-arrival">{{ row.seatAt }} 到达</span>
+                </template>
               </span>
             </div>
             <p v-if="!exchangeRows.length" class="ov-empty">回看窗内没有任何数据。</p>
