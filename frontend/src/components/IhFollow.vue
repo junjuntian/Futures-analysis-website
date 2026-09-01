@@ -10,6 +10,7 @@
  * 这里原样印出来,不做美化 —— 运营者有权在看方向的同时看到证据强度。
  */
 import { computed, onMounted, ref } from 'vue'
+import { getSeatNetPosition } from '../api'
 
 interface Seat {
   member: string
@@ -51,6 +52,15 @@ interface Payload {
 
 const data = ref<Payload | null>(null)
 const error = ref('')
+/**
+ * 在场席位的净持仓成本(键=会员名)。
+ *
+ * **不在引擎算**(DEC-143,运营者 2026-08-25:「成本直接引用净持仓的成本,
+ * 不需要你单独算」):前端拿浏览器登录态调 `/seats/net-position`,显示的就是
+ * 净持仓页**同一台成本引擎**的同一个数。引擎只出在场状态与净持仓。
+ * 取的是**品种汇总档**(不传 contract),与看板上那个净手数同口径。
+ */
+const costs = ref<Record<string, string>>({})
 
 onMounted(async () => {
   try {
@@ -59,7 +69,26 @@ onMounted(async () => {
     data.value = await res.json()
   } catch (e) {
     error.value = e instanceof Error ? e.message : '读取失败'
+    return
   }
+  const d = data.value
+  if (!d) return
+  await Promise.all(
+    d.seats.filter((s) => s.on).map(async (s) => {
+      try {
+        const { data: net } = await getSeatNetPosition({
+          instrument: 'IH', members: [s.member], tradeDate: d.data_date
+        })
+        const m = net.latest_members.find((x) => x.member === s.member)
+        if (!m || m.missing) return
+        // 净空的取空腿成本、净多取多腿 —— 取错一侧会拿到另一批持仓的均价
+        const raw = s.side === 'long' ? m.long_cost : m.short_cost
+        if (raw !== null && raw !== undefined) costs.value[s.member] = Number(raw).toFixed(2)
+      } catch {
+        // 单家取不到就不显示那一个,不影响整块
+      }
+    })
+  )
 })
 
 /** 状态一句话。**分歧**是个独立状态,不能和「没人在场」混为一谈。 */
@@ -105,7 +134,10 @@ function mdBold(t: string) {
         <span class="big">{{ headline?.text }}</span>
         <template v-if="data.current">
           <span class="sep">·</span>
-          {{ onSeats.map((s) => s.member).join('、') }}
+          <template v-for="(s, i) in onSeats" :key="s.member">
+            <span v-if="i" class="sep">、</span>{{ s.member }}<template
+              v-if="costs[s.member]"> <i class="cost-at">@{{ costs[s.member] }}</i></template>
+          </template>
           <span class="sep">·</span>
           进场 {{ data.current.entry_date }}
           <span class="sep">·</span>
@@ -122,6 +154,9 @@ function mdBold(t: string) {
             <span v-if="s.on" class="tag" :class="s.side === 'long' ? 'up' : 'down'">
               在场 · {{ s.side === 'long' ? '净多' : '净空' }} {{ lots(s.net) }} 手
             </span>
+            <!-- 成本摆在手数后面(运营者 2026-09-01)。口径与净持仓页同一台引擎,
+                 字段名是「净持仓成本(推算)」而不是成交均价 —— 我们看不到成交明细。 -->
+            <i v-if="s.on && costs[s.member]" class="cost-at">@{{ costs[s.member] }}</i>
             <span v-else class="tag muted">不在场</span>
           </td>
           <td class="num cost">末次上榜 {{ s.last_board ?? '—' }}</td>
@@ -202,6 +237,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tag.up { color: var(--tv-up); }
 .tag.down { color: var(--tv-down); }
 .tag.muted { color: var(--el-text-color-secondary); }
+.cost-at { font-style: normal; color: var(--el-text-color-secondary); margin-left: 6px; }
 .up { color: var(--tv-up); }
 .down { color: var(--tv-down); }
 .stats { margin-top: 12px; font-size: 13px; line-height: 1.8; }
