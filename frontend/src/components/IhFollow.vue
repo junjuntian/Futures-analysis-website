@@ -28,6 +28,13 @@ interface Round {
   exit_date: string | null
   side: 'long' | 'short'
   days: number
+  /** 执行价:进场 = 信号次日开盘,出场 = 离场信号次日开盘。与段收益同一口径。 */
+  entry_px: number | null
+  exit_px: number | null
+  entry_contract: string | null
+  exit_contract: string | null
+  /** 段内换过月:两个价属于不同合约,直除**对不上**段收益。界面必须标出来。 */
+  rolled: boolean
   mkt_pct: number
   ret_pct: number
 }
@@ -36,6 +43,7 @@ interface Payload {
   name: string
   data_date: string
   main_contract: string | null
+  last_open: number | null
   carry: number
   state: 'long' | 'short' | 'split' | 'flat'
   on_count: number
@@ -186,17 +194,37 @@ function mdBold(t: string) {
 
       <table class="hist">
         <tr class="head">
-          <td>进场</td><td>出场</td><td>方向</td><td class="num">持有</td>
+          <td>进场</td><td class="num">进场价</td>
+          <td>出场</td><td class="num">出场价</td>
+          <td>方向</td><td class="num">持有</td>
           <td class="num">本段涨跌</td><td class="num">照它做</td><td></td>
         </tr>
         <tr v-for="(h, i) in data.history" :key="i">
           <td>{{ h.entry_date }}</td>
+          <!-- 价格后面跟合约代码:段内换过月时两个价属于不同合约,
+               不写清楚会让人拿两个价一除、发现对不上段收益又找不到原因。 -->
+          <td class="num">
+            {{ h.entry_px ?? '—' }}
+            <i v-if="h.entry_contract" class="con">{{ h.entry_contract }}</i>
+          </td>
           <td>{{ h.exit_date ?? '—' }}</td>
+          <td class="num">
+            <template v-if="h.exit_px !== null">
+              {{ h.exit_px }}<i v-if="h.exit_contract" class="con">{{ h.exit_contract }}</i>
+            </template>
+            <template v-else-if="data.last_open">
+              <span class="cost">现价 {{ data.last_open }}</span>
+            </template>
+            <template v-else>—</template>
+          </td>
           <td><span class="tag" :class="h.side === 'long' ? 'up' : 'down'">{{ h.side === 'long' ? '做多' : '做空' }}</span></td>
           <td class="num">{{ h.days }} 日</td>
           <td class="num cost">{{ pct(h.mkt_pct) }}</td>
           <td class="num" :class="cls(h.ret_pct)">{{ pct(h.ret_pct) }}</td>
-          <td class="num cost">{{ h.exit_date ? (h.ret_pct > 0 ? '赢' : '输') : '进行中' }}</td>
+          <td class="num cost">
+            {{ h.exit_date ? (h.ret_pct > 0 ? '赢' : '输') : '进行中' }}
+            <i v-if="h.rolled" class="roll" title="段内换过月:两个价属于不同合约，直除对不上段收益">换月</i>
+          </td>
         </tr>
       </table>
 
@@ -238,6 +266,12 @@ table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tag.down { color: var(--tv-down); }
 .tag.muted { color: var(--el-text-color-secondary); }
 .cost-at { font-style: normal; color: var(--el-text-color-secondary); margin-left: 6px; }
+.con { font-style: normal; font-size: 11px; color: var(--el-text-color-secondary); margin-left: 4px; }
+.roll {
+  font-style: normal; font-size: 11px; margin-left: 6px;
+  color: var(--tv-warn); border: 1px solid var(--tv-warn);
+  border-radius: 3px; padding: 0 3px;
+}
 .up { color: var(--tv-up); }
 .down { color: var(--tv-down); }
 .stats { margin-top: 12px; font-size: 13px; line-height: 1.8; }

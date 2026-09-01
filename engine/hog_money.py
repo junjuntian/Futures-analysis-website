@@ -2858,10 +2858,36 @@ def _ih_state(net_by_day, idx, carry):
     return st
 
 
-def _ih_segments(sig, idx, ret, lag):
-    """信号的连续同向段 → 逐轮明细(段收益按 T+1 对齐,与研究口径同)。"""
+def _ih_segments(sig, idx, ret, lag, op=None, mains=None):
+    """信号的连续同向段 → 逐轮明细(段收益按 T+1 对齐,与研究口径同)。
+
+    **进出场价必须与收益同一口径,不能另取一个好看的价**(运营者 2026-09-01
+    「进场和出场成本都要写」)。`ret` 是开→开收益,仓位后移 `lag` 格,所以
+    一段从 i 到 j 实际吃到的是 `ret[i+lag] … ret[j+lag]`:
+      · **进场价 = open[i+lag−1]**(信号日 T 收盘出榜 → T+1 开盘成交);
+      · **出场价 = open[j+lag]**(离场信号次日开盘);仍在场则为 None,
+        由前端显示现价。
+    **一个必须标出来的陷阱**:段内换过月时,进出场价属于**不同的合约**,两个价
+    直接相除**对不上** `mkt_pct` —— 后者是逐日按各合约自己的前收连乘的(换月纪律,
+    见 main_series 开头)。实测 2024-07-16 那段:2405 → 3138.8 直除 +30.51%,
+    而真实段收益 +30.76%。所以每个价都带上**它属于哪个合约**,并给出 `rolled` 标记;
+    界面据此提示,免得运营者拿两个价一除发现对不上、又找不到原因。
+    """
     segs, i = [], 0
     n = len(idx)
+    o = None if op is None else np.asarray(op, dtype=float)
+    mn = None if mains is None else list(mains)
+
+    def px(k):
+        if o is None or k < 0 or k >= n or not np.isfinite(o[k]):
+            return None
+        return round(float(o[k]), 1)
+
+    def con(k):
+        if mn is None or k < 0 or k >= n:
+            return None
+        return mn[k] if isinstance(mn[k], str) else None
+
     while i < n:
         if sig[i] == 0:
             i += 1
@@ -2874,10 +2900,19 @@ def _ih_segments(sig, idx, ret, lag):
         if len(seg):
             mkt = (float(np.prod(1 + seg)) - 1) * 100
             mine = (float(np.prod(1 + sig[i] * seg)) - 1) * 100
+            closed = j + 1 < n
             segs.append({"entry_date": idx[i].strftime("%Y-%m-%d"),
-                         "exit_date": idx[j].strftime("%Y-%m-%d") if j + 1 < n else None,
+                         "exit_date": idx[j].strftime("%Y-%m-%d") if closed else None,
                          "side": "long" if sig[i] > 0 else "short",
                          "days": j - i + 1,
+                         "entry_px": px(i + lag - 1),
+                         "exit_px": px(j + lag) if closed else None,
+                         "entry_contract": con(i + lag - 1),
+                         "exit_contract": con(j + lag) if closed else con(n - 1),
+                         # 段内换过月:两个价属于不同合约,直除对不上段收益
+                         "rolled": len({c for c in mn[max(i + lag - 1, 0):
+                                                     min(j + lag + 1, n)]
+                                        if isinstance(c, str)}) > 1 if mn else False,
                          "mkt_pct": round(mkt, 2), "ret_pct": round(mine, 2)})
         i = j + 1
     return segs
@@ -2936,7 +2971,7 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
             "entry_date": entry.strftime("%Y-%m-%d") if entry is not None else None,
             "days": (int((idx >= entry).sum()) if entry is not None else None),
             "seg_ret_pct": seg_ret,
-            "rounds": len([1 for b in _ih_segments(st, idx, ret, cfg["lag"])]),
+            "rounds": len([1 for b in _ih_segments(st, idx, ret, cfg["lag"], mkt["open"].values, mkt["main"].values)]),
         })
 
     # 合成信号:在场的那几家方向一致才算数
@@ -2946,7 +2981,7 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
     agree = (on_cnt >= 1) & (np.abs(ssum) == on_cnt)
     sig = np.where(agree, np.sign(ssum), 0.0)
 
-    segs = _ih_segments(sig, idx, ret, cfg["lag"])
+    segs = _ih_segments(sig, idx, ret, cfg["lag"], mkt["open"].values, mkt["main"].values)
     closed = [s for s in segs if s["exit_date"]]
     wins = [s for s in closed if s["ret_pct"] > 0]
     p = np.concatenate([np.zeros(cfg["lag"]), sig[:-cfg["lag"]]])
@@ -2971,6 +3006,10 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
         "main_contract": str(mkt["main"].iloc[-1]) if isinstance(mkt["main"].iloc[-1], str) else None,
         "close": float(mkt["settle"].iloc[-1]) if "settle" in mkt else None,
         "carry": cfg["carry"], "seats": seats_out,
+        # 未平仓那一段的「现价」:最新开盘价,与进场价同一口径(都是可成交的开盘价),
+        # 不用结算价 —— 两种价混着摆,看的人会拿去算一个对不上的浮盈。
+        "last_open": (round(float(mkt["open"].iloc[-1]), 1)
+                      if np.isfinite(mkt["open"].iloc[-1]) else None),
         "state": state,
         "current": cur,
         "on_count": int(on_cnt[-1]),
