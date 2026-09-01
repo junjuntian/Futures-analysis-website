@@ -1277,3 +1277,18 @@ class TestIH核心席位看板:
         p = H.ih_follow_payload(self._price(idx), none)
         assert p["state"] == "flat" and p["on_count"] == 0, p
         assert all(not s["on"] for s in p["seats"]), p["seats"]
+
+    def test_品种名和点值是IH自己的_不是上一个跑过的品种(self):
+        """2026-09-01 上线后 Chrome 一眼看出来的:看板顶着「焦煤 JM」的名字。
+
+        根因:读了 `CURRENT`(run_one 设的全局量,跑完五个品种后停在最后一个 JM),
+        而 `use()` 只改 RULES 不改 CURRENT。**这里故意先把 CURRENT 弄脏再调**,
+        钉住它不许再依赖那个全局量。
+        """
+        idx = self._world()
+        H.VARIETIES["IH"]["replay_start"] = "2026-08-24"
+        H.CURRENT = {"code": "JM", "name": "焦煤 JM", "multiplier": 60.0}   # 脏
+        rows = self._seat_rows([("2026-08-28", "摩根大通", -100)])
+        p = H.ih_follow_payload(self._price(idx), rows)
+        assert p["name"] == "上证50 IH", p["name"]
+        assert p["multiplier"] == 300.0, p["multiplier"]

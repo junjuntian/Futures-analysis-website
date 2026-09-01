@@ -2896,7 +2896,12 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
     cfg = IH_FOLLOW
     price = clean_price(price_raw)
     seat = clean_seat(seat_raw)
-    use("IH")
+    # **用 use() 的返回值,不要读 CURRENT**(2026-09-01 上线后 Chrome 一眼看出来):
+    # CURRENT 是 run_one 设的全局量,跑完五个品种后停在最后一个 JM 上;`use()` 只改
+    # RULES 不改 CURRENT。原来读 CURRENT["name"]/["multiplier"],于是 IH 看板顶着
+    # 「焦煤 JM」的名字、点值也是焦煤的 60(IH 是 300)。**这类错单元测试照不到** ——
+    # 测的是状态判定,不是显示成谁。
+    v = use("IH")
     mkt = main_series(price)
     mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
     if not len(mkt):
@@ -2961,8 +2966,7 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
         state = "split"                                    # 有人在场但方向打架
     cur = segs[-1] if segs and not segs[-1]["exit_date"] else None
     return {
-        "instrument": "IH", "name": CURRENT.get("name", "上证50 IH"),
-        "multiplier": CURRENT.get("multiplier"),
+        "instrument": "IH", "name": v["name"], "multiplier": v["multiplier"],
         "data_date": d0.strftime("%Y-%m-%d"),
         "main_contract": str(mkt["main"].iloc[-1]) if isinstance(mkt["main"].iloc[-1], str) else None,
         "close": float(mkt["settle"].iloc[-1]) if "settle" in mkt else None,
