@@ -1206,3 +1206,16 @@ class Test跨月跟随方案:
                 continue          # 资金太小撑不起两腿,那时不给方案,也算对
             assert p["margin"] <= cap * 0.35 + 1, (cap, p["margin"], p["margin_pct"])
             assert p["margin_pct"] <= 35.0, (cap, p["margin_pct"])
+
+    def test_套利只收单边保证金(self):
+        """运营者 2026-09-01:「JM 单边保证金是 13%,套利只收单边保证金。」
+
+        跨期套利指令的占用是**两腿里较大的那一腿**,不是两腿相加。这不是费率微调:
+        占用砍掉近一半,同样预算下手数接近翻倍(实测 5/8 手 → 9/13 手)。
+        钉住报出来的 margin **等于较大那一腿**,而不是两腿之和。
+        """
+        p = H.cal_follow_plan_payload("JM", self.DZ, self.PX)
+        cfg = H.CAL_FOLLOW["JM"]
+        per_leg = [lg["lots"] * cfg["mult"] * lg["px"] * cfg["margin"] for lg in p["legs"]]
+        assert abs(p["margin"] - max(per_leg)) <= 1, (p["margin"], per_leg)
+        assert p["margin"] < sum(per_leg) - 1, "两腿相加就是没按单边收"

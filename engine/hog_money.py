@@ -2647,17 +2647,21 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
 
 # 跨月跟随方案的每品种配置(DEC-168)。
 #
-# **`margin` 是单边保证金率**,与 FOLLOW_PLAN 的 FG 9%/SA 8% 同口径。焦煤 12% =
-# 合约窗「沉淀资金」用的 24%(交易所最低保证金 × 双边,运营者逐格对过行情软件)
-# 的一半。**这是估算**:交易所对跨期套利指令有保证金优惠,真实占用会更低,
-# 卡面照 FOLLOW_PLAN 的老规矩把「按估算」写在明面上,以运营者账户为准。
+# **`margin` 是单边保证金率,13% 由运营者 2026-09-01 给定**(此前我按沉淀资金那个
+# 24% 双边折半估成 12%,是估的)。同一句话里他还给了第二件更要紧的事:
+# **「套利只收单边保证金」** —— 跨期套利指令的占用是**两腿里较大的那一腿**,
+# 不是两腿相加。这不是费率微调,是把占用砍掉近一半、同样预算下手数接近翻倍。
+# 见 `_cal_plan_sized` 里的 `aggregate=max`。
+#
+# **只改焦煤这一张。** 玻纯那张(FOLLOW_PLAN)是跨品种组合,交易所收不收单边
+# 我没有依据,账户类参数不猜 —— 等运营者给了再动。
 CAL_FOLLOW = {
     # 2026-09-01 运营者拍板由东证换成中泰。理由与丑话都在 `caveat` 里,原样印在卡上。
     # 换人依据:`REPORT_JM_CAL_PICK_v1` —— 按「它做跨月的那些天价差赚不赚」排,
     # 东证是 −8,125 万(日均 −53.5 万),中信更差(−9,947 万,16 家垫底),
     # 中泰 +1.80 亿(日均 +86.1 万)、跨月天数 209 天全场最多、100% 在榜。
     "JM": {"member": "中泰期货", "capital": 500000.0, "use": 0.35,
-           "margin": 0.12, "mult": 60.0,
+           "margin": 0.13, "mult": 60.0,
            "caveat": "**丑话**:中泰做跨月的 209 天里价差 +1.80 亿(日均 +86 万,"
                      "全场最多的跨月天数、100% 在榜),但**利润几乎全在 2026 一年、"
                      "四年里只有两年为正**;而 2026 同时是东证 −1.09 亿、中信 −1.03 亿"
@@ -2671,7 +2675,7 @@ CAL_FOLLOW = {
 CAL_MAX_RATIO = 3.0
 
 
-def _fit_within_budget(unit, budget, margin_of):
+def _fit_within_budget(unit, budget, margin_of, aggregate=sum):
     """把每条腿的手数取整到**保证金不超预算**(运营者 2026-09-01:「改成宁少不多」)。
 
     为什么不直接向下取整:两腿手数本来就小(五到十手),各自 floor 会把比例也
@@ -2680,6 +2684,8 @@ def _fit_within_budget(unit, budget, margin_of):
     比例基本不动,只是仓位小一点。
 
     `unit` 是 [(合约, 方向, 相对份额)],`margin_of(合约, 手数)` 给该腿的保证金占用。
+    `aggregate` 决定两腿怎么合成总占用:**跨期套利指令只收单边**(运营者
+    2026-09-01),那时传 `max`;各腿独立收取时传 `sum`。
     返回 {合约: 手数};缩到有腿为 0 就返回 None(资金撑不起这个配比)。
     """
     scale = 1.0
@@ -2687,7 +2693,7 @@ def _fit_within_budget(unit, budget, margin_of):
         lots = {c: int(round(scale * u)) for c, _, u in unit}
         if any(v <= 0 for v in lots.values()):
             return None
-        if sum(margin_of(c, v) for c, v in lots.items()) <= budget:
+        if aggregate(margin_of(c, v) for c, v in lots.items()) <= budget:
             return lots
         scale *= 0.98
     return None
@@ -2754,13 +2760,18 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
     # 以手数少的那一方向为 1,另一方向按合计比例放大 —— 与玻纯版同一套。
     unit = [(long_c, "long", long_tot / min(long_tot, short_tot)),
             (short_c, "short", short_tot / min(long_tot, short_tot))]
-    per_group = sum(u * mult * px_all[c] * margin_rate for c, _, u in unit)
+    # **套利只收单边保证金**(运营者 2026-09-01):跨期套利指令的占用是两腿里
+    # 较大的那一腿,不是相加。所以定规模、卡预算、报占用三处都用 max 不用 sum。
+    def leg_margin(c, n):
+        return n * mult * px_all[c] * margin_rate
+
+    per_group = max(u * mult * px_all[c] * margin_rate for c, _, u in unit)
     if per_group <= 0:
         return None
     budget = cfg["capital"] * cfg["use"]
     sized = _fit_within_budget(
         [(c, side, groups_u * (budget / per_group)) for c, side, groups_u in unit],
-        budget, lambda c, n: n * mult * px_all[c] * margin_rate)
+        budget, leg_margin, aggregate=max)
     if not sized:
         return None
     legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
@@ -2771,7 +2782,7 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
             continue
         val = lots * mult * px_all[c]
         sd = 1.0 if side == "long" else -1.0
-        margin += val * margin_rate
+        margin = max(margin, val * margin_rate)      # 单边:取较大那一腿,不累加
         notional += val
         net_val += sd * val
         legs.append({"contract": c, "instrument": code, "side": side, "lots": lots,
@@ -2804,7 +2815,8 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
                                      for lg in legs) * 0.01)),
         "note": ("按%s**当日真实持仓比例**等比缩到 %d 万,保证金用 %d%%(留足现金扛价差反向)。"
                  "它改仓位,这里第二天自动跟着改。**这是展示不是下单指令**:手数取整有偏差,"
-                 "保证金率按估算(%s %d%% 单边,跨期套利指令实际占用更低),实际以你的账户为准;"
+                 "保证金按 %s **%d%% 单边**、且**套利指令只收较大那一腿**(运营者给定),"
+                 "实际以你的账户为准;"
                  "建仓用筹码地图分批挂,别一次打满。"
                  % (member, cfg["capital"] / 1e4, cfg["use"] * 100, code, cfg["margin"] * 100)
                  + (cfg.get("caveat") or "")),
