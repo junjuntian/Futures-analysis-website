@@ -80,10 +80,15 @@ describe('SmartMoneyView 历史信号分页', () => {
   it('品种按钮由 FLOW 列表渲染,加品种只改那一行', async () => {
     // 2026-08-19 加鸡蛋/焦煤时把四个写死的按钮改成 v-for。这条钉住的是
     // 「按钮数量 = 合计流向品种数 + 金银」,以后再加品种不改模板也不会漏。
+    //
+    // **上证50 是有意单列的**(DEC-172,2026-09-01):它的信号是「跟某几家席位
+    // 的在场方向」,与其余五个品种的阵营 z 分数不是一回事,渲染的组件也不同
+    // (IhFollow 而非 HogMoney)。所以它**不在 FLOW 里**,是模板里单独一个按钮 ——
+    // 把它塞进 FLOW 会让 v-for 渲染出一个点了会崩的标签。
     const wrapper = mount(SmartMoneyView, { global: { plugins: [ElementPlus] } })
     await flushPromises()
     const labels = wrapper.findAll('.variety').map((b) => b.text())
-    expect(labels).toEqual(['黄金白银', '生猪', '鸡蛋', '焦煤', '玻璃', '纯碱'])
+    expect(labels).toEqual(['黄金白银', '生猪', '鸡蛋', '焦煤', '玻璃', '纯碱', '上证50'])
     wrapper.unmount()
   })
 

@@ -2823,6 +2823,177 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
     }
 
 
+# ---------------------------------------------------------------- IH 跟随引擎
+#
+# **这条线的完整来龙去脉,别只看结论。** 五轮研究(IH_MODEL_v1/v2、JPM_v1、
+# STATE_SCAN_v1、PLAN_V3、JUDGE12、TRIO_v1、SYNC_v1、GTJA_v1)没有一轮拿到过
+# 能过多重检验校正的信号,我据此两次建议「不排期」。**运营者两次否掉这个建议**,
+# 理由是「主力资金会提前一段时间进场,必须做一个引擎出来,这样我能参考」——
+# 而他上一次提出同一条(2026-08-30「他们钱多必须提前进场」)时是对的:
+# 正是那句话让我把事件窗改成在场状态,当场捞出了摩根大通那条线。
+#
+# **所以这个引擎的定位是「参考看板」,不是「过闸的策略」**:它如实回答
+# 「此刻这三家核心席位在不在场、什么方向、进场多久、这一轮浮盈多少」,
+# 统计每次全量重算并把丑话一起印出来,**不写死任何一个漂亮数字**。
+IH_FOLLOW = {
+    "seats": ["摩根大通", "高盛期货", "中财期货"],   # 运营者点名的三家核心席位
+    "carry": 20,        # 掉榜沿用天数,与全部研究同档,不调参
+    "lag": 2,           # T 日收盘出榜 → T+1 开盘进场 → 收益从 T+1→T+2 起算
+}
+
+
+def _ih_state(net_by_day, idx, carry):
+    """把某席位的逐日净持仓变成在场状态向量(±1/0)。与 research 完全同一套。"""
+    st = np.zeros(len(idx))
+    if not len(net_by_day):
+        return st
+    locs = idx.get_indexer(net_by_day.index)
+    sgn = np.sign(net_by_day.values)
+    for i, lo in enumerate(locs):
+        if lo < 0:
+            continue
+        nxt = locs[i + 1] if i + 1 < len(locs) else None
+        end = nxt if (nxt is not None and nxt - lo <= carry) else min(lo + carry + 1, len(idx))
+        st[lo:end] = sgn[i]
+    return st
+
+
+def _ih_segments(sig, idx, ret, lag):
+    """信号的连续同向段 → 逐轮明细(段收益按 T+1 对齐,与研究口径同)。"""
+    segs, i = [], 0
+    n = len(idx)
+    while i < n:
+        if sig[i] == 0:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and sig[j + 1] == sig[i]:
+            j += 1
+        a, b = min(i + lag, n - 1), min(j + 1 + lag, n)
+        seg = ret[a:b]
+        if len(seg):
+            mkt = (float(np.prod(1 + seg)) - 1) * 100
+            mine = (float(np.prod(1 + sig[i] * seg)) - 1) * 100
+            segs.append({"entry_date": idx[i].strftime("%Y-%m-%d"),
+                         "exit_date": idx[j].strftime("%Y-%m-%d") if j + 1 < n else None,
+                         "side": "long" if sig[i] > 0 else "short",
+                         "days": j - i + 1,
+                         "mkt_pct": round(mkt, 2), "ret_pct": round(mine, 2)})
+        i = j + 1
+    return segs
+
+
+def ih_follow_payload(price_raw, seat_raw) -> dict | None:
+    """IH「核心席位在场看板」(DEC-172,运营者两次要求)。
+
+    规则(零参数,与 research 同一套口径):
+      * 三家核心席位,谁在榜谁在场,方向 = 它净持仓的符号,掉榜沿用 20 日;
+      * **在场的那几家方向一致才给方向**;有人多有人空 → 分歧,观望;
+        一个都不在场 → 观望。这直接落实运营者「三方共振」那个想法,
+        并如实处理「它们其实很少同时在场」这个事实。
+      * T+1 开盘执行(lag=2)。
+    """
+    cfg = IH_FOLLOW
+    price = clean_price(price_raw)
+    seat = clean_seat(seat_raw)
+    use("IH")
+    mkt = main_series(price)
+    mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
+    if not len(mkt):
+        return None
+    idx = mkt.index
+    ret = mkt["ret_open"].fillna(0.0).values
+    n = len(idx)
+
+    states, seats_out = {}, []
+    for m in cfg["seats"]:
+        g = seat[seat["member_key"] == m]
+        d = g.groupby("trade_date")["net_off"].sum()
+        d = d[d.index.isin(idx) & (d != 0)]
+        st = _ih_state(d, idx, cfg["carry"])
+        states[m] = st
+        on = bool(st[-1] != 0)
+        # 本轮:从当前这一段的起点算起
+        entry, seg_ret = None, None
+        if on:
+            k = n - 1
+            while k > 0 and st[k - 1] == st[-1]:
+                k -= 1
+            entry = idx[k]
+            a = min(k + cfg["lag"], n - 1)
+            seg = ret[a:]
+            seg_ret = round((float(np.prod(1 + st[-1] * seg)) - 1) * 100, 2) if len(seg) else None
+        seats_out.append({
+            "member": m, "on": on,
+            "side": (None if not on else ("long" if st[-1] > 0 else "short")),
+            "net": (int(round(d.iloc[-1])) if len(d) else None),
+            "last_board": (d.index.max().strftime("%Y-%m-%d") if len(d) else None),
+            "entry_date": entry.strftime("%Y-%m-%d") if entry is not None else None,
+            "days": (int((idx >= entry).sum()) if entry is not None else None),
+            "seg_ret_pct": seg_ret,
+            "rounds": len([1 for b in _ih_segments(st, idx, ret, cfg["lag"])]),
+        })
+
+    # 合成信号:在场的那几家方向一致才算数
+    M = np.array([states[m] for m in cfg["seats"]])
+    on_cnt = (M != 0).sum(axis=0)
+    ssum = M.sum(axis=0)
+    agree = (on_cnt >= 1) & (np.abs(ssum) == on_cnt)
+    sig = np.where(agree, np.sign(ssum), 0.0)
+
+    segs = _ih_segments(sig, idx, ret, cfg["lag"])
+    closed = [s for s in segs if s["exit_date"]]
+    wins = [s for s in closed if s["ret_pct"] > 0]
+    p = np.concatenate([np.zeros(cfg["lag"]), sig[:-cfg["lag"]]])
+    live = p != 0
+    k = 242 / max(live.sum(), 1)
+    ann = (float(np.prod(1 + (p * ret)[live]) ** k) - 1) * 100 if live.sum() else None
+    lng = (float(np.prod(1 + ret[live]) ** k) - 1) * 100 if live.sum() else None
+    # 利润集中度:最赚的三轮占了多少 —— 摩根那条线上是 117%(其余十轮合计为负)
+    rs = sorted((s["ret_pct"] for s in closed), reverse=True)
+    top3 = round(sum(rs[:3]) / sum(rs) * 100) if rs and sum(rs) else None
+
+    d0 = idx[-1]
+    state = "flat"
+    if sig[-1] != 0:
+        state = "long" if sig[-1] > 0 else "short"
+    elif on_cnt[-1] >= 2:
+        state = "split"                                    # 有人在场但方向打架
+    cur = segs[-1] if segs and not segs[-1]["exit_date"] else None
+    return {
+        "instrument": "IH", "name": CURRENT.get("name", "上证50 IH"),
+        "multiplier": CURRENT.get("multiplier"),
+        "data_date": d0.strftime("%Y-%m-%d"),
+        "main_contract": str(mkt["main"].iloc[-1]) if isinstance(mkt["main"].iloc[-1], str) else None,
+        "close": float(mkt["settle"].iloc[-1]) if "settle" in mkt else None,
+        "carry": cfg["carry"], "seats": seats_out,
+        "state": state,
+        "current": cur,
+        "on_count": int(on_cnt[-1]),
+        "history": segs[-12:][::-1],                       # 倒序,与全站历史表一致
+        "stats": {
+            "rounds": len(closed), "wins": len(wins),
+            "win_rate": round(len(wins) / len(closed) * 100) if closed else None,
+            "avg_pct": round(float(np.mean([s["ret_pct"] for s in closed])), 2) if closed else None,
+            "in_days": int(live.sum()), "in_pct": round(live.sum() / n * 100, 1),
+            "ann_pct": None if ann is None else round(ann, 1),
+            "long_same_pct": None if lng is None else round(lng, 1),
+            "edge_pct": None if (ann is None or lng is None) else round(ann - lng, 1),
+            "top3_share_pct": top3,
+        },
+        "note": ("**这是参考看板,不是过闸的策略。** 规则:三家核心席位(%s)谁在榜谁在场,"
+                 "方向=净持仓符号,掉榜沿用 %d 日;**在场的那几家方向一致才给方向**,"
+                 "有分歧或无人在场就观望;T+1 开盘执行。"
+                 "**必须一起看的丑话**:五轮研究没有一轮拿到过能过多重检验校正的信号 —— "
+                 "摩根大通十二年只出手 13 轮,p(方向)=0.136 且**利润高度集中在少数几轮大跌**;"
+                 "高盛 2023-09 已离场、中财在十二年官方口径下择时增益为负;"
+                 "「三家同时在场」历史上一天都没出现过。"
+                 "运营者知情后仍要求做出来当参考(DEC-172),依据是「主力资金提前进场,"
+                 "要能看见」。**看方向、看谁在场,别把它当信号照单下注。**"
+                 % ("、".join(cfg["seats"]), cfg["carry"])),
+    }
+
+
 def fgsa_hedge_book() -> dict | None:
     """玻纯「永安对冲簿」状态卡(DEC-142,展示级,只显示不进判据)。
 
@@ -3114,6 +3285,29 @@ def main():
             continue
         if run_one(code, src, out_dir) is not None:
             ok += 1
+    # IH 核心席位看板(DEC-172):它不走 run_one 那套阵营/z 分数流程 —— 信号是
+    # 「跟某几家席位的在场方向」,形状完全不同,硬塞进去只会两边都别扭。
+    # 单独取数、单独写产物;失败只告警,不拖垮其它品种。
+    try:
+        if src == "csv":
+            _p, _s = load_from_csv("IH", Path(os.environ.get("CSV_DIR", "../research/data")))
+        else:
+            _p, _s = load_from_pg(
+                "IH",
+                os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
+                os.environ.get("PG_USER", "futures_app"),
+                os.environ.get("PG_DB", "futures_platform"))
+        _ih = ih_follow_payload(_p, _s)
+        if _ih:
+            _out = out_dir / "ih_signals.json"
+            _tmp = _out.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(_ih, ensure_ascii=False, indent=2), encoding="utf-8")
+            _tmp.replace(_out)
+            print(f"[IH] {_ih['data_date']} 写出 {_out} | 状态 {_ih['state']} | "
+                  f"在场 {_ih['on_count']} 家 | 历史 {_ih['stats']['rounds']} 轮")
+    except Exception as e:                      # noqa: BLE001
+        print(f"[IH] 看板失败,保留上一版:{e}", file=sys.stderr)
+
     # FG-SA 配对信号:两个品种都跑成了才算。失败只告警,不影响单品种产物。
     if {"FG", "SA"} <= set(SIG_CACHE):
         try:

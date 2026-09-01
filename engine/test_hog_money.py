@@ -1219,3 +1219,61 @@ class Test跨月跟随方案:
         per_leg = [lg["lots"] * cfg["mult"] * lg["px"] * cfg["margin"] for lg in p["legs"]]
         assert abs(p["margin"] - max(per_leg)) <= 1, (p["margin"], per_leg)
         assert p["margin"] < sum(per_leg) - 1, "两腿相加就是没按单边收"
+
+
+class TestIH核心席位看板:
+    """DEC-172 的 IH 看板。钉住那条**合成规则**——它是运营者拍板的口径,
+    不是我挑的:在场的那几家方向一致才给方向,有分歧就观望。
+
+    夹具手工构造(五个交易日、整数价),期望值能用纸笔算出来 —— 用真实数据当夹具
+    等于把今天的历史冻进测试(见本文件开头)。
+    """
+
+    def _world(self):
+        idx = pd.to_datetime(["2026-08-24", "2026-08-25", "2026-08-26",
+                              "2026-08-27", "2026-08-28"])
+        return idx
+
+    def _seat_rows(self, rows):
+        """rows = [(日期, 会员, 净持仓)] → clean_seat 认得的原始形状。"""
+        out = []
+        for d, m, net in rows:
+            side = "long" if net > 0 else "short"
+            out.append({"instrument": "IH", "contract": "IH2609", "is_variety_total": "f",
+                        "trade_date": d, "rank_type": side, "member": m,
+                        "quantity": abs(net), "change": 0, "source": "cffex_seats_v1"})
+        return pd.DataFrame(out)
+
+    def _price(self, idx):
+        return pd.DataFrame({
+            "exchange": "CFFEX", "instrument": "IH", "contract": "IH2609",
+            "trade_date": [d.strftime("%Y-%m-%d") for d in idx],
+            "open_price": [100, 101, 102, 103, 104],
+            "high_price": [105] * 5, "low_price": [95] * 5,
+            "close_price": [100, 101, 102, 103, 104],
+            "settlement_price": [100, 101, 102, 103, 104],
+            "volume": [10] * 5, "open_interest": [100] * 5, "source": "t",
+        })
+
+    def test_同向才给方向_分歧则观望(self):
+        idx = self._world()
+        H.VARIETIES["IH"]["replay_start"] = "2026-08-24"
+        # 两家同为净空 → 应给 short
+        same = self._seat_rows([("2026-08-28", "摩根大通", -100),
+                                ("2026-08-28", "高盛期货", -200)])
+        p = H.ih_follow_payload(self._price(idx), same)
+        assert p["state"] == "short" and p["on_count"] == 2, p
+
+        # 一多一空 → 分歧,观望(**不是**按手数大的那家算)
+        split = self._seat_rows([("2026-08-28", "摩根大通", -100),
+                                 ("2026-08-28", "高盛期货", +5000)])
+        q = H.ih_follow_payload(self._price(idx), split)
+        assert q["state"] == "split" and q["on_count"] == 2, q
+
+    def test_无人在场就是观望不是空仓信号(self):
+        idx = self._world()
+        H.VARIETIES["IH"]["replay_start"] = "2026-08-24"
+        none = self._seat_rows([("2026-08-28", "中信期货", -100)])   # 不在核心三家里
+        p = H.ih_follow_payload(self._price(idx), none)
+        assert p["state"] == "flat" and p["on_count"] == 0, p
+        assert all(not s["on"] for s in p["seats"]), p["seats"]
