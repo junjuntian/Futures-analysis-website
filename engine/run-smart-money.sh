@@ -48,7 +48,12 @@ echo "[smart-money] $(date '+%F %T') 导出数据…"
 # LH 与 AU/AG 一起导:生猪引擎读同样的两张表,只是品种不同。
 # AU/AG 给金银引擎;LH/FG/SA/JD/JM 给合计流向引擎。都读同样的两张表,只是品种不同。
 # 加品种时**这里和 FLOW_CODES 要一起改**——只改一边不报错,只是那个品种没数据。
-for INST in AU AG LH FG SA JD JM; do
+#
+# **IH 是个例外,它不在 FLOW_CODES 里**(DEC-172):看板不走 run_one 那套阵营流程,
+# 由 hog_money.main() 末尾单独取数、单独写 ih_signals.json。但它照样从 CSV 读,
+# 所以**必须在这里导出** —— 2026-09-01 首次上线就是漏了这一行,引擎报
+# 「/work/tmp/ih_price.csv[.gz] 都不存在」,产物根本没生成。
+for INST in AU AG LH FG SA JD JM IH; do
   low=$(echo "$INST" | tr 'A-Z' 'a-z')
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
     "\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,volume,open_interest,source from price_history where instrument='$INST') to '/tmp/${low}_price.csv' with (format csv, header true)"
@@ -90,7 +95,8 @@ fi
 if [ -f "$ROOT/hog_money.py" ]; then
   echo "[flow] 计算生猪/玻璃/纯碱/鸡蛋/焦煤信号…"
   if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
-    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json pair_fgsa.json; do
+    # ih_signals.json 同样要拷:它由同一次运行产出(DEC-172),漏了的话页面读到 404。
+    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json pair_fgsa.json ih_signals.json; do
       if [ -s "$TMP/$f" ]; then
         # 同上:模式写死,不靠继承的 umask。
         install -m 644 "$TMP/$f" "$WEB/$f.new"
