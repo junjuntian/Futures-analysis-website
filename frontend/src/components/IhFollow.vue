@@ -84,8 +84,12 @@ onMounted(async () => {
   await Promise.all(
     d.seats.filter((s) => s.on).map(async (s) => {
       try {
+        // **按它自己的末次上榜日取,不是看板的数据日**(2026-09-01):
+        // 掉榜席位按「沿用 20 日」仍算在场,但它在数据日那天不在榜,
+        // 接口会返回 missing=true、成本为 null —— 摩根大通末次上榜 08-20,
+        // 拿 09-01 去问永远问不到成本。它最后在榜那天的成本才是有意义的那个。
         const { data: net } = await getSeatNetPosition({
-          instrument: 'IH', members: [s.member], tradeDate: d.data_date
+          instrument: 'IH', members: [s.member], tradeDate: s.last_board ?? d.data_date
         })
         const m = net.latest_members.find((x) => x.member === s.member)
         if (!m || m.missing) return
@@ -159,13 +163,16 @@ function mdBold(t: string) {
         <tr v-for="s in data.seats" :key="s.member">
           <td class="k"><b>{{ s.member }}</b></td>
           <td>
+            <!-- **v-if / v-else 之间不许插东西**:2026-09-01 我把成本那个 <i> 插在
+                 中间,Vue 的链断掉,摩根大通那一行同时渲染出「在场·净空 697 手」
+                 和「不在场」两个标签。成本挪到链外。 -->
             <span v-if="s.on" class="tag" :class="s.side === 'long' ? 'up' : 'down'">
               在场 · {{ s.side === 'long' ? '净多' : '净空' }} {{ lots(s.net) }} 手
             </span>
-            <!-- 成本摆在手数后面(运营者 2026-09-01)。口径与净持仓页同一台引擎,
-                 字段名是「净持仓成本(推算)」而不是成交均价 —— 我们看不到成交明细。 -->
-            <i v-if="s.on && costs[s.member]" class="cost-at">@{{ costs[s.member] }}</i>
             <span v-else class="tag muted">不在场</span>
+            <!-- 成本口径与净持仓页同一台引擎;字段名是「净持仓成本(推算)」
+                 而不是成交均价 —— 我们看不到成交明细。 -->
+            <i v-if="s.on && costs[s.member]" class="cost-at">@{{ costs[s.member] }}</i>
           </td>
           <td class="num cost">末次上榜 {{ s.last_board ?? '—' }}</td>
           <td class="num cost">
