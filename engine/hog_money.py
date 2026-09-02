@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import subprocess
 import sys
@@ -629,6 +630,22 @@ def load_from_csv(code: str, csv_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]
     return one(f"{low}_price"), one(f"{low}_seat")
 
 
+CONTRACT_RE = re.compile(r"^([A-Za-z]+)(\d{4})$")
+
+
+def split_contract(contract) -> tuple[str, str]:
+    """把合约代码拆成(品种字母, 四位年月)。认不出来返回 ("", "")。
+
+    **不要写 `contract[:2]` / `contract[2:]`**:铁矿石的品种代码是单字母 `I`,
+    `"I2601"[2:]` 得到 `"01"` —— 主力换月那处拿它跟别人的 `"2601"` 比大小,
+    比的是月份对年月,**不报错,只是静默算错**。2026-09-02 接铁矿石时才发现
+    这套两字符切片在仓库里有三处(本文件两处 + `smart_money.main_contract`),
+    而它们对现有的双字母品种恰好全对,所以一直没人踩到。
+    """
+    match = CONTRACT_RE.match(str(contract))
+    return (match.group(1).upper(), match.group(2)) if match else ("", "")
+
+
 def clean_price(price: pd.DataFrame) -> pd.DataFrame:
     df = price.copy()
     df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -742,7 +759,7 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
     cand = p.loc[idx, ["trade_date", "contract"]].sort_values("trade_date")
     dates, cands = cand["trade_date"].tolist(), cand["contract"].tolist()
     def ym(c):
-        return str(c)[2:]
+        return split_contract(c)[1]
     main, cur = [], cands[0]
     for i in range(len(dates)):
         if i > 0 and ym(cands[i - 1]) > ym(cur):
@@ -1506,8 +1523,8 @@ def replay(sig: pd.DataFrame, mkt: pd.DataFrame,
 
 def next_main_contract(contract: str, step: int = 2) -> str:
     """生猪合约月 1/3/5/7/9/11,次主力 = 月份 +2(跨年进位)。"""
-    code = contract[:2]
-    y, m = int(contract[2:4]), int(contract[4:6])
+    code, ym = split_contract(contract)
+    y, m = int(ym[:2]), int(ym[2:])
     m += step
     while m > 12:
         m -= 12

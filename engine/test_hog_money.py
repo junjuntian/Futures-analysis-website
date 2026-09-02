@@ -1292,3 +1292,45 @@ class TestIH核心席位看板:
         p = H.ih_follow_payload(self._price(idx), rows)
         assert p["name"] == "上证50 IH", p["name"]
         assert p["multiplier"] == 300.0, p["multiplier"]
+
+
+# 2026-09-02 接铁矿石时发现的:合约代码的品种字母不是永远两位。
+# `"I2601"[2:]` 得到 "01",主力换月那处拿它跟 "2601" 比大小,不报错,只是算错。
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("I2601", ("I", "2601")),      # 单字母品种：正是踩坑的那个
+        ("JM2601", ("JM", "2601")),
+        ("LH2611", ("LH", "2611")),
+        ("i2601", ("I", "2601")),
+        ("SPD_JM", ("", "")),          # 认不出来就说认不出来
+        ("JM26011", ("", "")),
+    ],
+)
+def test_split_contract_handles_single_letter_varieties(code, expected):
+    assert H.split_contract(code) == expected
+
+
+def test_main_series_rolls_forward_for_a_single_letter_variety():
+    """铁矿石主力只向更远月切换,不因为「切了前两位」而回切。
+
+    造两个合约:I2601 先当主力,持仓量交棒给 I2605 之后不再回头。
+    旧写法下 ym("I2601")="01"、ym("I2605")="05",比较的是月份,
+    跨年时(如 I2701 的 "01")会判成「更近」而回切 —— 这条用例钉住它。
+    """
+    rows = []
+    for i, day in enumerate(pd.date_range("2026-01-05", periods=6, freq="D")):
+        # 前三天 I2601 持仓大,后三天 I2705 反超
+        for contract, oi in (("I2601", 900 - i * 200), ("I2705", 100 + i * 200)):
+            rows.append({
+                "exchange": "DCE", "instrument": "I", "contract": contract,
+                "trade_date": day, "open_price": 700.0, "high_price": 710.0,
+                "low_price": 690.0, "close_price": 700.0 + i, "settlement_price": 700.0 + i,
+                "volume": 1000.0, "open_interest": float(oi), "source": "sina",
+            })
+    mkt = H.main_series(H.clean_price(pd.DataFrame(rows)))
+    mains = list(mkt["main"])
+    assert mains[0] == "I2601"
+    assert mains[-1] == "I2705"
+    # 一旦切到远月就不回头
+    assert mains.index("I2705") == len(mains) - mains.count("I2705")

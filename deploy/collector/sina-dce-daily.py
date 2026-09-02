@@ -124,6 +124,21 @@ def listed_contracts():
     )
 
 
+def variety_of(symbol):
+    """合约代码里的品种字母。
+
+    **不能写 `symbol[:2]`** —— 铁矿石的代码是单字母 `I`,`"I2601"[:2]` 得到
+    `"I2"`:既不在 `WANT` 里(整个品种被静默跳过),写进 instrument 列也是错的。
+    2026-09-02 查出来的:`WANT` 里 2026-08-30 就加了 `"I"`,而日更**从来没有采到
+    过一行铁矿石行情**,数据一直停在回填那天(08-28)。零产出守卫也照不到它 ——
+    JM/JD/LH 三个双字母品种每天照常写出几十行,`kept` 从来不是 0。
+
+    认不出来的返回空串,调用方据此跳过,不要让一个畸形代码写出一行畸形数据。
+    """
+    match = re.fullmatch(r"([A-Z]{1,2})[0-9]{4}", symbol.upper())
+    return match.group(1) if match else ""
+
+
 def usable(bar, contract, day):
     """这一行自不自洽。不自洽就别放进来，并说清楚是哪一条不过。"""
     def number(key):
@@ -168,7 +183,8 @@ def main() -> int:
         writer = csv.writer(handle)
         writer.writerow(COLUMNS)
         for symbol in contracts:
-            if symbol[:2] not in WANT:
+            variety = variety_of(symbol)
+            if variety not in WANT:
                 continue
             time.sleep(PACE)
             try:
@@ -194,7 +210,7 @@ def main() -> int:
                     continue
                 writer.writerow([
                     "DCE",
-                    symbol[:2],
+                    variety,
                     symbol,
                     day,
                     bar.get("o") or "",

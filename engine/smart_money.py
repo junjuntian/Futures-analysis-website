@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -252,7 +253,8 @@ def main_contract(price: pd.DataFrame) -> pd.DataFrame:
     cand = p.loc[idx, ["trade_date", "contract"]].sort_values("trade_date")
     dates, cands = cand["trade_date"].tolist(), cand["contract"].tolist()
     def ym(c):
-        return c[2:]
+        # 与 hog_money.split_contract 同一条纪律:单字母品种(铁矿石 I)不能切前两位。
+        return re.sub(r"^[A-Za-z]+", "", str(c))
     main, cur = [], cands[0]
     for i in range(len(dates)):
         if i > 0 and ym(cands[i - 1]) > ym(cur):
