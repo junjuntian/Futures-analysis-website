@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { bounceHint, pickBounceDay, type BounceDay, type BounceState } from '../bounce-hint'
+import { visibleItems } from '../monitorVisibility'
 import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -114,9 +115,16 @@ function comboName(item: SpreadMonitorItem) {
     : `${item.contract_1} − ${item.contract_2}`
 }
 
+/**
+ * 当前视图的行源:**过期组合不进来**(2026-09-02 运营者:「这个过期了,就不要展示了」)。
+ * 判据与理由都在 `monitorVisibility.ts` —— 那里也写清了为什么历史模式一行都不滤。
+ * 品种筛选、计数、触发/未触发三处都从它取,免得「看不见的行还在被数」。
+ */
+const live = computed(() => visibleItems(items.value, historyMode.value))
+
 const varieties = computed(() => {
   const seen = new Set<string>()
-  for (const item of items.value) {
+  for (const item of live.value) {
     seen.add(item.instrument_1)
     seen.add(item.instrument_2)
   }
@@ -134,7 +142,7 @@ function extremity(item: SpreadMonitorItem) {
 
 const filtered = computed(() => {
   const wanted = new Set(varietyFilter.value)
-  return items.value
+  return live.value
     .filter((item) => {
       if (wanted.size && !wanted.has(item.instrument_1) && !wanted.has(item.instrument_2)) {
         return false
@@ -702,7 +710,7 @@ function openDetail(item: SpreadMonitorItem) {
       </div>
 
       <div class="tally" v-if="!historyMode">
-        <div class="cell"><span class="k">监控组合</span><span class="v">{{ items.length }}</span></div>
+        <div class="cell"><span class="k">监控组合</span><span class="v">{{ live.length }}</span></div>
         <div class="cell"><span class="k">触发</span><span class="v">{{ fired.length }}</span></div>
         <div class="cell"><span class="k">新触发</span><span class="v fresh">{{ newCount }}</span></div>
         <div class="cell"><span class="k">已拐头</span><span class="v fresh">{{ turnCount }}</span></div>
