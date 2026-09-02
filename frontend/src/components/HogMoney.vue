@@ -253,6 +253,9 @@ interface HogPayload {
   /** 顶部风险条。门槛写死在引擎里、数字实算,够不上门槛就是空数组
    *  ——生猪现在 0 条,玻璃 3 条,纯碱 5 条。可选:旧 JSON 没有这个字段。 */
   risk_flags?: Array<{ key: string; text: string }>
+  /** 品种级公告(DEC-185):**编辑判断,不是算出来的**,所以与 risk_flags 分开渲染。
+   *  铁矿石用它说明「主引擎没过闸、要看第二引擎」——这件事门槛算不出来。 */
+  notice?: string | null
   /** 当前主力离散户可交易窗口止点还有多远。窗口止点 = 交割月前月最后一个工作日。
    *  **可选**:前端先于引擎上线,当晚引擎跑过之前线上 JSON 还是上一版没有这个字段,
    *  写成必填会让整页白掉。 */
@@ -753,6 +756,9 @@ const bySide = computed(() => {
       下面的持仓、历史与统计都可能与现行规则不符。等下一轮定时任务跑过会自动对齐。
     </div>
 
+    <!-- 品种级公告排在风险条**之前**:它说的是「该看哪一张卡」,
+         而风险条说的是「这张卡有多不好拿」——先回答前者才有意义。 -->
+    <div v-if="data.notice" class="notice-banner" v-html="mdBold(data.notice)"></div>
     <div v-if="data.risk_flags && data.risk_flags.length" class="risk-banner">
       <div class="risk-head">
         ⚠ 这条曲线不好拿住 —— 先看完这{{ data.risk_flags.length }}条再看收益
@@ -1777,6 +1783,14 @@ const bySide = computed(() => {
 .rules { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.9; }
 .rules li { margin-bottom: 6px; }
 .caveats { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.9; color: var(--tv-text-secondary); }
+/* 公告条:比风险条更强的存在感——它要在人读任何数字之前先被读到。 */
+.notice-banner {
+  margin: 0 0 12px; padding: 12px 16px; border-radius: 8px;
+  font-size: 13px; line-height: 1.9;
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  border-left: 4px solid var(--el-color-primary, #409eff);
+  color: var(--tv-text, inherit);
+}
 
 /* 逐合约战役卡(DEC-133):持仓表与观察表之间的间隔 */
 .watch-head {

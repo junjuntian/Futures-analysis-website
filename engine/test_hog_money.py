@@ -1356,3 +1356,23 @@ def test_retail_seed_is_not_per_variety():
     """
     for code in H.VARIETIES:
         assert "retail_seed" not in H.VARIETIES[code], code
+
+
+# 2026-09-02(DEC-185):品种级公告与 retail_panel 同款 —— `use()` 必须每轮都写,
+# 否则跑完铁矿石再跑玻璃,玻璃会顶着铁矿石那条「要看第二引擎」的公告。
+def test_notice_does_not_leak_between_varieties():
+    H.use("I")
+    assert H.RULES["notice"] and "第二引擎" in H.RULES["notice"]
+    H.use("FG")
+    assert H.RULES["notice"] is None
+
+
+def test_notice_is_separate_from_risk_flags():
+    """公告是**编辑判断**,风险条是**门槛实算**,两者不能混。
+
+    这条钉住的是:没有任何品种把 notice 塞进 risk_flags 的门槛逻辑里。
+    混在一起会让人以为那句话也是算出来的。
+    """
+    flags = H.risk_flags({"sharpe": 0.5, "cum": 10.0}, [], pd.Series([0.01] * 30),
+                         {"sharpe": 0.4, "cum": 8.0})
+    assert all("第二引擎" not in f["text"] for f in flags)
