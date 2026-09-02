@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from 'vue'
 import HogMoney from '../components/HogMoney.vue'
 import type { FlowCode } from '../api'
 import IhFollow from '../components/IhFollow.vue'
-import IronFollow from '../components/IronFollow.vue'
 import { failureHint } from '../fetch-hint'
 
 // 机构资金信号页。数据由信号引擎每日盘后生成(nginx 静态服务的
@@ -116,7 +115,7 @@ const tab = ref<'today' | 'history' | 'weights' | 'rules'>('today')
 // 跨两个市场的),拆开看没有意义;生猪是另一套完全不同的信号,单独一个。
 // 记在本地:运营者盯哪个品种通常是稳定的,每次进来重选一遍是重复劳动。
 const VARIETY_KEY = 'smart-money.variety'
-type Variety = 'GOLD' | 'IH' | 'I' | FlowCode
+type Variety = 'GOLD' | 'IH' | FlowCode
 const variety = ref<Variety>(readVariety())
 /** 合计流向品种。**加品种只改这一行**——按钮由它渲染,不再逐个写死。
  *  金银共用一套信号(金银比/配对/跑路警报都是跨两市场的),所以不在这里。 */
@@ -125,16 +124,15 @@ const FLOW: Array<{ code: FlowCode; label: string }> = [
   { code: 'JD', label: '鸡蛋' },
   { code: 'JM', label: '焦煤' },
   { code: 'FG', label: '玻璃' },
-  { code: 'SA', label: '纯碱' }
+  { code: 'SA', label: '纯碱' },
+  // 铁矿石(DEC-178 二版):运营者要「跟焦煤生猪一样的界面」,所以它走
+  // 与其余五个品种完全相同的 run_one/HogMoney 那条路,不再是单独一张卡。
+  { code: 'I', label: '铁矿石' }
 ]
 // 上证50 单列:它的信号是「跟某几家席位的在场方向」,与上面五个品种的阵营
 // z 分数完全不是一回事,渲染的也不是 HogMoney 而是 IhFollow(DEC-172)。
 const IH = { code: 'IH' as const, label: '上证50' }
-// 铁矿石同样单列(DEC-178):它是「跟永安一家席位的方向」+ 手数方案,
-// 既不是阵营 z 分数,也不是 IH 那种三家共振,所以第三个组件。
-// **铁矿石没有主引擎** —— 运营者要的是跟随线,不是再立一套主引擎研究。
-const IRON = { code: 'I' as const, label: '铁矿石' }
-const FLOW_VARIETIES: Variety[] = [...FLOW.map((v) => v.code), IH.code, IRON.code]
+const FLOW_VARIETIES: Variety[] = [...FLOW.map((v) => v.code), IH.code]
 function readVariety(): Variety {
   try {
     const v = localStorage.getItem(VARIETY_KEY) as Variety | null
@@ -291,9 +289,6 @@ onMounted(async () => {
       <button class="variety" :class="{ on: variety === 'IH' }" @click="pickVariety('IH')">
         {{ IH.label }}
       </button>
-      <button class="variety" :class="{ on: variety === 'I' }" @click="pickVariety('I')">
-        {{ IRON.label }}
-      </button>
     </div>
 
     <!-- 合计流向品种共用一个组件:规则差异全在各自的 payload 里,
@@ -301,7 +296,6 @@ onMounted(async () => {
          上证50 例外:它的信号是「跟某几家席位的在场方向」,与阵营 z 分数
          不是一回事,走 IhFollow(DEC-172)。 -->
     <IhFollow v-if="variety === 'IH'" />
-    <IronFollow v-else-if="variety === 'I'" />
     <HogMoney
       v-else-if="variety !== 'GOLD'"
       :key="variety"

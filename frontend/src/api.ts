@@ -720,7 +720,7 @@ export interface SpreadMonitorTrack {
  * JD2612/JD2701 的 rate 是 100% 而 drift 中位 −166 点,方向是反的。 */
 /** 机构资金里走「合计流向」这套信号的品种。**加品种改这一处**,
  *  组件与视图都从这里取,不各写一份 union。金银是另一套信号,不在里面。 */
-export type FlowCode = 'LH' | 'FG' | 'SA' | 'JD' | 'JM'
+export type FlowCode = 'LH' | 'FG' | 'SA' | 'JD' | 'JM' | 'I'
 
 export interface SpreadRevertStats {
   side: string

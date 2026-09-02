@@ -94,11 +94,11 @@ fi
 # 失败只告警并保留上一版 JSON。引擎内部也按品种各跑各的:一个品种挂了不影响其余。
 if [ -f "$ROOT/hog_money.py" ]; then
   echo "[flow] 计算生猪/玻璃/纯碱/鸡蛋/焦煤信号…"
-  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
+  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM,I       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
     # ih_signals.json / i_signals.json 同样要拷:它们由同一次运行产出
     # (DEC-172 / DEC-178),漏了的话页面读到 404。**这份清单与上面那个导出循环
     # 是同一件事的两半,加品种必须同时改**。
-    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json pair_fgsa.json ih_signals.json i_signals.json; do
+    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json i_signals.json pair_fgsa.json ih_signals.json; do
       if [ -s "$TMP/$f" ]; then
         # 同上:模式写死,不靠继承的 umask。
         install -m 644 "$TMP/$f" "$WEB/$f.new"

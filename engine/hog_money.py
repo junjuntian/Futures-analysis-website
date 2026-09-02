@@ -404,14 +404,58 @@ VARIETIES = {
         "long_needs_dip": False,
     },
     "I": {
-        # **只做跟随线,不做主引擎**(DEC-178,2026-09-02 运营者:「铁矿石也做一个
-        # 资金跟随策略」)。铁矿石不在 FLOW_CODES 里,不走 run_one 那套阵营/z 分数
-        # 流程 —— 那需要另立一整套主引擎研究,运营者要的是跟随。
-        # 点值 100 吨/手、保证金 11%:运营者 2026-09-02 给的实盘数,不是我猜的。
+        # **完整品种页(DEC-178 二版,2026-09-02 运营者:「要做得跟焦煤生猪一样的
+        # 界面,不要偷懒,全部给我改掉」)**。初版只做了一张跟随卡,被否 —— 铁矿石
+        # 走与其余五个品种同一条 run_one 流程:今日信号/历史信号/席位权重/策略方案
+        # + 合约窗 + 筹码地图 + 第二引擎,一样不少。
+        #
+        # 点值 100 吨/手:运营者 2026-09-02 给的。
         "name": "铁矿石 I", "unit": "元/吨", "multiplier": 100.0,
-        "replay_start": "2023-08-30",   # 大商所席位数据里铁矿石的起点
+        "replay_start": "2023-08-30",   # 大商所席位里铁矿石的起点,与焦煤同档
+        # 做多打开:铁矿石三年里有过 2024-08→09、2025-06→07 两波像样的上行,
+        # 关掉等于对机构做多装瞎(理由同焦煤 DEC-116)。
         "long_enabled": True,
         "long_needs_dip": False,
+        # **出场用默认的散户口径,不抄焦煤的 inst。** 焦煤那条的注释写得很清楚:
+        # 机构出场「只在焦煤成立,其余四品种出场体检全输,不许外推」。
+        # 铁矿石没做过出场体检,就用通用那条,不拿别人的结论替自己背书。
+        #
+        # **第二引擎:跟永安**(研究见 REPORT_I_FOLLOW_v1)。与焦煤跟华泰同一台
+        # 机器(seat_follow_payload),规则一字不差。
+        # **第七道闸门没过**,运营者知情拍板 —— 丑话在 note 里,页面照挂。
+        "follow_seat": {
+            "member": "永安期货",
+            "note": (
+                "第二引擎,与主引擎并列、各管各的仓位。规则:永安在当日主力的可见"
+                "净持仓方向,翻转→次日开盘反手。"
+                "**丑话,采纳前必须认下**(检验定档于 2026-09-02,REPORT_I_FOLLOW_v1):"
+                "① **第七道闸门没过**——它是 47 家候选里挑出来的第一名,而纯噪声下"
+                "「47 家第一名」的夏普中位数就有 0.99,定档时实测 1.20 只排到第 83 "
+                "百分位(最大统计量置换 p=0.17);"
+                "② **季度重挑的走前检验 −13.2%**——「挑最好的那个」这个动作实盘做不到,"
+                "2024 年它一路在挑光大期货,而光大随后连亏;"
+                "③ **肥尾**——利润高度集中在少数几段,盯上面那行实算的集中度;"
+                "④ **跨品种先验只是一枚硬币**:永安在铁矿石排第 1/47,而焦煤在用的"
+                "华泰在这里排第 43/47(夏普 −0.44)。"
+                "撑得住的那一半:安慰剂 p=0.002、前后半夏普 1.25/1.21 几乎不衰减、"
+                "T+3 仍有 1.31、成本翻四倍仍有 0.96、逐年 4/4 正。"
+            ),
+        },
+        # 沉淀资金费率。**这个数是我按大商所铁矿石最低保证金 8% × 双边推的,
+        # 不是运营者给的** —— 运营者 2026-09-02 给的 11% 是他自己账户的保证金率,
+        # 那个用在跟随方案那一格。两者口径不同(见 LATEST「五品种沉淀资金费率」
+        # 一节:一律 = 交易所最低 × 双边)。**看到这条请核对 8% 这个前提。**
+        "sink": {"rate": 0.16, "near_rate": 0.16, "near_days": 22},
+        "out": "i_signals.json",
+        # 主引擎用通用的共振进场 + 散户出场,**没有做过品种专属的验收**。
+        # 这一栏照实写:别让人以为它像焦煤/鸡蛋那样过过闸。
+        "backtest": "23 笔 净 −19.9%/胜率 43.5%/夏普 −0.67(2023-08 起,基准 −0.44)"
+                    "—— **主引擎是通用共振口径,铁矿石没做过任何专项验收,而且这个"
+                    "回测是亏的、还不如什么都不做**。页面上的 risk_flags 四条全亮,"
+                    "不是显示故障。上线是为了把品种页开出来(DEC-178,运营者要求"
+                    "「跟焦煤生猪一样的界面」),**今日信号那一格现在不该照着下单**。"
+                    "这个品种真正有证据的是第二引擎那条(跟永安),而它的第七道闸门"
+                    "也没过 —— 见 REPORT_I_FOLLOW_v1",
     },
     "SA": {
         "name": "纯碱 SA", "unit": "元/吨", "multiplier": 20.0,
@@ -2862,117 +2906,6 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
 # **所以这个引擎的定位是「参考看板」,不是「过闸的策略」**:它如实回答
 # 「此刻这三家核心席位在不在场、什么方向、进场多久、这一轮浮盈多少」,
 # 统计每次全量重算并把丑话一起印出来,**不写死任何一个漂亮数字**。
-I_FOLLOW = {
-    "member": "永安期货",
-    # 账户参数,运营者 2026-09-02 给的实盘数 —— **不猜**(纪律见 PITFALLS,已栽两次)。
-    "capital": 500000.0,      # 本金
-    "use": 0.35,              # 单次动用比例,与焦煤跟随卡同口径
-    "margin": 0.11,           # 铁矿石保证金率
-    "mult": 100.0,            # 100 吨/手
-    # **这段话里不许再写段数、胜率、集中度这类会变的数** —— 它们就在上面那行
-    # 实算的统计里。2026-09-02 首版犯过:丑话里写死「57 段胜率 58%、最赚 3 段占 62%」
-    # (研究定档时的数),而卡上实算的是「56 段胜 62%、占 57%」——**同一张卡上
-    # 同一件事两个数**,而且每收一段就会差得更多。这里只留研究定档那天的**检验
-    # 结论**(它们不随数据漂),会变的一律指回上面那行。
-    "note": (
-        "第二引擎,与主引擎并列、各管各的仓位。规则:永安在当日主力的可见净持仓方向,"
-        "翻转→次日开盘反手。"
-        "**丑话,采纳前必须认下**(检验定档于 2026-09-02,REPORT_I_FOLLOW_v1):"
-        "① **第七道闸门没过**——它是 47 家候选里挑出来的第一名,而纯噪声下"
-        "「47 家第一名」的夏普中位数就有 0.99,定档时实测 1.20 只排到第 83 百分位"
-        "(最大统计量置换 p=0.17);"
-        "② **季度重挑的走前检验 −13.2%**——「挑最好的那个」这个动作实盘做不到,"
-        "2024 年它一路在挑光大期货,而光大随后连亏;"
-        "③ **肥尾**——利润高度集中在少数几段,盯上面那行实算的「最赚的 3 段占…」;"
-        "④ **跨品种先验只是一枚硬币**:永安在铁矿石排第 1/47,而焦煤在用的华泰"
-        "在这里排第 43/47(夏普 −0.44)。"
-        "撑得住的那一半:安慰剂 p=0.002、前后半夏普 1.25/1.21 几乎不衰减、"
-        "T+3 仍有 1.31、成本翻四倍仍有 0.96、逐年 4/4 正。"
-    ),
-}
-
-
-def i_follow_payload(price_raw, seat_raw) -> dict | None:
-    """铁矿石「跟永安」第二引擎(DEC-178,2026-09-02 运营者拍板)。
-
-    **信号部分整个复用 `seat_follow_payload`**,一行规则都不另写 —— 跟华泰、
-    跟永安(玻璃)、跟永安(铁矿)必须是同一台机器算出来的,否则三张卡迟早会
-    因为「有人改了其中一处」而互相对不上(PITFALLS 第一条:同一个事实两处维护)。
-
-    这里只多做两件 `seat_follow_payload` 不管的事:
-      1. **手数方案**:按运营者给的本金 50 万 / 动用 35% / 保证金 11% / 100 吨每手
-         把当前方向缩到可下单的手数;
-      2. **补几个丑话要用的统计**(胜率、最赚 3 段占比)——`stats` 里原来没有,
-         而这两个数正是 REPORT_I_FOLLOW_v1 里最该被看见的。
-
-    铁矿石**不进 FLOW_CODES**:它没有主引擎(运营者要的是跟随,不是再立一套
-    阵营/z 分数研究),所以与 IH 看板一样单独取数、单独写产物。
-    """
-    cfg = I_FOLLOW
-    price = clean_price(price_raw)
-    seat = clean_seat(seat_raw)
-    # 用 use() 的返回值,不读 CURRENT —— CURRENT 是 run_one 设的全局量,跑完停在
-    # 最后一个品种上(2026-09-01 IH 看板就是这么顶着「焦煤」的名字上线的)。
-    v = use("I")
-    mkt = main_series(price)
-    mkt = mkt[mkt.index >= pd.Timestamp(RULES["replay_start"])]
-    if not len(mkt):
-        return None
-
-    follow = seat_follow_payload(seat, mkt, cfg)
-    runs = follow.get("history") or []
-
-    # ---- 补统计:胜率与集中度。平均值好看不代表每一段都好看。
-    closed = [r for r in runs if not r.get("open")]
-    rets = [r["ret_pct"] for r in closed if r.get("ret_pct") is not None]
-    win_rate = round(sum(1 for r in rets if r > 0) / len(rets) * 100, 0) if rets else None
-    top3_share = None
-    if len(rets) >= 4:
-        total = sum(rets)
-        top3 = sum(sorted(rets)[-3:])
-        top3_share = round(top3 / total * 100, 0) if total else None
-    follow["stats"]["segs"] = len(rets)
-    follow["stats"]["win_rate"] = win_rate
-    follow["stats"]["top3_share_pct"] = top3_share
-
-    # ---- 手数方案。**当前不在场就不给方案**:没有方向的时候给手数是无意义的。
-    plan = None
-    px = _f(mkt["settle"].iloc[-1])
-    if follow.get("side") and px:
-        per_lot_margin = px * cfg["mult"] * cfg["margin"]
-        budget = cfg["capital"] * cfg["use"]
-        lots = int(budget // per_lot_margin) if per_lot_margin > 0 else 0
-        plan = {
-            "capital": cfg["capital"],
-            "use_pct": round(cfg["use"] * 100, 0),
-            "margin_pct": round(cfg["margin"] * 100, 1),
-            "mult": cfg["mult"],
-            "price": round(px, 1),
-            "contract": str(mkt["main"].iloc[-1]),
-            "side": follow["side"],
-            "lots": lots,
-            "budget": round(budget, 0),
-            "margin_used": round(lots * per_lot_margin, 0),
-            "notional": round(lots * px * cfg["mult"], 0),
-            # 一个跳动 = 0.5 元/吨 × 100 吨 = 50 元/手;这里按 1 元/吨给,
-            # 免得把交易所最小变动价位写死在两个地方对不上。
-            "per_yuan": round(lots * cfg["mult"], 0),
-        }
-        if lots == 0:
-            plan["warn"] = (f"按 {cfg['capital']:,.0f} × {cfg['use']*100:.0f}% = "
-                            f"{budget:,.0f} 元,连一手都开不起"
-                            f"(一手保证金 {per_lot_margin:,.0f} 元)")
-    return {
-        "instrument": "I",
-        "name": v["name"],
-        "data_date": mkt.index[-1].strftime("%Y-%m-%d"),
-        "main_contract": str(mkt["main"].iloc[-1]),
-        "last_settle": _f(mkt["settle"].iloc[-1]),
-        "plan": plan,
-        **follow,
-    }
-
-
 IH_FOLLOW = {
     "seats": ["摩根大通", "高盛期货", "中财期货"],   # 运营者点名的三家核心席位
     "carry": 20,        # 掉榜沿用天数,与全部研究同档,不调参
@@ -3488,30 +3421,6 @@ def main():
                   f"在场 {_ih['on_count']} 家 | 历史 {_ih['stats']['rounds']} 轮")
     except Exception as e:                      # noqa: BLE001
         print(f"[IH] 看板失败,保留上一版:{e}", file=sys.stderr)
-
-    # 铁矿石「跟永安」第二引擎(DEC-178):与 IH 同构 —— 不走 run_one,单独取数、
-    # 单独写产物、失败只告警。**加在这里就必须同时改 run-smart-money.sh 的两处**
-    # (CSV 导出循环 + 产物拷贝清单),2026-09-01 IH 首发就是漏了导出那一行,
-    # 引擎报「拿不到 CSV」、产物根本没生成。
-    try:
-        if src == "csv":
-            _p, _s = load_from_csv("I", Path(os.environ.get("CSV_DIR", "../research/data")))
-        else:
-            _p, _s = load_from_pg(
-                "I",
-                os.environ.get("PG_CONTAINER", "futures-analysis-platform-postgres-1"),
-                os.environ.get("PG_USER", "futures_app"),
-                os.environ.get("PG_DB", "futures_platform"))
-        _i = i_follow_payload(_p, _s)
-        if _i:
-            _out = out_dir / "i_signals.json"
-            _tmp = _out.with_suffix(".tmp")
-            _tmp.write_text(json.dumps(_i, ensure_ascii=False, indent=2), encoding="utf-8")
-            _tmp.replace(_out)
-            print(f"[I] {_i['data_date']} 写出 {_out} | 跟 {_i['member']} | "
-                  f"方向 {_i['side']} | 历史 {len(_i.get('history') or [])} 段")
-    except Exception as e:                      # noqa: BLE001
-        print(f"[I] 跟随卡失败,保留上一版:{e}", file=sys.stderr)
 
     # FG-SA 配对信号:两个品种都跑成了才算。失败只告警,不影响单品种产物。
     if {"FG", "SA"} <= set(SIG_CACHE):

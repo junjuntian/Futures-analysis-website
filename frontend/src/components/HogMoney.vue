@@ -26,7 +26,7 @@ import { getSeatNetPosition, type MemberLeg as SeatCost,
 const props = defineProps<{ instrument: FlowCode }>()
 const FILES: Record<FlowCode, string> = {
   LH: 'hog_signals.json', FG: 'fg_signals.json', SA: 'sa_signals.json',
-  JD: 'jd_signals.json', JM: 'jm_signals.json'
+  JD: 'jd_signals.json', JM: 'jm_signals.json', I: 'i_signals.json'
 }
 
 interface MemberLeg {
