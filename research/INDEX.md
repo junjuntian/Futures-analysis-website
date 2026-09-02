@@ -17,7 +17,7 @@
 | 成本进场(知情破例) | 纯碱 | `REPORT_COST_ENTRY_v1` |
 | 第二引擎 · 跟华泰 | 焦煤 | `REPORT_JM_HUATAI_v1` |
 | 第二引擎 · 跟永安 | 玻璃 | `REPORT_FGSA_MODEL_v1` |
-| 第二引擎 · 跟永安(**第七闸门未过,运营者知情拍板**) | 铁矿石 | `REPORT_I_FOLLOW_v1` |
+| 第二引擎 · 跟永安(**订正:同口径下过闸**) | 铁矿石 | `REPORT_I_FOLLOW_v1` + **`REPORT_I_FAIR_v1`(订正)** |
 | 五窗散户名单逐品种覆盖(判据三家未动) | 铁矿石 | `REPORT_I_RETAIL_v1` |
 | 移仓压力 ⚡ 判据(单向) | 生猪 | `REPORT_ROLL_PRESSURE_v1` |
 | 移仓压力 ⚡ 判据(双向含镜像) | 鸡蛋 | `REPORT_JD_MODEL_v1` |
