@@ -502,6 +502,18 @@ interface FollowPlan {
   risk_same?: number; risk_spread?: number
   note: string
 }
+/**
+ * 五窗底部说明里的散户名单。
+ *
+ * **原来是写死的**(东方财富/方正中期/徽商/平安/中信建投)。DEC-182 起
+ * `retail_panel` 可以逐品种覆盖 —— 铁矿石换成了新湖/瑞达/宝城/中信建投/方正中期,
+ * 于是页面上方展示的是新名单、下方说明写的还是旧名单,**同一屏自相矛盾**。
+ * 这正是 PITFALLS 第一条(同一个事实两处维护)。改成从 payload 现读。
+ */
+const panelRetailNames = computed(() => {
+  const first = data.value?.contracts_panel?.[0]?.retail ?? []
+  return first.length ? first.map((r) => r.member).join('/') : '—'
+})
 const followPlan = ref<FollowPlan | null>(null)
 /** 各腿的永安持仓成本(键=合约),各腿单独取,不依赖它恰好在五窗里。 */
 const followCosts = ref<Record<string, string>>({})
@@ -1103,7 +1115,7 @@ const bySide = computed(() => {
         </div>
       </div>
       <p v-if="data.contracts_panel && data.contracts_panel.length" class="note panel-note">
-        每窗:左=跟踪席位,右=五大散户席位(东方财富/方正中期/徽商/平安/中信建投),
+        每窗:左=跟踪席位,右=五大散户席位({{ panelRetailNames }}),
         各给净持仓(正红=净多,负绿=净空)、较昨日变化(净多+X=净多增了 X,净空+X=净空增了 X)、
         @净持仓成本(推算,按结算价推,不是成交均价)。窗头沉淀资金=全市场持仓×现价×点值×保证金率
         (费率为品种配置的近似,非交易所实时;未配费率的品种给名义市值)。
