@@ -478,8 +478,9 @@ function chipEdge(last: number | null | undefined, anchor: { cost: number } | nu
  * (成本走净持仓引擎,DEC-143;SA 腿不在本页 payload 里,单独取)。
  */
 interface FollowPlan {
-  /** opposite/same = 玻纯跨品种版(DEC-154);spread/trend = 跨月版(DEC-168)。 */
-  state: 'opposite' | 'same' | 'spread' | 'trend'
+  /** opposite/same = 玻纯跨品种版(DEC-154);spread/trend = 跨月版(DEC-168);
+   *  single = 单腿方向版(DEC-182,铁矿石跟永安)。 */
+  state: 'opposite' | 'same' | 'spread' | 'trend' | 'single'
   member: string
   capital?: number
   use_pct?: number
@@ -972,7 +973,7 @@ const bySide = computed(() => {
               <span class="cost">· 保证金 {{ followPlan.use_pct }}%</span>
             </span>
           </h3>
-          <template v-if="followPlan.state === 'opposite' || followPlan.state === 'spread'">
+          <template v-if="['opposite', 'spread', 'single'].includes(followPlan.state)">
             <table class="panel-vs">
               <tr v-for="lg in followPlan.legs" :key="lg.contract">
                 <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
@@ -1005,7 +1006,12 @@ const bySide = computed(() => {
                 <b>风险敞口 {{ followPlan.net_exposure_wan }} 万</b>
                 <span class="cost">(本金 {{ followPlan.net_exposure_pct }}% · 总名义 {{ followPlan.net_of_notional_pct }}%)</span>
               </div>
-              <div class="chip-line gray">
+              <!-- 单腿没有「价差反向」这回事:两腿版才有对冲那一半。
+                   照抄两腿文案会凭空给出一个不存在的对冲收益,所以分开写。 -->
+              <div class="chip-line gray" v-if="followPlan.state === 'single'">
+                单日:标的涨跌 1% → {{ followPlan.risk_same }} 元(单边敞口,没有对冲腿)
+              </div>
+              <div class="chip-line gray" v-else>
                 单日:同涨跌 1% → {{ followPlan.risk_same }} 元 · 价差反向各 1% → ±{{ followPlan.risk_spread }} 元
               </div>
             </div>

@@ -1334,3 +1334,25 @@ def test_main_series_rolls_forward_for_a_single_letter_variety():
     assert mains[-1] == "I2705"
     # 一旦切到远月就不回头
     assert mains.index("I2705") == len(mains) - mains.count("I2705")
+
+
+# 2026-09-02(DEC-182):retail_panel 变成可逐品种覆盖之后,`use()` 必须**每轮都写**。
+# 只在「品种配了」时赋值的话,跑完铁矿石再跑玻璃,玻璃会顶着铁矿石的名单 ——
+# 与 2026-09-01 IH 看板顶着「焦煤」名字的是同一个坑(RULES/CURRENT 是全局可变的)。
+def test_retail_panel_falls_back_between_varieties():
+    H.use("I")
+    assert H.RULES["retail_panel"] == H.VARIETIES["I"]["retail_panel"]
+    # 紧接着跑一个**没有配**覆盖的品种,必须回落到全站默认,不能继承上一个
+    H.use("FG")
+    assert H.RULES["retail_panel"] == H.DEFAULT_RETAIL_PANEL
+    assert "新湖期货" not in H.RULES["retail_panel"]
+
+
+def test_retail_seed_is_not_per_variety():
+    """retail_seed 动的是进出场判据,**不给逐品种覆盖的待遇**。
+
+    这条是防守性的:哪天有人顺手照 retail_panel 的样子给 seed 也加一个覆盖,
+    就会在没做品种专属研究的情况下改掉方案 C 的进出场。
+    """
+    for code in H.VARIETIES:
+        assert "retail_seed" not in H.VARIETIES[code], code

@@ -135,6 +135,10 @@ RULES = {
     # 五窗对照用的五大散户席位(DEC-151,2026-08-28 运营者指定,=席位页「散户席位」
     # 收藏组)。与 retail_seed(三家,进散户反向/压力表判据)**是两份名单**:
     # retail_seed 动判据不许随便加人(四家实测更差),这五家只做五窗展示对照。
+    # **可以逐品种覆盖**(DEC-182,2026-09-02 运营者答「换一组」):它只做展示对照、
+    # 不进任何判据,所以换人是安全的;而某个品种上这五家大面积不上榜时,
+    # 五窗里一半格子是空的,对照就没有意义了(铁矿石:东方财富上榜率仅 3%)。
+    # **retail_seed 不给这个待遇** —— 那三家动的是进出场判据,换人 = 改引擎。
     "retail_panel": ["东方财富", "方正中期", "徽商期货", "平安期货", "中信建投"],
     # 共振 = 聪明钱流向与散户反向流向同号。
     #
@@ -412,10 +416,33 @@ VARIETIES = {
         # 点值 100 吨/手:运营者 2026-09-02 给的。
         "name": "铁矿石 I", "unit": "元/吨", "multiplier": 100.0,
         "replay_start": "2023-08-30",   # 大商所席位里铁矿石的起点,与焦煤同档
-        # 做多打开:铁矿石三年里有过 2024-08→09、2025-06→07 两波像样的上行,
-        # 关掉等于对机构做多装瞎(理由同焦煤 DEC-116)。
+        # **做多打开:运营者 2026-09-02 拍板**(DEC-182 第 2 问答「开」)。
+        # 初版是我自己判断开的 —— 那不该由我定,已归位成运营者的决定。
+        # 性质同焦煤 DEC-116:是知情选择,不是回测验证通过。
         "long_enabled": True,
         "long_needs_dip": False,
+        # **换月接力开:运营者拍板**(DEC-182 第 3 问答「开」)。
+        # 铁矿石十二个月都挂合约、换月比谁都频繁,交割是日历、机构没撤就不该丢仓
+        # (同焦煤 DEC-147 的理由)。
+        "roll_continue": True,
+        # **移仓压力表:展示级**(运营者答「展示级」),criterion=False —— 只显示,
+        # 不进进出场判据,同焦煤。step=4:铁矿石主力实测是 **1/5/9**
+        # (2401→2405→2409→2501→2505→2509→2601→2605→2609→2701),
+        # 次主力 = +4 个月,与焦煤同、**不要照抄生猪的 +2**。
+        "roll_pressure": {"window": 30, "anchor": 20, "step": 4, "criterion": False},
+        # 跟随方案(运营者答「加回来」):账户参数全部由运营者给,不猜 ——
+        # 本金 50 万 / 单次动用 35%(同焦煤那张卡)/ 保证金 11% / 100 吨每手。
+        "follow_plan": {"capital": 500000.0, "use": 0.35, "margin": 0.11},
+        # **五窗散户名单换一组**(运营者答「换一组」,REPORT_I_RETAIL_v1)。
+        # 全站那五家在铁矿石上不成立:东方财富上榜率 **3%**(22/726 天)、
+        # 方正中期虽然天天在榜但**净多占比只有 11%**(它在铁矿石上常年净空,
+        # 不是散户那一侧)。换成三条结构判据全过的三家 + 两家高上榜率的:
+        #   新湖 82% 上榜 / 85% 净多 / 盯市 −3.06 亿
+        #   瑞达 89% / 70% / −2.02 亿
+        #   宝城 87% / 70% / −1.07 亿
+        # **只换展示,不动 retail_seed** —— 那三家进进出场判据,要换得等品种专属
+        # 研究(运营者已同意立项)。
+        "retail_panel": ["新湖期货", "瑞达期货", "宝城期货", "中信建投", "方正中期"],
         # **出场用默认的散户口径,不抄焦煤的 inst。** 焦煤那条的注释写得很清楚:
         # 机构出场「只在焦煤成立,其余四品种出场体检全输,不许外推」。
         # 铁矿石没做过出场体检,就用通用那条,不拿别人的结论替自己背书。
@@ -614,6 +641,11 @@ VARIETIES = {
 }
 
 
+#: `retail_panel` 的全站默认。`use()` 每轮都要用它回落 —— RULES 是全局可变的,
+#: 上一个品种覆盖过之后不写回来,下一个品种就会继承别人的名单(CURRENT 那个坑的同款)。
+DEFAULT_RETAIL_PANEL = list(RULES["retail_panel"])
+
+
 def use(code: str) -> dict:
     """把某个品种的参数并进 RULES 供本轮使用。返回该品种的配置。
 
@@ -646,6 +678,12 @@ def use(code: str) -> dict:
     RULES["roll_pressure"] = dict(v["roll_pressure"]) if v.get("roll_pressure") else None
     # 单席位跟随第二引擎(DEC-139):只有焦煤配(华泰);None = 不出这块。
     RULES["follow_seat"] = dict(v["follow_seat"]) if v.get("follow_seat") else None
+    # 单腿跟随方案(DEC-182):配了才出手数卡。账户参数在 VARIETIES 里,全部由
+    # 运营者给。玻纯那张跨品种卡与焦煤那张跨月卡各有自己的配置,互不相干。
+    RULES["follow_plan"] = dict(v["follow_plan"]) if v.get("follow_plan") else None
+    # 五窗展示的散户名单:品种没配就回落到全站默认。**必须每轮都写**,
+    # 不能只在配了的时候赋值 —— 否则跑完铁矿石再跑玻璃,玻璃会顶着铁矿石的名单。
+    RULES["retail_panel"] = list(v.get("retail_panel") or DEFAULT_RETAIL_PANEL)
     # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
     RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
     # 逐合约战役策略(DEC-133):strategy="campaign" 的品种,进出场与历史/统计
@@ -2925,6 +2963,68 @@ def _cal_plan_sized(code, cfg, member, longs, shorts, long_tot, short_tot, px_al
 # **所以这个引擎的定位是「参考看板」,不是「过闸的策略」**:它如实回答
 # 「此刻这三家核心席位在不在场、什么方向、进场多久、这一轮浮盈多少」,
 # 统计每次全量重算并把丑话一起印出来,**不写死任何一个漂亮数字**。
+def single_follow_plan_payload(member: str, side: str | None, net_by_contract: dict,
+                               px_all: dict, main: str | None, cfg: dict,
+                               mult: float) -> dict | None:
+    """单腿跟随方案(DEC-182,运营者答「加回来」)。
+
+    与玻纯那张跨品种卡(`follow_plan_payload`)、焦煤那张跨月卡
+    (`cal_follow_plan_payload`)**同一个模子**,只是腿数从两条变成一条 ——
+    铁矿石跟的是永安的**方向**,不是它的两腿结构。
+
+    手数 = ⌊本金 × 动用比例 ÷ 每手保证金⌋,每手保证金 = 结算价 × 点值 × 保证金率。
+    **账户参数一律由 VARIETIES 里的配置来,不在这里写死任何数字。**
+
+    没方向(席位当日不在场)就返回 None —— 没有方向时给手数是没有意义的。
+    """
+    if not side or not cfg:
+        return None
+    contract = main if isinstance(main, str) else None
+    px = px_all.get(contract) if contract else None
+    if not contract or not px or px <= 0:
+        return None
+    margin_rate = float(cfg["margin"])
+    per_lot = px * mult * margin_rate
+    budget = float(cfg["capital"]) * float(cfg["use"])
+    lots = int(budget // per_lot) if per_lot > 0 else 0
+    notional = lots * px * mult
+    margin = lots * per_lot
+    return {
+        "state": "single",
+        "member": member,
+        "capital": float(cfg["capital"]),
+        "use_pct": round(float(cfg["use"]) * 100),
+        "legs": [{
+            "contract": contract,
+            "instrument": CURRENT["name"] if CURRENT else "",
+            "side": side,
+            "lots": lots,
+            "px": round(px, 1),
+            # 该席位在这条腿上的净持仓:方案是按它的方向缩的,得让人看见原始规模。
+            "member_net": int(round(net_by_contract.get(contract, 0.0))),
+            "value_wan": round(notional / 1e4, 1),
+        }],
+        "margin": round(margin),
+        "margin_pct": round(margin_rate * 100, 1),
+        "notional_wan": round(notional / 1e4, 1),
+        "leverage": round(notional / margin, 1) if margin > 0 else None,
+        # 单腿没有「价差反向」这回事,前端据 state 判断不渲染那一行。
+        "risk_same": round(notional * 0.01),
+        "splits": [{"label": f"{'多头' if side == 'long' else '空头'}名义",
+                    "wan": round(notional / 1e4, 1)}],
+        "net_exposure_wan": round(notional / 1e4, 1),
+        "net_exposure_pct": round(notional / float(cfg["capital"]) * 100),
+        "net_of_notional_pct": 100,
+        "note": (
+            f"按 {member} 当日在主力 {contract} 上的**方向**等比缩到 "
+            f"{float(cfg['capital'])/1e4:.0f} 万 × {float(cfg['use'])*100:.0f}%。"
+            f"手数 = 预算 ÷ 每手保证金(结算价 × {mult:.0f} 吨 × {margin_rate*100:.0f}%)。"
+            "**这是把方向摆成可下单的规模,不是一条过了闸的策略** —— "
+            "第二引擎那张卡上的丑话同样适用于这里的手数。"
+        ),
+    }
+
+
 IH_FOLLOW = {
     "seats": ["摩根大通", "高盛期货", "中财期货"],   # 运营者点名的三家核心席位
     "carry": 20,        # 掉榜沿用天数,与全部研究同档,不调参
@@ -3366,6 +3466,25 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                                      if isinstance(mkt["main"].iloc[-1], str) else None)
         try:
             payload["follow_plan"] = cal_follow_plan_payload(code, _net, _px)
+        except Exception as e:                  # noqa: BLE001
+            print(f"[{code}] follow_plan 失败,置空:{e}", file=sys.stderr)
+            payload["follow_plan"] = None
+
+    # 单腿跟随方案(DEC-182):配了 follow_plan 且有第二引擎才出。
+    # 与上面那两张卡走同一个 payload 槽(`follow_plan`),前端据 state 分支渲染。
+    if RULES.get("follow_plan") and payload.get("seat_follow"):
+        try:
+            _sf = payload["seat_follow"]
+            _d = mkt.index[-1]
+            _rows = seat[(seat["member_key"] == _sf["member"]) & (seat["trade_date"] == _d)]
+            _net = ({c: float(v) for c, v in
+                     _rows.groupby("contract")["net_off"].sum().items()
+                     if isinstance(c, str) and np.isfinite(v)} if len(_rows) else {})
+            _px = {c: float(st[c].asof(_d)) for c in st.columns
+                   if isinstance(c, str) and np.isfinite(st[c].asof(_d))}
+            payload["follow_plan"] = single_follow_plan_payload(
+                _sf["member"], _sf.get("side"), _net, _px,
+                mkt["main"].iloc[-1], RULES["follow_plan"], RULES["multiplier"])
         except Exception as e:                  # noqa: BLE001
             print(f"[{code}] follow_plan 失败,置空:{e}", file=sys.stderr)
             payload["follow_plan"] = None
