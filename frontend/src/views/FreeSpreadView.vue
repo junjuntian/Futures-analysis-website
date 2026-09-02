@@ -18,6 +18,7 @@ import {
   type SpreadVariety
 } from '../api'
 import SpreadChart from '../components/SpreadChart.vue'
+import { failureHint, isNetworkFailure } from '../fetch-hint'
 import { continuousChartOption, formatNumber, seasonalChartOption } from '../spreadCharts'
 import { useAuthStore } from '../stores/auth'
 
@@ -127,16 +128,40 @@ async function applyFavorite(favorite: SpreadFavorite) {
   ])
 }
 
+async function queryOnce() {
+  return queryFreeSpread({
+    provider: 'self',
+    leg1: { ...legs.leg1 },
+    leg2: { ...legs.leg2 }
+  }, await ensureCsrf())
+}
+
+/**
+ * 查到就渲染;**网络层失败自动重发一次**。
+ *
+ * 2026-09-02:页面报 `Failed to fetch`,而 qh 上两级 nginx(宿主 443 + 容器)
+ * 的 access log 里连一行都没有、error log 全空,同一组合手工重放 396ms 就回
+ * 200 —— 请求根本没送到服务器。站点走 HTTP/2,nginx 没配 keepalive_timeout
+ * 走默认 65 秒;看着图琢磨几分钟再点「查看」,浏览器正好复用那条已被服务器
+ * 关掉的连接。**这种失败浏览器会自己换条连接重发 GET,但绝不重发 POST**
+ * (它不知道这个 POST 有没有副作用),所以全站只有这个查询接口露了馅。
+ *
+ * 我们知道它没有副作用:只读查询、同参数当日缓存,重发一次是安全的。
+ * **收藏的增删是真写入,不在这里重试** —— 那种要是重发,就是多一条收藏。
+ * HTTP 错误(ApiError)一律不重试:服务器已经答过了,再问一次还是同一个答案。
+ */
 async function runQuery() {
   if (!canQuery.value) return
   querying.value = true
   errorMessage.value = ''
   try {
-    const envelope = await queryFreeSpread({
-      provider: 'self',
-      leg1: { ...legs.leg1 },
-      leg2: { ...legs.leg2 }
-    }, await ensureCsrf())
+    let envelope
+    try {
+      envelope = await queryOnce()
+    } catch (error) {
+      if (!isNetworkFailure(error)) throw error
+      envelope = await queryOnce()
+    }
     result.value = envelope.data
     source.value = envelope.data.source
   } catch (error) {
@@ -210,6 +235,9 @@ function describeError(error: unknown) {
     }
     return known[error.code] ?? `请求失败（${error.code}）`
   }
+  // 原本直接印 error.message,于是运营者看到的是一句生英文 `Failed to fetch`——
+  // 它既没说清是「没送到」还是「服务器出错」,也没说该怎么办。
+  if (isNetworkFailure(error)) return `${failureHint(error)}已自动重发过一次仍未成功，请再点一次「重试当前组合」。`
   return error instanceof Error ? error.message : '请求失败'
 }
 

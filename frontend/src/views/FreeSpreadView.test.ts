@@ -125,6 +125,61 @@ describe('FreeSpreadView', () => {
     expect(urls.some((url) => url.endsWith('/months'))).toBe(false)
   })
 
+  /**
+   * 2026-09-02:HTTP/2 连接闲置 65 秒后被 nginx 关掉,浏览器复用它发 POST 就
+   * 直接抛 `Failed to fetch` —— 服务器日志里一行都没有,因为请求没送到。
+   * GET 浏览器会自己重发,POST 不会,所以这个重试必须我们自己做。
+   */
+  it('连接失效导致的失败会自动重发一次,用户看不到报错', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().csrfToken = 'csrf-test'
+    const realFetch = vi.mocked(fetch).getMockImplementation()!
+    let attempts = 0
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input.toString().endsWith('/free-spread/query') && attempts++ === 0) {
+        throw new TypeError('Failed to fetch')
+      }
+      return realFetch(input, init)
+    })
+    const wrapper = mount(FreeSpreadView, {
+      global: {
+        plugins: [pinia, ElementPlus],
+        stubs: { SpreadChart: { template: '<div class="chart-stub" />' } }
+      }
+    })
+    await flushPromises()
+    await selectBothLegs(wrapper)
+    await wrapper.findAll('button').find((button) => button.text() === '查看')!.trigger('click')
+    await flushPromises()
+
+    expect(attempts).toBe(2)
+    expect(wrapper.text()).toContain('仅统计散户可交易窗口 · 当前 3')
+    expect(wrapper.text()).not.toContain('Failed to fetch')
+  })
+
+  it('重发也失败时给中文说明,不把 `Failed to fetch` 原样甩给运营者', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().csrfToken = 'csrf-test'
+    const realFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input.toString().endsWith('/free-spread/query')) throw new TypeError('Failed to fetch')
+      return realFetch(input, init)
+    })
+    const wrapper = mount(FreeSpreadView, {
+      global: { plugins: [pinia, ElementPlus], stubs: { SpreadChart: true } }
+    })
+    await flushPromises()
+    await selectBothLegs(wrapper)
+    await wrapper.findAll('button').find((button) => button.text() === '查看')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('没送到服务器')
+    expect(wrapper.text()).toContain('重试当前组合')
+    expect(wrapper.text()).not.toContain('Failed to fetch')
+  })
+
   it('ships no built-in preset combinations', async () => {
     const pinia = createPinia()
     setActivePinia(pinia)
