@@ -139,6 +139,30 @@ report("D A 型日 且 **次日结算收复**(夜盘拉回属这一型)", mD.fil
 mD2 = mA & (d_settle < 0)
 report("D' 对照组:A 型日但次日继续跌", mD2.fillna(False).values)
 
+# ---------------------------------------------------------------- 基差(用分位,不用水平)
+L.append("## 基差:只用**自身历史分位**,不用绝对水平")
+L.append("")
+L.append("2026-09-03 运营者确认:交易所口径现货是 **998**,我们库里(生意社)是 1087,")
+L.append("**偏高 8.9%**。而库里 basis_rate 全样本均值 −8.85%、中位 −7.11% —— 两个数吻合:")
+L.append("那个「期货常年贴水 7~9%」正是基准本身偏高造成的,**不是真的贴水**。")
+L.append("")
+L.append("**所以水平值不能用,但分位可以**:偏差是稳定的乘性偏移,同一条序列内部的")
+L.append("高低排序不受影响。下面按 basis_rate 在**自身历史**中的分位分档。")
+L.append("")
+bs = pd.read_csv(D / "sa_basis.csv", parse_dates=["trade_date"]).set_index("trade_date")
+br = bs["dominant_basis_rate"].astype(float).reindex(idx).ffill()
+rank = br.rank(pct=True)
+today_rank = float(rank.iloc[-1])
+L.append(f"  今天(09-02)basis_rate 分位 = **{today_rank*100:.0f}%** "
+         f"(越高 = 期货相对现货越贵)")
+L.append("")
+for lo, hi, lab in ((0.0, 0.25, "最低四分位(期货相对最便宜)"),
+                    (0.25, 0.50, "第二四分位"),
+                    (0.50, 0.75, "第三四分位(**今天在这一档**)"),
+                    (0.75, 1.01, "最高四分位(期货相对最贵)")):
+    report(f"E 基差分位 {lo*100:.0f}~{hi*100:.0f}% · {lab}",
+           ((rank >= lo) & (rank < hi)).fillna(False).values)
+
 L.append("## 今天的读数(2026-09-02 收盘)")
 L.append("")
 k = n - 1
