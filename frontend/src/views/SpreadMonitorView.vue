@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { bounceHint, pickBounceDay, type BounceDay, type BounceState } from '../bounce-hint'
+import { basisTone } from '../basisTone'
 import { visibleItems } from '../monitorVisibility'
 import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { useRouter } from 'vue-router'
@@ -503,10 +504,18 @@ async function loadFundFlow() {
 }
 
 const BASIS_HINT =
-  '现货价与主力基差(生意社数据,DEC-074)。基差 = 现货 − 主力期货:为正是期货' +
-  '贴水(现货更贵),为负是期货升水。**跨期套利的两条腿相对同一个现货,所以两个' +
+  // **2026-09-03 订正:这句话原来是反的。** 原文写「基差 = 现货 − 主力期货,
+  // 为正是期货贴水」,而上游(生意社经 akshare)给的 dom_basis 是
+  // **主力期货 − 现货**:生猪 11,740 − 10,970 = +770、玻璃 961 − 956 = +5、
+  // 纯碱 1,056 − 1,087 = −31,三个品种逐个对得上。**正 = 期货升水**,
+  // 与原文说的正好相反,颜色也跟着标反了(disc/prem 已一并对调)。
+  '现货价与主力基差(DEC-074)。基差 = **主力期货 − 现货**:为正是期货**升水**' +
+  '(期货更贵),为负是期货**贴水**。**跨期套利的两条腿相对同一个现货,所以两个' +
   '基差之差就是价差本身**——这里给的是水平与历史分位,是产业背景不是进场信号。' +
-  '苹果没有现货报价,那几行不显示。跨品种组合按第一条腿的品种给。'
+  '苹果没有现货报价,那几行不显示。跨品种组合按第一条腿的品种给。' +
+  '**现货口径 = 生意社(多地加权均价,带小数)**,与行情软件按单一基准地报的价' +
+  '(如同花顺「沙河地区」)不是同一个数——2026-09-03 实测纯碱两者差 89 元(8.9%),' +
+  '**比较升贴水时以你自己软件的基准地为准**,这里只用来看历史分位。'
 
 const REVERT_HINT =
   '同月份组合（同品种 + 同月份对 + 同年差）跨年拼起来的样本，不是这一组合自己的胜率。' +
@@ -878,9 +887,14 @@ function openDetail(item: SpreadMonitorItem) {
               <div class="basis">
                 <span class="k">{{ label(item.basis.instrument) }}现货</span>
                 <span class="v">{{ num(item.basis.spot_price) }}</span>
+                <!-- 口径写在数旁边,不只藏在 tooltip 里:运营者拿它跟行情软件对过,
+                     两个数差 89 元,不标口径就会被当成对方那个数看。 -->
+                <span class="src">生意社均价</span>
                 <template v-if="item.basis.dominant_basis !== null">
                   <span class="k">主力基差</span>
-                  <span class="v" :class="Number(item.basis.dominant_basis) >= 0 ? 'disc' : 'prem'">
+                  <!-- basis = 期货 − 现货,**正 = 升水**(2026-09-03 订正,原来标反了)。
+                       映射提进 basisTone.ts —— 模板表达式测不到,而这正是标反的那处。 -->
+                  <span class="v" :class="basisTone(item.basis.dominant_basis) ?? ''">
                     {{ signedSpread(item.basis.dominant_basis) }}
                   </span>
                 </template>
@@ -1366,6 +1380,7 @@ function openDetail(item: SpreadMonitorItem) {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
+.basis .src { color: var(--el-text-color-placeholder); font-size: 11px; margin-left: -2px; }
 .basis .v.disc {
   color: var(--tv-up);
 }
