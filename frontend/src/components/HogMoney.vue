@@ -13,6 +13,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { entryGateText } from '../entry-gate'
 import { failureHint } from '../fetch-hint'
+import { netChangeLabel } from '../netChangeLabel'
 import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { getSeatNetPosition, type MemberLeg as SeatCost,
   type FlowCode
@@ -40,17 +41,16 @@ interface MemberLeg {
   on_board: boolean
 }
 
-/** 五窗括号文案(DEC-149,2026-08-26 二改):**单数字、随席位方向表述**——
+/** 五窗与组内各家的括号文案(DEC-149,2026-08-26 二改):**单数字、随席位方向表述**——
  *  净多席位「净多±X」、净空席位「净空±X」(净空+11,988 = 空头仓位增了 11,988)。
  *  一改的两腿版(多+X 空+Y)运营者看过效果图后否了:「显示净多+4790就行了,
  *  不要两腿显示」。change_long/change_short 留在 payload 里不显示,别删引擎字段。
- *  歧义的根源不变:纯净数 "(−1万)" 会把净空席位的加空读成在减,方向词补上就清了。 */
+ *  歧义的根源不变:纯净数 "(−1万)" 会把净空席位的加空读成在减,方向词补上就清了。
+ *
+ *  **2026-09-02 移进 netChangeLabel.ts**:跨零那一支原来是错的(东证「净多+100,239」
+ *  实际是从净空 60,573 翻到净多 39,666),而埋在 script setup 里测不到。 */
 function panelChg(m: MemberLeg): string | null {
-  if (m.change === null || m.change === undefined || m.change === 0) return null
-  const mag = fmt(Math.abs(m.change))
-  if (m.net > 0) return `净多${m.change > 0 ? '+' : '-'}${mag}`
-  if (m.net < 0) return `净空${m.change < 0 ? '+' : '-'}${mag}`
-  return `净${m.change > 0 ? '+' : ''}${fmt(m.change)}`
+  return netChangeLabel({ net: m.net, change: m.change })
 }
 interface HogTrade {
   side: 'short' | 'long'
@@ -543,16 +543,14 @@ async function loadFollowCosts() {
   }))
 }
 
-/** 散户三家「合计变化」的方向文案(DEC-155):口径同 panelChg,按合计净持仓方向说。 */
+/** 散户三家「合计变化」的方向文案(DEC-155):口径同 panelChg,按合计净持仓方向说。
+ *  **同一个跨零问题散户这边也有**,所以走同一个函数,别再抄一份。 */
 const retailTotalChg = computed(() => {
   const r = data.value?.retail
   if (!r || r.change === null || r.change === undefined) return '—'
   if (r.change === 0) return '0 手'
-  const mag = fmt(Math.abs(r.change))
-  const net = r.net ?? 0
-  if (net > 0) return `净多${r.change > 0 ? '+' : '-'}${mag} 手`
-  if (net < 0) return `净空${r.change < 0 ? '+' : '-'}${mag} 手`
-  return `${r.change > 0 ? '+' : ''}${fmt(r.change)} 手`
+  const label = netChangeLabel({ net: r.net ?? 0, change: r.change })
+  return label === null ? '—' : `${label} 手`
 })
 
 const band = (b: [number, number]) => (b[0] === b[1] ? `${fmt(b[0])}` : `${fmt(b[0])}~${fmt(b[1])}`)
