@@ -47,8 +47,9 @@ interface MemberLeg {
  *  不要两腿显示」。change_long/change_short 留在 payload 里不显示,别删引擎字段。
  *  歧义的根源不变:纯净数 "(−1万)" 会把净空席位的加空读成在减,方向词补上就清了。
  *
- *  **2026-09-02 移进 netChangeLabel.ts**:跨零那一支原来是错的(东证「净多+100,239」
- *  实际是从净空 60,573 翻到净多 39,666),而埋在 script setup 里测不到。 */
+ *  **2026-09-02 移进 netChangeLabel.ts**,只为能被测试调到。同一天我给跨零加过一支
+ *  「由净空 A 转净多 B」,运营者否了(「东证还是按原来显示」),已回退 —— 理由与
+ *  那条否掉的结论都写在模块头,别再改回去。 */
 function panelChg(m: MemberLeg): string | null {
   return netChangeLabel({ net: m.net, change: m.change })
 }
@@ -899,7 +900,8 @@ const bySide = computed(() => {
               <template v-if="m.on_board">
                 {{ fmt(m.net) }} 手
                 <!-- DEC-153:与五窗同一套方向表述(净多+X/净空+X),净数会把加空读成在减。
-                     口径不同仍保留:这里是 sig_win 日变化,五窗是较昨日(DEC-146)。 -->
+                     **2026-09-02 起口径也统一成较昨日**(运营者:「跟前一日对比,
+                     不要跟前五日对比」),不再与五窗分家。 -->
                 <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)">
                   ({{ panelChg(m) }})
                 </span>
@@ -910,8 +912,8 @@ const bySide = computed(() => {
           <p class="note">
             <template v-if="isFixedGroup">席位组是运营者拍板的**固定名单**(DEC-122),不滚动重选。</template>
             <template v-else>席位组{{ reselectText }}按历史择时收益重选一次,不是固定名单。</template>
-            这是**全品种合约合计**;括号=较 {{ data.signal.win }} 日前变化
-            (净多+X=净多增了 X,净空+X=净空增了 X;下面那排小窗是**较昨日**,口径有意不同)。
+            这是**全品种合约合计**;括号=**较昨日**变化
+            (净多+X=净多增了 X,净空+X=净空增了 X;与下面那排小窗同口径)。
             逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
           </p>
         </div>

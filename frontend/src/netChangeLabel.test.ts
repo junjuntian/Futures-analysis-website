@@ -3,21 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { netChangeLabel } from './netChangeLabel'
 
 describe('netChangeLabel', () => {
-  // 2026-09-02 运营者指出的那一格:玻璃页东证期货。
-  // 库里逐笔:08-26 净空 60,573 → 09-02 净多 39,666,净变化 +100,239。
-  it('跨零时不说「净多+100,239」—— 东证的多头从没增加过那么多', () => {
-    const label = netChangeLabel({ net: 39666, change: 100239 })
-    expect(label).toBe('由净空 60,573 转净多 39,666')
-    expect(label).not.toContain('100,239')
-  })
-
-  it('反向跨零同理', () => {
-    expect(netChangeLabel({ net: -39666, change: -100239 }))
-      .toBe('由净多 60,573 转净空 39,666')
-  })
-
-  // 同一张卡上的中信:一直净空,只是空头小了。这一句原来就是对的,别改坏。
-  it('没换边时照旧按今天这一侧说增减', () => {
+  it('按今天在哪一边说净持仓的变化', () => {
     expect(netChangeLabel({ net: -27933, change: 90187 })).toBe('净空-90,187')
     expect(netChangeLabel({ net: 33963, change: -9258 })).toBe('净多-9,258')
     expect(netChangeLabel({ net: -92981, change: -442 })).toBe('净空+442')
@@ -29,6 +15,17 @@ describe('netChangeLabel', () => {
     expect(netChangeLabel({ net: -12454, change: -3018 })).toBe('净空+3,018')
   })
 
+  /**
+   * 2026-09-02 我一度给跨零加了一支「由净空 A 转净多 B」,**运营者否了**:
+   * 「东证还是按原来显示,那样显示没有错」。这一条把否掉的结论钉住,
+   * 免得后来者(包括我自己)看着觉得不严谨又改回去。
+   */
+  it('跨零仍按今天这一边说 —— 运营者拍板,不要再改成「由净空…转净多…」', () => {
+    const label = netChangeLabel({ net: 39666, change: 100239 })
+    expect(label).toBe('净多+100,239')
+    expect(label).not.toContain('转')
+  })
+
   it('不可知与零变化都不渲染括号', () => {
     expect(netChangeLabel({ net: 100, change: null })).toBeNull()
     expect(netChangeLabel({ net: 100, change: undefined })).toBeNull()
@@ -38,10 +35,5 @@ describe('netChangeLabel', () => {
   it('今天正好持平时没有「哪一边」可说', () => {
     expect(netChangeLabel({ net: 0, change: 500 })).toBe('净+500')
     expect(netChangeLabel({ net: 0, change: -500 })).toBe('净-500')
-  })
-
-  it('从 0 出发不算跨零 —— 起点没有对面那一侧', () => {
-    expect(netChangeLabel({ net: 500, change: 500 })).toBe('净多+500')
-    expect(netChangeLabel({ net: -500, change: -500 })).toBe('净空+500')
   })
 })

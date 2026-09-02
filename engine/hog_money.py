@@ -2228,7 +2228,14 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     open_trade = trades[-1] if trades and trades[-1]["exit_date"] is None else None
     closed = [t for t in trades if t["exit_date"]]
 
-    prev_d = mkt.index[-1 - RULES["sig_win"]] if len(mkt) > RULES["sig_win"] else None
+    # **逐家席位的括号一律是「较昨日」**(2026-09-02 运营者:「这个净空或者净多跟
+    # 前一日对比,不要跟前五日对比」)。原来用 sig_win(5 日),与下面那排合约小窗
+    # 的「较昨日」两套口径并存,读起来对不上。
+    #
+    # **注意只改展示,不许碰 `RULES["sig_win"]`** —— 那是引擎的信号窗口
+    # (`chg = s - full.shift(sig_win)`),动它就是改策略,不是改显示。
+    # 「机构合计流向」卡上那行「5 日变化」是信号本身,保持 sig_win 不变。
+    prev_d = mkt.index[-2] if len(mkt) > 1 else None
     grp = list(groups.get(d) or ())
     today = seat[(seat["trade_date"] == d) & (seat["member_key"].isin(grp))]
     prev = seat[(seat["trade_date"] == prev_d) & (seat["member_key"].isin(grp))] if prev_d is not None else None
