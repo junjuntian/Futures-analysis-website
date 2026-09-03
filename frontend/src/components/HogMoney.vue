@@ -620,6 +620,25 @@ const sideText = (s: string) => (s === 'short' ? '做空' : '做多')
  * 页面还在说 3 个月和 36 笔——同一个事实两处维护,必然对不上(运营者当场发现)。
  */
 const isFixedGroup = computed(() => data.value?.group_mode === 'fixed')
+
+/**
+ * 择时能力最强的那家(DEC-197,运营者 2026-09-03:「东证席位右上角弄个小角标,
+ * 圈圈里一个 1,让我知道这是择时能力最强的席位」)。
+ *
+ * **不写死东证**:它只是今天在玻璃/纯碱上排第 1,焦煤第 1 是国泰君安、鸡蛋是东吴,
+ * 而且名次每天都在动。写死席位名这类错**单元测试照不到** —— 测的是有没有渲染,
+ * 不是渲染成了谁(DEC-168 那次「东证的持仓顶着永安的名字」就是这么上线的)。
+ * 这里直接读引擎给的 `group_recent`(近一年择时收益名次,DEC-192),谁第 1 就标谁。
+ */
+const topTimingSeat = computed(() => {
+  const rows = (data.value?.group_recent ?? []).filter((r) => r.rank !== null)
+  if (!rows.length) return null
+  // **标组内最强的那家,圈里写它在全池的名次** —— 不是只在「全池第 1 恰好在组里」时
+  // 才标。否则哪天组里最强的只排到第 3,页面上一个角标都没有,看上去像功能坏了;
+  // 而写成「组内第 1」又会让人以为它是全场最强。两个都要说清,所以圈里放全池名次。
+  const best = rows.reduce((a, b) => (a.rank! <= b.rank! ? a : b))
+  return { member: best.member, rank: best.rank!, pool: best.pool }
+})
 const reselectText = computed(() => {
   const m = data.value?.rules.reselect_months ?? 0
   return m === 12 ? '每年' : m === 1 ? '每月' : `每 ${m} 个月`
@@ -921,7 +940,9 @@ const bySide = computed(() => {
         <div class="card">
           <h3>组内各家(共 {{ data.members.length }} 家)</h3>
           <div v-for="m in data.members" :key="m.member" class="kv">
-            <span class="k">{{ m.member }}</span>
+            <span class="k">{{ m.member }}<sup v-if="m.member === topTimingSeat?.member"
+              class="top-seat" :title="`组内择时能力最强:近一年择时收益在本品种全部 ${topTimingSeat?.pool} 家里排第 ${topTimingSeat?.rank}`"
+              >{{ topTimingSeat?.rank }}</sup></span>
             <span class="v">
               <template v-if="m.on_board">
                 {{ fmt(m.net) }} 手
@@ -1056,7 +1077,9 @@ const bySide = computed(() => {
           </h3>
           <table class="panel-vs">
             <tr v-for="(m, i) in c.members" :key="m.member">
-              <td class="k">{{ m.member.slice(0, 4) }}</td>
+              <td class="k">{{ m.member.slice(0, 4) }}<sup v-if="m.member === topTimingSeat?.member"
+                class="top-seat" :title="`组内择时能力最强:近一年全池第 ${topTimingSeat?.rank}`"
+                >{{ topTimingSeat?.rank }}</sup></td>
               <td class="num">
                 <template v-if="m.on_board">
                   <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
@@ -1723,6 +1746,12 @@ const bySide = computed(() => {
 /* 现任各家近一年成色(DEC-192)。掉到后三分之一的标**警示橙**(--tv-warn)——
    **不能用 --tv-up/--tv-down**:那两个是涨跌语义(红涨绿跌),拿绿色标「该看一眼了」
    会被读成「跌」。这一行只是提示,不是信号:选人窗口没变,换窗口是改规则。 */
+/* 择时第 1 的角标(DEC-197)。用 --tv-blue 不用涨跌色:它标的是「这家最会挑时机」,
+   不是涨跌,借用红绿会被读成方向。谁第 1 由 group_recent 算,不写死席位名。 */
+.top-seat { display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin-left: 3px; border-radius: 50%;
+  background: var(--tv-blue); color: #fff; font-size: 9px; font-weight: 700;
+  line-height: 1; vertical-align: super; }
 .grecent { margin: 0 0 10px; font-size: 12px; line-height: 2; }
 .grecent .gr-label { color: var(--tv-text-secondary); margin-right: 6px; }
 .grecent .chip { display: inline-flex; align-items: baseline; gap: 4px; margin: 0 6px 0 0;
