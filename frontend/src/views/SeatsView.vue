@@ -1376,23 +1376,24 @@ const latestDailyPnl = computed(() => {
             </span>
             <!-- 每手与择时(DEC-198):总盈亏基本是手数榜,这两列才是「同手数谁强」
                  与「扣掉方向暴露还剩什么」。老 JSON 没有这几个键时显示 —— 。 -->
-            <span
-              v-if="!item.no_multiplier"
-              class="pnl-alt"
-              :title="`日均 ${item.avg_lots ?? '—'} 手 · 每手 = 盈亏 / 日均仓位`"
-            >
-              每手 <b :class="Number(item.per_lot) >= 0 ? 'red' : 'green'">{{
-                perLotText(item.per_lot)
-              }}</b>
+            <span class="pnl-alt" :title="`日均 ${item.avg_lots ?? '—'} 手 · 每手 = 盈亏 / 日均仓位`">
+              <template v-if="!item.no_multiplier"
+                >每手
+                <b :class="Number(item.per_lot) >= 0 ? 'red' : 'green'">{{
+                  perLotText(item.per_lot)
+                }}</b></template
+              >
             </span>
             <span
-              v-if="!item.no_multiplier"
               class="pnl-alt"
               :title="`择时收益 = 盈亏 − 方向暴露(${pnlText(item.beta ?? '0')});方向暴露 = 恒定持有它自己平均仓位能赚到的钱`"
             >
-              择时 <b :class="Number(item.alpha) >= 0 ? 'red' : 'green'">{{
-                item.alpha === undefined ? '—' : pnlText(item.alpha)
-              }}</b>
+              <template v-if="!item.no_multiplier"
+                >择时
+                <b :class="Number(item.alpha) >= 0 ? 'red' : 'green'">{{
+                  item.alpha === undefined ? '—' : pnlText(item.alpha)
+                }}</b></template
+              >
             </span>
             <span class="pnl-days">
               <template v-if="!item.no_multiplier">
@@ -1950,7 +1951,6 @@ h2 .muted {
 .pnl-sort { margin-left: 12px; }
 /* 每手/择时两列:定宽右对齐,免得逐行长短不一把「天数」那列顶来顶去。 */
 .pnl-alt {
-  min-width: 108px;
   text-align: right;
   font-size: 12px;
   color: var(--tv-text-secondary);
@@ -1965,7 +1965,11 @@ h2 .muted {
 }
 .pnl-row {
   display: grid;
-  grid-template-columns: 110px 1fr 110px 150px;
+  /* 六列:品种 / 条 / 总盈亏 / 每手 / 择时 / 天数(DEC-198 从四列扩到六列)。
+     **列数必须与模板里的子元素个数一一对应** —— 加了两个 span 却没加列,
+     多出来的会溢到第二行,「择时 +279 万」看着像是下一个品种的数(2026-09-03 实拍)。
+     所以那两个 span 即便没数也要渲染成空占位,不能用 v-if 整个摘掉。 */
+  grid-template-columns: 110px 1fr 110px 118px 118px 150px;
   align-items: center;
   gap: 10px;
 }
