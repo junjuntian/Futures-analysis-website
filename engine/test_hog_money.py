@@ -1254,12 +1254,34 @@ class TestLongSince:
 class TestGroupOverrides:
     """DEC-129:运营者点名换人,在滚动组之上、只管到下一次重选切点。"""
 
-    def test_玻璃配了华泰换国泰君安其余品种为空(self):
-        H.use("FG")
-        assert H.RULES["group_overrides"] == [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}}]
-        for code in ("LH", "SA", "JD", "JM"):
+    def test_只有明确配过的品种才有点名换人(self):
+        """点名换人是**逐个品种拍板**的,不是全站开关 —— 没拍过板的必须是 None。
+
+        玻璃 DEC-129(华泰 → 国泰君安)、纯碱 DEC-195(海通 → 瑞达)。
+        再有新的要连着这条一起改,别让某个品种悄悄多出一次换人。
+        """
+        expect = {
+            "FG": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}}],
+            "SA": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}}],
+        }
+        for code, want in expect.items():
+            H.use(code)
+            assert H.RULES["group_overrides"] == want, code
+        for code in ("LH", "JD", "JM", "I"):
             H.use(code)
             assert H.RULES["group_overrides"] is None, code
+
+    def test_换人日必须是有数据的交易日(self):
+        """`since` 写成没有行情的日子(周末/节假日/未来),换人会静默不生效。
+
+        2026-09-03 落 DEC-195 时本地快照只到 09-02,跑出来阵容没变 —— 一眼看去
+        像是配置没写对。**这类失效不报错**,所以钉一条:since 必须落在工作日上。
+        """
+        for code in ("FG", "SA"):
+            H.use(code)
+            for o in H.RULES["group_overrides"]:
+                d = pd.Timestamp(o["since"])
+                assert d.weekday() < 5, f"{code} 的 since {o['since']} 是周末"
 
     def test_只在since到下次切点之间替换并写一条手动log(self):
         idx = bdays("2026-08-17", 12)     # 08-17 ~ 09-01
