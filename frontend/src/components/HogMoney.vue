@@ -187,6 +187,13 @@ interface HogPayload {
   /** 选人方式(DEC-122):rolling=按择时收益滚动重选;fixed=运营者拍板的固定名单(生猪)。
    *  没这个字段的老产物按 rolling 读。 */
   group_mode?: 'fixed' | 'rolling'
+  /**
+   * 现任席位组各家**近一年**的择时收益与名次(DEC-192)。只做展示,**不参与选人** ——
+   * 选人用的是「有史以来累计」,没有时间衰减,一家早年攒够存量的席位可以在近一年
+   * 掉到几十名开外还稳坐组里,而卡片上只印它重选时点的累计值,看不出任何异常。
+   * 老 JSON 没有这个键。
+   */
+  group_recent?: Array<{ member: string; rank: number | null; pool: number; alpha: number | null }>
   /** 重选切点。`group_log` 只记**换人**,所以阵容连年不变时它会停在很早的日期,
    *  看上去像「三年没重选过」。可选:旧 JSON 没有这个字段。 */
   reselect?: { last: string | null; next: string | null; changed_at: string | null }
@@ -1510,6 +1517,17 @@ const bySide = computed(() => {
             不动」能赚到的钱扣掉之后剩下的部分。按它选人,而不是按谁赚得多:
             实测按总盈亏选样本外 t=3.57、按仓位规模选 t=0.11,按择时收益选 t=5.22。
           </p>
+          <!-- 现任五家近一年成色(DEC-192)。选人看的是「有史以来累计」,所以一家
+               早年攒够存量的席位可能已经很久不行了,而上面那串括号看不出来。
+               这一行只做展示,**不是判据** —— 换选人窗口要走完整闸门。 -->
+          <div v-if="!isFixedGroup && data.group_recent?.length" class="grecent">
+            <span class="gr-label">现任各家近一年择时收益(亿,仅参考,不参与选人):</span>
+            <span v-for="r in data.group_recent" :key="r.member" class="chip"
+                  :class="{ stale: r.rank !== null && r.rank > r.pool / 3 }">
+              {{ r.member }}<i>{{ r.alpha === null ? '—' : r.alpha.toFixed(2) }}</i>
+              <em>{{ r.rank === null ? '未上榜' : `第 ${r.rank}/${r.pool}` }}</em>
+            </span>
+          </div>
           <div v-for="g in [...data.group_log].reverse()" :key="g.date" class="glog">
             <b>{{ g.date }}</b>
             <!-- 手动换人(DEC-129):不是重选算出来的,要标出来;只管到下一次重选切点。 -->
@@ -1702,6 +1720,17 @@ const bySide = computed(() => {
 .kv .k { color: var(--tv-text-secondary); white-space: nowrap; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
 .reselect-note { margin: 0 0 8px; font-size: 12px; color: var(--tv-text-secondary); }
+/* 现任各家近一年成色(DEC-192)。掉到后三分之一的标**警示橙**(--tv-warn)——
+   **不能用 --tv-up/--tv-down**:那两个是涨跌语义(红涨绿跌),拿绿色标「该看一眼了」
+   会被读成「跌」。这一行只是提示,不是信号:选人窗口没变,换窗口是改规则。 */
+.grecent { margin: 0 0 10px; font-size: 12px; line-height: 2; }
+.grecent .gr-label { color: var(--tv-text-secondary); margin-right: 6px; }
+.grecent .chip { display: inline-flex; align-items: baseline; gap: 4px; margin: 0 6px 0 0;
+  padding: 2px 8px; border-radius: 10px; background: var(--tv-bg-secondary); }
+.grecent .chip i { font-style: normal; font-weight: 600; }
+.grecent .chip em { font-style: normal; color: var(--tv-text-secondary); font-size: 11px; }
+.grecent .chip.stale { background: var(--tv-warn-bg); }
+.grecent .chip.stale i, .grecent .chip.stale em { color: var(--tv-warn); }
 /* 信号过期:比风险条更硬 —— 风险条说「这条曲线不好拿」,这条说「这些数字别信」。 */
 .stale-banner {
   margin: 0 0 12px;

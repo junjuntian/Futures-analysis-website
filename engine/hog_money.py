@@ -989,11 +989,18 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 席位组
 
-def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp) -> pd.Series:
+def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp,
+               lo: pd.Timestamp | None = None) -> pd.Series:
     """截至 hi(不含)每家的择时收益 alpha = 实际盈亏 − 恒定仓位能赚到的钱。
 
     **绝不许看 hi 之后的数据**——滚动重选的全部意义就在这里。
+
+    `lo` 给了就只算 `[lo, hi)` 这一段。**选人一律不传 lo**(现行口径是「有史以来
+    累计」);传 lo 的只有页面上那一列「近一年择时收益」,它只做展示、不参与选人 ——
+    同一个算法只此一份实现,别再抄第二套(research/PITFALLS 第 9 条)。
     """
+    if lo is not None:
+        seat = seat[seat["trade_date"] >= lo]
     d = seat[seat["trade_date"] < hi].merge(
         price[["contract", "trade_date", "settle"]], on=["contract", "trade_date"], how="inner")
     if d.empty:
@@ -2439,13 +2446,37 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
     }
 
 
+def _group_recent(seat: pd.DataFrame, price: pd.DataFrame | None,
+                  groups: pd.Series, d: pd.Timestamp) -> list[dict] | None:
+    """现任席位组各家**近一年**的择时收益与名次(展示用,不参与选人)。
+
+    与选人用的是同一个 `alpha_upto`,只是把窗口从「有史以来」换成「近一年」——
+    两套数字并排摆着,才看得出谁是靠存量留在组里的。
+    """
+    if price is None or not len(groups.dropna()):
+        return None
+    cur = list(groups.dropna().iloc[-1])
+    a = alpha_upto(seat, price, d + pd.Timedelta(days=1),
+                   lo=d - pd.DateOffset(years=1))
+    if not len(a):
+        return None
+    pool = len(a)
+    out = []
+    for m in cur:
+        r = int(a.index.get_loc(m)) + 1 if m in a.index else None
+        out.append({"member": m, "rank": r, "pool": pool,
+                    "alpha": (round(float(a[m]) / 1e8, 2) if m in a.index else None)})
+    return out
+
+
 def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                   groups: pd.Series, log: list, cuts: list | None = None,
                   op: pd.DataFrame | None = None, st: pd.DataFrame | None = None,
                   vols: pd.DataFrame | None = None,
                   oi: pd.DataFrame | None = None,
                   hi: pd.DataFrame | None = None, lo: pd.DataFrame | None = None,
-                  close: pd.DataFrame | None = None) -> dict:
+                  close: pd.DataFrame | None = None,
+                  price: pd.DataFrame | None = None) -> dict:
     d = mkt.index[-1]
     z = sig["z"].get(d, np.nan)
     # 散户那路要先算出来:方案 C 的进出场都靠它(见 entry_exit_signals)
@@ -2682,6 +2713,16 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 界面「换人历史」「怎么算的」两处文案都看它,别再各写一套。
         "group_mode": "fixed" if RULES.get("fixed_members") else "rolling",
         "group_log": log[-8:],
+        # **现任五家的「近一年择时收益」**(DEC-192,2026-09-03)。只做展示,不参与选人。
+        #
+        # 为什么加:选人用的是**有史以来累计**择时收益,没有时间衰减 —— 一家在早年
+        # 攒够存量的席位,可以在近一年掉到几十名开外还稳坐组里,而卡片上只印它
+        # 「重选时点的累计值」(纯碱海通 21.27 亿),看不出任何异常。运营者
+        # 2026-09-03 正是因为看不到这一列,才从「今天谁加仓谁减仓」去反推谁好谁坏。
+        # 加上这一列之后,这个问题在页面上就能自问自答。
+        #
+        # **它不是新判据**:换选人窗口是改规则,要走完整闸门,本条没有做。
+        "group_recent": _group_recent(seat, price, groups, d),
         # 重选切点(2026-08-19 加):`group_log` 只记**换人**,阵容没变就不写。
         # 界面要能说「最近一次重选是哪天、换没换人」,否则看上去像三年没重选过。
         "reselect": {
@@ -3652,7 +3693,9 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                                                      values="low_price", aggfunc="min").sort_index(),
                                 close=price.pivot_table(index="trade_date", columns="contract",
                                                         values="close_price",
-                                                        aggfunc="first").sort_index())
+                                                        aggfunc="first").sort_index(),
+                                # 「近一年择时收益」那一列要长表原样(DEC-192)。
+                                price=price)
     except Exception as e:                      # noqa: BLE001
         print(f"[{code}] 失败,保留上一版:{e}", file=sys.stderr)
         return None
