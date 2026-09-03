@@ -940,9 +940,9 @@ const bySide = computed(() => {
         <div class="card">
           <h3>组内各家(共 {{ data.members.length }} 家)</h3>
           <div v-for="m in data.members" :key="m.member" class="kv">
-            <span class="k">{{ m.member }}<sup v-if="m.member === topTimingSeat?.member"
-              class="top-seat" :title="`组内择时能力最强:近一年择时收益在本品种全部 ${topTimingSeat?.pool} 家里排第 ${topTimingSeat?.rank}`"
-              >{{ topTimingSeat?.rank }}</sup></span>
+            <span class="k">{{ m.member }}<span v-if="m.member === topTimingSeat?.member"
+              class="top-tag" :title="`近一年择时收益在本品种全部 ${topTimingSeat?.pool} 家里排第 ${topTimingSeat?.rank}`"
+              >择时第 {{ topTimingSeat?.rank }}</span></span>
             <span class="v">
               <template v-if="m.on_board">
                 {{ fmt(m.net) }} 手
@@ -1077,9 +1077,10 @@ const bySide = computed(() => {
           </h3>
           <table class="panel-vs">
             <tr v-for="(m, i) in c.members" :key="m.member">
-              <td class="k">{{ m.member.slice(0, 4) }}<sup v-if="m.member === topTimingSeat?.member"
-                class="top-seat" :title="`组内择时能力最强:近一年全池第 ${topTimingSeat?.rank}`"
-                >{{ topTimingSeat?.rank }}</sup></td>
+              <td class="k" :class="{ 'top-seat-name': m.member === topTimingSeat?.member }"
+                  :title="m.member === topTimingSeat?.member
+                    ? `择时能力最强:近一年全池第 ${topTimingSeat?.rank}` : m.member"
+                >{{ m.member.slice(0, 4) }}</td>
               <td class="num">
                 <template v-if="m.on_board">
                   <span :class="m.net > 0 ? 'red' : m.net < 0 ? 'green' : ''">{{ fmt(m.net) }}</span>
@@ -1746,12 +1747,16 @@ const bySide = computed(() => {
 /* 现任各家近一年成色(DEC-192)。掉到后三分之一的标**警示橙**(--tv-warn)——
    **不能用 --tv-up/--tv-down**:那两个是涨跌语义(红涨绿跌),拿绿色标「该看一眼了」
    会被读成「跌」。这一行只是提示,不是信号:选人窗口没变,换窗口是改规则。 */
-/* 择时第 1 的角标(DEC-197)。用 --tv-blue 不用涨跌色:它标的是「这家最会挑时机」,
-   不是涨跌,借用红绿会被读成方向。谁第 1 由 group_recent 算,不写死席位名。 */
-.top-seat { display: inline-flex; align-items: center; justify-content: center;
-  width: 14px; height: 14px; margin-left: 3px; border-radius: 50%;
-  background: var(--tv-blue); color: #fff; font-size: 9px; font-weight: 700;
-  line-height: 1; vertical-align: super; }
+/* 择时最强的标记(DEC-197,2026-09-03 二版)。一版是名字右上角一个蓝圆圈①,
+   运营者反馈「怪怪的、不协调」—— 原因是 `.panel-vs .k` 宽度写死 52px,
+   多一个元素就把后面的数字列顶歪,密表里尤其明显。二版改成:
+     · 组内各家卡(flex,有横向空间)→ 名字后一枚小文字牌「择时第 N」,把话说明白;
+     · 合约窗(固定 52px)→ **只染色加粗,不加任何元素**,零布局变化。
+   两处都用 --tv-blue 不用涨跌红绿:标的是「最会挑时机」,借用涨跌色会被读成方向。 */
+.top-tag { margin-left: 5px; padding: 1px 5px; border-radius: 3px;
+  background: var(--tv-blue-bg); color: var(--tv-blue);
+  font-size: 11px; font-weight: 600; white-space: nowrap; }
+.panel-vs .k.top-seat-name { color: var(--tv-blue); font-weight: 600; }
 .grecent { margin: 0 0 10px; font-size: 12px; line-height: 2; }
 .grecent .gr-label { color: var(--tv-text-secondary); margin-right: 6px; }
 .grecent .chip { display: inline-flex; align-items: baseline; gap: 4px; margin: 0 6px 0 0;
