@@ -30,7 +30,9 @@ ALIAS = {
 # 席位来源可信度,与 SEAT_SOURCE_RANK 同序。同一天同一合约多源并存时按此收敛,
 # 不收敛会把同一家的持仓加两遍(PITFALLS 四·多源重复行灌水)。
 SEAT_SOURCE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
-PRICE_SOURCE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina_v1": 3}
+# 键名必须是库里真实写的那个:`price_history.source` 只有 `sina`,没有 `sina_v1`。
+# 与 `engine/hog_money.PRICE_RANK` 同一份,改一处要改两处。
+PRICE_SOURCE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina": 3}
 
 # 各品种点值,与库里 instruments.price_multiplier 一致。加品种时在这里补一行。
 MULTIPLIERS = {"LH": 16.0, "FG": 20.0, "SA": 20.0, "JD": 10.0, "JM": 60.0,
@@ -58,9 +60,14 @@ def load_price(code: str = "LH") -> pd.DataFrame:
     """
     df = pd.read_csv(DATA / f"{code.lower()}_price.csv.gz", parse_dates=["trade_date"])
     df["_r"] = _rank(df["source"], PRICE_SOURCE_RANK)
-    df = (df.sort_values(["contract", "trade_date", "_r", "source"])
+    # 残缺行不许顶掉完整行,与 `engine/hog_money.clean_price` 同一条纪律(那边有
+    # 完整的来龙去脉):akshare_v1 的 447 行只有收/结算价、`open_interest` 全空,
+    # 优先级却压过新浪,于是大商所三天的行情被顶掉、主力序列整天消失。
+    # 回测与生产必须同源,这里不跟着改就会得出「那三天本来就没有信号」的假结论。
+    df["_no_oi"] = df["open_interest"].isna().astype(int)
+    df = (df.sort_values(["contract", "trade_date", "_no_oi", "_r", "source"])
             .drop_duplicates(["contract", "trade_date"], keep="first")
-            .drop(columns="_r"))
+            .drop(columns=["_r", "_no_oi"]))
     close = df["close_price"].replace(0, np.nan)
     df["px"] = close.fillna(df["settlement_price"])
     df["settle"] = df["settlement_price"].replace(0, np.nan)

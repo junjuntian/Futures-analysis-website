@@ -305,7 +305,11 @@ VARIETIES = {
         # 近月对次主力承压(REPORT_ROLL_PRESSURE_v1:dleft≤20 锚点秩相关 −0.53,
         # 散户高剩仓组价差 −3.14%/88% 届在跌;**机构版被否**——机构能慢慢移仓,
         # 不构成单边强制流,真正"必须交易且无承接"的是散户多头)。
-        # **只显示不进判据**:16 届样本、主断言被否后的第二枪、2609 刚出过反例。
+        # **2026-08-24 当天是「只显示不进判据」,当晚 DEC-137 就升成判据了** ——
+        # 这行旧话留到 2026-09-03 才被发现,别再照它判断生猪能不能亮 ⚡。
+        # 现行:criterion 缺省 True,判据窗口 = 缺省的 `5 < dleft <= anchor(20)`,
+        # 与 DEC-137 原文「近月剩 5~20 日」和 REPORT_ROLL_PRESSURE_v1 的 PIT 同口径。
+        # `window: 30` 只管这张表从第几天开始显示,**不再是判据窗口**。
         "roll_pressure": {"window": 30, "anchor": 20},
         # **策略切换为逐合约战役(campaign,DEC-133,2026-08-24 运营者拍板)**:
         # 左侧批次进场(逢跌加仓区间确认 + 价<=批次成本)x 聪明钱份额资格
@@ -721,7 +725,12 @@ def use(code: str) -> dict:
     return v
 
 SEAT_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sanhe": 3}
-PRICE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina_v1": 3}
+# 行情源可信度。**键名必须是库里真实写的那个字符串** —— 这张表原先写的是
+# `sina_v1`,而 `price_history.source` 里从来只有 `sina`,于是新浪一直落到
+# `_rank` 的兜底 4 档。今天排序结果不受影响(官方 0 < akshare 1 < 新浪),
+# 但一张对不上真实取值的查找表迟早会骗人。2026-09-03 生产实测全表只有六个源:
+# dce_official_history / shfe_official / czce_official / cffex_official / sina / akshare_v1。
+PRICE_RANK = {"akshare_v1": 1, "eastmoney_seats_v1": 2, "sina": 3}
 
 
 # ---------------------------------------------------------------- 数据
@@ -782,7 +791,24 @@ def clean_price(price: pd.DataFrame) -> pd.DataFrame:
     df = price.copy()
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     df["_r"] = _rank(df["source"].astype(str), PRICE_RANK)
-    df = (df.sort_values(["contract", "trade_date", "_r", "source"])
+    # **残缺行不许顶掉完整行** —— DEC-081 在 SQL 侧修过同一条纪律,引擎侧一直没修。
+    #
+    # 原写法是「先按来源优先级挑一行,再让下游自己发现它缺东西」。通道退役前后
+    # akshare_v1 留下 447 行只有收盘价与结算价、`open_interest` 全空,而它的优先级
+    # (1)压过新浪(3)。郑商所上期所有官方源(0)压着不受影响,**大商所没有官方
+    # 日更源**,于是 JD/JM/LH 在 2026-07-31 / 08-03 / 08-05 这三天被这批行顶掉,
+    # `main_series` 开头那句 `dropna(subset=["open_interest"])` 直接把整天丢掉 ——
+    # 那三天没有主力、没有收益、没有信号,**而且不报错**(DEC-145 附记的任务卡)。
+    #
+    # 判据只看 `open_interest`,不看四价:缺持仓量会让**整个交易日消失**,缺开盘价
+    # 只是那一格取不到值(无成交日本来就该缺,上期所有 10,094 行如此)。把完整性
+    # 定义放到刚好够用的地方,免得哪天让一个低优先级源顶掉官方行。
+    #
+    # 2026-09-03 生产实测:全表多源并存共 447 组,**全部**是这批 akshare_v1 行;
+    # 它们的收盘价与结算价与被顶掉的那行**逐行相等**(447/447)。所以这一改
+    # 不动任何价格,只是把 open/high/low/持仓量/成交量填回来。
+    df["_no_oi"] = df["open_interest"].isna().astype(int)
+    df = (df.sort_values(["contract", "trade_date", "_no_oi", "_r", "source"])
             .drop_duplicates(["contract", "trade_date"], keep="first"))
     # 收盘价 0 是「当天无成交」不是价格(DEC-073),用结算价兜底
     df["px"] = df["close_price"].replace(0, np.nan).fillna(df["settlement_price"])
@@ -1708,7 +1734,13 @@ def _f(v):
 
 def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFrame,
                           cfg: dict, vols: pd.DataFrame | None = None) -> dict:
-    """移仓强制流压力表(DEC-136)。**只显示,不进任何判据。**
+    """移仓强制流压力表(DEC-136 建表,DEC-137 升判据)。
+
+    **判据级(生猪/鸡蛋)与展示级(焦煤/铁矿石)共用这一份产物**,靠 `criterion`
+    分开:判据级的品种在窗口内高位会亮 ⚡ 并置 `suppress_long`,展示级的 ⚡ 恒不亮。
+    这行原本写着「只显示,不进任何判据」——那是 DEC-136 当天的话,DEC-137 之后
+    就不对了,却一直留到 2026-09-03 才被发现。**`window` 既是显示窗口又是判据
+    窗口,而历届分位取在 `anchor` 上,两者口径不一致(详见下面 entry_flag 那段)。**
 
     机制(REPORT_ROLL_PRESSURE_v1):散户多头集中在近月、窗口止点必须离场、
     小资金无承接 → 近月相对次主力被压。散户净多剩仓越大,交割前价差跌得越狠
@@ -1822,6 +1854,23 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     # -> ⚡压力进场·做多价差(多近月空次主力,被迫方到点买平托近月)。
     # 生猪不配 mirror:历届零净空样本,分支无从验证(REPORT_ROLL_PRESSURE_v1)。
     crit = cfg.get("criterion", True)
+    # ⚠ **判据用的窗口(`active`,剩≤window)和回测用的锚点(剩≤anchor)不是同一把
+    # 尺子** —— 2026-09-03 首亮前核对查明,尚未处置,等运营者拍板,别当没看见:
+    #
+    # · 历届分位永远取在**锚点**上(`dl <= anchor and dl > 5`,而且是在合约**自己的**
+    #   序列上找 —— 那时它早就不是主力了);当前值取在**今天**,只要主力剩 ≤window。
+    # · 生猪 16 届实测:进窗口那天的散户剩仓比锚点那天中位多 +1,556 手、比值中位
+    #   1.20、13/16 届更大。**拿偏大的当前值去比偏小的历届分布,天然容易亮。**
+    # · 照生产口径重放 PIT,触发的届会换人(生猪 LH2501→LH2503;鸡蛋研究 11 届 →
+    #   10 届,少了 JD2606/JD2609 两个镜像届、多了 JD2409)。
+    #   卡上印的 +2.93%/胜 86%(生猪)与 +3.04%/胜 82%(鸡蛋)是锚点口径跑出来的。
+    #
+    # **不要顺手把 window 收成 anchor 去"对齐"** —— 试过,那是错的:主力在 dleft
+    # 掉到 20 之前就换月了,生产实测主力剩余日 ≤20 的天数生猪只有 54/1370,后 8 届
+    # 里 7 届的主力期最小剩余日是 21~24。收窄等于把生猪的 ⚡ 从"每届都可能亮"
+    # 变成"八届难得亮一次"(LH2609 那 10 天会一天都不剩)。研究的锚点活在
+    # **换月之后的近月**上,生产的判据活在**主力**上,两者是不同的对象,
+    # 差的不是十天而是合约的角色 —— 要对齐得先决定对齐谁,那是规则决策。
     entry_flag = bool(active and level == "high" and crit
                       and cur_retail is not None and cur_retail > 0)
     entry_flag_long = bool(cfg.get("mirror") and active and level == "low" and crit
@@ -1833,6 +1882,10 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         # 镜像分支(DEC-145,只有配 mirror 的品种可能为 True):⚡做多价差。
         "entry_flag_long": entry_flag_long,
         "suppress_short": entry_flag_long,
+        # 本品种是不是判据级。前端此前对「高位但没亮 ⚡」一律写死「展示级,不进判据」,
+        # 那句话对焦煤/铁矿石成立、对生猪鸡蛋是假话(DEC-168 同款:模板里写死了
+        # 只对一部分品种成立的话)。给它一个能判的键,别让它猜。
+        "criterion": bool(crit),
         "main": main, "next": nxt, "days_left": dleft,
         "window": int(cfg.get("window", 30)),
         "retail_net": None if cur_retail is None else int(round(cur_retail)),

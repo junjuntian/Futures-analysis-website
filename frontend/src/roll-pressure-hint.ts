@@ -20,6 +20,11 @@ export interface RollPressureState {
   /** 镜像判据(DEC-145,只有鸡蛋配):净空剩仓处历届低位 = ⚡做多价差。老 JSON 没有。 */
   entry_flag_long?: boolean
   suppress_short?: boolean
+  /**
+   * 本品种是不是判据级(生猪/鸡蛋 true,焦煤/铁矿石 false)。老 JSON 没有这个键 ——
+   * 缺失时**不许**替它猜成展示级:那会把生猪说成「不进判据」(2026-09-03 抓到)。
+   */
+  criterion?: boolean
   main: string
   /** 次主力。鸡蛋主力序列不规则,当前届由引擎按量能选,选不出为 null。 */
   next: string | null
@@ -63,7 +68,7 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
     if (rp.entry_flag) {
       return { on: true, text: `${head} —— ⚡ 压力进场 · 做空价差(空 ${rp.main} 多 ${rp.next ?? '次主力'});窗口内做多价差信号按 ⚠ 对待` }
     }
-    return { on: true, text: `${head} —— 处历届高位,近月对次主力承压(展示级,不进判据)` }
+    return { on: true, text: `${head} —— 处历届高位,近月对次主力承压${whyNoBolt(rp)}` }
   }
   if (rp.level === 'low') {
     // 镜像分支(DEC-145,只有鸡蛋配 mirror):散户**净空**剩仓处历届低位 =
@@ -74,4 +79,20 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
     return { on: false, text: `${head} —— 处历届低位,历届低剩仓届价差常反涨,压力不明显` }
   }
   return { on: false, text: `${head} —— 处历届中位,压力一般` }
+}
+
+/**
+ * ⚡ 没亮的原因,只在「处历届高位」时补一句 —— 而且**只有确知是展示级品种时才补**。
+ *
+ * 原来这一句对所有品种写死「展示级,不进判据」。对焦煤/铁矿石成立,对生猪/鸡蛋
+ * 是假话:它们是判据级,只是当下没满足别的条件。今天生猪走不到这个分支(高位
+ * 必然伴随净剩仓为正,⚡ 就亮了),但只要哪个品种的历届 Q3 落到 0 以下就走得到,
+ * 到时页面会一本正经地说生猪不进判据 —— DEC-168 那次「模板里写死席位名」同款,
+ * 而且**单元测试照不到**:测的是有没有渲染,不是渲染成了谁。
+ *
+ * 老 JSON 没有 `criterion` 键(前端先于引擎上线的空窗期,DEC-089):什么都不补,
+ * 不许替它猜 —— 猜错方向就是上面那句假话。
+ */
+function whyNoBolt(rp: RollPressureState): string {
+  return rp.criterion === false ? '(展示级,不进判据)' : ''
 }

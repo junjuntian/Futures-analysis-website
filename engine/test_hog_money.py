@@ -427,6 +427,208 @@ class TestPastAcrossRollover:
         assert naive.max() > 0.0, "夹具没能重现跨合约假涨,上一条测试形同虚设"
 
 
+class Test压力判据:
+    """⚡ 压力进场判据(DEC-137 生猪 / DEC-145 鸡蛋)。此前**一个引擎测试都没有**。
+
+    钉住的是**现行**行为:⚡ 在展示窗口(`剩 ≤ window`)内且散户剩仓处历届高位时亮,
+    展示级品种(`criterion: False`)恒不亮。
+
+    **同时钉住一个已知的口径缺口**(2026-09-03 首亮前核对查明,未处置,等运营者
+    拍板):判据用的是主力的 `剩 ≤ window`(生猪 30/鸡蛋 25),历届分位却取在
+    `anchor`(20)上、而且是在合约**自己的**序列上找 —— 那时它已经不是主力了。
+    生猪 16 届实测,进窗口那天的散户剩仓比锚点那天中位多 +1,556 手(比值 1.20,
+    13/16 届更大),照生产口径重放 PIT 触发的届会换人(LH2501 → LH2503)。
+    **别顺手把 window 收成 anchor 去"对齐"**:主力在 dleft 掉到 20 之前就换月了
+    (生猪主力剩 ≤20 的天数只有 54/1370),收窄等于把 ⚡ 基本关掉 ——
+    `test_不许把判据窗口收成锚点` 就是拦这个的。
+    """
+
+    IDX = bdays("2026-03-02", 175)
+    CONTRACTS = ["LH2605", "LH2607", "LH2609", "LH2611"]
+
+    @classmethod
+    def _st(cls):
+        # 每个合约每天都有结算价,锚点按合约自己的序列找(与引擎口径一致)。
+        return pd.DataFrame({c: [1000.0 + i for i in range(len(cls.IDX))]
+                             for c in cls.CONTRACTS}, index=cls.IDX)
+
+    @classmethod
+    def _mkt(cls, today: pd.Timestamp):
+        """主力序列按 CONTRACTS 顺序推进,最后一届是 LH2611(当前届)。"""
+        idx = cls.IDX[cls.IDX <= today]
+        cut = max(1, len(idx) // 4)
+        mains = []
+        for i in range(len(idx)):
+            mains.append(cls.CONTRACTS[min(i // cut, len(cls.CONTRACTS) - 1)])
+        mains[-1] = "LH2611"
+        return pd.DataFrame(
+            {"main": mains,
+             "dleft": [H.days_to_window_end(m, d) for m, d in zip(mains, idx)]},
+            index=idx)
+
+    @classmethod
+    def _seat(cls, cur_net: float):
+        """三家散户:历届各 1000/2000/3000 手,当前届按参数给。"""
+        per = {"LH2605": 1000.0, "LH2607": 2000.0, "LH2609": 3000.0, "LH2611": cur_net}
+        rows = []
+        for c, tot in per.items():
+            for m in H.RULES["retail_seed"]:
+                for d in cls.IDX:
+                    rows.append({"member_key": m, "contract": c, "trade_date": d,
+                                 "net_off": tot / len(H.RULES["retail_seed"])})
+        return pd.DataFrame(rows)
+
+    @classmethod
+    def _vols(cls):
+        # 次主力按 20 日均量选:给更远的合约更大的量。
+        return pd.DataFrame({c: [100.0 * (i + 1)] * len(cls.IDX)
+                             for i, c in enumerate(cls.CONTRACTS)}, index=cls.IDX)
+
+    @classmethod
+    def _day_with_dleft(cls, want: int) -> pd.Timestamp:
+        for d in cls.IDX:
+            if H.days_to_window_end("LH2611", d) == want:
+                return d
+        raise AssertionError(f"夹具里没有剩 {want} 日的交易日")
+
+    @classmethod
+    def _payload(cls, dleft: int, cur_net: float = 50000.0, **over):
+        H.use("LH")
+        cfg = {**H.RULES["roll_pressure"], **over}
+        today = cls._day_with_dleft(dleft)
+        return H.roll_pressure_payload(cls._seat(cur_net), cls._mkt(today),
+                                       cls._st(), cfg, cls._vols())
+
+    def test_夹具确实造出了历届分布(self):
+        rp = self._payload(20)
+        assert len(rp["history"]) >= 3, f"历届只有 {len(rp['history'])} 届,断言不成立"
+        assert rp["level"] == "high", "当前届没被判成高位,后面的用例白测"
+
+    def test_窗口内高位就亮并置抑制位(self):
+        rp = self._payload(20)
+        assert rp["entry_flag"] is True
+        assert rp["suppress_long"] is True, "同窗口做多价差信号要降级挂 ⚠(DEC-137)"
+
+    def test_窗口外不亮(self):
+        """剩 42 日:表都还没开始显示,更不该有 ⚡。"""
+        rp = self._payload(42)
+        assert rp["active"] is False
+        assert rp["entry_flag"] is False
+
+    def test_展示窗口靠上那一段照样会亮(self):
+        """剩 28 日仍在窗口内 —— 这是现行口径,也是那个已知缺口的所在。
+
+        生猪 LH2609 在 2026-07-20~07-31(剩 30→21 日)真的这么亮过十个交易日,
+        而 REPORT_ROLL_PRESSURE_v1 的成绩是在剩 ≤20 的锚点上跑的。
+        **这条用例不是在为这个口径背书,是把它钉出来** —— 哪天运营者拍板改了,
+        这条会红,红了要连着改研究引证一起改,不许只把断言改绿。
+        """
+        rp = self._payload(28)
+        assert rp["active"] is True
+        assert rp["entry_flag"] is True
+
+    def test_不许把判据窗口收成锚点(self):
+        """主力在剩 20 日之前就换月了,照锚点收窄等于把 ⚡ 关掉。
+
+        生产实测:生猪主力剩 ≤20 的天数只有 54/1370,后 8 届里 7 届的主力期最小
+        剩余日是 21~24。2026-09-03 我按「与回测对齐」把窗口收成 anchor,LH2609
+        那十天会一天都不剩 —— 研究的锚点活在**换月之后的近月**上,判据活在**主力**
+        上,不是差十天,是不同的对象。这条用例守着这个坑。
+        """
+        H.use("LH")
+        cfg = H.RULES["roll_pressure"]
+        # 生猪那一届真实的主力剩余日区间(2026-07-09~07-31 实测 37→21),
+        # 全都在 anchor=20 之外 —— 收窄之后一天都不会亮。
+        assert cfg["window"] > cfg["anchor"], (
+            "window 被收到 anchor 了:主力走不到 dleft<=20,⚡ 会整个哑掉")
+        assert self._payload(21)["entry_flag"] is True, "换月前最后一天该还能亮"
+
+    def test_展示级品种永不亮但照标高位(self):
+        rp = self._payload(20, criterion=False)
+        assert rp["criterion"] is False
+        assert rp["entry_flag"] is False
+        assert rp["level"] == "high", "展示级只是不亮 ⚡,高位照标(REPORT_JM_THREE_GAPS_v1)"
+
+    def test_镜像分支只给配了mirror的品种(self):
+        """生猪历届零净空样本,镜像分支无从验证,不许亮(REPORT_ROLL_PRESSURE_v1)。"""
+        rp = self._payload(20, cur_net=-50000.0)
+        assert rp["level"] == "low"
+        assert rp["entry_flag_long"] is False, "生猪没配 mirror,做多价差 ⚡ 不该亮"
+        assert self._payload(20, cur_net=-50000.0, mirror=True)["entry_flag_long"] is True
+
+
+class Test残缺行不许顶掉完整行:
+    """多源并存时,缺 `open_interest` 的行不能因为来源优先级高就挑中它。
+
+    2026-07-31 / 08-03 / 08-05 三天,JD/JM/LH 的行情由 akshare_v1(只有收盘价与
+    结算价,持仓量全空)与新浪(四价持仓量俱全)各写一行。旧写法「先按来源挑一行、
+    再让下游发现它缺东西」挑中了 akshare,`main_series` 开头的
+    `dropna(subset=["open_interest"])` 于是把**整个交易日**丢掉 —— 那三天没有主力、
+    没有收益、没有信号,而且不报错(DEC-145 附记,DEC-081 在 SQL 侧修过同一条纪律)。
+
+    生产实测:全表 447 组多源并存全部是这批行,收盘价与结算价与被顶掉的那行
+    逐行相等(447/447),所以正确的选择只补字段、不改价格。
+    """
+
+    @staticmethod
+    def _rows(crippled: bool = True):
+        """五个交易日,中间那天(第 3 天)多出一行残缺的高优先级数据。"""
+        rows = []
+        for i, d in enumerate(bdays("2026-07-29", 5)):
+            px = 4000.0 + i
+            rows.append({"contract": "JD2610", "trade_date": d,
+                         "open_price": px - 5, "high_price": px + 8,
+                         "low_price": px - 9, "close_price": px,
+                         "settlement_price": px, "volume": 1000.0,
+                         "open_interest": 50000.0 + i, "source": "sina"})
+            if crippled and i == 2:
+                # akshare 那行:价格与新浪逐行相等,四价与持仓量全空。
+                rows.append({"contract": "JD2610", "trade_date": d,
+                             "open_price": np.nan, "high_price": np.nan,
+                             "low_price": np.nan, "close_price": px,
+                             "settlement_price": px, "volume": np.nan,
+                             "open_interest": np.nan, "source": "akshare_v1"})
+        return pd.DataFrame(rows)
+
+    def test_挑中的是有持仓量的那一行(self):
+        df = H.clean_price(self._rows())
+        assert len(df) == 5, "同合约同日应当收敛成一行"
+        assert df["open_interest"].notna().all(), "残缺行又把完整行顶掉了"
+        assert df["open_price"].notna().all()
+
+    def test_那一天不会从主力序列里消失(self):
+        mkt = H.main_series(H.clean_price(self._rows()))
+        assert len(mkt) == 5, f"少了 {5 - len(mkt)} 个交易日"
+
+    def test_反证_旧的排序真的会丢掉那一天(self):
+        """确认夹具能重现事故,否则上面两条测试形同虚设。"""
+        raw = self._rows()
+        raw["trade_date"] = pd.to_datetime(raw["trade_date"])
+        raw["_r"] = H._rank(raw["source"].astype(str), H.PRICE_RANK)
+        old = (raw.sort_values(["contract", "trade_date", "_r", "source"])
+                  .drop_duplicates(["contract", "trade_date"], keep="first"))
+        old["px"] = old["close_price"]
+        old["settle"] = old["settlement_price"]
+        assert old["open_interest"].isna().any(), "夹具没让 akshare 行胜出"
+        assert len(H.main_series(old)) == 4, "旧写法本该丢掉一天"
+
+    def test_只补字段不改价格(self):
+        """新旧两条路挑出来的价格必须逐日相等 —— 这一改不是在改口径。"""
+        with_bad = H.clean_price(self._rows(crippled=True))
+        without = H.clean_price(self._rows(crippled=False))
+        for col in ("settle", "px"):
+            assert list(with_bad[col]) == list(without[col]), f"{col} 被改动了"
+
+    def test_完整性不许盖过官方源(self):
+        """两行都齐全时,仍旧按来源可信度挑 —— 完整性只用来排除残缺行。"""
+        rows = self._rows(crippled=False)
+        official = rows.copy()
+        official["source"] = "dce_official_history"
+        official["settlement_price"] = official["settlement_price"] + 100.0
+        df = H.clean_price(pd.concat([rows, official], ignore_index=True))
+        assert (df["source"] == "dce_official_history").all(), "官方行被顶掉了"
+
+
 class TestPointInTime:
     """回榜反推 = 未来数据,当天那一格不许用(2026-08-21 修)。
 
