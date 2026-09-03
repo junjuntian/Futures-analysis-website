@@ -556,6 +556,22 @@ VARIETIES = {
                     "(2020-06 起,基准 −17.5%)(2026-08-22 换成本进场信号,闸门 4/5,"
                     "运营者知情破例上线,见 REPORT_COST_GATES_v1 与 DEC-113;"
                     "流量信号时代 111 笔 +47.0%/0.36/−61.8% 见 DEC-111)",
+        # **品种级公告(DEC-190)**:与 risk_flags 分开 —— 那条是门槛写死、数字实算、
+        # 不针对品种;这条是编辑判断(同 DEC-185 铁矿石那句)。写的都是**定档日的
+        # 检验结论**,不是会随数据漂的数(DEC-178)。
+        "notice": "这条线的成绩几乎全来自 2021 一年(+64.5%/夏普 1.85);"
+                  "去掉那一年,其余五年基本是平的。"
+                  "**近两年进场只有个位数笔**(2025 全年 4 笔、2026 至 09-02 共 6 笔)——"
+                  "不是规则变差,是**成本这把尺子在漂**:进场要「价格不劣于机构成本」,"
+                  "而「价格−成本」自 2023 年起单向走到 −2~−3% 并停在那里,"
+                  "它为正的天数从 2022 年的 62% 掉到 2025 年的 20%,门就常年关着"
+                  "(鸡蛋同一指标 2025 也漂过一年、2026 回来了 —— 那才是协整该有的样子,"
+                  "纯碱没有回来)。"
+                  "**后半样本夏普转负不是最近失效**:切点落在 2023/2024,那正是 DEC-113 "
+                  "上线时就写明会让利的两年,且三种切法的差异 t 全在 ±2 内,不显著;"
+                  "最近两年成本臂反而跑赢旧的流量臂。"
+                  "**结论:判据形态(拿两个水平量比大小)该改,参数不该动**,方向见 "
+                  "REPORT_SA_DECAY_v1,未立项前本页按知情破例对待,别照着今日信号加仓。",
     },
     # 鸡蛋、焦煤(2026-08-19 加)。两者的席位数据与生猪同一个起点 2023-08-11
     # (大商所),所以样本同样只有三年——**开关一律按各自的数据实测,不许照抄生猪**。
@@ -2072,10 +2088,38 @@ def risk_flags(strat: dict, closed: list, daily: pd.Series,
     return out
 
 
-def _caveats(strat: dict, bench: dict, closed: list) -> list[str]:
-    """边界说明。**凡是数字都从实参算**,不许写死——参数一改文案就会对不上。"""
+def _caveats(strat: dict, bench: dict, closed: list,
+             daily: pd.Series | None = None) -> list[str]:
+    """边界说明。**凡是数字都从实参算**,不许写死——参数一改文案就会对不上。
+
+    这条纪律写在这里,而**第一句话自己违反了十几天**(2026-09-03 查出):它写死了
+    「样本只有三年(2023-08 起,大商所席位数据起点),且只有一种市况——全程熊市」,
+    然后原样发给每一个品种。对生猪/鸡蛋/焦煤成立,对另外三个全是假的:
+    玻璃是郑商所、2013 年起 **13 年**样本(同一屏的 risk_flags 自己写着「13 年里有
+    4 年是亏的」),纯碱是郑商所、2020 年起 6 年,铁矿石 2023-08 起但同期价格是涨的。
+    「全程熊市」更是反的 —— 玻璃/纯碱/铁矿石同期「恒定满仓做空」都是**亏**的。
+    现在样本区间与市况都从实参算。
+    """
     shorts = [t for t in closed if t["side"] == "short"]
-    out = ["样本只有三年(2023-08 起,大商所席位数据起点),且**只有一种市况**——全程熊市。"]
+    out = []
+    if daily is not None and len(daily):
+        a, b = daily.index[0], daily.index[-1]
+        yrs = (b - a).days / 365.25
+        span = f"{a:%Y-%m} ~ {b:%Y-%m}"
+        head = (f"**样本只有 {yrs:.1f} 年**" if yrs < 4 else f"样本 {yrs:.1f} 年")
+        bc = bench.get("cum_pct")
+        # 市况用基准说话,不靠形容词。做空的复利收益不是买入持有取反(DEC-090 附注),
+        # 所以只说「做空赚/亏」与由此可推的价格方向,不去换算涨跌幅。
+        if bc is None:
+            tail = ""
+        elif bc >= 50:
+            tail = (f"同期「恒定满仓做空」{bc:+.1f}%,**这段基本是单边下跌,"
+                    f"只有一种市况** —— 策略没有在上涨行情里被检验过。")
+        elif bc <= -15:
+            tail = (f"同期「恒定满仓做空」{bc:+.1f}%(做空是亏的,即价格整体在涨)。")
+        else:
+            tail = f"同期「恒定满仓做空」{bc:+.1f}%,涨跌互见。"
+        out.append(f"{head}({span},起点是本品种席位数据的起点)。{tail}")
     if not RULES["long_enabled"]:
         out.append(
             "**做多支路已关闭**:回测里多头 15 笔逐笔累计 −1.5%、均值 −0.02%(抛硬币),"
@@ -2671,7 +2715,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         # 界面必须把这句话摆出来,不能让人以为多头信号和空头一样可信。
         # 数字一律**由实际回测结果生成**,不写死。上一版把 "+86.5% vs +99.2%"
         # 硬编码在这里,关掉做多支路后就成了错的——同一个事实两处维护,必栽。
-        "caveats": _caveats(_perf(strat_daily), _perf(bench_daily), closed),
+        "caveats": _caveats(_perf(strat_daily), _perf(bench_daily), closed, strat_daily),
         # 品种级公告(DEC-185):**编辑判断,不是算出来的**,与 risk_flags 分开。
         # 没配就是 None,前端不渲染。
         "notice": RULES.get("notice"),
@@ -2724,7 +2768,7 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
                     "campaign 策略多仓并行,资金曲线按「每仓 1 单位等权、当日取均值」;"
                     "历史表的逐笔收益是各仓自己的连乘,与该曲线口径不同,别互相求和核对。",
         }
-        payload["caveats"] = _caveats(_perf(c_daily), _perf(bench_daily), c_closed)
+        payload["caveats"] = _caveats(_perf(c_daily), _perf(bench_daily), c_closed, c_daily)
         payload["risk_flags"] = risk_flags(_perf(c_daily), c_closed, c_daily,
                                            _perf(bench_daily))
         # 进场条件:campaign 的观察列表里有就绪的流,报它的方向;没有就报最接近的原因。
