@@ -445,12 +445,15 @@ class Test压力判据:
 
     IDX = bdays("2026-03-02", 175)
     CONTRACTS = ["LH2605", "LH2607", "LH2609", "LH2611"]
+    # LH2701 只挂行情与成交量,**不进主力序列** —— 当前这一届还没有「继任」,
+    # 次主力得按量能选出来,引擎里那条 fallback 走的就是这条路。
+    QUOTED = CONTRACTS + ["LH2701"]
 
     @classmethod
     def _st(cls):
         # 每个合约每天都有结算价,锚点按合约自己的序列找(与引擎口径一致)。
         return pd.DataFrame({c: [1000.0 + i for i in range(len(cls.IDX))]
-                             for c in cls.CONTRACTS}, index=cls.IDX)
+                             for c in cls.QUOTED}, index=cls.IDX)
 
     @classmethod
     def _mkt(cls, today: pd.Timestamp):
@@ -482,7 +485,7 @@ class Test压力判据:
     def _vols(cls):
         # 次主力按 20 日均量选:给更远的合约更大的量。
         return pd.DataFrame({c: [100.0 * (i + 1)] * len(cls.IDX)
-                             for i, c in enumerate(cls.CONTRACTS)}, index=cls.IDX)
+                             for i, c in enumerate(cls.QUOTED)}, index=cls.IDX)
 
     @classmethod
     def _day_with_dleft(cls, want: int) -> pd.Timestamp:
@@ -504,44 +507,45 @@ class Test压力判据:
         assert len(rp["history"]) >= 3, f"历届只有 {len(rp['history'])} 届,断言不成立"
         assert rp["level"] == "high", "当前届没被判成高位,后面的用例白测"
 
-    def test_窗口内高位就亮并置抑制位(self):
+    def test_锚点区间内高位就亮并置抑制位(self):
         rp = self._payload(20)
+        assert rp["forced"] is True, "被迫方没认出来"
         assert rp["entry_flag"] is True
         assert rp["suppress_long"] is True, "同窗口做多价差信号要降级挂 ⚠(DEC-137)"
 
-    def test_窗口外不亮(self):
-        """剩 42 日:表都还没开始显示,更不该有 ⚡。"""
-        rp = self._payload(42)
-        assert rp["active"] is False
-        assert rp["entry_flag"] is False
+    def test_锚点区间之外不亮(self):
+        """剩 28 日:表已经在显示(≤30),但回测从没在这一段验过,不许亮。
 
-    def test_展示窗口靠上那一段照样会亮(self):
-        """剩 28 日仍在窗口内 —— 这是现行口径,也是那个已知缺口的所在。
-
-        生猪 LH2609 在 2026-07-20~07-31(剩 30→21 日)真的这么亮过十个交易日,
-        而 REPORT_ROLL_PRESSURE_v1 的成绩是在剩 ≤20 的锚点上跑的。
-        **这条用例不是在为这个口径背书,是把它钉出来** —— 哪天运营者拍板改了,
-        这条会红,红了要连着改研究引证一起改,不许只把断言改绿。
+        旧口径在这里会亮 —— 生猪 LH2609 在 2026-07-20~07-31(剩 30→21 日)真的
+        这么亮过十个交易日,而 REPORT_ROLL_PRESSURE_v1 的成绩是在剩 ≤20 上跑的。
+        DEC-189 把判据挪到被迫方近月的锚点区间之后,这一段归零。
         """
         rp = self._payload(28)
-        assert rp["active"] is True
-        assert rp["entry_flag"] is True
+        assert rp["active"] is True, "展示窗口该是开着的"
+        assert rp["forced"] is False
+        assert rp["entry_flag"] is False
+        assert rp["suppress_long"] is False
 
-    def test_不许把判据窗口收成锚点(self):
-        """主力在剩 20 日之前就换月了,照锚点收窄等于把 ⚡ 关掉。
+    def test_剩五日以内不亮(self):
+        """研究量的是「锚点 → 剩 5 日」那一段,剩 5 日内进场零验证覆盖。"""
+        rp = self._payload(4)
+        assert rp["forced"] is False
+        assert rp["entry_flag"] is False
 
-        生产实测:生猪主力剩 ≤20 的天数只有 54/1370,后 8 届里 7 届的主力期最小
-        剩余日是 21~24。2026-09-03 我按「与回测对齐」把窗口收成 anchor,LH2609
-        那十天会一天都不剩 —— 研究的锚点活在**换月之后的近月**上,判据活在**主力**
-        上,不是差十天,是不同的对象。这条用例守着这个坑。
+    def test_判据读的是锚点日那一格不是今天(self):
+        """两把尺子必须一样长:历届分位取在锚点,当前值也必须取在锚点。
+
+        这同时天然实现了 DEC-137 的「每届一次」—— 整段窗口里判据读同一个数,
+        不会因为剩仓当天抖一下就忽明忽灭。
         """
-        H.use("LH")
-        cfg = H.RULES["roll_pressure"]
-        # 生猪那一届真实的主力剩余日区间(2026-07-09~07-31 实测 37→21),
-        # 全都在 anchor=20 之外 —— 收窄之后一天都不会亮。
-        assert cfg["window"] > cfg["anchor"], (
-            "window 被收到 anchor 了:主力走不到 dleft<=20,⚡ 会整个哑掉")
-        assert self._payload(21)["entry_flag"] is True, "换月前最后一天该还能亮"
+        # 同一届的两天:锚点日(剩 20)与走到一半那天(剩 12)。
+        first, later = self._payload(20), self._payload(12)
+        assert first["forced"] and later["forced"]
+        assert first["anchor_date"] == later["anchor_date"], "锚点日应当是同一天"
+        assert later["days_left"] == 12 and first["days_left"] == 20, "夹具没走动"
+        assert later["retail_net"] == first["retail_net"], (
+            "同一届里判据用的数应当恒定(锚点日那一格),现在跟着今天在变")
+        assert later["retail_net_now"] is not None, "今天的剩仓要另给一个键,别和判据值混"
 
     def test_展示级品种永不亮但照标高位(self):
         rp = self._payload(20, criterion=False)

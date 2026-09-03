@@ -594,12 +594,14 @@ VARIETIES = {
             "note": ("散户(三家反向名单)带符号净剩仓到点必须离场:净多剩仓压近月、"
                      "净空剩仓托近月。鸡蛋 27 届实测(REPORT_JD_MODEL_v1,样本最大):"
                      "锚点剩≤20/≤10 日秩相关同号 −0.32,高剩仓组价差 −1.59%,低组 −0.42%。"
-                     "**判据(DEC-145,双向)**:窗口内净多剩仓≥历届 Q3 → ⚡做空价差"
-                     "(空近月多次主力);净空剩仓≤历届 Q1 → ⚡做多价差(多近月空次主力,"
-                     "鸡蛋散户 19% 的届净空,镜像分支全平台首证 4 触发 3 胜);每届一次,"
-                     "持到交割纪律日。PIT 回测触发 11 届 +3.04%/胜 82%,未触发届仅 "
-                     "+0.41%(区分度真)。**丑话**:单轮测试;+10.2/+9.4 两届贡献大头;"
-                     "镜像分支仅 4 例;证据等级同 DEC-137 知情上。"),
+                     "**判据(DEC-145 双向,DEC-189 与回测口径对齐)**:盯**被迫方近月**"
+                     "(剩 20 日内那个正被赶出场的合约),拿它**锚点日**那一格的散户剩仓"
+                     "比历届同一时点的分布 —— 两边同一把尺子。净多剩仓≥历届 Q3 → ⚡做空"
+                     "价差(空近月多次主力);净空剩仓≤历届 Q1 → ⚡做多价差(多近月空次"
+                     "主力,鸡蛋散户 19% 的届净空,镜像分支全平台首证);每届一次,持到"
+                     "交割纪律日。PIT 回测触发 11 届(6 空 5 多)胜 82%,未触发届原始价差"
+                     "仅 +0.41%(区分度真)。**丑话**:单轮测试;两届贡献大头;镜像分支"
+                     "样本少;证据等级同 DEC-137 知情上。"),
         },
         # 沉淀资金费率(DEC-151 补齐):常规 14%(=7%双边),临近交割 20%(jd2609 实测);
         # jd2610/2611 验证命中。
@@ -1737,10 +1739,14 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     """移仓强制流压力表(DEC-136 建表,DEC-137 升判据)。
 
     **判据级(生猪/鸡蛋)与展示级(焦煤/铁矿石)共用这一份产物**,靠 `criterion`
-    分开:判据级的品种在窗口内高位会亮 ⚡ 并置 `suppress_long`,展示级的 ⚡ 恒不亮。
+    分开:判据级的品种在锚点区间内高位会亮 ⚡ 并置 `suppress_long`,展示级的恒不亮。
     这行原本写着「只显示,不进任何判据」——那是 DEC-136 当天的话,DEC-137 之后
-    就不对了,却一直留到 2026-09-03 才被发现。**`window` 既是显示窗口又是判据
-    窗口,而历届分位取在 `anchor` 上,两者口径不一致(详见下面 entry_flag 那段)。**
+    就不对了,却一直留到 2026-09-03 才被发现。
+
+    **表述对象是「被迫方近月」,不是主力**(DEC-189):判据盯的是剩 `anchor` 日内
+    那个正被赶出场的合约,并且读它**锚点日**那一格的散户剩仓 —— 与历届分位取在
+    同一个时点,两把尺子这才一样长。`window`(30/25)从此只管这张表从第几天开始
+    显示。没有被迫方时退回主力,只作背景展示,⚡ 不可能亮。
 
     机制(REPORT_ROLL_PRESSURE_v1):散户多头集中在近月、窗口止点必须离场、
     小资金无承接 → 近月相对次主力被压。散户净多剩仓越大,交割前价差跌得越狠
@@ -1788,41 +1794,81 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
 
     # —— 历届锚点分布与逐届结果(全量重算,幂等)——
     anchor = int(cfg.get("anchor", 20))
-    hist = []
-    seen = set()
-    for c in dict.fromkeys(mkt["main"]):
-        if not isinstance(c, str) or c == main or c in seen:
-            continue
-        seen.add(c)
-        # 锚点按**合约自己的**行情序列算:dleft<=anchor 时主力早已换到下一届,
-        # 用主力时段找锚点一届都找不齐(首版就是这么错的,16 届只剩 6 届)。
+    crit_min = int(cfg.get("crit_min", 5))
+
+    def anchor_row(c: str, fallback_next: str | None = None) -> dict | None:
+        """合约 c 自己的锚点日、锚点日散户剩仓、到 dleft=crit_min 的价差变动。
+
+        锚点按**合约自己的**行情序列算:dleft<=anchor 时主力早已换到下一届,
+        用主力时段找锚点一届都找不齐(首版就是这么错的,16 届只剩 6 届)。
+        """
         if c not in st.columns:
-            continue
+            return None
         px_c = st[c].dropna()
+        if not len(px_c):
+            return None
         dl = pd.Series([days_to_window_end(c, t) for t in px_c.index], index=px_c.index)
-        hitrows = dl[(dl <= anchor) & (dl > 5)]
-        if not len(hitrows):
-            continue
-        t0 = hitrows.index[0]
+        band = dl[(dl <= anchor) & (dl > crit_min)]
+        if not len(band):
+            return None
+        t0 = band.index[0]
         r_net = retail_net_on(c, t0)
-        if r_net is None:
-            continue
-        # 历届次主力 = 主力序列里的继任(生猪/焦煤下等价于月份算术;鸡蛋序列不规则,
-        # 算术会指到从没当过主力的合约)。继任缺失(最新一届)退回算术。
-        n = nxt_of.get(c) or (next_main_contract(c, int(cfg["step"])) if "step" in cfg else None)
-        if n is None:
-            continue
+        # 次主力 = 主力序列里的继任(生猪/焦煤下等价于月份算术;鸡蛋序列不规则,
+        # 算术会指到从没当过主力的合约)。**最新一届还没有继任**(它就是序列末尾),
+        # 退回调用方给的 fallback(当前主力那条按量能/月份算术选出来的),
+        # 再退回月份算术。少了这一层,被迫方恰好还是主力时(鸡蛋常见)判据会哑掉。
+        n = (nxt_of.get(c) or fallback_next
+             or (next_main_contract(c, int(cfg["step"])) if "step" in cfg else None))
+        if r_net is None or n is None:
+            return None
         move_pct = None
         if n in st.columns:
             spread = (st[c] - st[n]).dropna()
-            endrows = dl[dl <= 5]
+            endrows = dl[dl <= crit_min]
             t1 = endrows.index[0] if len(endrows) else px_c.index[-1]
             s0, s1 = spread.asof(t0), spread.asof(t1)
             base = px_c.asof(t0)
             if np.isfinite(s0) and np.isfinite(s1) and np.isfinite(base) and base:
                 move_pct = round(float(s1 - s0) / float(base) * 100, 2)
-        hist.append({"main": c, "date": t0.strftime("%Y-%m-%d"),
-                     "retail_net": int(round(r_net)), "spread_move_pct": move_pct})
+        return {"main": c, "date": t0.strftime("%Y-%m-%d"), "t0": t0, "next": n,
+                "retail_net": int(round(r_net)), "spread_move_pct": move_pct}
+
+    # **被迫方近月**:今天正落在锚点区间 (crit_min, anchor] 里的那个合约(DEC-189)。
+    #
+    # 判据盯的是**它**,不是主力 —— 这是 2026-09-03 对齐回测口径时改的。研究量的
+    # 是「近月在自己最后 20 个交易日里,散户被迫离场把价差压成什么样」,而近月走到
+    # 那一段时**主力早换走了**(生猪主力剩余日 ≤20 的天数只有 54/1370)。旧写法拿
+    # 主力剩 ≤30 当判据窗口,等于在**换月之前**用一个偏大的当前值去比锚点上偏小的
+    # 历届分布,16 届实测中位偏大 +1,556 手、比值 1.20 —— 亮的不是回测那条规则。
+    #
+    # 生产实测:最近 260 个交易日里,同时有多个合约落在锚点区间的天数 = 0,
+    # 被迫方永远唯一。真撞上就取离交割最近的那个(dleft 最小),保证结果确定。
+    forced, forced_row = None, None
+    for c in sorted((x for x in mains_seq if x in st.columns),
+                    key=lambda x: days_to_window_end(x, d)):
+        if not (crit_min < days_to_window_end(c, d) <= anchor):
+            continue
+        px_c = st[c].dropna()
+        if not len(px_c) or d < px_c.index.min() or d > px_c.index.max():
+            continue
+        row = anchor_row(c, fallback_next=nxt if c == main else None)
+        if row is not None:
+            forced, forced_row = c, row
+            break
+
+    # 表述对象:有被迫方就是它,否则退回主力(此时只是背景展示,⚡ 不可能亮)。
+    subject = forced or main
+    subj_next = forced_row["next"] if forced_row else nxt
+    subj_dleft = days_to_window_end(subject, d) if forced else dleft
+
+    hist = []
+    for c in dict.fromkeys(mains_seq):
+        # **当前这一届不进自己的分布**(PIT):主力还没走到锚点、被迫方是被判的那个。
+        if c in (subject, main):
+            continue
+        row = anchor_row(c)
+        if row is not None:
+            hist.append({k: row[k] for k in ("main", "date", "retail_net", "spread_move_pct")})
     nets = sorted(h["retail_net"] for h in hist)
 
     def q(arr, pctl):
@@ -1830,22 +1876,26 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
 
     q1, med, q3 = q(nets, 25), q(nets, 50), q(nets, 75)
 
-    cur_retail = retail_net_on(main, d)
+    # **判据用的是锚点日那一格的值,不是今天的值** —— 与历届分布同一个时点取数,
+    # 两把尺子这才一样长。它同时天然实现了 DEC-137 的「每届一次」:整段窗口里
+    # 判据读的都是同一个数,不会因为剩仓当天抖一下就忽明忽灭。
+    retail_now = retail_net_on(subject, d)
+    cur_retail = float(forced_row["retail_net"]) if forced_row else retail_now
     level = None
     if cur_retail is not None and med is not None:
         level = ("high" if q3 is not None and cur_retail >= q3
                  else "low" if q1 is not None and cur_retail <= q1 else "mid")
     vr = None
-    if vols is not None and main in vols.columns:
-        vv = vols[main].dropna()
+    if vols is not None and subject in vols.columns:
+        vv = vols[subject].dropna()
         if len(vv) >= 20:
             vr = round(float(vv.rolling(5).mean().iloc[-1] / vv.rolling(20).mean().iloc[-1]), 2)
     spread_now = None
-    if main in st.columns and nxt in st.columns:
-        sn = (st[main] - st[nxt]).dropna()
+    if subject in st.columns and subj_next in st.columns:
+        sn = (st[subject] - st[subj_next]).dropna()
         if len(sn):
             spread_now = _f(sn.iloc[-1])
-    active = bool(dleft <= int(cfg.get("window", 30)))
+    active = bool(subj_dleft <= int(cfg.get("window", 30)))
     # 判据(DEC-137,运营者拍板):窗口内且散户剩仓处历届高位 -> ⚡压力进场·做空价差
     # (空近月多次主力);同窗口做多价差信号降级挂⚠。判据在引擎算,前端只渲染(DEC-104)。
     # criterion=False 的品种(焦煤)**展示级**:高位照标 level,⚡永不亮
@@ -1854,27 +1904,20 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
     # -> ⚡压力进场·做多价差(多近月空次主力,被迫方到点买平托近月)。
     # 生猪不配 mirror:历届零净空样本,分支无从验证(REPORT_ROLL_PRESSURE_v1)。
     crit = cfg.get("criterion", True)
-    # ⚠ **判据用的窗口(`active`,剩≤window)和回测用的锚点(剩≤anchor)不是同一把
-    # 尺子** —— 2026-09-03 首亮前核对查明,尚未处置,等运营者拍板,别当没看见:
+    # **判据 = 被迫方近月落在锚点区间 + 它在锚点日的剩仓处历届高位**(DEC-189,
+    # 2026-09-03 运营者拍板「肯定要对齐」)。与 REPORT_ROLL_PRESSURE_v1 /
+    # REPORT_JD_MODEL_v1 的 PIT 逐届对得上:生猪 7 届胜 86%、鸡蛋 11 届胜 82%,
+    # 触发的届与报告里那两串明细逐个相同。
     #
-    # · 历届分位永远取在**锚点**上(`dl <= anchor and dl > 5`,而且是在合约**自己的**
-    #   序列上找 —— 那时它早就不是主力了);当前值取在**今天**,只要主力剩 ≤window。
-    # · 生猪 16 届实测:进窗口那天的散户剩仓比锚点那天中位多 +1,556 手、比值中位
-    #   1.20、13/16 届更大。**拿偏大的当前值去比偏小的历届分布,天然容易亮。**
-    # · 照生产口径重放 PIT,触发的届会换人(生猪 LH2501→LH2503;鸡蛋研究 11 届 →
-    #   10 届,少了 JD2606/JD2609 两个镜像届、多了 JD2409)。
-    #   卡上印的 +2.93%/胜 86%(生猪)与 +3.04%/胜 82%(鸡蛋)是锚点口径跑出来的。
+    # 对齐的是**合约角色**,不是把窗口收窄十天 —— 收窄那条我试过并撤回了:
+    # 主力在剩余日掉到 20 之前就换月(生猪主力剩 ≤20 只有 54/1370 天),
+    # 照锚点收窄会把 ⚡ 直接关掉。研究盯的一直是**换月之后那个正在被赶出场的近月**。
     #
-    # **不要顺手把 window 收成 anchor 去"对齐"** —— 试过,那是错的:主力在 dleft
-    # 掉到 20 之前就换月了,生产实测主力剩余日 ≤20 的天数生猪只有 54/1370,后 8 届
-    # 里 7 届的主力期最小剩余日是 21~24。收窄等于把生猪的 ⚡ 从"每届都可能亮"
-    # 变成"八届难得亮一次"(LH2609 那 10 天会一天都不剩)。研究的锚点活在
-    # **换月之后的近月**上,生产的判据活在**主力**上,两者是不同的对象,
-    # 差的不是十天而是合约的角色 —— 要对齐得先决定对齐谁,那是规则决策。
-    entry_flag = bool(active and level == "high" and crit
+    # `window`(30/25)从此**只管这张表从第几天开始显示**,不再参与判据。
+    entry_flag = bool(forced is not None and level == "high" and crit
                       and cur_retail is not None and cur_retail > 0)
-    entry_flag_long = bool(cfg.get("mirror") and active and level == "low" and crit
-                           and cur_retail is not None and cur_retail < 0)
+    entry_flag_long = bool(cfg.get("mirror") and forced is not None and level == "low"
+                           and crit and cur_retail is not None and cur_retail < 0)
     return {
         "active": active,
         "entry_flag": entry_flag,
@@ -1886,8 +1929,16 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
         # 那句话对焦煤/铁矿石成立、对生猪鸡蛋是假话(DEC-168 同款:模板里写死了
         # 只对一部分品种成立的话)。给它一个能判的键,别让它猜。
         "criterion": bool(crit),
-        "main": main, "next": nxt, "days_left": dleft,
+        # 表述对象:被迫方近月(在锚点区间内)或退回主力。`forced` 为真时
+        # `retail_net` 是**锚点日**那一格的值(判据用的就是它),`retail_net_now`
+        # 才是今天的 —— 两个数不许混着读,所以分成两个键。
+        "forced": forced is not None,
+        "anchor_date": forced_row["date"] if forced_row else None,
+        "retail_net_now": None if retail_now is None else int(round(retail_now)),
+        "main": subject, "next": subj_next, "days_left": subj_dleft,
+        "main_contract": main, "main_days_left": dleft,
         "window": int(cfg.get("window", 30)),
+        "crit_min": crit_min,
         "retail_net": None if cur_retail is None else int(round(cur_retail)),
         "hist_q1": None if q1 is None else int(round(q1)),
         "hist_med": None if med is None else int(round(med)),
@@ -1912,12 +1963,16 @@ def roll_pressure_payload(seat: pd.DataFrame, mkt: pd.DataFrame, st: pd.DataFram
                  "近月相对次主力被压。历届锚点(剩≤%d日)实测:散户剩仓与其后价差变动"
                  "秩相关 −0.53,高剩仓组价差 −3.14%%(88%% 的届在跌),低剩仓组 −0.36%%;"
                  "散户没剩仓的届价差反而涨。**机构剩仓没有预测力(机构能慢慢移仓),"
-                 "别把这块改成看机构**。**DEC-137 已升级为判据**:窗口内散户剩仓处历届"
-                 "高位 → ⚡压力进场·做空价差(空近月多次主力),每届一次,持到交割纪律日;"
-                 "PIT 回测 7 触发/12 可判 +2.93%%/胜 86%%,未触发届 −0.88%%;同窗口做多"
-                 "价差信号按 ⚠ 对待。丑话:7 次触发 6 次集中在 2025-26(散户参与度抬升的"
-                 "时代效应),上一届 2609 亏过 −2.24%%;16 届样本,性质同 DEC-121 知情上。"
-                 % anchor),
+                 "别把这块改成看机构**。**DEC-137 升级为判据,DEC-189 与回测口径对齐**:"
+                 "盯的是**被迫方近月**(剩 %d 日内那个正被赶出场的合约,此时主力多半已换走),"
+                 "拿它**锚点日**那一格的散户剩仓比历届同一时点的分布 —— 两边同一把尺子;"
+                 "处历届高位 → ⚡压力进场·做空价差(空近月多次主力),每届一次,持到交割"
+                 "纪律日;同期做多价差信号按 ⚠ 对待。PIT 回测 7 触发 +2.93%%/胜 86%%。"
+                 "丑话:7 次触发 6 次集中在 2025-26(散户参与度抬升的时代效应),"
+                 "上一届 2609 亏过 −2.2%%;16 届样本,性质同 DEC-121 知情上。"
+                 # 两个 %d(锚点在文案里出现两次),参数得给两个 —— 少一个是
+                 # TypeError,而这段话只有判据级品种才走到,冒烟跑焦煤看不出来。
+                 % (anchor, anchor)),
     }
 
 
