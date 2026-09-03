@@ -14,7 +14,7 @@ import { computed, onMounted, ref } from 'vue'
 import { entryGateText } from '../entry-gate'
 import { failureHint } from '../fetch-hint'
 import { netChangeLabel } from '../netChangeLabel'
-import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
+import { netLots, rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { getSeatNetPosition, type MemberLeg as SeatCost,
   type FlowCode
 } from '../api'
@@ -1277,8 +1277,10 @@ const bySide = computed(() => {
         <b>移仓压力(散户强制流):</b>{{ rollPressureHint(data.roll_pressure).text }}
         <div class="roll-hist">
           <span class="gray">历届锚点(剩≤{{ data.roll_pressure.anchor }}日时散户剩仓 → 其后价差变动):</span>
+          <!-- 方向必须写出来:这个数是「多单 − 空单」,净多压近月、净空托近月,
+               只印绝对值或一个减号等于把信号的一半吞掉(2026-09-03 运营者指出)。 -->
           <span v-for="h in data.roll_pressure.history.slice(-8)" :key="h.main" class="chip">
-            {{ h.main }} {{ h.retail_net.toLocaleString('zh-CN') }}手
+            {{ h.main }} {{ netLots(h.retail_net) }}
             <i :class="pnlClass(h.spread_move_pct)">{{ h.spread_move_pct === null ? '—' : pct(h.spread_move_pct) }}</i>
           </span>
         </div>

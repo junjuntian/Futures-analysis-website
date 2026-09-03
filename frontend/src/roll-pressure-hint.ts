@@ -64,7 +64,31 @@ export interface RollPressureHint {
   text: string
 }
 
-const fmt = (v: number | null) => (v === null ? '—' : v.toLocaleString('zh-CN'))
+const abs = (v: number) => Math.abs(v).toLocaleString('zh-CN')
+
+/**
+ * 带符号的净剩仓 → **带方向**的中文。
+ *
+ * 这个数是「多单 − 空单」:正数净多、负数净空。**方向是信号的一部分,不是可以从
+ * 上下文猜的装饰**(PITFALLS 七·交易信号必须把方向写在标上,DEC-088 同族):
+ * 净多剩仓压近月 → ⚡做空价差;净空剩仓托近月 → ⚡做多价差(镜像分支)。
+ *
+ * 2026-09-03 运营者在套利监控上当场指出「这净剩仓 7,686 手,多单还是空单,写清楚」——
+ * 原来只印了 `toLocaleString`,正数看不出是多、负数只有一个不起眼的减号。
+ */
+export function netLots(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '—'
+  if (v === 0) return '净持平'
+  return `${v > 0 ? '净多' : '净空'} ${abs(v)} 手`
+}
+
+/** 历届四分位区间,按 Q1→Q3 的原顺序给,同向就只写一次方向。 */
+function netRange(lo: number, hi: number): string {
+  if ((lo >= 0) === (hi >= 0)) {
+    return `${lo >= 0 ? '净多' : '净空'} ${abs(lo)}~${abs(hi)} 手`
+  }
+  return `${netLots(lo)} ~ ${netLots(hi)}`
+}
 
 export function rollPressureHint(rp: RollPressureState): RollPressureHint {
   if (!rp.active) {
@@ -74,15 +98,15 @@ export function rollPressureHint(rp: RollPressureState): RollPressureHint {
     }
   }
   const q = rp.hist_q1 !== null && rp.hist_q3 !== null
-    ? `,历届锚点四分位 ${fmt(rp.hist_q1)}~${fmt(rp.hist_q3)} 手`
+    ? `,历届锚点四分位 ${netRange(rp.hist_q1, rp.hist_q3)}`
     : ''
   // 有被迫方时,判据读的是**锚点日**那一格,不是今天 —— 必须写明是哪天的数,
   // 否则页面上摆着一个和「今」对不上的数字,读的人只会以为哪里算错了(DEC-189)。
   const judged = rp.forced && rp.anchor_date
-    ? `锚点日(${rp.anchor_date})散户净剩仓 ${fmt(rp.retail_net)} 手` +
+    ? `锚点日(${rp.anchor_date})散户${netLots(rp.retail_net)}` +
       (rp.retail_net_now !== undefined && rp.retail_net_now !== null
-        ? `,今 ${fmt(rp.retail_net_now)} 手` : '')
-    : `散户净剩仓 ${fmt(rp.retail_net)} 手`
+        ? `,今 ${netLots(rp.retail_net_now)}` : '')
+    : `散户${netLots(rp.retail_net)}`
   const who = rp.forced ? `被迫方 ${rp.main}` : rp.main
   const head = `${who} 剩 ${rp.days_left} 日,${judged}${q}`
   if (rp.level === 'high') {

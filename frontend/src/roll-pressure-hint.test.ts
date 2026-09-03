@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { rollPressureHint, type RollPressureState } from './roll-pressure-hint'
+import { netLots, rollPressureHint, type RollPressureState } from './roll-pressure-hint'
 
 // 被迫方近月 LH2609 正在被赶出场,对手腿是接任的 LH2611(DEC-189)。
 const base: RollPressureState = {
@@ -19,12 +19,33 @@ describe('rollPressureHint(DEC-136/137/189)', () => {
     expect(h.text).toContain('被迫方 LH2609')
     expect(h.text).toContain('12,000')
   })
+  it('净剩仓必须写出多空方向 —— 只印数字等于把信号的一半吞掉', () => {
+    // 2026-09-03 运营者:「这净剩仓 7,686 手,多单还是空单,写清楚」。
+    // 净多压近月(⚡做空价差)、净空托近月(⚡做多价差),方向是信号的一部分。
+    expect(netLots(7686)).toBe('净多 7,686 手')
+    expect(netLots(-23929)).toBe('净空 23,929 手')
+    expect(netLots(0)).toBe('净持平')
+    expect(netLots(null)).toBe('—')
+    const h = rollPressureHint(base)
+    expect(h.text).toContain('散户净多 12,000 手')
+    expect(h.text).toContain('今 净多 9,100 手')
+    expect(h.text).not.toMatch(/净剩仓 [\d,]+ 手/)
+  })
+  it('历届四分位跨零时,两端各写各的方向', () => {
+    // 鸡蛋历届锚点有净空的届(JD2608 −23,929),Q1 为负、Q3 为正时
+    // 写成「1,164~8,419」会让人以为都是净多。
+    const h = rollPressureHint({ ...base, hist_q1: -5431, hist_q3: 8419 })
+    expect(h.text).toContain('净空 5,431 手 ~ 净多 8,419 手')
+    // 同向就只写一次方向,别啰嗦。
+    const same = rollPressureHint({ ...base, hist_q1: 1164, hist_q3: 8419 })
+    expect(same.text).toContain('净多 1,164~8,419 手')
+  })
   it('判据读的是锚点日那一格,页面必须写明是哪天的数', () => {
     // 判据值(锚点日)和今值不是一个数。只印一个、又不说是哪天的,
     // 读的人拿它去和净持仓页对,永远对不上(DEC-179 同族)。
     const h = rollPressureHint(base)
     expect(h.text).toContain('锚点日(2026-08-03)')
-    expect(h.text).toContain('今 9,100 手')
+    expect(h.text).toContain('今 净多 9,100 手')
   })
   it('没有被迫方时说清判据还没起算,不许说成「展示级」', () => {
     // 生猪剩 30~21 日这一段:表已经在显示,但判据只看被迫方近月剩 ≤20 那一段。
@@ -67,7 +88,7 @@ describe('rollPressureHint(DEC-136/137/189)', () => {
     expect(h.on).toBe(true)
     expect(h.text).not.toContain('展示级')
     expect(h.text).not.toContain('还没到')
-    expect(h.text).toContain('散户净剩仓 12,000 手')
+    expect(h.text).toContain('散户净多 12,000 手')
   })
   it('未到窗口不亮,写清还剩几天', () => {
     const h = rollPressureHint({ ...base, active: false, days_left: 53 })
