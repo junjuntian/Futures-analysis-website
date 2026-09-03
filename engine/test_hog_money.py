@@ -1168,7 +1168,7 @@ class TestFixedGroup:
         H.use("LH")
         assert H.RULES["fixed_members"] == ["国泰君安", "东证期货", "东吴期货", "永安期货", "南华期货"]
         # 焦煤 DEC-125 固定过一天又改回滚动(DEC-126):固定名单弱的主因是失去按年重选
-        for code in ("FG", "SA", "JD", "JM"):
+        for code in ("FG", "SA", "JD", "JM", "I"):
             H.use(code)
             assert H.RULES["fixed_members"] is None, code
 
@@ -1263,13 +1263,17 @@ class TestGroupOverrides:
         expect = {
             # 玻璃两条:DEC-129 华泰→国泰君安、DEC-196 海通→瑞达,都到 2026-10-01 失效。
             "FG": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}},
-                   {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}}],
+                   {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
+                   {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}}],
             "SA": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}}],
+            "JD": [{"since": "2026-09-03", "replace": {"宏源期货": "东证期货"}}],
         }
         for code, want in expect.items():
             H.use(code)
             assert H.RULES["group_overrides"] == want, code
-        for code in ("LH", "JD", "JM", "I"):
+        # 生猪是固定名单,点名换人走不到它(run_one 只在滚动分支应用),
+        # 所以它必须是 None —— 想换生猪的人得直接改 fixed_members(DEC-199)。
+        for code in ("LH", "JM", "I"):
             H.use(code)
             assert H.RULES["group_overrides"] is None, code
 
@@ -1279,7 +1283,7 @@ class TestGroupOverrides:
         2026-09-03 落 DEC-195 时本地快照只到 09-02,跑出来阵容没变 —— 一眼看去
         像是配置没写对。**这类失效不报错**,所以钉一条:since 必须落在工作日上。
         """
-        for code in ("FG", "SA"):
+        for code in ("FG", "SA", "JD"):
             H.use(code)
             for o in H.RULES["group_overrides"]:
                 d = pd.Timestamp(o["since"])
