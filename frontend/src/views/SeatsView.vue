@@ -446,10 +446,48 @@ async function loadPnl() {
   }
 }
 
-/** 条形宽度:同卡内按绝对值最大的那根归一。 */
+/**
+ * 排序键(DEC-198)。默认仍是总盈亏 —— 但**总盈亏榜基本是手数榜**:
+ * 玻璃国泰君安总盈亏第 1(18.2 亿)里 20.0 亿是方向暴露(日均 82,967 手,
+ * 是海通的 6.8 倍),它自己调仓那部分倒亏 1.79 亿、择时排 75/82。
+ * 所以把每手与择时并排给出来,并且**能按它们排** —— 只给列不给排序,
+ * 人还是会照着默认那一列做判断。
+ */
+const pnlSort = ref<'pnl' | 'per_lot' | 'alpha'>('pnl')
+const PNL_SORT_LABEL = {
+  pnl: '总盈亏',
+  per_lot: '每手收益',
+  alpha: '择时收益',
+} as const
+
+function pnlMetric(item: PnlBreakdownItem, key: 'pnl' | 'per_lot' | 'alpha' = pnlSort.value) {
+  const raw = key === 'pnl' ? item.pnl : key === 'per_lot' ? item.per_lot : item.alpha
+  return raw === undefined || raw === '' ? null : Number(raw)
+}
+
+/** 按当前排序键重排;取不到该指标的(老 JSON、未配点值)一律沉底,不参与比较。 */
+function pnlSorted(items: PnlBreakdownItem[]) {
+  return [...items].sort((a, b) => {
+    const va = pnlMetric(a)
+    const vb = pnlMetric(b)
+    if (va === null && vb === null) return a.key.localeCompare(b.key)
+    if (va === null) return 1
+    if (vb === null) return -1
+    return vb - va || a.key.localeCompare(b.key)
+  })
+}
+
+/** 条形宽度:同卡内按**当前排序那一列**的绝对值最大者归一 —— 条要和排序说同一件事。 */
 function pnlBarWidth(items: PnlBreakdownItem[], item: PnlBreakdownItem) {
-  const max = Math.max(...items.map((x) => Math.abs(Number(x.pnl) || 0)), 1)
-  return `${Math.max(2, (Math.abs(Number(item.pnl) || 0) / max) * 100).toFixed(1)}%`
+  const max = Math.max(...items.map((x) => Math.abs(pnlMetric(x) ?? 0)), 1)
+  return `${Math.max(2, (Math.abs(pnlMetric(item) ?? 0) / max) * 100).toFixed(1)}%`
+}
+
+/** 每手收益:数小(几万元/手),不套「万」的缩写,直接给整数。 */
+function perLotText(v: string | undefined) {
+  if (v === undefined || v === '') return '—'
+  const n = Number(v) || 0
+  return `${n >= 0 ? '+' : '-'}${Math.abs(Math.round(n)).toLocaleString('zh-CN')}`
 }
 
 function pnlText(value: string) {
@@ -1316,10 +1354,15 @@ const latestDailyPnl = computed(() => {
         <template #header>
           <span class="pnl-card-title">{{ card.title }} 盈亏分布(估)</span>
           <span class="pnl-card-sub">{{ pnlStart }} 至 {{ pnlEnd }} · 逐日盯市 · 掉榜沿用上次持仓</span>
+          <el-radio-group v-model="pnlSort" size="small" class="pnl-sort">
+            <el-radio-button v-for="(label, key) in PNL_SORT_LABEL" :key="key" :value="key">
+              {{ label }}
+            </el-radio-button>
+          </el-radio-group>
         </template>
         <el-empty v-if="!card.items.length" description="区间内没有可计算的持仓" />
         <div v-else class="pnl-rows">
-          <div v-for="item in card.items" :key="item.key" class="pnl-row">
+          <div v-for="item in pnlSorted(card.items)" :key="item.key" class="pnl-row">
             <span class="pnl-key">{{ card.mode === 'instrument' ? item.key : varietyLabel(item.key) }}</span>
             <div class="pnl-bar-track">
               <div
@@ -1330,6 +1373,26 @@ const latestDailyPnl = computed(() => {
             </div>
             <span class="pnl-value" :class="Number(item.pnl) >= 0 ? 'red' : 'green'">
               {{ item.no_multiplier ? '未配点值' : pnlText(item.pnl) }}
+            </span>
+            <!-- 每手与择时(DEC-198):总盈亏基本是手数榜,这两列才是「同手数谁强」
+                 与「扣掉方向暴露还剩什么」。老 JSON 没有这几个键时显示 —— 。 -->
+            <span
+              v-if="!item.no_multiplier"
+              class="pnl-alt"
+              :title="`日均 ${item.avg_lots ?? '—'} 手 · 每手 = 盈亏 / 日均仓位`"
+            >
+              每手 <b :class="Number(item.per_lot) >= 0 ? 'red' : 'green'">{{
+                perLotText(item.per_lot)
+              }}</b>
+            </span>
+            <span
+              v-if="!item.no_multiplier"
+              class="pnl-alt"
+              :title="`择时收益 = 盈亏 − 方向暴露(${pnlText(item.beta ?? '0')});方向暴露 = 恒定持有它自己平均仓位能赚到的钱`"
+            >
+              择时 <b :class="Number(item.alpha) >= 0 ? 'red' : 'green'">{{
+                item.alpha === undefined ? '—' : pnlText(item.alpha)
+              }}</b>
             </span>
             <span class="pnl-days">
               <template v-if="!item.no_multiplier">
@@ -1884,6 +1947,17 @@ h2 .muted {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
+.pnl-sort { margin-left: 12px; }
+/* 每手/择时两列:定宽右对齐,免得逐行长短不一把「天数」那列顶来顶去。 */
+.pnl-alt {
+  min-width: 108px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--tv-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pnl-alt b { font-weight: 600; }
 .pnl-rows {
   display: flex;
   flex-direction: column;

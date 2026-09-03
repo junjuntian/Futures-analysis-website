@@ -406,6 +406,14 @@ export interface PnlBreakdownItem {
   known_days: number
   filled_days: number
   no_multiplier: boolean
+  /** 区间日均绝对净持仓(手)。老 JSON 没有这三个键(DEC-089 空窗期)。 */
+  avg_lots?: string
+  /** 每手收益(元/手)= 盈亏 / 日均仓位。日均为 0 时是空串。 */
+  per_lot?: string
+  /** 择时收益 = 盈亏 − 方向暴露。`pnl = alpha + beta` 恒成立(后端同源同批点算的)。 */
+  alpha?: string
+  /** 方向暴露 = 恒定持有自身平均仓位能赚到的钱。 */
+  beta?: string
 }
 
 export interface SeatPnlResponse {

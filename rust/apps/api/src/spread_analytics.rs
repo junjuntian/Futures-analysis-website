@@ -1937,6 +1937,16 @@ pub struct PnlBreakdownItem {
     pub filled_days: i64,
     /// 品种没有配置点值:盈亏算不了(如实列出而不是悄悄消失)。
     pub no_multiplier: bool,
+    /// 区间日均绝对净持仓(手)。`每手收益 = 盈亏 / 它`,把仓位规模归一掉。
+    pub avg_lots: String,
+    /// **每手收益**(元/手):归一到同样手数之后谁赚得多 —— 运营者 2026-09-03 提的口径,
+    /// 比总盈亏更贴平台用法(平台跟的是方向,仓位自己定)。日均仓位为 0 时给空串。
+    pub per_lot: String,
+    /// **择时收益** = 盈亏 − 方向暴露,方向暴露 = 该席位自身平均净持仓恒定持有能赚到的钱。
+    /// 单边行情里「谁赚得多」测的是仓位与方向,不是本事;扣掉它才看得见择时。
+    pub alpha: String,
+    /// 方向暴露(= 盈亏 − 择时收益),摆出来才看得出总盈亏是靠什么来的。
+    pub beta: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1966,7 +1976,7 @@ fn interval_mtm_pnl(
     factor: Decimal,
     start: Date,
     end: Date,
-) -> Option<(Decimal, i64, i64)> {
+) -> Option<PnlParts> {
     let mut by_contract: BTreeMap<&str, BTreeMap<Date, Decimal>> = BTreeMap::new();
     for row in rows {
         let net = parse_decimal(&row.long_position) - parse_decimal(&row.short_position);
@@ -1979,6 +1989,12 @@ fn interval_mtm_pnl(
     let mut known: BTreeSet<Date> = BTreeSet::new();
     let mut filled: BTreeSet<Date> = BTreeSet::new();
     let mut any = false;
+    // 每手收益与择时收益的分量。**必须与 total 走同一批点** —— 少一格多一格,
+    // 页面上「总盈亏 = 择时 + 方向暴露」就对不上,那种自相矛盾比不显示更坏。
+    let mut sum_dpx = Decimal::ZERO;
+    let mut sum_prev_net = Decimal::ZERO;
+    let mut sum_abs_net = Decimal::ZERO;
+    let mut n_points: i64 = 0;
     for (contract, on_board) in &by_contract {
         let Some(px) = settlements.get(*contract) else {
             continue;
@@ -2013,17 +2029,71 @@ fn interval_mtm_pnl(
                 settlement: Some(*settle),
             });
         }
-        for point in build_cost_series(&points, factor) {
+        for (i, point) in build_cost_series(&points, factor).iter().enumerate() {
             if point.trade_date >= start
                 && point.trade_date <= end
                 && let Some(pnl) = point.daily_pnl
             {
                 total += pnl;
                 any = true;
+                // daily_pnl =(今结算 − 昨结算)× 昨净持仓 × 点值。把这三个分量在
+                // **同一格**上攒起来:dpx 用来算方向暴露,|昨净持仓| 用来算每手。
+                if i > 0
+                    && let (Some(prev_net), Some(prev_px), Some(px)) = (
+                        points[i - 1].net_position,
+                        points[i - 1].settlement,
+                        points[i].settlement,
+                    )
+                {
+                    sum_dpx += (px - prev_px) * factor;
+                    sum_prev_net += prev_net;
+                    sum_abs_net += prev_net.abs();
+                    n_points += 1;
+                }
             }
         }
     }
-    any.then_some((total, known.len() as i64, filled.len() as i64))
+    if !any {
+        return None;
+    }
+    let (alpha, beta, avg_lots) = if n_points > 0 {
+        let n = Decimal::from(n_points);
+        let mean_net = sum_prev_net / n;
+        let beta = mean_net * sum_dpx; // 恒定持有自身均值仓位能赚到的钱
+        (total - beta, beta, sum_abs_net / n)
+    } else {
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+    };
+    Some(PnlParts {
+        pnl: total,
+        known_days: known.len() as i64,
+        filled_days: filled.len() as i64,
+        alpha,
+        beta,
+        avg_lots,
+    })
+}
+
+/// `interval_mtm_pnl` 的返回值。四个数**同源同批点**,所以
+/// `pnl = alpha + beta` 恒成立,页面并排摆不会自相矛盾。
+struct PnlParts {
+    pnl: Decimal,
+    known_days: i64,
+    filled_days: i64,
+    alpha: Decimal,
+    beta: Decimal,
+    avg_lots: Decimal,
+}
+
+impl PnlParts {
+    /// 每手收益(元/手)。日均仓位为 0 时不给数 —— 除以 0 造出来的大数比空着更坏。
+    fn per_lot(&self) -> String {
+        if self.avg_lots > Decimal::ZERO {
+            (self.pnl / self.avg_lots).round_dp(0).to_string()
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[utoipa::path(
@@ -2153,18 +2223,24 @@ pub async fn query_seat_pnl_breakdown(
                     known_days: 0,
                     filled_days: 0,
                     no_multiplier: true,
+                    avg_lots: String::new(),
+                    per_lot: String::new(),
+                    alpha: String::new(),
+                    beta: String::new(),
                 });
                 continue;
             };
-            if let Some((pnl, known, filled)) =
-                interval_mtm_pnl(&member_rows, &settlements, factor, start, end)
-            {
+            if let Some(parts) = interval_mtm_pnl(&member_rows, &settlements, factor, start, end) {
                 items.push(PnlBreakdownItem {
                     key: name.to_string(),
-                    pnl: pnl.round_dp(0).to_string(),
-                    known_days: known,
-                    filled_days: filled,
+                    pnl: parts.pnl.round_dp(0).to_string(),
+                    known_days: parts.known_days,
+                    filled_days: parts.filled_days,
                     no_multiplier: false,
+                    avg_lots: parts.avg_lots.round_dp(0).to_string(),
+                    per_lot: parts.per_lot(),
+                    alpha: parts.alpha.round_dp(0).to_string(),
+                    beta: parts.beta.round_dp(0).to_string(),
                 });
             }
         }
@@ -2197,20 +2273,26 @@ pub async fn query_seat_pnl_breakdown(
                     known_days: 0,
                     filled_days: 0,
                     no_multiplier: true,
+                    avg_lots: String::new(),
+                    per_lot: String::new(),
+                    alpha: String::new(),
+                    beta: String::new(),
                 });
                 continue;
             };
             let settlements = load_settlement_matrix(&state, &context, &code, request_id).await?;
             let refs: Vec<&database::spread_analytics::SeatNetPositionRow> = rows.iter().collect();
-            if let Some((pnl, known, filled)) =
-                interval_mtm_pnl(&refs, &settlements, factor, start, end)
-            {
+            if let Some(parts) = interval_mtm_pnl(&refs, &settlements, factor, start, end) {
                 items.push(PnlBreakdownItem {
                     key: code,
-                    pnl: pnl.round_dp(0).to_string(),
-                    known_days: known,
-                    filled_days: filled,
+                    pnl: parts.pnl.round_dp(0).to_string(),
+                    known_days: parts.known_days,
+                    filled_days: parts.filled_days,
                     no_multiplier: false,
+                    avg_lots: parts.avg_lots.round_dp(0).to_string(),
+                    per_lot: parts.per_lot(),
+                    alpha: parts.alpha.round_dp(0).to_string(),
+                    beta: parts.beta.round_dp(0).to_string(),
                 });
             }
         }
@@ -4208,7 +4290,7 @@ mod tests {
         px.insert(date!(2026 - 08 - 22), Decimal::from(106));
         let mut settlements = BTreeMap::new();
         settlements.insert("FG2701".to_string(), px);
-        let (pnl, known, filled) = interval_mtm_pnl(
+        let parts = interval_mtm_pnl(
             &refs,
             &settlements,
             Decimal::from(5),
@@ -4216,9 +4298,68 @@ mod tests {
             date!(2026 - 08 - 22),
         )
         .expect("interval should produce pnl");
-        assert_eq!(pnl, Decimal::from(300), "150 + 150");
-        assert_eq!(known, 2, "8/20 与 8/22 真实上榜");
-        assert_eq!(filled, 1, "8/21 掉榜,按沿用推算");
+        assert_eq!(parts.pnl, Decimal::from(300), "150 + 150");
+        assert_eq!(parts.known_days, 2, "8/20 与 8/22 真实上榜");
+        assert_eq!(parts.filled_days, 1, "8/21 掉榜,按沿用推算");
+        // 三个数同源同批点:8/21 用昨仓 10、8/22 用沿用的 10,均值也是 10,
+        // 所以这一段全是方向暴露、择时收益恰好为 0 —— 仓位一动没动就该是这样。
+        assert_eq!(parts.avg_lots, Decimal::from(10), "两格昨仓都是 10");
+        assert_eq!(parts.beta, Decimal::from(300));
+        assert_eq!(parts.alpha, Decimal::ZERO, "没调过仓 = 没有择时收益");
+        assert_eq!(
+            parts.pnl,
+            parts.alpha + parts.beta,
+            "总盈亏必须恒等于 择时 + 方向暴露,否则页面上并排摆会自相矛盾"
+        );
+        assert_eq!(parts.per_lot(), "30", "300 元 / 日均 10 手");
+    }
+
+    /// 调过仓才会有择时收益:同样的日均仓位,在涨的那天多拿、跌的那天少拿。
+    #[test]
+    fn timing_alpha_is_the_part_that_a_constant_position_cannot_earn() {
+        use time::macros::date;
+        let mk = |d: Date, long: &str| database::spread_analytics::SeatNetPositionRow {
+            member_key: "东证期货".to_string(),
+            contract: "FG2701".to_string(),
+            trade_date: d,
+            long_position: long.to_string(),
+            short_position: "0".to_string(),
+            settlement: None,
+            inferred: false,
+        };
+        // 价格:100 → 110(涨)→ 105(跌)。仓位:涨之前拿 20 手,跌之前减到 5 手。
+        // 实际   = (110-100)*20 + (105-110)*5  = +175
+        // 恒定持有均值 12.5 手 = (10 + -5) * 12.5 = +62.5
+        // → 择时收益 +112.5,每手 175/12.5 = 14。
+        //
+        // **空仓那天不计入**:净持仓为 0 时 `daily_pnl` 是 None,那一格既不进盈亏
+        // 也不进均值 —— 所以这里两天都留着仓,否则测的是「只有一格」的退化情形。
+        let rows = [
+            mk(date!(2026 - 08 - 20), "20"),
+            mk(date!(2026 - 08 - 21), "5"),
+            mk(date!(2026 - 08 - 22), "5"),
+        ];
+        let refs: Vec<&database::spread_analytics::SeatNetPositionRow> = rows.iter().collect();
+        let mut px: BTreeMap<Date, Decimal> = BTreeMap::new();
+        px.insert(date!(2026 - 08 - 20), Decimal::from(100));
+        px.insert(date!(2026 - 08 - 21), Decimal::from(110));
+        px.insert(date!(2026 - 08 - 22), Decimal::from(105));
+        let mut settlements = BTreeMap::new();
+        settlements.insert("FG2701".to_string(), px);
+        let parts = interval_mtm_pnl(
+            &refs,
+            &settlements,
+            Decimal::ONE,
+            date!(2026 - 08 - 20),
+            date!(2026 - 08 - 22),
+        )
+        .expect("interval should produce pnl");
+        assert_eq!(parts.pnl, Decimal::from(175));
+        assert_eq!(parts.avg_lots, Decimal::new(125, 1), "日均 12.5 手");
+        assert_eq!(parts.beta, Decimal::new(625, 1), "恒定持有 12.5 手能赚到的");
+        assert_eq!(parts.alpha, Decimal::new(1125, 1), "择时挣出来的那部分");
+        assert_eq!(parts.pnl, parts.alpha + parts.beta);
+        assert_eq!(parts.per_lot(), "14", "175 / 12.5");
     }
 
     /// 席位首次上榜之前的日子不参与:没有「上次持仓」可沿用,不能凭空造仓。
