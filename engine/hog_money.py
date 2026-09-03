@@ -3215,8 +3215,25 @@ IH_FOLLOW = {
 }
 
 
-def _ih_state(net_by_day, idx, carry):
-    """把某席位的逐日净持仓变成在场状态向量(±1/0)。与 research 完全同一套。"""
+def _ih_state(net_by_day, idx, carry, expiry: pd.Series | None = None):
+    """把某席位的逐日净持仓变成在场状态向量(±1/0)。
+
+    掉榜之后沿用 `carry` 个交易日 —— 龙虎榜是前 20 截断,掉榜 ≠ 清仓(DEC-048)。
+
+    **但沿用不许跨过持仓所在合约的交割日**(DEC-191,2026-09-03 抓到):
+    `expiry` 给的是每个上榜日「该席位当天持仓所在合约中最晚的那个最后交易日」,
+    沿用到那天为止。合约还在交易时这道上限不起作用,所以它只管一种情形 ——
+    **持仓的那个合约已经退市了**,那笔持仓在物理上就不可能还存在。
+
+    实抓:摩根大通 2026-07-21~08-20 那 697 手空单**全在 IH2608 上**,IH2608 于
+    08-21 交割(最后行情日就是它),而看板照旧显示「在场 · 净空 697 手」,
+    还要一路显示到沿用期用完。硬证据是 697 手**高于当时每一个合约的空头榜门槛**
+    (IH2609 空 501 / IH2612 空 220 / IH2703 空 51)—— 它若还拿着,不可能不在榜上。
+    这一轮因此被记成「仍在场 −0.32%」,真实是「08-21 交割了结 +1.66%」,
+    **连符号都是反的**,而它正是十二年样本的第 14 个数据点。
+
+    影响面(生产数据实测):摩根状态向量 107/2770 天变化、高盛 34 天、中财 0 天。
+    """
     st = np.zeros(len(idx))
     if not len(net_by_day):
         return st
@@ -3227,6 +3244,11 @@ def _ih_state(net_by_day, idx, carry):
             continue
         nxt = locs[i + 1] if i + 1 < len(locs) else None
         end = nxt if (nxt is not None and nxt - lo <= carry) else min(lo + carry + 1, len(idx))
+        if expiry is not None:
+            e = expiry.get(net_by_day.index[i])
+            if e is not None and pd.notna(e):
+                # 交割日当天仍算在场,之后不算;至少留自己上榜的那一天。
+                end = min(end, max(int(idx.searchsorted(e, side="right")), lo + 1))
         st[lo:end] = sgn[i]
     return st
 
@@ -3318,12 +3340,22 @@ def ih_follow_payload(price_raw, seat_raw) -> dict | None:
     ret = mkt["ret_open"].fillna(0.0).values
     n = len(idx)
 
+    # 每个合约的最后行情日 —— 沿用期的硬上限靠它(DEC-191)。
+    last_td = price.groupby("contract")["trade_date"].max()
+
     states, seats_out = {}, []
     for m in cfg["seats"]:
         g = seat[seat["member_key"] == m]
         d = g.groupby("trade_date")["net_off"].sum()
         d = d[d.index.isin(idx) & (d != 0)]
-        st = _ih_state(d, idx, cfg["carry"])
+        # 该席位每个上榜日持仓所在合约里**最晚**的那个最后交易日:
+        # 只要还有一个合约在交易,沿用就仍然站得住;全退市了才判离场。
+        gc = g[g["contract"].notna()]
+        exp = (gc.groupby("trade_date")["contract"]
+                 .apply(lambda cs: max((last_td.get(c, pd.NaT) for c in set(cs)),
+                                       default=pd.NaT))
+               if len(gc) else None)
+        st = _ih_state(d, idx, cfg["carry"], exp)
         states[m] = st
         on = bool(st[-1] != 0)
         # 本轮:从当前这一段的起点算起

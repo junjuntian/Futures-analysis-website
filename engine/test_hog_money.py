@@ -1476,6 +1476,41 @@ class TestIH核心席位看板:
         q = H.ih_follow_payload(self._price(idx), split)
         assert q["state"] == "split" and q["on_count"] == 2, q
 
+    def test_沿用不许跨过持仓合约的交割日(self):
+        """DEC-191:掉榜沿用 20 日,但持仓那个合约退市了就必须停。
+
+        实抓:摩根大通 2026-07-21~08-20 的 697 手空单全在 IH2608 上,IH2608 于
+        08-21 交割,看板照旧显示「在场·净空 697 手」,还要显示到沿用期用完。
+        硬证据是 697 手高于当时**每一个**合约的空头榜门槛(2609 空 501 /
+        2612 空 220 / 2703 空 51)—— 还拿着就不可能不在榜上。
+        这一轮因此被记成「仍在场 −0.32%」,真实是「交割了结 +1.6%」,**符号是反的**。
+        """
+        idx = pd.to_datetime(["2026-08-24", "2026-08-25", "2026-08-26",
+                              "2026-08-27", "2026-08-28"])
+        H.VARIETIES["IH"]["replay_start"] = "2026-08-24"
+        px = self._price(idx)
+        # 老合约 IH2608 只活到 08-25 就退市;新合约 IH2609 全程都在。
+        old = px.copy()
+        old["contract"] = "IH2608"
+        old = old[old["trade_date"] <= "2026-08-25"]
+        price = pd.concat([px, old], ignore_index=True)
+
+        def rows(contract):
+            return pd.DataFrame([{
+                "instrument": "IH", "contract": contract, "is_variety_total": "f",
+                "trade_date": "2026-08-25", "rank_type": "short", "member": "摩根大通",
+                "quantity": 697, "change": 0, "source": "cffex_seats_v1"}])
+
+        # 持仓挂在**已退市**的 IH2608 上:08-25 之后不许再沿用。
+        dead = H.ih_follow_payload(price, rows("IH2608"))
+        assert dead["on_count"] == 0, "合约都交割了还说在场"
+        assert not dead["seats"][0]["on"]
+
+        # 同一天、同样掉榜,但持仓挂在仍在交易的 IH2609 上 → 沿用照旧生效。
+        alive = H.ih_follow_payload(price, rows("IH2609"))
+        assert alive["on_count"] == 1, "合约还在交易,沿用不该被砍掉"
+        assert alive["seats"][0]["on"] and alive["seats"][0]["side"] == "short"
+
     def test_无人在场就是观望不是空仓信号(self):
         idx = self._world()
         H.VARIETIES["IH"]["replay_start"] = "2026-08-24"
