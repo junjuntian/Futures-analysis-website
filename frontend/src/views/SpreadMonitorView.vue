@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { bounceHint, pickBounceDay, type BounceDay, type BounceState } from '../bounce-hint'
-import { basisTone } from '../basisTone'
+import { basisConventional, basisPercentile, basisTone } from '../basisView'
 import { visibleItems } from '../monitorVisibility'
 import { rollPressureHint, type RollPressureState } from '../roll-pressure-hint'
 import { useRouter } from 'vue-router'
@@ -504,18 +504,20 @@ async function loadFundFlow() {
 }
 
 const BASIS_HINT =
-  // **2026-09-03 订正:这句话原来是反的。** 原文写「基差 = 现货 − 主力期货,
-  // 为正是期货贴水」,而上游(生意社经 akshare)给的 dom_basis 是
-  // **主力期货 − 现货**:生猪 11,740 − 10,970 = +770、玻璃 961 − 956 = +5、
-  // 纯碱 1,056 − 1,087 = −31,三个品种逐个对得上。**正 = 期货升水**,
-  // 与原文说的正好相反,颜色也跟着标反了(disc/prem 已一并对调)。
-  '现货价与主力基差(DEC-074)。基差 = **主力期货 − 现货**:为正是期货**升水**' +
-  '(期货更贵),为负是期货**贴水**。**跨期套利的两条腿相对同一个现货,所以两个' +
-  '基差之差就是价差本身**——这里给的是水平与历史分位,是产业背景不是进场信号。' +
-  '苹果没有现货报价,那几行不显示。跨品种组合按第一条腿的品种给。' +
-  '**现货口径 = 生意社(多地加权均价,带小数)**,与行情软件按单一基准地报的价' +
-  '(如同花顺「沙河地区」)不是同一个数——2026-09-03 实测纯碱两者差 89 元(8.9%),' +
-  '**比较升贴水时以你自己软件的基准地为准**,这里只用来看历史分位。'
+  // **2026-09-03 两次订正的最终状态。** 第一次:页面原文把口径写成「现货 − 期货」
+  // 而库里存的是「期货 − 现货」,方向词与颜色全反(生猪 7% 的升水读成利多)。
+  // 第二次:我把文案改成对齐库里原值 —— 数是对了,却与**行业惯例和运营者手边的
+  // 同花顺**相反(同花顺:焦煤 2054 − 1686.5 = +367.5)。最终按惯例来,
+  // 显示层统一取负,分位跟着翻(见 basisView.ts)。
+  '现货价与主力基差(DEC-074/186)。**基差 = 现货 − 主力期货**(行业惯例,与同花顺' +
+  '期货通同号):为正是期货**贴水**(现货更贵),为负是期货**升水**。' +
+  '**跨期套利的两条腿相对同一个现货,所以两个基差之差就是价差本身**——' +
+  '这里给的是水平与历史分位,是产业背景不是进场信号。苹果没有现货报价,那几行不显示。' +
+  '跨品种组合按第一条腿的品种给。' +
+  '**现货口径 = 生意社多地加权均价**,与行情软件按单一基准地报的价不是同一个数:' +
+  '2026-09-03 实测**纯碱 1,087 vs 沙河 998(+8.9%)、焦煤 2,349 vs 甘其毛都 2,054' +
+  '(+14.4%)、鸡蛋 5,140 vs 德州 4,850(+6.0%)**,我们这条系统性偏高。' +
+  '**要判升贴水以你自己软件的基准地为准**,这里的水平只做参考,真正可用的是历史分位。'
 
 const REVERT_HINT =
   '同月份组合（同品种 + 同月份对 + 同年差）跨年拼起来的样本，不是这一组合自己的胜率。' +
@@ -540,9 +542,10 @@ function num(text: string) {
   const value = Number(text)
   return Number.isFinite(value) ? value.toLocaleString('zh-CN') : text
 }
-function signedSpread(text: string) {
+function signedSpread(text: string | number | null) {
+  if (text === null) return '—'
   const value = Number(text)
-  if (!Number.isFinite(value)) return text
+  if (!Number.isFinite(value)) return String(text)
   return value > 0 ? `+${value.toLocaleString('zh-CN')}` : value.toLocaleString('zh-CN')
 }
 
@@ -892,14 +895,15 @@ function openDetail(item: SpreadMonitorItem) {
                 <span class="src">生意社均价</span>
                 <template v-if="item.basis.dominant_basis !== null">
                   <span class="k">主力基差</span>
-                  <!-- basis = 期货 − 现货,**正 = 升水**(2026-09-03 订正,原来标反了)。
-                       映射提进 basisTone.ts —— 模板表达式测不到,而这正是标反的那处。 -->
+                  <!-- 显示按行业惯例(现货 − 期货),与同花顺同号;库里存的是反的,
+                       转换与配色都在 basisView.ts 里,模板不自己算 —— 这处标反过两次。 -->
                   <span class="v" :class="basisTone(item.basis.dominant_basis) ?? ''">
-                    {{ signedSpread(item.basis.dominant_basis) }}
+                    {{ signedSpread(basisConventional(item.basis.dominant_basis)) }}
                   </span>
                 </template>
-                <span class="pctile" v-if="item.basis.percentile !== null">
-                  历年 {{ (Number(item.basis.percentile) * 100).toFixed(0) }}% 位
+                <!-- 分位也在 basisView 里跟着翻:数取了负,分位不翻会自相矛盾。 -->
+                <span class="pctile" v-if="basisPercentile(item.basis.percentile) !== null">
+                  历年 {{ (basisPercentile(item.basis.percentile)! * 100).toFixed(0) }}% 位
                 </span>
               </div>
             </el-tooltip>
