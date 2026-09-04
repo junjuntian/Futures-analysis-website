@@ -2981,9 +2981,10 @@ FOLLOW_PLAN = {"capital": 500000.0, "use": 0.35, "margin": {"FG": 0.09, "SA": 0.
 def follow_plan_payload(cfg: dict | None = None) -> dict | None:
     """「永安跟随策略」建议仓位(DEC-154,展示级,**不是下单指令**)。
 
-    按永安**当日真实结构**等比缩放到运营者的资金:FG 取它净多最大的合约作多腿、
-    净空最大的作空腿,SA 取绝对值最大的合约代表纯碱那条腿;比例照抄它的手数比,
-    再按保证金预算缩放。永安改仓位,这里第二天自动跟着改。
+    按永安**当日真实结构**等比缩放到运营者的资金:**一个品种一条腿,共两条** ——
+    合约取当日主力(FG2701 / SA2701),手数比照**该品种全合约净持仓合计**
+    (2026-09-04 改,此前是三条腿、比例照单方向合计,见下面选腿处的注释)。
+    永安改仓位,这里第二天自动跟着改。
 
     只在**对冲态**(FG 净方向与 SA 净方向相反)给方案 —— 同向时它不是在做对冲簿,
     这套配比没有意义(DEC-142 同一个状态门)。
@@ -3002,31 +3003,39 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
                 "sa_net": int(round(sa_net)), "legs": [],
                 "note": "永安当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
                         "等它回到一多一空的对冲态再看。"}
-    # 选腿:**手数比例照各方向的合计**(永安的纯碱空单分散在 7 个合约,只取单一最大腿
-    # 会把对冲腿低估一半、净敞口从 8% 虚增到 44%);**下单合约优先当日主力**
-    # (运营者 2026-08-28:「纯碱空腿选 SA2701」——主力盘口最深,挂得上才谈得上筹码),
-    # 主力上没有该方向持仓时才退回持仓最大的那个合约。
-    # 实际效果:FG 多腿=主力 FG2701(永安多单也压在这)、FG 空腿=主力方向不对→退回
-    # 最大空腿 FG2611、SA 腿=主力 SA2701。三条腿 = FG 顺向 / FG 反向 / SA。
+    # 选腿:**一个品种一条腿,合约取当日主力,手数比照该品种的全合约净持仓合计**
+    # (运营者 2026-09-04:「显示 2 个主力合约,后面跟永安的净持仓」)。
+    #
+    # **这是对上一版三条腿的改写,理由记清楚免得被当成回退**:
+    # 上一版是 FG 顺向腿 / FG 反向腿 / SA 腿,把永安在玻璃内部的跨月对冲
+    # (FG2701 多 36,598 对 FG2611 空 24,464)也摆出来了。摆出来不算错,但这张卡问的是
+    # 「跟着永安做,我该拿什么仓位」—— 而**玻璃内部那两条腿是互相抵消的**,
+    # 跟随者只需要复制净下来的方向。收成净持仓之后,玻璃腿从「顺向合计 36,598」
+    # 变成「净 28,846」,与净持仓页、组内各家卡**同一个口径**,三处不再各说各话。
+    #
+    # 仍然保留的两条老规矩:
+    #   * **下单合约优先当日主力**(运营者 2026-08-28:主力盘口最深,挂得上才谈得上
+    #     筹码);主力当天没数据时退回该品种绝对值最大的合约;
+    #   * 只在对冲态给方案(上面 `fg_net * sa_net >= 0` 那道门)。
+    #
+    # **口径提醒(有意为之)**:`member_net` 是**全合约合计**,而前端那个 `@成本`
+    # 是**主力合约**的成本 —— 两个数的范围不一样。运营者 2026-09-04 明确要这个组合
+    # (「净持仓 28,846 手多单,均价显示 2701 主力合约 932」),不是漏改。
     mains = {k: (PAIR_EXTRA[k].get("main").iloc[-1]
                  if PAIR_EXTRA[k].get("main") is not None and len(PAIR_EXTRA[k]["main"]) else None)
              for k in ("FG", "SA")}
 
-    def pick(d, sign, kind=None):
+    def pick_main(kind):
         m = mains.get(kind)
-        if isinstance(m, str) and d.get(m, 0.0) * sign > 0:
-            return m                                        # 主力方向对得上,优先主力
-        cand = {c: v for c, v in d.items() if v * sign > 0}
-        return max(cand, key=lambda c: abs(cand[c])) if cand else None
+        if isinstance(m, str) and m in px[kind]:
+            return m                                        # 主力有价,直接用
+        d = {c: v for c, v in ya[kind].items() if c in px[kind]}
+        return max(d, key=lambda c: abs(d[c])) if d else None
 
-    def tot(d, sign):
-        return sum(v for v in d.values() if v * sign > 0)
-    fg_sign = 1.0 if fg_net > 0 else -1.0
     legs_raw = []
-    for c, k, w in ((pick(ya["FG"], fg_sign, "FG"), "FG", tot(ya["FG"], fg_sign)),
-                    (pick(ya["FG"], -fg_sign, "FG"), "FG", tot(ya["FG"], -fg_sign)),
-                    (pick(ya["SA"], -fg_sign, "SA"), "SA", sum(ya["SA"].values()))):
-        if c and c in px[k] and w:
+    for k, w in (("FG", fg_net), ("SA", sa_net)):
+        c = pick_main(k)
+        if c and w:
             legs_raw.append((c, k, w))
     if len(legs_raw) < 2:
         return None
@@ -3058,7 +3067,9 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
         legs.append({"contract": c, "instrument": k,
                      "side": "long" if sd > 0 else "short", "lots": lots,
                      "px": round(px[k][c], 1),
-                     "member_net": int(round(ya[k][c])),
+                     # **全合约合计,不是这个合约上的**(运营者 2026-09-04)——
+                     # 与净持仓页、组内各家卡同口径。玻璃 +28,846 / 纯碱 −46,359。
+                     "member_net": int(round(fg_net if k == "FG" else sa_net)),
                      "value_wan": round(val / 1e4, 1)})
     if not legs:
         return None
@@ -3066,10 +3077,21 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
                  for lg in legs if lg["instrument"] == "FG")
     sa_val = sum((1 if lg["side"] == "long" else -1) * lg["lots"] * cfg["mult"]["SA"] * lg["px"]
                  for lg in legs if lg["instrument"] == "SA")
+    # 两个品种各按自己的最后一天取仓位。正常情况下同一天;采集进度不一致时不一样,
+    # 那时这张卡是拿两天的仓位拼出来的比例 —— 必须说出来(DEC-099 那条「让它露馅」)。
+    dates = {k: PAIR_EXTRA[k].get("date") for k in ("FG", "SA")}
+    stale = None
+    if all(dates.values()) and dates["FG"] != dates["SA"]:
+        stale = ("⚠️ 两条腿不是同一天的仓位:玻璃取 %s、纯碱取 %s(采集进度不一致)。"
+                 "手数比例按两天拼出来的,**别照这个下单**,等两边补齐再看。"
+                 % (dates["FG"].strftime("%m-%d"), dates["SA"].strftime("%m-%d")))
     return {
         "state": "opposite", "member": "永安期货",
         "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
         "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)),
+        "fg_date": dates["FG"].strftime("%Y-%m-%d") if dates["FG"] is not None else None,
+        "sa_date": dates["SA"].strftime("%Y-%m-%d") if dates["SA"] is not None else None,
+        "stale": stale,
         "legs": legs,
         "margin": int(round(margin)), "margin_pct": round(margin / cfg["capital"] * 100, 1),
         "notional_wan": round(notional / 1e4),
@@ -3853,6 +3875,12 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                  if len(_rows) else pd.Series(dtype=float))
         PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
                             "ret_open": mkt["ret_open"], "main": mkt["main"],
+                            # 这个品种取数用的是哪一天(2026-09-04 加)。跟随卡按
+                            # **各品种自己的最后一天**取仓位,两边采集进度不一致时
+                            # 会静悄悄地混用两个日期 —— 本地快照就撞上过一次
+                            # (FG 到 09-01、SA 到 09-02,差 3,469 手查了半天)。
+                            # 存下来让 follow_plan 能把它标出来,别静静地错。
+                            "date": _d,
                             # 跟随方案(DEC-154)要逐腿:最新日永安在各合约的净持仓 + 结算价。
                             "ya_all": {c: float(v) for c, v in _last.items()
                                        if isinstance(c, str) and np.isfinite(v) and v},

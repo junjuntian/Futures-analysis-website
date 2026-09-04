@@ -1682,3 +1682,93 @@ def test_notice_is_separate_from_risk_flags():
     flags = H.risk_flags({"sharpe": 0.5, "cum": 10.0}, [], pd.Series([0.01] * 30),
                          {"sharpe": 0.4, "cum": 8.0})
     assert all("第二引擎" not in f["text"] for f in flags)
+
+
+# 2026-09-04(运营者:「显示 2 个主力合约,后面跟永安的净持仓」):
+# 玻纯跟随卡从三条腿(FG 顺向 / FG 反向 / SA)收成两条腿(一个品种一条),
+# 手数比照**全合约净持仓合计**,`member_net` 也换成全合约合计。
+class Test玻纯跟随卡收成两条腿:
+    """夹具用 2026-09-04 生产库实测的永安持仓,数字可以拿纸笔核。
+
+    FG 全合约净 = +28,846(净多)、SA = −46,359(净空);主力 FG2701 / SA2701。
+    """
+
+    YA_FG = {"FG2609": -30.0, "FG2610": 6870.0, "FG2611": -24464.0,
+             "FG2612": 7457.0, "FG2701": 36598.0, "FG2702": -83.0,
+             "FG2703": 101.0, "FG2705": 2397.0}
+    YA_SA = {"SA2609": -580.0, "SA2610": -2442.0, "SA2611": -13836.0,
+             "SA2612": -2498.0, "SA2701": -16183.0, "SA2702": -918.0,
+             "SA2703": -185.0, "SA2705": -9717.0}
+    PX_FG = {c: 932.0 for c in YA_FG}
+    PX_SA = {c: 1063.0 for c in YA_SA}
+
+    def _pair(self, fg_main="FG2701", sa_main="SA2701",
+              fg_date="2026-09-04", sa_date="2026-09-04"):
+        import pandas as pd
+        H.PAIR_EXTRA.clear()
+        for k, ya, px, main, d in (("FG", self.YA_FG, self.PX_FG, fg_main, fg_date),
+                                   ("SA", self.YA_SA, self.PX_SA, sa_main, sa_date)):
+            H.PAIR_EXTRA[k] = {"ya_all": dict(ya), "px_all": dict(px),
+                               "main": pd.Series([main]),
+                               "date": pd.Timestamp(d)}
+
+    def test_只出两条腿_一个品种一条(self):
+        self._pair()
+        p = H.follow_plan_payload()
+        assert p["state"] == "opposite", p
+        assert len(p["legs"]) == 2, p["legs"]
+        assert [lg["instrument"] for lg in p["legs"]] == ["FG", "SA"]
+        # 合约必须是主力,不是"该方向最大的那个合约"
+        assert [lg["contract"] for lg in p["legs"]] == ["FG2701", "SA2701"]
+        assert [lg["side"] for lg in p["legs"]] == ["long", "short"]
+
+    def test_席位持仓显示全合约合计而不是该合约(self):
+        self._pair()
+        p = H.follow_plan_payload()
+        got = {lg["instrument"]: lg["member_net"] for lg in p["legs"]}
+        # **全合约合计**:玻璃 +28,846 / 纯碱 −46,359
+        assert got["FG"] == 28846, got
+        assert got["SA"] == -46359, got
+        # 这两个数必须和卡头的 fg_net/sa_net 是同一个东西
+        assert p["fg_net"] == 28846 and p["sa_net"] == -46359, p
+        # **不能**是主力合约上的持仓(那是 +36,598 / −16,183)
+        assert got["FG"] != 36598 and got["SA"] != -16183, got
+
+    def test_手数比照净持仓比例(self):
+        self._pair()
+        p = H.follow_plan_payload()
+        lots = {lg["instrument"]: lg["lots"] for lg in p["legs"]}
+        # 目标比 46,359 / 28,846 = 1.607;取整后允许 ±8% 偏差
+        want = 46359 / 28846
+        got = lots["SA"] / lots["FG"]
+        assert abs(got / want - 1) < 0.08, (lots, got, want)
+
+    def test_两腿不同日要告警(self):
+        self._pair(sa_date="2026-09-03")
+        p = H.follow_plan_payload()
+        assert p["stale"], "两条腿取数日期不一致时必须给出告警"
+        assert "09-04" in p["stale"] and "09-03" in p["stale"], p["stale"]
+        assert p["fg_date"] == "2026-09-04" and p["sa_date"] == "2026-09-03"
+
+    def test_同日不告警(self):
+        self._pair()
+        p = H.follow_plan_payload()
+        assert p["stale"] is None, p["stale"]
+
+    def test_主力当天没价就退回最大腿(self):
+        # 主力取不到价(比如当天没数据)时不能整张卡消失,退回绝对值最大的合约
+        self._pair(fg_main="FG9999")
+        p = H.follow_plan_payload()
+        assert len(p["legs"]) == 2, p["legs"]
+        assert p["legs"][0]["contract"] == "FG2701", p["legs"]   # |36,598| 最大
+
+    def test_同向时仍然不给方案(self):
+        import pandas as pd
+        H.PAIR_EXTRA.clear()
+        for k, ya, px in (("FG", self.YA_FG, self.PX_FG),
+                          ("SA", {c: abs(v) for c, v in self.YA_SA.items()}, self.PX_SA)):
+            H.PAIR_EXTRA[k] = {"ya_all": dict(ya), "px_all": dict(px),
+                               "main": pd.Series(["FG2701" if k == "FG" else "SA2701"]),
+                               "date": pd.Timestamp("2026-09-04")}
+        p = H.follow_plan_payload()
+        assert p["state"] == "same" and not p["legs"], p

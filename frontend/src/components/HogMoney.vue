@@ -507,6 +507,9 @@ interface FollowPlan {
   fg_net_wan?: number; sa_net_wan?: number
   net_exposure_wan?: number; net_exposure_pct?: number; net_of_notional_pct?: number
   risk_same?: number; risk_spread?: number
+  // 两条腿取数日期不一致时引擎给的告警文案(同日为 null)。
+  stale?: string | null
+  fg_date?: string | null; sa_date?: string | null
   note: string
 }
 /**
@@ -1062,6 +1065,9 @@ const bySide = computed(() => {
               </div>
             </div>
           </template>
+          <!-- 两腿取数日期不一致时的告警(引擎给 stale 才渲染)。放在 note 之前:
+               「这张卡今天不能用」要比「怎么用」先看到。 -->
+          <p class="note warn" v-if="followPlan.stale" v-html="mdBold(followPlan.stale)"></p>
           <p class="note" v-html="mdBold(followPlan.note)"></p>
         </div>
         <div v-for="c in data.contracts_panel" :key="c.contract" class="card panel-card wide">
@@ -1793,6 +1799,16 @@ const bySide = computed(() => {
 .kv .v.near { color: var(--tv-warn, #d98e00); }
 .kv .v.must { color: var(--tv-warn, #d98e00); font-weight: 700; }
 .note { font-size: 12px; color: var(--tv-text-muted); margin: 10px 0 0; line-height: 1.6; }
+/* 跟随卡的「两腿不同日」告警:与 stale-banner 同一套警示橙,但收在卡内。
+   不用红绿 —— 那是涨跌语义,借过来会被读成方向。 */
+.note.warn {
+  color: var(--tv-text);
+  border: 1px solid var(--tv-warn, #d98e00);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tv-warn, #d98e00) 14%, transparent);
+  padding: 8px 12px;
+}
 .hint { font-size: 12px; color: var(--tv-text-muted); }
 /* 成本挨在手数后面,弱一档:它是补充信息,手数与增减才是这张卡的主角 */
 .cost { color: var(--tv-text-muted); margin-left: 8px; font-size: 12px; }
