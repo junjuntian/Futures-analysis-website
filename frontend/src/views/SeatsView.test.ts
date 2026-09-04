@@ -203,7 +203,12 @@ describe('席位持仓表的成本列', () => {
     await flushPromises()
     const text = wrapper.text()
     expect(text).toContain('13,780.5')
-    expect(text).toContain('净多 2,015 手')
+    // 2026-09-04 措辞与品种汇总那排对齐(运营者:「跟这个品种汇总一样」)。
+    // 这两个数本来就是同一件事:引擎净持仓计价,一个合约一个净额成本,按净额正负
+    // 归入多单/空单桶,品种汇总的「多 N 手 均价 X」就是这一列加权出来的。
+    // 原来写「净多 2,015 手」,看着像和汇总那排是两回事。
+    expect(text).toContain('多单均价 · 2,015 手')
+    expect(text).not.toContain('净多 2,015 手')
     // LH2705 那行:成本空,原因要露出来,不能只画个横杠
     expect(text).toContain('不在前 20 榜上')
     wrapper.unmount()
