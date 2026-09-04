@@ -1611,8 +1611,11 @@ def test_main_series_rolls_forward_for_a_single_letter_variety():
 def test_retail_panel_falls_back_between_varieties():
     H.use("I")
     assert H.RULES["retail_panel"] == H.VARIETIES["I"]["retail_panel"]
-    # 紧接着跑一个**没有配**覆盖的品种,必须回落到全站默认,不能继承上一个
-    H.use("FG")
+    # 紧接着跑一个**没有配**覆盖的品种,必须回落到全站默认,不能继承上一个。
+    # 这里原本用玻璃,2026-09-04 玻璃自己配了名单(DEC-202),换成焦煤 ——
+    # 挑「没配覆盖的品种」当例子时,下面这条断言保证它真的没配。
+    assert "retail_panel" not in H.VARIETIES["JM"]
+    H.use("JM")
     assert H.RULES["retail_panel"] == H.DEFAULT_RETAIL_PANEL
     assert "新湖期货" not in H.RULES["retail_panel"]
 
@@ -1626,10 +1629,16 @@ def test_纯碱散户名单已换掉东方财富():
     # 换人的**唯一理由**就是把东方财富换成广发,这两条各钉一头:
     assert "东方财富" not in H.RULES["retail_panel"]
     assert "广发期货" in H.RULES["retail_panel"]
-    # 纯碱的名单不许漏给下一个没配覆盖的品种(同 test_retail_panel_falls_back)
+    # 玻璃 2026-09-04 起用同一份名单(同一个理由:东方财富单合约上榜率 28.2%)
     H.use("FG")
+    assert H.RULES["retail_panel"] == ["平安期货", "徽商期货", "方正中期",
+                                       "广发期货", "中信建投"]
+    assert H.VARIETIES["FG"]["retail_panel"] == H.VARIETIES["SA"]["retail_panel"]
+    # 回落仍要成立 —— 挑一个**没配**覆盖的品种验
+    H.use("JM")
     assert H.RULES["retail_panel"] == H.DEFAULT_RETAIL_PANEL
     assert "广发期货" not in H.RULES["retail_panel"]
+    assert "东方财富" in H.RULES["retail_panel"]
 
 
 def test_换散户名单不许顺手动了进出场判据():
