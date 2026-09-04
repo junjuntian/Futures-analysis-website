@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { addChange, sideDelta, signedChange } from '../seatChange'
+import { addChange, sideDelta } from '../seatChange'
+import { netChangeLabel } from '../netChangeLabel'
 import { offBoardBands, type Band } from '../offBoard'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { CandlestickSeriesOption, EChartsOption } from 'echarts'
@@ -644,6 +645,23 @@ function costNetLabel(value: string) {
   if (n === 0) return '净持仓 0'
   return `${n > 0 ? '净多' : '净空'} ${fmt(Math.abs(n))} 手`
 }
+/** 「总净持仓」那列的变化(运营者 2026-09-04:「改成净多净空这样显示」)。
+ *  **走 netChangeLabel,与机构资金页「组内各家」是同一个函数** —— 净空减少要说成
+ *  「净空-42,148」而不是「+42,148」,跨零那一档也有讲究,别在这里另写一份
+ *  (同一个概念两处各写一遍迟早对不上,research/PITFALLS #9)。
+ *  未知仍留空(承 seatChange.ts 的「空着比印一个 0 诚实」),恰好持平印「不变」。 */
+function netChgLabel(net: number, change: number | null | undefined) {
+  if (change === null || change === undefined) return ''
+  if (change === 0) return '不变'
+  return netChangeLabel({ net, change }) ?? ''
+}
+/** 多头/空头那两列的变化。**它们是单边持仓不是净额**,净多/净空在这里不成立,
+ *  所以标「多单/空单」——目的一样:让这个数字自己说清它在讲什么。 */
+function sideChgLabel(side: '多单' | '空单', change: number | null | undefined) {
+  if (change === null || change === undefined) return ''
+  if (change === 0) return '不变'
+  return `${side}${change > 0 ? '+' : '-'}${fmt(Math.abs(change))}`
+}
 /** 成本为空的原因,说人话。引擎给的是枚举,不认识的原样显示,别吞掉。 */
 function costReasonText(reason: string | null) {
   switch (reason) {
@@ -666,7 +684,6 @@ function openBuilding(instrument: string, contract?: string) {
   tab.value = 'building'
 }
 
-const signed = signedChange
 const fmt = (value: number) => value.toLocaleString('zh-CN')
 
 // —— 净持仓的四联图 ——
@@ -1459,7 +1476,7 @@ const latestDailyPnl = computed(() => {
                   <div :class="block.netTotal >= 0 ? 'long' : 'short'">
                     {{ block.netTotal >= 0 ? '净多' : '净空' }}{{ fmt(Math.abs(block.netTotal)) }}
                   </div>
-                  <div class="change">{{ signed(block.netChange) }}</div>
+                  <div class="change">{{ netChgLabel(block.netTotal, block.netChange) }}</div>
                   <el-button size="small" @click="openBuilding(block.instrument)">
                     品种汇总净持仓
                   </el-button>
@@ -1482,11 +1499,11 @@ const latestDailyPnl = computed(() => {
                 </td>
                 <td class="figure">
                   <div>{{ fmt(line.long) }}</div>
-                  <div class="change">{{ signed(line.longChange) }}</div>
+                  <div class="change">{{ sideChgLabel('多单', line.longChange) }}</div>
                 </td>
                 <td class="figure">
                   <div>{{ fmt(line.short) }}</div>
-                  <div class="change">{{ signed(line.shortChange) }}</div>
+                  <div class="change">{{ sideChgLabel('空单', line.shortChange) }}</div>
                 </td>
                 <td class="figure cost">
                   <template v-if="line.cost !== null">

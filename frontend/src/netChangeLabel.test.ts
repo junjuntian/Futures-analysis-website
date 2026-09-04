@@ -37,3 +37,27 @@ describe('netChangeLabel', () => {
     expect(netChangeLabel({ net: 0, change: -500 })).toBe('净-500')
   })
 })
+
+// 2026-09-04(运营者:「净持仓页那三列改成净多净空这样显示」):
+// 净持仓页的「总净持仓」变化与机构资金页「组内各家」**共用 netChangeLabel**。
+// 这里钉住那几个真实场景,免得哪天有人在 SeatsView 里另写一份。
+describe('净持仓页的三列变化文案', () => {
+  it('净空减少要说成「净空-」,不是「+」', () => {
+    // 国泰君安 纯碱:净空 44,689,当日净持仓 +42,148(空单大幅回补)
+    expect(netChangeLabel({ net: -44689, change: 42148 })).toBe('净空-42,148')
+  })
+
+  it('净空增加说成「净空+」', () => {
+    expect(netChangeLabel({ net: -44689, change: -1200 })).toBe('净空+1,200')
+  })
+
+  it('净多两个方向', () => {
+    expect(netChangeLabel({ net: 27997, change: -9665 })).toBe('净多-9,665')
+    expect(netChangeLabel({ net: 18098, change: 2634 })).toBe('净多+2,634')
+  })
+
+  it('变化为 0 或未知时不给标签,由调用方决定印什么', () => {
+    expect(netChangeLabel({ net: -44689, change: 0 })).toBeNull()
+    expect(netChangeLabel({ net: -44689, change: null })).toBeNull()
+  })
+})
