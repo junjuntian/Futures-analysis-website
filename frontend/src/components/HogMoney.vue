@@ -1047,8 +1047,13 @@ const bySide = computed(() => {
                 <!-- 席位名读 followPlan.member,**不能写死**:这张卡从 DEC-168 起也给
                      东证跑焦煤,写死「永安」会让东证的持仓顶着永安的名字(2026-08-31
                      上线后 Chrome 实机第一眼就看出来了)。 -->
+                <!-- 持仓变动的文案与下面合约窗**用同一个函数**(运营者 2026-09-04:
+                     「跟下面一样」)。别在这里另写一份「+7,873」——净空减少要说成
+                     「净空-7,873」,跨零那一档也有讲究,netChangeLabel 已经处理过
+                     (DEC-155);同一个概念两处各写一遍迟早对不上(PITFALLS #9)。 -->
                 <td class="num cost">{{ followPlan.member.replace('期货', '') }} {{ fmt(lg.member_net) }}<span
-                  v-if="lg.member_net_chg" class="chg-inline" :class="lg.member_net_chg > 0 ? 'up' : 'down'">{{ lg.member_net_chg > 0 ? '+' : '' }}{{ fmt(lg.member_net_chg) }}</span><template
+                  v-if="netChangeLabel({ net: lg.member_net, change: lg.member_net_chg ?? null })"
+                  :class="pnlClass(lg.member_net_chg ?? 0)"> ({{ netChangeLabel({ net: lg.member_net, change: lg.member_net_chg ?? null }) }})</span><template
                   v-if="followCosts[costKey(followPlan.member, lg.contract)]"> @{{ followCosts[costKey(followPlan.member, lg.contract)] }}</template></td>
               </tr>
             </table>
@@ -1826,9 +1831,6 @@ const bySide = computed(() => {
 .panel-vs .chg .down { color: var(--tv-down); }
 .panel-vs .chg .flat { color: var(--tv-text-muted); }
 .panel-vs .chg .flip { color: var(--tv-warn, #d98e00); font-weight: 600; }
-.chg-inline { margin-left: 6px; }
-.chg-inline.up { color: var(--tv-up); }
-.chg-inline.down { color: var(--tv-down); }
 .note.warn {
   color: var(--tv-text);
   border: 1px solid var(--tv-warn, #d98e00);
