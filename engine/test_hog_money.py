@@ -1617,6 +1617,34 @@ def test_retail_panel_falls_back_between_varieties():
     assert "新湖期货" not in H.RULES["retail_panel"]
 
 
+# 2026-09-04:纯碱也换了一组五窗散户名单(运营者指名)。合约卡右列常年空三格,
+# 根子在东方财富 —— 它在纯碱上的**单合约**上榜率只有 15.5%,广发是 91.4%。
+def test_纯碱散户名单已换掉东方财富():
+    H.use("SA")
+    assert H.RULES["retail_panel"] == ["平安期货", "徽商期货", "方正中期",
+                                       "广发期货", "中信建投"]
+    # 换人的**唯一理由**就是把东方财富换成广发,这两条各钉一头:
+    assert "东方财富" not in H.RULES["retail_panel"]
+    assert "广发期货" in H.RULES["retail_panel"]
+    # 纯碱的名单不许漏给下一个没配覆盖的品种(同 test_retail_panel_falls_back)
+    H.use("FG")
+    assert H.RULES["retail_panel"] == H.DEFAULT_RETAIL_PANEL
+    assert "广发期货" not in H.RULES["retail_panel"]
+
+
+def test_换散户名单不许顺手动了进出场判据():
+    """`retail_panel` 只进展示,`retail_seed` 才进判据 —— 两份名单不许混。
+
+    纯碱这次换人**一个字都不该碰 seed**:东方财富仍然在 seed 里(它动的是
+    进出场,与「卡片上填不填得满」无关)。哪天有人图省事把两份名单对齐,
+    就会在没做品种专属研究的情况下改掉方案 C 的进场信号。
+    """
+    H.use("SA")
+    assert H.RULES["retail_seed"] == ["东方财富", "平安期货", "徽商期货"]
+    assert "东方财富" in H.RULES["retail_seed"]
+    assert "广发期货" not in H.RULES["retail_seed"]
+
+
 def test_retail_seed_is_not_per_variety():
     """retail_seed 动的是进出场判据,**不给逐品种覆盖的待遇**。
 
