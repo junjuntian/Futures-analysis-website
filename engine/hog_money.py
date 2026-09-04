@@ -414,6 +414,19 @@ VARIETIES = {
         # **只换展示,不动 retail_seed**(那三家进出场判据,换人 = 改引擎;
         # 实测把这五家搬进判据,玻璃 +248.6% → +54.4%、夏普 0.64 → 0.23,见 DEC-202)。
         "retail_panel": ["平安期货", "徽商期货", "方正中期", "广发期货", "中信建投"],
+        # **关掉自动重选**(运营者 2026-09-04:「fg 暂时不要重选了,关掉这个自动重选」)。
+        # 2026-10-01 本来是下一个重选切点,届时上面那三条点名换人会一起失效、
+        # 组按择时收益自动重排。冻结之后:**历史照常滚动重选(回测一个字不动)**,
+        # 只是从这天起不再产生新切点,一路沿用换完人的那一组
+        # (海通/永安/瑞达/东证/国泰君安)。
+        #
+        # **没有用 `fixed_members`** —— 那个会把整段历史都按同一组重算,实测玻璃
+        # 从 +248.6%/夏普 0.64 掉到 **+17.6%/0.10**(119 笔里只有 29 笔两版共有)。
+        # 运营者要的是「10-01 别把今天挑好的这组换掉」,不是「把历史回测重写」。
+        # 生猪那次(DEC-126/199)已经证明固定名单弱的主因就是失去重选。
+        #
+        # 「暂时」= 想恢复自动重选,把这一行删掉即可,不留残留状态。
+        "freeze_since": "2026-10-01",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
         # 其余品种没配费率 → 窗头显示名义市值;要同款口径给一句费率即可。
@@ -829,6 +842,9 @@ def use(code: str) -> dict:
     RULES["notice"] = v.get("notice")
     # 手动换人(DEC-129):滚动组之上的点名替换,只管到下一次重选为止。None = 没有。
     RULES["group_overrides"] = [dict(o) for o in v["group_overrides"]] if v.get("group_overrides") else None
+    # 从这天起不再重选(2026-09-04)。**每轮都要写**,理由同 retail_panel:
+    # RULES 是全局可变的,只在「品种配了」时赋值,下一个品种会顶着上一个的冻结日。
+    RULES["freeze_since"] = v.get("freeze_since")
     # 逐合约战役策略(DEC-133):strategy="campaign" 的品种,进出场与历史/统计
     # 由 engine/campaign.py 产出;flow 系(方案C/成本)照旧。参数见 VARIETIES 注释。
     RULES["strategy"] = v.get("strategy", "flow")
@@ -1164,6 +1180,36 @@ def fixed_groups(members: list[str], seat: pd.DataFrame, price: pd.DataFrame,
     log = [{"date": decided, "members": list(mem),
             "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in mem}}]
     return ser, log, []
+
+
+def freeze_groups(groups: pd.Series, log: list, cuts: list,
+                  since: str) -> tuple[pd.Series, list, list]:
+    """从 `since` 起**不再重选**,一路沿用冻结日当时那一组(2026-09-04 运营者:
+    「玻璃暂时不要重选了,关掉这个自动重选」)。
+
+    **为什么不用 `fixed_members`**:那个是把**整段历史**都按同一组重算 ——
+    实测玻璃会从 +248.6%/夏普 0.64 掉到 **+17.6%/0.10**(119 笔里只有 29 笔两版共有,
+    丢掉的里面有 +56.5%、+22.2%)。运营者要的是「10-01 别把今天挑好的这组换掉」,
+    不是「把历史回测重写」。这两件事必须分开:**历史照常滚动重选(回测一个字不动),
+    只把未来的切点砍掉**。生猪那次(DEC-126/199)已经证明固定名单弱的主因就是失去重选。
+
+    `since` 可以是未来日期(当前正是:2026-10-01 而数据到 09-04)。那时它对
+    `groups` 不产生任何影响,只把 `cuts` 里 ≥ since 的切点删掉,
+    界面上的「下次重选」因此变成空 —— 这就是「关掉自动重选」在产物上的样子。
+    """
+    fz = pd.Timestamp(since)
+    if len(groups.index) and fz <= groups.index[-1]:
+        base = groups[groups.index <= fz].dropna()
+        if len(base):
+            keep = base.iloc[-1]
+            mask = groups.index >= fz
+            groups = groups.copy()
+            groups.loc[mask] = pd.Series([keep] * int(mask.sum()),
+                                         index=groups.index[mask], dtype=object)
+    cuts = [c for c in (cuts or []) if c < since]
+    log = list(log) + [{"date": since, "members": None, "alpha": None,
+                        "frozen": True}]
+    return groups, log, cuts
 
 
 def apply_group_overrides(groups: pd.Series, log: list, cuts: list, overrides: list,
@@ -2970,11 +3016,23 @@ def _member_main_net(seat: pd.DataFrame, mkt: pd.DataFrame, member: str) -> pd.S
     return sig
 
 
-# 跟随方案的默认参数(DEC-154,2026-08-28 运营者:「总资金 50 万」)。
+# 跟随方案的默认参数。
 # **保证金率是运营者的真实值**(2026-08-28 他给:玻璃 9%、纯碱 8%);第一版按行业惯例
 # 估成 11%/10%,手数因此少开了约两成 —— 与手续费那次同一个教训:参数要问不要猜。
-# use=0.35 是三档里的"中",留 65% 现金应对价差反向(实测最坏日 ±2.1%)。
-FOLLOW_PLAN = {"capital": 500000.0, "use": 0.35, "margin": {"FG": 0.09, "SA": 0.08},
+#
+# **2026-09-04 运营者拍板:总资金 50 万 → 100 万,资金上限 35% → 12%。**
+# 上限这个数不是拍脑袋,是 `REPORT_FOLLOW_V3_v1` 实测出来的(真实费率 2 元/手/边、
+# T+1 开盘成交、预热 250 日):
+#     use=35% 回撤 −60%   use=20% −38.5%   **use=12% −24.9%**   use=8% −17.5%
+# 四档在累计与回撤上严格单调(V3 的 G0 就是查这个),12% 不是网格里挑到的运气格,
+# 是单调权衡曲线上一个把回撤压回 35% 保证金上限之内的点。
+#
+# **要认下的一件事**:V3 整体判的是**不上**(8 关过 7,挂在 G2「事前挑不出人」)。
+# 运营者仍决定把上限降到 12% —— 这是**降风险方向的知情破例**,与「上线一个策略」
+# 不是一回事:挂掉的 G2 问的是「跟谁」,与「上多少仓」无关,而 12% 档的回撤闸门(G5)
+# 本身是过的。卡片仍写「展示不是下单指令」,没有升级成可下单。
+FOLLOW_PLAN = {"capital": 1000000.0, "use": 0.12,
+               "margin": {"FG": 0.09, "SA": 0.08},
                "mult": {"FG": 20.0, "SA": 20.0}}
 
 # 玻纯跟随卡要出几张(运营者 2026-09-04:「不用替换,把东证也放进去」)。
@@ -3171,11 +3229,12 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         # 原来那段四行字占掉的位置比方案本身还大。保留的两件事:**不是下单指令**、
         # **保证金率是估算**——这两条是免责,不能省;其余(分批挂、第二天自动跟)属于
         # 用法说明,页面上已经有跨月那张卡在讲同一件事,不必每张都写一遍。
-        "note": ("按%s当日持仓比例缩到 %d 万,再按**仓位强度 %.0f%%**"
-                 "(今日 %s 手 / 近两年最大 %s 手)等比缩小。%s"
-                 "**展示不是下单指令**:保证金率按估算(FG %d%%/SA %d%%)。"
+        # 「今日 X 手 / 近两年最大 Y 手」这一段**不写进 note** —— chip-map 那行
+        # 已经渲染过一遍,重复写只会把这段字挤成四行(运营者要的是两行内)。
+        "note": ("按%s当日持仓比例缩到 %d 万,再按**仓位强度 %.0f%%**等比缩小。%s"
+                 "上限 12%% 是实测定的(该档回撤 −24.9%%,35%% 档 −60%%)。"
+                 "**展示不是下单指令**,保证金率按估算(FG %d%%/SA %d%%)。"
                  % (short, cfg["capital"] / 1e4, strength * 100,
-                    f"{int(gross_now or 0):,}", f"{int(gross_max or 0):,}",
                     # 同向态必须当场说清它不是对冲(运营者 2026-09-04 要求显示同向,
                     # 但两种状态的风险差一个数量级,不能靠读的人自己看方向猜)。
                     ("**同向 = 两腿一个方向,没有对冲腿**,净敞口是全部名义;"
@@ -3909,6 +3968,9 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
             groups, log, cuts = rolling_groups(seat, price, mkt.index)
             if RULES.get("group_overrides"):
                 groups, log = apply_group_overrides(groups, log, cuts, RULES["group_overrides"], seat, price)
+            # 冻结排在点名换人**之后**:要冻住的是「换完人之后的那一组」。
+            if RULES.get("freeze_since"):
+                groups, log, cuts = freeze_groups(groups, log, cuts, RULES["freeze_since"])
         sig = signal_series(seat, groups)
         if RULES["signal_source"] == "cost":
             sig = attach_cost_signal(sig, seat, mkt, groups)

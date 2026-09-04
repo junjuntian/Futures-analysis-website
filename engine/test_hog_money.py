@@ -1863,6 +1863,9 @@ class Test玻纯跟随卡收成两条腿:
         assert len(note) < 130, f"说明太长({len(note)} 字):{note}"
         assert "不是下单指令" in note and "估算" in note, note
         assert "仓位强度" in note, note
+        # 2026-09-04:上限降到 12% 之后,note 必须带上实测回撤——
+        # 「35% 档 −60%」这句是这次改动的全部理由,省了就等于没披露。
+        assert "回撤" in note and "12%" in note, note
 
     def _with_hist(self, now_fg, now_sa, max_fg, max_sa, member="永安期货"):
         """给 gross_hist 造一段:最后一天是今天的量,中间某天是历史最大。"""
@@ -1930,3 +1933,59 @@ class Test玻纯跟随卡收成两条腿:
         # 必须是两条腿之和,不是只剩纯碱那 46,359
         assert p["gross_now"] == 28846 + 46359, p["gross_now"]
         assert p["gross_max"] == 28846 + 46359, p["gross_max"]
+
+
+# 2026-09-04(运营者:「fg 暂时不要重选了,关掉这个自动重选」):
+# freeze_since = 从这天起不再重选。**关键是历史照常滚动**——用 fixed_members 会把
+# 整段历史按同一组重算,实测玻璃 +248.6%/0.64 → +17.6%/0.10。
+class Test关掉自动重选:
+    def _g(self):
+        import pandas as pd
+        idx = pd.date_range("2025-01-01", periods=8, freq="D")
+        ser = pd.Series([("A", "B")] * 4 + [("C", "D")] * 4, index=idx, dtype=object)
+        return idx, ser, ["2025-01-01", "2025-01-05", "2025-01-09"]
+
+    def test_冻结日之后一路沿用当时那一组(self):
+        idx, ser, cuts = self._g()
+        g, log, c2 = H.freeze_groups(ser, [], cuts, "2025-01-05")
+        # 冻结日当天那一组是 ("C","D"),之后每天都必须是它
+        assert all(g[d] == ("C", "D") for d in idx[idx >= "2025-01-05"]), g.to_dict()
+
+    def test_冻结日之前一个字不许动(self):
+        idx, ser, cuts = self._g()
+        g, _log, _c = H.freeze_groups(ser, [], cuts, "2025-01-05")
+        for d in idx[idx < "2025-01-05"]:
+            assert g[d] == ser[d], (d, g[d], ser[d])
+
+    def test_未来的重选切点被砍掉(self):
+        _idx, ser, cuts = self._g()
+        _g, _log, c2 = H.freeze_groups(ser, [], cuts, "2025-01-05")
+        assert c2 == ["2025-01-01"], c2      # ≥ 冻结日的都没了
+
+    def test_冻结日在数据之后时不影响任何一天(self):
+        """当前正是这种情形:冻结日 2026-10-01,而数据到 09-04。"""
+        idx, ser, cuts = self._g()
+        g, _log, c2 = H.freeze_groups(ser, [], cuts, "2099-01-01")
+        assert list(g) == list(ser), "未来冻结日不该改动任何一天的组"
+        assert c2 == cuts, "但未来切点仍应保留(它们都早于冻结日)"
+
+    def test_玻璃配了冻结而其它品种没有(self):
+        assert H.VARIETIES["FG"].get("freeze_since") == "2026-10-01"
+        for code in H.VARIETIES:
+            if code != "FG":
+                assert not H.VARIETIES[code].get("freeze_since"), code
+        # 且不许漏给下一个品种(RULES 是全局可变的)
+        H.use("FG")
+        assert H.RULES["freeze_since"] == "2026-10-01"
+        H.use("SA")
+        assert H.RULES["freeze_since"] is None
+
+    def test_玻璃没有改用固定名单(self):
+        """固定名单会重写整段历史(+248.6% → +17.6%),这次有意不用它。"""
+        assert not H.VARIETIES["FG"].get("fixed_members")
+
+
+class Test跟随卡资金与上限:
+    def test_资金一百万上限十二(self):
+        assert H.FOLLOW_PLAN["capital"] == 1000000.0
+        assert H.FOLLOW_PLAN["use"] == 0.12
