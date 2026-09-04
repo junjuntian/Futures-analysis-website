@@ -2977,8 +2977,15 @@ def _member_main_net(seat: pd.DataFrame, mkt: pd.DataFrame, member: str) -> pd.S
 FOLLOW_PLAN = {"capital": 500000.0, "use": 0.35, "margin": {"FG": 0.09, "SA": 0.08},
                "mult": {"FG": 20.0, "SA": 20.0}}
 
+# 玻纯跟随卡要出几张(运营者 2026-09-04:「不用替换,把东证也放进去」)。
+# 两张卡各自按 50 万独立缩放 —— **不能合成一张**:一张卡只有一个总资金与一个
+# 风险敞口,把两个人的腿摆进同一张,那两个数就没有意义了。
+# 顺序即页面顺序;永安在前(它是过了闸的第二引擎那一家,DEC-141)。
+FOLLOW_MEMBERS = ("永安期货", "东证期货")
 
-def follow_plan_payload(cfg: dict | None = None) -> dict | None:
+
+def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
+                     k_date: str) -> dict | None:
     """「永安跟随策略」建议仓位(DEC-154,展示级,**不是下单指令**)。
 
     按永安**当日真实结构**等比缩放到运营者的资金:**一个品种一条腿,共两条** ——
@@ -2989,20 +2996,20 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
     只在**对冲态**(FG 净方向与 SA 净方向相反)给方案 —— 同向时它不是在做对冲簿,
     这套配比没有意义(DEC-142 同一个状态门)。
     """
-    cfg = {**FOLLOW_PLAN, **(cfg or {})}
     if not ({"FG", "SA"} <= set(PAIR_EXTRA)):
         return None
-    ya = {k: PAIR_EXTRA[k].get("ya_all") or {} for k in ("FG", "SA")}
-    px = {k: PAIR_EXTRA[k].get("px_all") or {} for k in ("FG", "SA")}
+    ya = {k: (PAIR_EXTRA[k].get(k_net) or {}).get(member) or {} for k in ("FG", "SA")}
+    px = {k: PAIR_EXTRA[k].get(k_px) or {} for k in ("FG", "SA")}
     if not ya["FG"] or not ya["SA"]:
         return None
+    short = member.replace("期货", "")
     fg_net = sum(ya["FG"].values())
     sa_net = sum(ya["SA"].values())
     if fg_net * sa_net >= 0:
-        return {"state": "same", "member": "永安期货", "fg_net": int(round(fg_net)),
+        return {"state": "same", "member": member, "fg_net": int(round(fg_net)),
                 "sa_net": int(round(sa_net)), "legs": [],
-                "note": "永安当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
-                        "等它回到一多一空的对冲态再看。"}
+                "note": "%s当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
+                        "等它回到一多一空的对冲态再看。" % short}
     # 选腿:**一个品种一条腿,合约取当日主力,手数比照该品种的全合约净持仓合计**
     # (运营者 2026-09-04:「显示 2 个主力合约,后面跟永安的净持仓」)。
     #
@@ -3079,14 +3086,14 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
                  for lg in legs if lg["instrument"] == "SA")
     # 两个品种各按自己的最后一天取仓位。正常情况下同一天;采集进度不一致时不一样,
     # 那时这张卡是拿两天的仓位拼出来的比例 —— 必须说出来(DEC-099 那条「让它露馅」)。
-    dates = {k: PAIR_EXTRA[k].get("date") for k in ("FG", "SA")}
+    dates = {k: PAIR_EXTRA[k].get(k_date) for k in ("FG", "SA")}
     stale = None
     if all(dates.values()) and dates["FG"] != dates["SA"]:
         stale = ("⚠️ 两条腿不是同一天的仓位:玻璃取 %s、纯碱取 %s(采集进度不一致)。"
                  "手数比例按两天拼出来的,**别照这个下单**,等两边补齐再看。"
                  % (dates["FG"].strftime("%m-%d"), dates["SA"].strftime("%m-%d")))
     return {
-        "state": "opposite", "member": "永安期货",
+        "state": "opposite", "member": member,
         "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
         "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)),
         "fg_date": dates["FG"].strftime("%Y-%m-%d") if dates["FG"] is not None else None,
@@ -3104,12 +3111,52 @@ def follow_plan_payload(cfg: dict | None = None) -> dict | None:
         # 单日损益两情形:玻纯同涨跌 1%(对冲生效)/ 价差反向各 1%(最坏)
         "risk_same": int(round(net_val * 0.01)),
         "risk_spread": int(round((abs(fg_val) + abs(sa_val)) * 0.01)),
-        "note": ("按永安**当日真实持仓比例**等比缩到 %d 万,保证金用 %d%%(留足现金扛价差反向)。"
-                 "它改仓位,这里第二天自动跟着改。**这是展示不是下单指令**:手数取整有偏差,"
-                 "保证金率按估算(FG %d%%/SA %d%%),实际以你的账户为准;建仓用筹码地图分批挂,"
-                 "别一次打满。" % (cfg["capital"] / 1e4, cfg["use"] * 100,
-                                   cfg["margin"]["FG"] * 100, cfg["margin"]["SA"] * 100)),
+        # 说明收短(运营者 2026-09-04:「底下文字简短说明」)。加了东证之后页面多一张卡,
+        # 原来那段四行字占掉的位置比方案本身还大。保留的两件事:**不是下单指令**、
+        # **保证金率是估算**——这两条是免责,不能省;其余(分批挂、第二天自动跟)属于
+        # 用法说明,页面上已经有跨月那张卡在讲同一件事,不必每张都写一遍。
+        "note": ("按%s当日持仓比例缩到 %d 万。**展示不是下单指令**:手数取整有偏差,"
+                 "保证金率按估算(FG %d%%/SA %d%%),以你的账户为准。"
+                 % (short, cfg["capital"] / 1e4,
+                    cfg["margin"]["FG"] * 100, cfg["margin"]["SA"] * 100)),
     }
+
+
+def follow_plan_payload(member: str = "永安期货",
+                        cfg: dict | None = None) -> dict | None:
+    """玻纯跟随卡:当日方案 + **相对昨天的手数变动**(运营者 2026-09-04)。
+
+    变动是这张卡真正要回答的问题 ——「今天我该加/减多少手」。做法是把**昨天的
+    方案整个再算一遍**再相减,而不是拿今天的比例去套昨天的持仓:后者在主力换月
+    或价格大动的日子会给出根本没发生过的手数差。
+
+    对齐按**品种**不是按合约:主力换月那天合约名会变(FG2701 → FG2705),
+    按合约对齐会把一次换月显示成「清掉 38 手又新开 40 手」,那是假的。
+    """
+    cfg = {**FOLLOW_PLAN, **(cfg or {})}
+    cur = _follow_plan_one(member, cfg, "nets", "px_all", "date")
+    if not cur:
+        return None
+    prev = _follow_plan_one(member, cfg, "nets_prev", "px_prev", "date_prev")
+    prev_legs = {lg["instrument"]: lg for lg in (prev or {}).get("legs", [])}
+    for lg in cur.get("legs", []):
+        q = prev_legs.get(lg["instrument"])
+        if not q:
+            lg["lots_chg"] = None
+            lg["member_net_chg"] = None
+            continue
+        # **`lots_chg` 说的是「这条腿加了还是减了」,不是「该下买单还是卖单」。**
+        # 两者在空腿上正好相反:空单 61 → 31 手,下的是买单(+30),但仓位是**减**了
+        # 30 手。运营者要的是前者(「每天加多少手,减多少手」),所以按**手数大小**算,
+        # 不带方向;第一版按带符号的下单量算,空腿减仓印成 +30,读起来像加仓。
+        lg["lots_chg"] = lg["lots"] - q["lots"]
+        # 方向翻了的话「加/减」就没有意义(38 手多 → 5 手空 不是「减 33 手」)。
+        # 单独给个旗子让前端改口说「反手」。
+        lg["flip"] = lg["side"] != q["side"]
+        lg["member_net_chg"] = lg["member_net"] - q["member_net"]
+    if prev:
+        cur["prev_date"] = prev.get("fg_date")
+    return cur
 
 
 # 跨月跟随方案的每品种配置(DEC-168)。
@@ -3746,11 +3793,21 @@ def pair_fgsa(cache: dict, out_dir: Path) -> dict | None:
     except Exception as e:                      # noqa: BLE001
         print(f"[pair] hedge_book 失败,置空:{e}", file=sys.stderr)
         payload["hedge_book"] = None
-    try:
-        payload["follow_plan"] = follow_plan_payload()
-    except Exception as e:                      # noqa: BLE001
-        print(f"[pair] follow_plan 失败,置空:{e}", file=sys.stderr)
-        payload["follow_plan"] = None
+    # 跟随卡:每个跟随席位一张(运营者 2026-09-04:「不用替换,把东证也放进去」)。
+    # 单张失败只丢那一张,别让东证的问题把永安那张也带没了。
+    _plans = []
+    for _m in FOLLOW_MEMBERS:
+        try:
+            _p = follow_plan_payload(_m)
+        except Exception as e:                  # noqa: BLE001
+            print(f"[pair] follow_plan({_m}) 失败,跳过:{e}", file=sys.stderr)
+            _p = None
+        if _p:
+            _plans.append(_p)
+    payload["follow_plans"] = _plans
+    # `follow_plan` 单数保留 = 第一张(永安)。老前端和别处的读取还指着它,
+    # 换字段名要两边同步改 —— 留着兼容比省一个字段划算(PITFALLS #9)。
+    payload["follow_plan"] = _plans[0] if _plans else None
     out = out_dir / "pair_fgsa.json"
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3870,11 +3927,39 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
         # 永安还有 8,508 手玻璃…不,是纯碱多单,**当日真实是 0**。
         # 注释本来就写着「最新日永安在各合约的净持仓」,实现没照办。
         # 影响的是运营者照这张卡定的手数比例,不是显示噪音。
+        # 前一个交易日(2026-09-04 加):跟随卡要显示「今天该加/减多少手」,
+        # 那就得把**昨天的方案**也算一遍再相减 —— 只存今天的仓位算不出变动。
+        _dp = mkt.index[-2] if len(mkt.index) >= 2 else None
+
+        def _nets_on(day):
+            """某一天、各跟随席位在各合约的净持仓(net_off 口径,同下面的注释)。"""
+            if day is None:
+                return {}
+            out = {}
+            for _m in FOLLOW_MEMBERS:
+                _r = seat[(seat["member_key"] == _m) & (seat["trade_date"] == day)]
+                _s = (_r.groupby("contract")["net_off"].sum()
+                      if len(_r) else pd.Series(dtype=float))
+                out[_m] = {c: float(v) for c, v in _s.items()
+                           if isinstance(c, str) and np.isfinite(v) and v}
+            return out
+
+        def _px_on(day):
+            if day is None:
+                return {}
+            return {c: float(st[c].asof(day)) for c in st.columns
+                    if isinstance(c, str) and np.isfinite(st[c].asof(day))}
+
         _rows = seat[(seat["member_key"] == "永安期货") & (seat["trade_date"] == _d)]
         _last = (_rows.groupby("contract")["net_off"].sum()
                  if len(_rows) else pd.Series(dtype=float))
         PAIR_EXTRA[code] = {"ya": _member_main_net(seat, mkt, "永安期货"),
                             "ret_open": mkt["ret_open"], "main": mkt["main"],
+                            # 逐席位的当日/前一日持仓与价格(2026-09-04)。
+                            # `ya_all`/`px_all` 保留不动:老字段还有别处在读,
+                            # 同一件事换个名字重写一遍是 PITFALLS #9 那条老坑。
+                            "nets": _nets_on(_d), "nets_prev": _nets_on(_dp),
+                            "px_prev": _px_on(_dp), "date_prev": _dp,
                             # 这个品种取数用的是哪一天(2026-09-04 加)。跟随卡按
                             # **各品种自己的最后一天**取仓位,两边采集进度不一致时
                             # 会静悄悄地混用两个日期 —— 本地快照就撞上过一次

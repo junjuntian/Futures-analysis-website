@@ -403,7 +403,7 @@ onMounted(async () => {
   void loadEngineFingerprint()
   histEngine.value = 'main'   // 换品种回到主引擎视图(DEC-150)
   page2.value = 1
-  followPlan.value = null
+  followPlans.value = []
   followCosts.value = {}
   void loadFollowPlan()
   try {
@@ -502,14 +502,18 @@ interface FollowPlan {
   ratio?: number
   splits?: Array<{ label: string; wan: number }>
   legs: Array<{ contract: string; instrument: string; side: 'long' | 'short'
-    lots: number; px: number; member_net: number; value_wan: number }>
+    lots: number; px: number; member_net: number; value_wan: number
+    // 相对上一交易日的变动(没有昨天的数据时为 null)。
+    // lots_chg 说的是**这条腿加了还是减了**,不是该下买单还是卖单 ——
+    // 空单 61→31 手是「减 30」,虽然下的是买单。flip=方向翻了,那时加/减无意义。
+    lots_chg?: number | null; member_net_chg?: number | null; flip?: boolean }>
   margin?: number; margin_pct?: number; notional_wan?: number; leverage?: number
   fg_net_wan?: number; sa_net_wan?: number
   net_exposure_wan?: number; net_exposure_pct?: number; net_of_notional_pct?: number
   risk_same?: number; risk_spread?: number
   // 两条腿取数日期不一致时引擎给的告警文案(同日为 null)。
   stale?: string | null
-  fg_date?: string | null; sa_date?: string | null
+  fg_date?: string | null; sa_date?: string | null; prev_date?: string | null
   note: string
 }
 /**
@@ -524,7 +528,11 @@ const panelRetailNames = computed(() => {
   const first = data.value?.contracts_panel?.[0]?.retail ?? []
   return first.length ? first.map((r) => r.member).join('/') : '—'
 })
-const followPlan = ref<FollowPlan | null>(null)
+const followPlans = ref<FollowPlan[]>([])
+/** 兼容旧读法:别处还在读单数,保持指向第一张。 */
+const followPlan = computed<FollowPlan | null>(() => followPlans.value[0] ?? null)
+/** 成本键是 `席位|合约` —— 两张卡跟的是不同席位,只按合约做键会互相覆盖。 */
+const costKey = (member: string, contract: string) => `${member}|${contract}`
 /** 各腿的永安持仓成本(键=合约),各腿单独取,不依赖它恰好在五窗里。 */
 const followCosts = ref<Record<string, string>>({})
 
@@ -536,8 +544,11 @@ async function loadFollowPlan() {
   try {
     const res = await fetch(`/smart-money/pair_fgsa.json?t=${Date.now()}`)
     if (!res.ok) return
-    const data = (await res.json()) as { follow_plan?: FollowPlan | null }
-    followPlan.value = data.follow_plan ?? null
+    // follow_plans 是 2026-09-04 加的多卡字段;follow_plan 单数留着兼容,
+    // 万一产物还是旧版(部署与引擎重算之间有窗口)不至于整张卡消失。
+    const data = (await res.json()) as {
+      follow_plans?: FollowPlan[] | null; follow_plan?: FollowPlan | null }
+    followPlans.value = data.follow_plans ?? (data.follow_plan ? [data.follow_plan] : [])
   } catch {
     return                                       // 取不到就不显示这张卡
   }
@@ -547,27 +558,27 @@ async function loadFollowPlan() {
 /** 跨月版:方案就在本品种 payload 里,主数据到位之后调。 */
 function loadPlanFromPayload(payload: { follow_plan?: FollowPlan | null } | null) {
   if (props.instrument === 'FG') return          // 玻璃页那张走 pair_fgsa,别互相覆盖
-  followPlan.value = payload?.follow_plan ?? null
+  followPlans.value = payload?.follow_plan ? [payload.follow_plan] : []
   void loadFollowCosts()
 }
 
 async function loadFollowCosts() {
-  const plan = followPlan.value
-  if (!plan?.legs?.length) return
-  await Promise.all(plan.legs.map(async (lg) => {
-    try {
-      const { data: net } = await getSeatNetPosition({
-        instrument: lg.instrument, members: [plan.member], contract: lg.contract
-      })
-      // 不标类型:本文件的 MemberLeg 是五窗那个,与接口返回的同名类型不是一回事。
-      const m = net.latest_members.find((x) => x.member === plan.member)
-      if (!m || m.missing) return
-      const raw = lg.side === 'long' ? m.long_cost : m.short_cost
-      if (raw !== null) followCosts.value[lg.contract] = Number(raw).toFixed(0)
-    } catch {
-      // 单腿成本取不到就不显示那一个
-    }
-  }))
+  const jobs = followPlans.value.flatMap((plan) =>
+    (plan.legs ?? []).map(async (lg) => {
+      try {
+        const { data: net } = await getSeatNetPosition({
+          instrument: lg.instrument, members: [plan.member], contract: lg.contract
+        })
+        // 不标类型:本文件的 MemberLeg 是五窗那个,与接口返回的同名类型不是一回事。
+        const m = net.latest_members.find((x) => x.member === plan.member)
+        if (!m || m.missing) return
+        const raw = lg.side === 'long' ? m.long_cost : m.short_cost
+        if (raw !== null) followCosts.value[costKey(plan.member, lg.contract)] = Number(raw).toFixed(0)
+      } catch {
+        // 单腿成本取不到就不显示那一个
+      }
+    }))
+  if (jobs.length) await Promise.all(jobs)
 }
 
 /** 散户三家「合计变化」的方向文案(DEC-155):口径同 panelChg,按合计净持仓方向说。
@@ -1014,7 +1025,7 @@ const bySide = computed(() => {
            机构 5 家 vs 五大散户对照(散户同款净多/净空变化),窗头挂沉淀资金。 -->
       <div v-if="data.contracts_panel && data.contracts_panel.length" class="panel-row">
         <!-- 永安跟随策略(DEC-154):与合约窗同宽,排在第一格;随永安持仓每日自动变。 -->
-        <div v-if="followPlan" class="card panel-card wide">
+        <div v-for="followPlan in followPlans" :key="followPlan.member" class="card panel-card wide">
           <h3>
             {{ followPlan.member }}跟随策略<template v-if="followPlan.ratio">（跨月 1 : {{ followPlan.ratio }}）</template>
             <span class="panel-sink" v-if="followPlan.capital">
@@ -1027,11 +1038,18 @@ const bySide = computed(() => {
               <tr v-for="lg in followPlan.legs" :key="lg.contract">
                 <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
                 <td class="num"><b>{{ lg.lots }} 手</b></td>
+                <!-- 今天该加/减多少手(运营者 2026-09-04)。**说的是仓位增减,不是买卖方向**:
+                     空单 61→31 手记「减 30」,虽然下的是买单。方向翻了就说「反手」。 -->
+                <td class="num chg"><span v-if="lg.flip" class="flip">反手</span><span
+                  v-else-if="lg.lots_chg" :class="lg.lots_chg > 0 ? 'up' : 'down'">{{ lg.lots_chg > 0 ? '加' : '减' }}{{ Math.abs(lg.lots_chg) }}</span><span
+                  v-else-if="lg.lots_chg === 0" class="flat">不变</span></td>
                 <td class="num cost">@{{ lg.px }}</td>
                 <!-- 席位名读 followPlan.member,**不能写死**:这张卡从 DEC-168 起也给
                      东证跑焦煤,写死「永安」会让东证的持仓顶着永安的名字(2026-08-31
                      上线后 Chrome 实机第一眼就看出来了)。 -->
-                <td class="num cost">{{ followPlan.member.replace('期货', '') }} {{ fmt(lg.member_net) }}<template v-if="followCosts[lg.contract]"> @{{ followCosts[lg.contract] }}</template></td>
+                <td class="num cost">{{ followPlan.member.replace('期货', '') }} {{ fmt(lg.member_net) }}<span
+                  v-if="lg.member_net_chg" class="chg-inline" :class="lg.member_net_chg > 0 ? 'up' : 'down'">{{ lg.member_net_chg > 0 ? '+' : '' }}{{ fmt(lg.member_net_chg) }}</span><template
+                  v-if="followCosts[costKey(followPlan.member, lg.contract)]"> @{{ followCosts[costKey(followPlan.member, lg.contract)] }}</template></td>
               </tr>
             </table>
             <div class="chip-map">
@@ -1801,6 +1819,16 @@ const bySide = computed(() => {
 .note { font-size: 12px; color: var(--tv-text-muted); margin: 10px 0 0; line-height: 1.6; }
 /* 跟随卡的「两腿不同日」告警:与 stale-banner 同一套警示橙,但收在卡内。
    不用红绿 —— 那是涨跌语义,借过来会被读成方向。 */
+/* 跟随卡的「今天加/减多少手」列。红涨绿跌是国内习惯,与本文件其余处一致;
+   「反手」不用红绿 —— 它不是方向,是方向变了本身。 */
+.panel-vs .chg { min-width: 56px; font-size: 12px; }
+.panel-vs .chg .up { color: var(--tv-up); }
+.panel-vs .chg .down { color: var(--tv-down); }
+.panel-vs .chg .flat { color: var(--tv-text-muted); }
+.panel-vs .chg .flip { color: var(--tv-warn, #d98e00); font-weight: 600; }
+.chg-inline { margin-left: 6px; }
+.chg-inline.up { color: var(--tv-up); }
+.chg-inline.down { color: var(--tv-down); }
 .note.warn {
   color: var(--tv-text);
   border: 1px solid var(--tv-warn, #d98e00);

@@ -1703,14 +1703,20 @@ class Test玻纯跟随卡收成两条腿:
     PX_SA = {c: 1063.0 for c in YA_SA}
 
     def _pair(self, fg_main="FG2701", sa_main="SA2701",
-              fg_date="2026-09-04", sa_date="2026-09-04"):
+              fg_date="2026-09-04", sa_date="2026-09-04",
+              member="永安期货", prev=None):
+        """prev = {"FG": {...}, "SA": {...}} 时才有昨天,用来测变动。"""
         import pandas as pd
         H.PAIR_EXTRA.clear()
         for k, ya, px, main, d in (("FG", self.YA_FG, self.PX_FG, fg_main, fg_date),
                                    ("SA", self.YA_SA, self.PX_SA, sa_main, sa_date)):
-            H.PAIR_EXTRA[k] = {"ya_all": dict(ya), "px_all": dict(px),
+            H.PAIR_EXTRA[k] = {"nets": {member: dict(ya)}, "px_all": dict(px),
                                "main": pd.Series([main]),
-                               "date": pd.Timestamp(d)}
+                               "date": pd.Timestamp(d),
+                               "nets_prev": ({member: dict(prev[k])} if prev else {}),
+                               "px_prev": (dict(px) if prev else {}),
+                               "date_prev": (pd.Timestamp(d) - pd.Timedelta(days=1)
+                                             if prev else None)}
 
     def test_只出两条腿_一个品种一条(self):
         self._pair()
@@ -1767,8 +1773,46 @@ class Test玻纯跟随卡收成两条腿:
         H.PAIR_EXTRA.clear()
         for k, ya, px in (("FG", self.YA_FG, self.PX_FG),
                           ("SA", {c: abs(v) for c, v in self.YA_SA.items()}, self.PX_SA)):
-            H.PAIR_EXTRA[k] = {"ya_all": dict(ya), "px_all": dict(px),
+            H.PAIR_EXTRA[k] = {"nets": {"永安期货": dict(ya)}, "px_all": dict(px),
                                "main": pd.Series(["FG2701" if k == "FG" else "SA2701"]),
-                               "date": pd.Timestamp("2026-09-04")}
+                               "date": pd.Timestamp("2026-09-04"),
+                               "nets_prev": {}, "px_prev": {}, "date_prev": None}
         p = H.follow_plan_payload()
         assert p["state"] == "same" and not p["legs"], p
+
+
+    def test_东证也能出一张卡(self):
+        """卡不再写死永安 —— 传谁就出谁(运营者 2026-09-04:「把东证也放进去」)。"""
+        self._pair(member="东证期货")
+        p = H.follow_plan_payload("东证期货")
+        assert p["state"] == "opposite" and p["member"] == "东证期货", p
+        assert "东证" in p["note"] and "永安" not in p["note"], p["note"]
+        # 同一份 PAIR_EXTRA 里没有永安的仓位,永安那张就该是 None,不能借东证的数
+        assert H.follow_plan_payload("永安期货") is None
+
+    def test_变动按品种对齐并带方向(self):
+        # 昨天:玻璃净多少一半、纯碱净空多一些 → 今天该加玻璃、减纯碱
+        prev = {"FG": {"FG2701": 14000.0}, "SA": {"SA2701": -60000.0}}
+        self._pair(prev=prev)
+        p = H.follow_plan_payload()
+        chg = {lg["instrument"]: lg for lg in p["legs"]}
+        assert chg["FG"]["member_net_chg"] == 28846 - 14000
+        assert chg["SA"]["member_net_chg"] == -46359 - (-60000)
+        # 手数变动 = 仓位增减(不是下单方向)。玻璃净多翻倍 → 这条腿加仓
+        assert chg["FG"]["lots_chg"] > 0, chg["FG"]
+        # 纯碱净空从 60,000 收到 46,359 → 空腿**减仓**,必须是负数。
+        # 若按「下单量」算这里会是正的(买单平空),那正是运营者不要的读法。
+        assert chg["SA"]["lots_chg"] < 0, chg["SA"]
+        assert chg["FG"]["flip"] is False and chg["SA"]["flip"] is False
+
+    def test_没有昨天的数据时变动为空不报错(self):
+        self._pair()                       # 不给 prev
+        p = H.follow_plan_payload()
+        for lg in p["legs"]:
+            assert lg["lots_chg"] is None and lg["member_net_chg"] is None, lg
+
+    def test_说明已收短且仍保留两条免责(self):
+        self._pair()
+        note = H.follow_plan_payload()["note"]
+        assert len(note) < 90, f"说明太长({len(note)} 字):{note}"
+        assert "不是下单指令" in note and "估算" in note, note
