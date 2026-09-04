@@ -1811,8 +1811,81 @@ class Test玻纯跟随卡收成两条腿:
         for lg in p["legs"]:
             assert lg["lots_chg"] is None and lg["member_net_chg"] is None, lg
 
-    def test_说明已收短且仍保留两条免责(self):
+    def test_说明保持两行内且仍保留两条免责(self):
+        """2026-09-04 加了仓位强度那句之后放宽到 130 字(约两行)。
+
+        运营者当天说的是「简短说明,再加 2 行,免得空间不够」—— 两行是给的,
+        四行是不行的。上限留在这里,免得以后又被一句句加回四行。
+        """
         self._pair()
         note = H.follow_plan_payload()["note"]
-        assert len(note) < 90, f"说明太长({len(note)} 字):{note}"
+        assert len(note) < 130, f"说明太长({len(note)} 字):{note}"
         assert "不是下单指令" in note and "估算" in note, note
+        assert "仓位强度" in note, note
+
+    def _with_hist(self, now_fg, now_sa, max_fg, max_sa, member="永安期货"):
+        """给 gross_hist 造一段:最后一天是今天的量,中间某天是历史最大。"""
+        import pandas as pd
+        idx = pd.date_range("2025-01-02", periods=60, freq="B")
+        for k, now, mx in (("FG", now_fg, max_fg), ("SA", now_sa, max_sa)):
+            v = pd.Series(0.0, index=idx)
+            v.iloc[10] = float(mx)
+            v.iloc[-1] = float(now)
+            H.PAIR_EXTRA[k]["gross_hist"] = {member: v}
+
+    def test_对方轻仓时跟随也轻仓(self):
+        """运营者 2026-09-04:「不能一直保证保证金的 35%,看最大持仓来算」。"""
+        self._pair()
+        self._with_hist(28846, 46359, 28846 * 4, 46359 * 4)     # 强度 = 25%
+        p = H.follow_plan_payload()
+        assert abs(p["strength_pct"] - 25.0) < 0.6, p["strength_pct"]
+        # 保证金必须明显低于上限 35%,大致落在 35% × 25% ≈ 8.75%
+        assert p["margin_pct"] < 12, p
+        light = {lg["instrument"]: lg["lots"] for lg in p["legs"]}
+        # 同一份持仓、把历史最大改成与今日相等(满仓)→ 手数应当明显变多
+        self._pair()
+        self._with_hist(28846, 46359, 28846, 46359)             # 强度 = 100%
+        q = H.follow_plan_payload()
+        assert abs(q["strength_pct"] - 100.0) < 0.6, q["strength_pct"]
+        full = {lg["instrument"]: lg["lots"] for lg in q["legs"]}
+        for k in ("FG", "SA"):
+            assert full[k] > light[k] * 2, (k, full, light)
+
+    def test_强度封顶一倍不许超过上限(self):
+        # 今天就是历史新高 → 强度算出来 >1,必须封到 1.0,保证金不许超过 35%
+        self._pair()
+        self._with_hist(28846, 46359, 100, 100)
+        p = H.follow_plan_payload()
+        assert p["strength_pct"] == 100.0, p["strength_pct"]
+        assert p["margin_pct"] <= 35.0, p["margin_pct"]
+
+    def test_轻到跟不出一手时给说明而不是消失(self):
+        self._pair()
+        self._with_hist(28846, 46359, 28846 * 2000, 46359 * 2000)
+        p = H.follow_plan_payload()
+        assert p is not None, "整张卡不许消失"
+        assert p["state"] == "tiny" and not p["legs"], p
+        assert "跟不了" in p["note"], p["note"]
+
+    def test_没有持仓历史时退回满仓不报错(self):
+        self._pair()                       # 不设 gross_hist
+        p = H.follow_plan_payload()
+        assert p["strength_pct"] == 100.0, p
+        assert p["gross_max"] is None, p
+        # gross_now 不依赖历史序列,永远算得出 = |玻璃净| + |纯碱净|
+        assert p["gross_now"] == 28846 + 46359, p["gross_now"]
+
+    def test_今日规模不因两品种末日不同而漏掉一条腿(self):
+        """首测踩过:两个品种最后一天不同时,从历史序列末尾取会把缺的填成 0。"""
+        import pandas as pd
+        self._pair()
+        idx_fg = pd.date_range("2025-01-02", periods=50, freq="B")
+        idx_sa = pd.date_range("2025-01-02", periods=51, freq="B")   # 多一天
+        H.PAIR_EXTRA["FG"]["gross_hist"] = {
+            "永安期货": pd.Series(28846.0, index=idx_fg)}
+        H.PAIR_EXTRA["SA"]["gross_hist"] = {
+            "永安期货": pd.Series(46359.0, index=idx_sa)}
+        p = H.follow_plan_payload()
+        # 必须是两条腿之和,不是只剩纯碱那 46,359
+        assert p["gross_now"] == 28846 + 46359, p["gross_now"]
+        assert p["gross_max"] == 28846 + 46359, p["gross_max"]

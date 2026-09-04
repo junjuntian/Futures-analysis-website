@@ -3051,7 +3051,31 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
     per_group = sum(abs(u) * cfg["mult"][k] * px[k][c] * cfg["margin"][k] for c, k, u in unit)
     if per_group <= 0:
         return None
-    budget = cfg["capital"] * cfg["use"]
+    # **仓位强度**(运营者 2026-09-04:「不能一直保证保证金的 35%,看最大持仓来算」)。
+    # 被跟的席位当下只用了历史三成仓,跟随者也只该上三成 —— 原来无论对方轻仓重仓
+    # 都把 35% 打满,那不是跟随,是永远满仓。
+    #   强度 = 今日两品种合计 |净持仓| / **近两年**同口径最大值,封顶 1.0。
+    # 为什么用近两年:窗口太长会被 2020 年的一次尖峰永久压小仓位;太短(近一年)
+    # 又会在对方刚减仓完时把分母也拉低、强度虚高。实测 2026-09-04 两家的近两年最大
+    # 与全历史最大**是同一天**,所以这个选择当下不改变结果,只影响以后。
+    strength, gross_now, gross_max = 1.0, None, None
+    # **今日规模直接用两条腿自己的净持仓**(= 卡上显示的那两个数),不从历史序列末尾取:
+    # 两个品种的最后一天可能不同(FG 到 09-01、SA 到 09-02 就撞上过),
+    # 从序列末尾取会因为对齐把缺的那个品种填成 0 —— 首测就把永安的
+    # 92,270 手算成 54,838(玻璃整条腿丢了)。
+    gross_now = abs(fg_net) + abs(sa_net)
+    _gh = [PAIR_EXTRA[k].get("gross_hist", {}).get(member) for k in ("FG", "SA")]
+    if all(g is not None and len(g) for g in _gh):
+        # 历史最大只在**两个品种都有数据**的日子上算(取交集),理由同上:
+        # 并集 + 补零会造出「某天只有一个品种」的假低点,拉不高最大值但会脏。
+        _ix = _gh[0].dropna().index.intersection(_gh[1].dropna().index)
+        if len(_ix):
+            tot = _gh[0].reindex(_ix).abs() + _gh[1].reindex(_ix).abs()
+            win = tot[tot.index >= _ix[-1] - pd.DateOffset(years=2)]
+            gross_max = float(win.max()) if len(win) else None
+    if gross_max and gross_max > 0:
+        strength = min(1.0, gross_now / gross_max)
+    budget = cfg["capital"] * cfg["use"] * strength
     # 保证金**宁少不多**(运营者 2026-09-01):原来是四舍五入,手数一取整就可能超预算
     # (焦煤那张 6/9 手实测 37.2%,而卡头写的是 35%)。改成保比例整体缩,
     # 见 `_fit_within_budget` —— 两腿比例是这张卡的全部意义,不能为了取整把它改掉。
@@ -3060,7 +3084,18 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         [(c, k, abs(u) * (budget / per_group)) for c, k, u in unit], budget,
         lambda c, n: n * cfg["mult"][kind_of[c]] * px[kind_of[c]][c] * cfg["margin"][kind_of[c]])
     if not sized:
-        return None
+        # 强度太低时手数会取整到 0,`_fit_within_budget` 返回 None。
+        # **不能让整张卡凭空消失** —— 那看起来像挂了。照实说:对方仓位太轻,
+        # 按这个本金跟不出一手。
+        return {"state": "tiny", "member": member,
+                "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)), "legs": [],
+                "strength_pct": round(strength * 100, 1),
+                "gross_now": int(gross_now) if gross_now else None,
+                "gross_max": int(gross_max) if gross_max else None,
+                "note": ("%s当前只有近两年最大仓位的 **%.0f%%**(%s 手 / %s 手),"
+                         "按 %d 万本金缩下来不足一手,这轮跟不了。"
+                         % (short, strength * 100, f"{int(gross_now or 0):,}",
+                            f"{int(gross_max or 0):,}", cfg["capital"] / 1e4))}
     legs, margin, notional, net_val = [], 0.0, 0.0, 0.0
     for c, k, u in unit:
         lots = sized[c]
@@ -3096,6 +3131,10 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         "state": "opposite", "member": member,
         "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
         "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)),
+        # 仓位强度:卡头要显示「跟到几成」,不然读的人以为永远是 35%。
+        "strength_pct": round(strength * 100, 1),
+        "gross_now": int(gross_now) if gross_now else None,
+        "gross_max": int(gross_max) if gross_max else None,
         "fg_date": dates["FG"].strftime("%Y-%m-%d") if dates["FG"] is not None else None,
         "sa_date": dates["SA"].strftime("%Y-%m-%d") if dates["SA"] is not None else None,
         "stale": stale,
@@ -3115,9 +3154,11 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         # 原来那段四行字占掉的位置比方案本身还大。保留的两件事:**不是下单指令**、
         # **保证金率是估算**——这两条是免责,不能省;其余(分批挂、第二天自动跟)属于
         # 用法说明,页面上已经有跨月那张卡在讲同一件事,不必每张都写一遍。
-        "note": ("按%s当日持仓比例缩到 %d 万。**展示不是下单指令**:手数取整有偏差,"
-                 "保证金率按估算(FG %d%%/SA %d%%),以你的账户为准。"
-                 % (short, cfg["capital"] / 1e4,
+        "note": ("按%s当日持仓比例缩到 %d 万,再按它的**仓位强度 %.0f%%**"
+                 "(今日 %s 手 / 近两年最大 %s 手)等比缩小 —— 它轻仓,这里也轻仓。"
+                 "**展示不是下单指令**:保证金率按估算(FG %d%%/SA %d%%)。"
+                 % (short, cfg["capital"] / 1e4, strength * 100,
+                    f"{int(gross_now or 0):,}", f"{int(gross_max or 0):,}",
                     cfg["margin"]["FG"] * 100, cfg["margin"]["SA"] * 100)),
     }
 
@@ -3960,6 +4001,15 @@ def run_one(code: str, src: str, out_dir: Path) -> dict | None:
                             # 同一件事换个名字重写一遍是 PITFALLS #9 那条老坑。
                             "nets": _nets_on(_d), "nets_prev": _nets_on(_dp),
                             "px_prev": _px_on(_dp), "date_prev": _dp,
+                            # 逐日「该席位在本品种的净持仓绝对值」(2026-09-04)。
+                            # 跟随卡要按**仓位强度**缩放:被跟的人只用了三成仓,
+                            # 跟随者也该只上三成,不能永远打满 35%。两个品种的序列
+                            # 在 follow_plan 里相加,再取近两年最大做分母。
+                            "gross_hist": {
+                                _m: (seat[seat["member_key"] == _m]
+                                     .groupby("trade_date")["net_off"].sum().abs()
+                                     .reindex(mkt.index))
+                                for _m in FOLLOW_MEMBERS},
                             # 这个品种取数用的是哪一天(2026-09-04 加)。跟随卡按
                             # **各品种自己的最后一天**取仓位,两边采集进度不一致时
                             # 会静悄悄地混用两个日期 —— 本地快照就撞上过一次

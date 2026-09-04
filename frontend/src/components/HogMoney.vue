@@ -514,6 +514,9 @@ interface FollowPlan {
   // 两条腿取数日期不一致时引擎给的告警文案(同日为 null)。
   stale?: string | null
   fg_date?: string | null; sa_date?: string | null; prev_date?: string | null
+  /** 仓位强度:被跟席位今日总持仓 / 近两年最大,封顶 100。方案按它等比缩小。 */
+  strength_pct?: number | null
+  gross_now?: number | null; gross_max?: number | null
   note: string
 }
 /**
@@ -1028,9 +1031,12 @@ const bySide = computed(() => {
         <div v-for="followPlan in followPlans" :key="followPlan.member" class="card panel-card wide">
           <h3>
             {{ followPlan.member }}跟随策略<template v-if="followPlan.ratio">（跨月 1 : {{ followPlan.ratio }}）</template>
+            <!-- 「保证金 35%」是**上限**不是实际值(2026-09-04 起按仓位强度缩)。
+                 照旧写死 35% 会与下面那行实算的保证金对不上,读的人会以为算错了。 -->
             <span class="panel-sink" v-if="followPlan.capital">
               总资金 <b>{{ (followPlan.capital / 10000).toFixed(0) }} 万</b>
-              <span class="cost">· 保证金 {{ followPlan.use_pct }}%</span>
+              <span class="cost" v-if="followPlan.strength_pct != null">· 强度 <b>{{ Math.round(followPlan.strength_pct) }}%</b> · 上限 {{ followPlan.use_pct }}%</span>
+              <span class="cost" v-else>· 保证金 {{ followPlan.use_pct }}%</span>
             </span>
           </h3>
           <template v-if="['opposite', 'spread', 'single'].includes(followPlan.state)">
@@ -1058,6 +1064,11 @@ const bySide = computed(() => {
               </tr>
             </table>
             <div class="chip-map">
+              <!-- 强度明细:让「为什么今天只有 13 手」有据可查 -->
+              <div class="chip-line gray" v-if="followPlan.gross_max">
+                仓位强度 <b>{{ Math.round(followPlan.strength_pct ?? 0) }}%</b>
+                <span class="cost">({{ followPlan.member.replace('期货', '') }}今日 {{ fmt(followPlan.gross_now ?? 0) }} 手 / 近两年最大 {{ fmt(followPlan.gross_max) }} 手)</span>
+              </div>
               <div class="chip-line">
                 保证金 <b>{{ ((followPlan.margin ?? 0) / 10000).toFixed(1) }} 万</b>({{ followPlan.margin_pct }}%)
                 <span class="sep">·</span> 名义 {{ followPlan.notional_wan }} 万 <span class="sep">·</span> 杠杆 {{ followPlan.leverage }} 倍
