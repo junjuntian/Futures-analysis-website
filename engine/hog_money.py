@@ -3005,11 +3005,24 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
     short = member.replace("期货", "")
     fg_net = sum(ya["FG"].values())
     sa_net = sum(ya["SA"].values())
-    if fg_net * sa_net >= 0:
-        return {"state": "same", "member": member, "fg_net": int(round(fg_net)),
+    if fg_net == 0 or sa_net == 0:
+        return {"state": "flat", "member": member, "fg_net": int(round(fg_net)),
                 "sa_net": int(round(sa_net)), "legs": [],
-                "note": "%s当前在玻璃与纯碱**同向**(不是对冲簿),这套跨品种配比不适用;"
-                        "等它回到一多一空的对冲态再看。" % short}
+                "note": "%s当前有一个品种是净持平,配不出两条腿。" % short}
+    # **同向也给方案**(运营者 2026-09-04:「同向的时候卡片也要显示,我自己选择
+    # 席位进行跟随」)。此前同向直接不出方案(DEC-142 的状态门),而实测那道门
+    # **挡掉了这两家 82~84% 的利润** —— 它们的钱大部分是在玻纯同向的日子上赚的
+    # (永安同向日 +39.11 亿 vs 对冲态日 +8.38 亿,见 REPORT_FOLLOW_COST_v1 第八节)。
+    #
+    # **但同向和对冲是两种完全不同的风险**,必须在 state 上分开、不许共用文案:
+    #   · 对冲态 opposite:两腿反向,净敞口 = 差额,「价差反向」才是最坏情形;
+    #   · 同向态 aligned:两腿同向,**净敞口 = 全部名义**,是纯方向性下注,
+    #     没有对冲腿,「价差反向」这句话在这里根本不成立。
+    # 实测拆掉门之后两家分道扬镳(剔预热、真实费率、T+1):
+    #   东证 +33.1% → **+266.5%**(年化 28.2%,夏普 0.72),
+    #   永安 −16.8% → **−47.5%**(年化 −11.6%,回撤 −90.4%)。
+    # **回撤 −60%~−90% 都远超卡片自己 35% 的保证金上限**,所以卡上必须把这句话写死。
+    aligned = fg_net * sa_net > 0
     # 选腿:**一个品种一条腿,合约取当日主力,手数比照该品种的全合约净持仓合计**
     # (运营者 2026-09-04:「显示 2 个主力合约,后面跟永安的净持仓」)。
     #
@@ -3087,7 +3100,7 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         # 强度太低时手数会取整到 0,`_fit_within_budget` 返回 None。
         # **不能让整张卡凭空消失** —— 那看起来像挂了。照实说:对方仓位太轻,
         # 按这个本金跟不出一手。
-        return {"state": "tiny", "member": member,
+        return {"state": "tiny", "member": member, "aligned": aligned,
                 "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)), "legs": [],
                 "strength_pct": round(strength * 100, 1),
                 "gross_now": int(gross_now) if gross_now else None,
@@ -3128,7 +3141,7 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
                  "手数比例按两天拼出来的,**别照这个下单**,等两边补齐再看。"
                  % (dates["FG"].strftime("%m-%d"), dates["SA"].strftime("%m-%d")))
     return {
-        "state": "opposite", "member": member,
+        "state": "aligned" if aligned else "opposite", "member": member,
         "capital": int(cfg["capital"]), "use_pct": round(cfg["use"] * 100),
         "fg_net": int(round(fg_net)), "sa_net": int(round(sa_net)),
         # 仓位强度:卡头要显示「跟到几成」,不然读的人以为永远是 35%。
@@ -3147,18 +3160,29 @@ def _follow_plan_one(member: str, cfg: dict, k_net: str, k_px: str,
         "net_exposure_pct": round(abs(net_val) / cfg["capital"] * 100),
         # 占总名义:与永安自己的中性度直接可比(它 8/27 是 8.1%)。
         "net_of_notional_pct": round(abs(net_val) / notional * 100, 1) if notional else None,
-        # 单日损益两情形:玻纯同涨跌 1%(对冲生效)/ 价差反向各 1%(最坏)
+        # 单日损益两情形:玻纯同涨跌 1%(对冲生效)/ 价差反向各 1%(最坏)。
+        # **同向态下第二个数没有意义**:两腿同向时「价差反向」反而是对冲生效,
+        # 最坏情形是两腿一起走反 —— 那正好等于 risk_same 的量级。前端据 state 分支,
+        # 同向态不渲染 risk_spread(照抄会凭空给出一个不存在的对冲收益)。
         "risk_same": int(round(net_val * 0.01)),
-        "risk_spread": int(round((abs(fg_val) + abs(sa_val)) * 0.01)),
+        "risk_spread": (None if aligned
+                        else int(round((abs(fg_val) + abs(sa_val)) * 0.01))),
         # 说明收短(运营者 2026-09-04:「底下文字简短说明」)。加了东证之后页面多一张卡,
         # 原来那段四行字占掉的位置比方案本身还大。保留的两件事:**不是下单指令**、
         # **保证金率是估算**——这两条是免责,不能省;其余(分批挂、第二天自动跟)属于
         # 用法说明,页面上已经有跨月那张卡在讲同一件事,不必每张都写一遍。
-        "note": ("按%s当日持仓比例缩到 %d 万,再按它的**仓位强度 %.0f%%**"
-                 "(今日 %s 手 / 近两年最大 %s 手)等比缩小 —— 它轻仓,这里也轻仓。"
+        "note": ("按%s当日持仓比例缩到 %d 万,再按**仓位强度 %.0f%%**"
+                 "(今日 %s 手 / 近两年最大 %s 手)等比缩小。%s"
                  "**展示不是下单指令**:保证金率按估算(FG %d%%/SA %d%%)。"
                  % (short, cfg["capital"] / 1e4, strength * 100,
                     f"{int(gross_now or 0):,}", f"{int(gross_max or 0):,}",
+                    # 同向态必须当场说清它不是对冲(运营者 2026-09-04 要求显示同向,
+                    # 但两种状态的风险差一个数量级,不能靠读的人自己看方向猜)。
+                    ("**同向 = 两腿一个方向,没有对冲腿**,净敞口是全部名义;"
+                     "实测拆掉对冲门后东证 +266.5%/年化 28.2%、"
+                     "永安 −47.5%/回撤 −90.4%(REPORT_FOLLOW_COST_v1),"
+                     "**回撤远超这张卡 35% 的保证金上限**。"
+                     if aligned else ""),
                     cfg["margin"]["FG"] * 100, cfg["margin"]["SA"] * 100)),
     }
 

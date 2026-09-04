@@ -1768,17 +1768,58 @@ class Test玻纯跟随卡收成两条腿:
         assert len(p["legs"]) == 2, p["legs"]
         assert p["legs"][0]["contract"] == "FG2701", p["legs"]   # |36,598| 最大
 
-    def test_同向时仍然不给方案(self):
+    def _aligned(self, member="永安期货"):
+        """把纯碱那边翻成净多 → 两个品种同向。"""
         import pandas as pd
         H.PAIR_EXTRA.clear()
         for k, ya, px in (("FG", self.YA_FG, self.PX_FG),
                           ("SA", {c: abs(v) for c, v in self.YA_SA.items()}, self.PX_SA)):
+            H.PAIR_EXTRA[k] = {"nets": {member: dict(ya)}, "px_all": dict(px),
+                               "main": pd.Series(["FG2701" if k == "FG" else "SA2701"]),
+                               "date": pd.Timestamp("2026-09-04"),
+                               "nets_prev": {}, "px_prev": {}, "date_prev": None}
+
+    # 2026-09-04 运营者:「同向的时候卡片也要显示,我自己选择席位进行跟随」。
+    # 此前同向直接不出方案(DEC-142 状态门),而那道门挡掉了这两家 82~84% 的利润。
+    def test_同向也出方案且两腿同一方向(self):
+        self._aligned()
+        p = H.follow_plan_payload()
+        assert p["state"] == "aligned", p["state"]
+        assert len(p["legs"]) == 2, p["legs"]
+        sides = {lg["side"] for lg in p["legs"]}
+        assert len(sides) == 1, ("同向态两腿必须同方向", p["legs"])
+
+    def test_同向态不许给出价差反向那个数(self):
+        """两腿同向时「价差反向」反而是对冲生效,照抄会凭空造出不存在的对冲收益。"""
+        self._aligned()
+        p = H.follow_plan_payload()
+        assert p["risk_spread"] is None, p["risk_spread"]
+        assert p["risk_same"] is not None
+        # 对冲态那边必须仍然有这个数
+        self._pair()
+        q = H.follow_plan_payload()
+        assert q["state"] == "opposite" and q["risk_spread"] is not None, q
+
+    def test_同向态的说明必须当场讲清没有对冲腿(self):
+        self._aligned()
+        note = H.follow_plan_payload()["note"]
+        assert "没有对冲腿" in note, note
+        assert "保证金上限" in note, note      # 回撤远超 35% 这句不许省
+        # 对冲态不该出现这段
+        self._pair()
+        assert "没有对冲腿" not in H.follow_plan_payload()["note"]
+
+    def test_有一腿净持平时不出方案(self):
+        import pandas as pd
+        H.PAIR_EXTRA.clear()
+        for k, ya, px in (("FG", self.YA_FG, self.PX_FG),
+                          ("SA", {"SA2701": 0.0}, self.PX_SA)):
             H.PAIR_EXTRA[k] = {"nets": {"永安期货": dict(ya)}, "px_all": dict(px),
                                "main": pd.Series(["FG2701" if k == "FG" else "SA2701"]),
                                "date": pd.Timestamp("2026-09-04"),
                                "nets_prev": {}, "px_prev": {}, "date_prev": None}
         p = H.follow_plan_payload()
-        assert p["state"] == "same" and not p["legs"], p
+        assert p["state"] == "flat" and not p["legs"], p
 
 
     def test_东证也能出一张卡(self):

@@ -490,7 +490,9 @@ function chipEdge(last: number | null | undefined, anchor: { cost: number } | nu
 interface FollowPlan {
   /** opposite/same = 玻纯跨品种版(DEC-154);spread/trend = 跨月版(DEC-168);
    *  single = 单腿方向版(DEC-182,铁矿石跟永安)。 */
-  state: 'opposite' | 'same' | 'spread' | 'trend' | 'single'
+  // aligned = 两腿同向(2026-09-04 起同向也出方案,风险语义与 opposite 完全不同);
+  // flat = 有一腿净持平配不出两条腿;tiny = 强度太低缩下来不足一手。
+  state: 'opposite' | 'aligned' | 'flat' | 'tiny' | 'same' | 'spread' | 'trend' | 'single'
   member: string
   capital?: number
   use_pct?: number
@@ -1031,6 +1033,9 @@ const bySide = computed(() => {
         <div v-for="followPlan in followPlans" :key="followPlan.member" class="card panel-card wide">
           <h3>
             {{ followPlan.member }}跟随策略<template v-if="followPlan.ratio">（跨月 1 : {{ followPlan.ratio }}）</template>
+            <!-- 同向 vs 对冲的风险差一个数量级,标在标题上,别让人自己看方向猜 -->
+            <span v-if="followPlan.state === 'aligned'" class="badge warn">同向 · 无对冲</span>
+            <span v-else-if="followPlan.state === 'opposite'" class="badge">对冲</span>
             <!-- 「保证金 35%」是**上限**不是实际值(2026-09-04 起按仓位强度缩)。
                  照旧写死 35% 会与下面那行实算的保证金对不上,读的人会以为算错了。 -->
             <span class="panel-sink" v-if="followPlan.capital">
@@ -1039,7 +1044,9 @@ const bySide = computed(() => {
               <span class="cost" v-else>· 保证金 {{ followPlan.use_pct }}%</span>
             </span>
           </h3>
-          <template v-if="['opposite', 'spread', 'single'].includes(followPlan.state)">
+          <!-- aligned = 两腿同向(2026-09-04 起同向也出方案)。它与 opposite 用
+               同一张表,但风险语义完全不同,下面按 state 分支处理。 -->
+          <template v-if="['opposite', 'aligned', 'spread', 'single'].includes(followPlan.state)">
             <table class="panel-vs">
               <tr v-for="lg in followPlan.legs" :key="lg.contract">
                 <td class="k"><span class="chip-side" :class="lg.side">{{ lg.side === 'long' ? '多' : '空' }}</span> {{ lg.contract }}</td>
@@ -1091,8 +1098,8 @@ const bySide = computed(() => {
               </div>
               <!-- 单腿没有「价差反向」这回事:两腿版才有对冲那一半。
                    照抄两腿文案会凭空给出一个不存在的对冲收益,所以分开写。 -->
-              <div class="chip-line gray" v-if="followPlan.state === 'single'">
-                单日:标的涨跌 1% → {{ followPlan.risk_same }} 元(单边敞口,没有对冲腿)
+              <div class="chip-line gray" v-if="['single', 'aligned'].includes(followPlan.state)">
+                单日:两腿同涨跌 1% → {{ followPlan.risk_same }} 元(<b>单边敞口,没有对冲腿</b>)
               </div>
               <div class="chip-line gray" v-else>
                 单日:同涨跌 1% → {{ followPlan.risk_same }} 元 · 价差反向各 1% → ±{{ followPlan.risk_spread }} 元
