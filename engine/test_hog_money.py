@@ -1641,27 +1641,64 @@ def test_纯碱散户名单已换掉东方财富():
     assert "东方财富" in H.RULES["retail_panel"]
 
 
-def test_换散户名单不许顺手动了进出场判据():
-    """`retail_panel` 只进展示,`retail_seed` 才进判据 —— 两份名单不许混。
+def test_展示名单与判据名单不许混成一份():
+    """`retail_panel` 只进展示,`retail_seed` 才进判据 —— 两份名单不许对齐。
 
-    纯碱这次换人**一个字都不该碰 seed**:东方财富仍然在 seed 里(它动的是
-    进出场,与「卡片上填不填得满」无关)。哪天有人图省事把两份名单对齐,
-    就会在没做品种专属研究的情况下改掉方案 C 的进场信号。
+    原意(2026-09-04):纯碱换展示名单时一个字都不该碰 seed。
+    2026-09-05 运营者给玻纯各配了一份 seed(DEC-211),所以不再断言 seed 的具体取值,
+    改断言**两份名单不相等** —— 哪天有人图省事把它们对齐,这条就会红。
+    对齐是危险的:展示看的是「卡片填不填得满」(单合约上榜率),
+    判据看的是「反向择时」,两个口径挑出来的人本就不该一样。
     """
-    H.use("SA")
-    assert H.RULES["retail_seed"] == ["东方财富", "平安期货", "徽商期货"]
-    assert "东方财富" in H.RULES["retail_seed"]
-    assert "广发期货" not in H.RULES["retail_seed"]
+    for code in ("SA", "FG"):
+        H.use(code)
+        panel = list(H.RULES["retail_panel"])
+        seed = list(H.RULES["retail_seed"])
+        assert set(panel) != set(seed), f"{code} 的展示名单与判据名单被对齐了"
+        assert len(seed) == 3 and len(panel) == 5, (code, seed, panel)
 
 
-def test_retail_seed_is_not_per_variety():
-    """retail_seed 动的是进出场判据,**不给逐品种覆盖的待遇**。
+def test_retail_seed_只有玻璃纯碱可以覆盖():
+    """`retail_seed` 动的是进出场判据,**除玻璃与纯碱外不许逐品种配**。
 
-    这条是防守性的:哪天有人顺手照 retail_panel 的样子给 seed 也加一个覆盖,
-    就会在没做品种专属研究的情况下改掉方案 C 的进出场。
+    这条原来是「谁都不许配」(防止有人照 retail_panel 的样子顺手给 seed 加覆盖,
+    在没做品种专属研究的情况下改掉方案 C 的进出场)。
+    2026-09-05 运营者点名给玻璃与纯碱各配一份(DEC-211,知情破例,
+    预注册 `PLAN_RETAIL_RESELECT_v1` 的 G1/G2 都没过),**守卫不删,改成白名单**:
+    这两个品种是运营者明确拍板的,其余品种要配仍必须先立项。
     """
+    allowed = {"FG", "SA"}
     for code in H.VARIETIES:
-        assert "retail_seed" not in H.VARIETIES[code], code
+        if code in allowed:
+            continue
+        assert "retail_seed" not in H.VARIETIES[code], (
+            f"{code} 不在白名单里却配了 retail_seed —— 要配先立项")
+
+
+def test_玻纯的散户名单是运营者点名的那两份():
+    H.use("FG")
+    assert H.RULES["retail_seed"] == ["中信建投", "平安期货", "广发期货"]
+    H.use("SA")
+    assert H.RULES["retail_seed"] == ["徽商期货", "方正中期", "中信建投"]
+
+
+def test_没配的品种必须回落到全站默认三家():
+    """RULES 是全局可变的:跑完玻璃再跑焦煤,焦煤不能顶着玻璃那份名单。"""
+    H.use("FG")
+    assert H.RULES["retail_seed"] == ["中信建投", "平安期货", "广发期货"]
+    H.use("JM")
+    assert H.RULES["retail_seed"] == H.DEFAULT_RETAIL_SEED
+    assert H.RULES["retail_seed"] == ["东方财富", "平安期货", "徽商期货"]
+    H.use("LH")
+    assert H.RULES["retail_seed"] == H.DEFAULT_RETAIL_SEED
+
+
+def test_全站默认那三家不许被改():
+    """2021 年定死、六年样本外验证过(REPORT_RETAIL_CROSS_v1)。
+
+    玻纯的破例不该扩散到默认值 —— 默认值一动,四个没立过项的品种跟着变。
+    """
+    assert H.DEFAULT_RETAIL_SEED == ["东方财富", "平安期货", "徽商期货"]
 
 
 # 2026-09-02(DEC-185):品种级公告与 retail_panel 同款 —— `use()` 必须每轮都写,
