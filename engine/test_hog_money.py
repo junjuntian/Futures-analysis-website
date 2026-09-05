@@ -1149,9 +1149,12 @@ class TestRules:
         H.use("JM")
         assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
         assert H.RULES["exit_mode"] == "inst"
-        for code in ("LH", "FG", "SA", "JD"):
+        # 纯碱 2026-09-06 起改成 discipline(DEC-218:散户不参与出场),其余仍是 retail
+        for code in ("LH", "FG", "JD"):
             H.use(code)
             assert H.RULES["exit_mode"] == "retail", code
+        H.use("SA")
+        assert H.RULES["exit_mode"] == "discipline"
         # 生猪(DEC-118):做多开,但只由卸仓反弹触发;别的品种 long_mode 必须是 flow
         H.use("LH")
         assert H.RULES["long_enabled"] is True and H.RULES["long_needs_dip"] is False
@@ -2057,3 +2060,66 @@ class Test跟随卡资金与上限:
     def test_资金一百万上限十二(self):
         assert H.FOLLOW_PLAN["capital"] == 1000000.0
         assert H.FOLLOW_PLAN["use"] == 0.12
+
+
+class Test出场只留纪律:
+    """DEC-218:纯碱把散户那一路从出场里拿掉,只留 止损 / 持满 / 临近交割。"""
+
+    def test_只有纯碱开了discipline并且持满改成六十(self):
+        """**逐品种钉死**,免得某个品种悄悄跟着变。
+
+        `max_hold` 这个键在 DEC-218 之前**根本没有逐品种加载** —— 品种里写了
+        也不生效、也不报错。加载逻辑是这次补的,所以这条同时钉住加载有没有断。
+        """
+        want = {"SA": ("discipline", 60), "FG": ("retail", 40), "JD": ("retail", 40),
+                "LH": ("retail", 40), "JM": ("inst", 40), "I": ("retail", 40)}
+        for code, (mode, hold) in want.items():
+            H.use(code)
+            assert (H.RULES["exit_mode"], H.RULES["max_hold"]) == (mode, hold), code
+
+    def test_全站默认那两个值不许被改(self):
+        """默认一动,四个没立过项的品种跟着变。"""
+        assert H.DEFAULT_MAX_HOLD == 40
+
+    def test_discipline下出场序列全是nan而进场一个字不动(self):
+        H.use("SA")
+        idx = bdays("2026-01-05", 6)
+        sig = pd.DataFrame({"cost_z": [1.5, -1.5, 0.0, 1.5, -1.5, 0.0],
+                            "z": 0.0, "net": 1.0, "chg": 1.0}, index=idx)
+        retail = pd.DataFrame({"net": 1.0, "chg": 1.0,
+                               "rz": [2.0, -2.0, 2.0, -2.0, 2.0, -2.0]}, index=idx)
+        z_in, z_out = H.entry_exit_signals(sig, retail)
+        assert z_in.equals(sig["cost_z"]), "进场那一路必须原样"
+        assert z_out.isna().all(), "出场那一路必须整条 NaN"
+        # 换成别的品种(retail 口径)时,出场仍旧是散户那一路 —— 不许被这次改动波及
+        H.use("FG")
+        _zi, zo = H.entry_exit_signals(sig, retail)
+        assert zo.equals(retail["rz"])
+
+    def test_纯碱回测里不许再出现散户驱动的出场(self, tmp_path):
+        """真跑一遍纯碱,出场原因里「反向」「消退」必须一条都没有。
+
+        判据是 `np.isfinite(z)`:NaN 让反向与消退同时跳过,而止损/持满/交割
+        不读这个序列。这条测试就是钉那个「同时跳过」。
+        """
+        import os
+        from pathlib import Path
+        d = Path(os.environ.get("CSV_DIR", "research/data"))
+        if not (d / "sa_price.csv.gz").exists():
+            pytest.skip("本机没有 research/data 快照")
+        H.use("SA")
+        price = H.clean_price(pd.read_csv(d / "sa_price.csv.gz"))
+        seat = H.clean_seat(pd.read_csv(d / "sa_seat.csv.gz"))
+        mkt = H.main_series(price)
+        op, st = H.contract_prices(price)
+        mkt = mkt[mkt.index >= pd.Timestamp(H.RULES["replay_start"])]
+        g, log, cuts = H.rolling_groups(seat, price, mkt.index)
+        if H.RULES.get("group_overrides"):
+            g, log = H.apply_group_overrides(g, log, cuts, H.RULES["group_overrides"],
+                                             seat, price)
+        rdf, _ = H.retail_series(seat, mkt.index)
+        sig = H.attach_cost_signal(H.signal_series(seat, g), seat, mkt, g)
+        trades, _pos, _daily = H.replay(sig, mkt, rdf, op, st)
+        reasons = {t["exit_reason"] for t in trades}
+        assert reasons <= {"止损", "持满", "临近交割"}, reasons
+        assert max(t["hold_days"] for t in trades) <= H.RULES["max_hold"] + 3
