@@ -1265,7 +1265,10 @@ class TestGroupOverrides:
             "FG": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}},
                    {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
                    {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}}],
-            "SA": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}}],
+            # 纯碱两条:DEC-195 海通→瑞达、DEC-215 华泰→海通(09-07 生效),**按顺序叠加**,
+            # 最终 = 国泰君安/瑞达/东证/海通/永安,都到 2027-03-01 失效。
+            "SA": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
+                   {"since": "2026-09-07", "replace": {"华泰期货": "海通期货"}}],
             "JD": [{"since": "2026-09-03", "replace": {"宏源期货": "东证期货"}}],
         }
         for code, want in expect.items():
@@ -1276,6 +1279,34 @@ class TestGroupOverrides:
         for code in ("LH", "JM", "I"):
             H.use(code)
             assert H.RULES["group_overrides"] is None, code
+
+    def test_纯碱两条点名换人叠加后是运营者要的那五家(self):
+        """DEC-215。两条 override 是**按顺序叠加**的,不是各管各的 ——
+        只看配置看不出最终阵容,所以把结果本身钉死。
+
+        滚动组 国泰君安/海通/东证/华泰/永安
+          → 海通→瑞达  得 国泰君安/瑞达/东证/华泰/永安(09-03 起)
+          → 华泰→海通  得 **国泰君安/瑞达/东证/海通/永安**(09-06 起)
+
+        如果哪天有人把两条的顺序调换,或者把第二条写成 华泰→瑞达(会撞重复被静默跳过),
+        这条测试立刻红。
+        """
+        H.use("SA")
+        idx = bdays("2026-09-01", 8)          # 09-01 ~ 09-10
+        roll = ("国泰君安", "海通期货", "东证期货", "华泰期货", "永安期货")
+        groups = pd.Series([roll] * len(idx), index=idx, dtype=object)
+        seat = pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+                             "member_key": "国泰君安", "net": 1, "net_off": 1,
+                             "source": "akshare_v1"})
+        price = pd.DataFrame({"trade_date": idx, "contract": "SA2701",
+                              "settle": [1000.0] * len(idx), "source": "akshare_v1"})
+        g, _log = H.apply_group_overrides(groups, [], ["2027-03-01"],
+                                          H.RULES["group_overrides"], seat, price)
+        assert set(g[pd.Timestamp("2026-09-02")]) == set(roll)          # 生效日之前不动
+        assert set(g[pd.Timestamp("2026-09-04")]) == {
+            "国泰君安", "瑞达期货", "东证期货", "华泰期货", "永安期货"}   # 只第一条
+        assert set(g[pd.Timestamp("2026-09-08")]) == {
+            "国泰君安", "瑞达期货", "东证期货", "海通期货", "永安期货"}   # 两条叠加
 
     def test_换人日必须是有数据的交易日(self):
         """`since` 写成没有行情的日子(周末/节假日/未来),换人会静默不生效。
