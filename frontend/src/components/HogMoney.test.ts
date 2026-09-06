@@ -482,6 +482,30 @@ describe('生猪机构资金', () => {
     w2.unmount()
   })
 
+  it('策略方案页跟着 exit_mode 走:discipline 不许再写「散户反向翻向」(DEC-218/224)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      rules: { ...PAYLOAD.rules, exit_mode: 'discipline', max_hold: 60, stop: 0.06,
+               exit_before_delivery: 10 },
+      sizing: { strength: 0.35, now: 1, peak: 3, capital: 1000000, cap: 1,
+                lots: 18, lots_prev: 18, lots_chg: 0, side: 'short', px: 1067,
+                notional: 384120, margin: 30730, margin_rate: 0.08, leverage: 0.38 }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[3].trigger('click')
+    const t = w.text()
+    expect(t).toContain('只剩纪律三条')
+    expect(t).toContain('散户反向不再参与出场')
+    expect(t).not.toContain('出场只看散户那一路')      // 这句是旧口径,不许再出现
+    expect(t).toContain('持满 60 个交易日')
+    expect(t).toContain('分数仓位')                    // DEC-224 那条也要在
+    expect(t).toContain('是整组,不是某一家')
+    // 家数不许写死成 5:这里 fixture 是 3 家
+    expect(t).toContain('这 3 家在')
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',
