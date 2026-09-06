@@ -1265,13 +1265,16 @@ class TestGroupOverrides:
         """
         expect = {
             # 玻璃两条:DEC-129 华泰→国泰君安、DEC-196 海通→瑞达,都到 2026-10-01 失效。
+            # 玻璃四条:三条换人 + DEC-219 剔瑞达(09-07 生效),最终四家。
             "FG": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}},
                    {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
-                   {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}}],
-            # 纯碱两条:DEC-195 海通→瑞达、DEC-215 华泰→海通(09-07 生效),**按顺序叠加**,
-            # 最终 = 国泰君安/瑞达/东证/海通/永安,都到 2027-03-01 失效。
+                   {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}},
+                   {"since": "2026-09-07", "drop": ["瑞达期货"]}],
+            # 纯碱三条:DEC-195 海通→瑞达、DEC-215 华泰→海通、DEC-219 剔瑞达,
+            # **按顺序叠加**,最终 = 国泰君安/东证/海通/永安 四家,都到 2027-03-01 失效。
             "SA": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
-                   {"since": "2026-09-07", "replace": {"华泰期货": "海通期货"}}],
+                   {"since": "2026-09-07", "replace": {"华泰期货": "海通期货"}},
+                   {"since": "2026-09-07", "drop": ["瑞达期货"]}],
             "JD": [{"since": "2026-09-03", "replace": {"宏源期货": "东证期货"}}],
         }
         for code, want in expect.items():
@@ -1283,16 +1286,17 @@ class TestGroupOverrides:
             H.use(code)
             assert H.RULES["group_overrides"] is None, code
 
-    def test_纯碱两条点名换人叠加后是运营者要的那五家(self):
+    def test_纯碱三条点名换人叠加后是运营者要的那四家(self):
         """DEC-215。两条 override 是**按顺序叠加**的,不是各管各的 ——
         只看配置看不出最终阵容,所以把结果本身钉死。
 
         滚动组 国泰君安/海通/东证/华泰/永安
           → 海通→瑞达  得 国泰君安/瑞达/东证/华泰/永安(09-03 起)
-          → 华泰→海通  得 **国泰君安/瑞达/东证/海通/永安**(09-06 起)
+          → 华泰→海通  得 国泰君安/瑞达/东证/海通/永安(09-07 起)
+          → 剔掉瑞达    得 **国泰君安/东证/海通/永安**(09-07 起,DEC-219)
 
-        如果哪天有人把两条的顺序调换,或者把第二条写成 华泰→瑞达(会撞重复被静默跳过),
-        这条测试立刻红。
+        如果哪天有人把顺序调换,或者把第二条写成 华泰→瑞达(会撞重复被静默跳过),
+        又或者 drop 没生效,这条测试立刻红。
         """
         H.use("SA")
         idx = bdays("2026-09-01", 8)          # 09-01 ~ 09-10
@@ -1308,8 +1312,36 @@ class TestGroupOverrides:
         assert set(g[pd.Timestamp("2026-09-02")]) == set(roll)          # 生效日之前不动
         assert set(g[pd.Timestamp("2026-09-04")]) == {
             "国泰君安", "瑞达期货", "东证期货", "华泰期货", "永安期货"}   # 只第一条
+        # 三条叠加:换完再剔瑞达,只剩四家(DEC-219,运营者要合约小窗「4 比 4」)
         assert set(g[pd.Timestamp("2026-09-08")]) == {
-            "国泰君安", "瑞达期货", "东证期货", "海通期货", "永安期货"}   # 两条叠加
+            "国泰君安", "东证期货", "海通期货", "永安期货"}
+        assert len(g[pd.Timestamp("2026-09-08")]) == 4
+
+    def test_剔人不补人且不许把整组剔空(self):
+        """DEC-219 的 `drop`:从 since 起剔掉指定席位,**不补人**,组变小。
+
+        为什么不用 `fixed_members`:那个会重写整段历史,DEC-214 实测带 +40pp 前视。
+        `drop` 与 `replace` 同一条管道,只从 since 起生效。
+        """
+        idx = bdays("2026-09-01", 8)
+        grp = ("甲", "乙", "丙")
+        groups = pd.Series([grp] * len(idx), index=idx, dtype=object)
+        seat = pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+                             "member_key": "甲", "net": 1, "net_off": 1,
+                             "source": "akshare_v1"})
+        price = pd.DataFrame({"trade_date": idx, "contract": "SA2701",
+                              "settle": [100.0] * len(idx), "source": "akshare_v1"})
+        g, log = H.apply_group_overrides(groups, [], ["2027-01-01"],
+                                         [{"since": "2026-09-04", "drop": ["乙"]}],
+                                         seat, price)
+        assert g[pd.Timestamp("2026-09-02")] == grp, "生效日之前不动"
+        assert g[pd.Timestamp("2026-09-08")] == ("甲", "丙"), "剔人不补人"
+        assert log and log[0]["drop"] == ["乙"] and log[0]["manual"] is True
+        # 把整组剔空 → 整条不生效,宁可不动也不能产出空组
+        g2, _l2 = H.apply_group_overrides(
+            groups, [], ["2027-01-01"],
+            [{"since": "2026-09-04", "drop": ["甲", "乙", "丙"]}], seat, price)
+        assert g2[pd.Timestamp("2026-09-08")] == grp
 
     def test_换人日必须是有数据的交易日(self):
         """`since` 写成没有行情的日子(周末/节假日/未来),换人会静默不生效。
@@ -1657,17 +1689,21 @@ def test_retail_panel_falls_back_between_varieties():
 # 2026-09-04:纯碱也换了一组五窗散户名单(运营者指名)。合约卡右列常年空三格,
 # 根子在东方财富 —— 它在纯碱上的**单合约**上榜率只有 15.5%,广发是 91.4%。
 def test_纯碱散户名单已换掉东方财富():
+    """DEC-200 换掉东方财富;DEC-219 起再各去掉一家,**两个品种去掉的不是同一家**。
+
+    合约小窗要「4 比 4」(机构侧同日剔掉瑞达)。纯碱去平安、玻璃去方正中期 ——
+    哪天有人图省事把两份改成一致,下面那条不等式就会红。
+    """
     H.use("SA")
-    assert H.RULES["retail_panel"] == ["平安期货", "徽商期货", "方正中期",
-                                       "广发期货", "中信建投"]
+    assert H.RULES["retail_panel"] == ["徽商期货", "方正中期", "广发期货", "中信建投"]
     # 换人的**唯一理由**就是把东方财富换成广发,这两条各钉一头:
     assert "东方财富" not in H.RULES["retail_panel"]
     assert "广发期货" in H.RULES["retail_panel"]
-    # 玻璃 2026-09-04 起用同一份名单(同一个理由:东方财富单合约上榜率 28.2%)
+    assert "平安期货" not in H.RULES["retail_panel"], "纯碱去的是平安"
     H.use("FG")
-    assert H.RULES["retail_panel"] == ["平安期货", "徽商期货", "方正中期",
-                                       "广发期货", "中信建投"]
-    assert H.VARIETIES["FG"]["retail_panel"] == H.VARIETIES["SA"]["retail_panel"]
+    assert H.RULES["retail_panel"] == ["平安期货", "徽商期货", "广发期货", "中信建投"]
+    assert "方正中期" not in H.RULES["retail_panel"], "玻璃去的是方正中期"
+    assert H.VARIETIES["FG"]["retail_panel"] != H.VARIETIES["SA"]["retail_panel"]
     # 回落仍要成立 —— 挑一个**没配**覆盖的品种验
     H.use("JM")
     assert H.RULES["retail_panel"] == H.DEFAULT_RETAIL_PANEL
@@ -1689,7 +1725,8 @@ def test_展示名单与判据名单不许混成一份():
         panel = list(H.RULES["retail_panel"])
         seed = list(H.RULES["retail_seed"])
         assert set(panel) != set(seed), f"{code} 的展示名单与判据名单被对齐了"
-        assert len(seed) == 3 and len(panel) == 5, (code, seed, panel)
+        # DEC-219 起展示名单是 4 家(合约小窗「4 比 4」),判据名单仍是 3 家、一个字没动
+        assert len(seed) == 3 and len(panel) == 4, (code, seed, panel)
 
 
 def test_retail_seed_只有玻璃纯碱可以覆盖():

@@ -416,9 +416,14 @@ VARIETIES = {
         # **三条按顺序叠加**:华泰→国泰君安、海通→瑞达、中信→海通,
         # 最终组 = 海通/永安/瑞达/东证/国泰君安。顺序不能颠倒 —— 第三条要在第二条
         # 把海通挪走之后才不会撞成重复(`apply_group_overrides` 撞重复会整条跳过)。
+        #
+        # **第四条:剔掉瑞达,五家变四家**(DEC-219,2026-09-06 运营者拍板,与纯碱同日同办)。
+        # 叠加后最终组 = **海通 / 永安 / 东证 / 国泰君安** 四家。
+        # 用 `drop` 不用 `fixed_members`:后者重写整段历史,DEC-214 实测带 +40pp 前视。
         "group_overrides": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}},
                             {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
-                            {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}}],
+                            {"since": "2026-09-03", "replace": {"中信期货": "海通期货"}},
+                            {"since": "2026-09-07", "drop": ["瑞达期货"]}],
         # **散户反向名单:本品种专用**(运营者 2026-09-05 指定,DEC-211)。
         # 全站默认那三家(东方财富/平安/徽商)是 2021 年定死、六年样本外验证过的
         # (`REPORT_RETAIL_CROSS_v1`);本品种改用运营者点名的三家。
@@ -438,7 +443,11 @@ VARIETIES = {
         # 换掉之后近半年平均填满 **2.85/5 → 3.44/5**,最新交易日七个合约**每个都多填一格**。
         # **只换展示,不动 retail_seed**(那三家进出场判据,换人 = 改引擎;
         # 实测把这五家搬进判据,玻璃 +248.6% → +54.4%、夏普 0.64 → 0.23,见 DEC-202)。
-        "retail_panel": ["平安期货", "徽商期货", "方正中期", "广发期货", "中信建投"],
+        #
+        # **2026-09-06 起去掉方正中期,五家变四家**(DEC-219,运营者:合约小窗要「4 比 4」)。
+        # 机构侧同日剔掉瑞达,两边各四家,卡片左右对齐。**玻璃去的是方正、纯碱去的是平安**
+        # —— 两个品种去掉的不是同一家,别顺手改成一致。
+        "retail_panel": ["平安期货", "徽商期货", "广发期货", "中信建投"],
         # **关掉自动重选**(运营者 2026-09-04:「fg 暂时不要重选了,关掉这个自动重选」)。
         # 2026-10-01 本来是下一个重选切点,届时上面那三条点名换人会一起失效、
         # 组按择时收益自动重排。冻结之后:**历史照常滚动重选(回测一个字不动)**,
@@ -665,8 +674,14 @@ VARIETIES = {
         # 所以「回测支不支持」这次根本无从谈起,DEC-193(按近端表现换人回测上不被支持)
         # 与 DEC-214(固定名单的 +40pp 是前视)两条警告依旧有效。
         # 页面靠「手动换人」徽标标出来,重选切点一到自动失效。
+        #
+        # **第三条:剔掉瑞达,五家变四家**(DEC-219,2026-09-06 运营者拍板)。
+        # 叠加顺序:海通→瑞达 → 华泰→海通 → **剔瑞达**,
+        # 最终 **国泰君安 / 东证 / 海通 / 永安** 四家。
+        # 用 `drop` 不用 `fixed_members`:后者会重写整段历史,DEC-214 实测带 +40pp 前视。
         "group_overrides": [{"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
-                            {"since": "2026-09-07", "replace": {"华泰期货": "海通期货"}}],
+                            {"since": "2026-09-07", "replace": {"华泰期货": "海通期货"}},
+                            {"since": "2026-09-07", "drop": ["瑞达期货"]}],
         # **散户反向名单:本品种专用**(运营者 2026-09-05 指定,DEC-211)。
         # 全站默认那三家(东方财富/平安/徽商)是 2021 年定死、六年样本外验证过的
         # (`REPORT_RETAIL_CROSS_v1`);本品种改用运营者点名的三家。
@@ -692,7 +707,12 @@ VARIETIES = {
         # **只换展示,不动 retail_seed** —— 那三家进进出场判据,换人 = 改引擎。
         # 残留:平安(单合约 33.7%)、徽商(42.5%)仍会时常空格,那是交易所按合约
         # 只发前 20 名的硬限制,不是名单选错。要再填满只能拿「散户度」换上榜率。
-        "retail_panel": ["平安期货", "徽商期货", "方正中期", "广发期货", "中信建投"],
+        #
+        # **2026-09-06 起去掉平安,五家变四家**(DEC-219,运营者:合约小窗要「4 比 4」)。
+        # 机构侧同日剔掉瑞达,两边各四家,卡片左右对齐。
+        # 顺带解决了上面那条「平安单合约上榜率只有 33.7%、时常空格」的残留。
+        # **纯碱去的是平安、玻璃去的是方正中期** —— 两个品种去掉的不是同一家。
+        "retail_panel": ["徽商期货", "方正中期", "广发期货", "中信建投"],
         # 沉淀资金费率(DEC-151 补齐):常规 16%(=8%双边),临近交割 20%(SA2609 实测);
         # SA2611/2701 验证命中。
         "sink": {"rate": 0.16, "near_rate": 0.20, "near_days": 22},
@@ -1304,12 +1324,20 @@ def apply_group_overrides(groups: pd.Series, log: list, cuts: list, overrides: l
     **只管到下一次重选切点为止** —— 切点一到,照常按择时收益重选,点名失效。
     这样既照运营者的判断换人,又不把「按年重选」这件事拆掉(DEC-126 的教训:固定名单弱的主因是失去重选)。
     换人那天写一条 log(带 manual=True),括号里是当时的择时收益,界面能看出这是手动换的。
+
+    **`drop`(DEC-219,2026-09-06 加)**:`{"since": 日期, "drop": [席位…]}` ——
+    **剔人不补人**,组从 5 家变 4 家。为什么不用 `fixed_members`:那个会把
+    **整段历史**按同一组重算,`DEC-214` 实测那条路带来 +40pp 的**前视**;
+    `drop` 与 `replace` 同一条管道,**只从 since 起生效、不改写历史**,
+    并且照样在下一次重选切点失效。
+    一条 override 里 `replace` 与 `drop` 可以只写其中之一,也可以都写(先换后剔)。
     """
     g = groups.copy()
     for o in overrides:
         since = pd.Timestamp(o["since"])
         nxt = next((pd.Timestamp(c) for c in cuts if pd.Timestamp(c) > since), None)
-        rep = dict(o["replace"])
+        rep = dict(o.get("replace") or {})
+        drop = tuple(o.get("drop") or ())
         changed = None
         for d in g.index:
             if d < since or (nxt is not None and d >= nxt) or g[d] is None:
@@ -1317,13 +1345,27 @@ def apply_group_overrides(groups: pd.Series, log: list, cuts: list, overrides: l
             new = tuple(rep.get(m, m) for m in g[d])
             if len(set(new)) != len(new):   # 新人本来就在组里 → 不重复,保留原组
                 continue
+            if drop:
+                kept = tuple(m for m in new if m not in drop)
+                # **不许把整组剔空**:剔完没人了就整条不生效,宁可不动也不能产出空组
+                # (空组会让 signal_series 静默产出全 NaN,页面看不出问题)。
+                if not kept:
+                    continue
+                new = kept
+            if new == g[d]:
+                continue
             g[d] = new
             changed = changed or new
         if changed:
             a = alpha_upto(seat, price, since + pd.Timedelta(days=1))
-            log.append({"date": since.strftime("%Y-%m-%d"), "members": list(changed),
-                        "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in changed},
-                        "manual": True, "replace": rep})
+            entry = {"date": since.strftime("%Y-%m-%d"), "members": list(changed),
+                     "alpha": {m: (round(float(a[m]) / 1e8, 2) if m in a.index else None) for m in changed},
+                     "manual": True}
+            if rep:
+                entry["replace"] = rep
+            if drop:
+                entry["drop"] = list(drop)
+            log.append(entry)
             log.sort(key=lambda x: x["date"])
     return g, log
 
