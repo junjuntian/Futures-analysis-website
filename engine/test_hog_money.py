@@ -2348,7 +2348,7 @@ class Test重仓翻向门:
     def _mk(self, series, main="FG2701", n=260):
         """series: {席位: [逐日主力净持仓]}(长度 n)。"""
         idx = bdays("2025-01-06", n)
-        rows, prows = [], []
+        rows = []
         for m, v in series.items():
             rows.append(pd.DataFrame({"trade_date": list(idx), "contract": main,
                                       "member_key": m, "net": v, "net_off": v,
