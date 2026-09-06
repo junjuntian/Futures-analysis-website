@@ -537,6 +537,18 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('那个 z 不许再叫「仓位强度」,且要标明不参与判据(DEC-233)', async () => {
+    stubFetch({ ...PAYLOAD, rules: { ...PAYLOAD.rules, signal_source: 'cost' } })
+    const w = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('流向强度')
+    expect(t).toContain('仅展示,不参与判据')
+    // **同一页上不许再出现「建议仓位强度」** —— 它和信号卡的「仓位强度 18%」会看混
+    expect(t).not.toContain('建议仓位强度')
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',

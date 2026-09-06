@@ -39,10 +39,11 @@ interface MemberLeg {
   change_long?: number | null
   change_short?: number | null
   on_board: boolean
-  /** 「几成仓」(DEC-222):该席位当前 |净持仓| ÷ 它**自己**近 500 日最大 |净持仓|。
+  /** 「几成仓」(DEC-222/229):该席位当前 |净持仓| ÷ 它**自己**近 400 日内、
+   *  彼此隔 ≥20 日的最高 3 次 |净持仓| 的平均。
    *  只作展示,引擎一个判据都不读它。预热不足(<120 天)时为 null。老 JSON 没有。 */
   level?: number | null
-  /** 上面那个比例的分母,即该席位自身近 500 日的最大净持仓(手)。 */
+  /** 上面那个比例的分母(近 400 日 top3 隔 20 日的平均,手)。 */
   peak?: number | null
 }
 
@@ -500,10 +501,10 @@ function isHotLevel(m: MemberLeg) {
 }
 function levelTip(m: MemberLeg) {
   if (m.level == null) return ''
-  const win = data.value?.seat_level?.win ?? 500
-  const peak = m.peak == null ? '' : `,自身高位 ${fmt(m.peak)} 手`
-  return `${m.member}当前净持仓是它自己近 ${win} 个交易日最大净持仓的 `
-    + `${Math.round(m.level * 100)}%${peak}。只作参考,引擎不读这个数。`
+  const win = data.value?.seat_level?.win ?? 400
+  const peak = m.peak == null ? '' : `,分母 ${fmt(m.peak)} 手`
+  return `${m.member}当前净持仓是它自己近 ${win} 个交易日内、彼此隔 ≥20 日的`
+    + `最高 3 次平均的 ${Math.round(m.level * 100)}%${peak}。只作参考,引擎不读这个数。`
 }
 
 function chipAnchor(contract: string, members: MemberLeg[], side: 'short' | 'long') {
@@ -946,7 +947,7 @@ const bySide = computed(() => {
               <span class="k">仓位强度</span>
               <span class="v">{{ Math.round(data.sizing.strength * 100) }}%
                 <span class="gray">(整组今日 {{ fmt(data.sizing.now) }} 手 /
-                  近 500 日最大 {{ fmt(data.sizing.peak ?? 0) }} 手)</span>
+                  近 400 日 top3 峰值 {{ fmt(data.sizing.peak ?? 0) }} 手)</span>
               </span>
             </div>
             <div class="kv">
@@ -983,7 +984,8 @@ const bySide = computed(() => {
           <p v-if="data.sizing" class="note">
             **不是满仓进场**(DEC-224):手数 = 总资金 × 仓位强度 ÷(结算价 × 点值),
             即**名义敞口 = 总资金 × 仓位强度**,满仓就是 1 倍杠杆。
-            仓位强度 = **整组合计**净持仓占它自己近 500 日最大值的比例 ——
+            仓位强度 = **整组合计**净持仓 ÷ 它自己**近 400 个交易日内、彼此隔 ≥20 日的
+            最高 3 次的平均**(DEC-229:单个最大值会被一次插针顶高,水位就常年偏低)——
             **是整组,不是某一家**;跟单一席位实测更差(纯碱夏普 0.23,还不如固定缩仓 0.60)。
             强度每天会变,**加减手数按上面那个数调**,调仓成本实测只吃 1pp 上下。
           </p>
@@ -1051,7 +1053,14 @@ const bySide = computed(() => {
           </p>
           <div class="kv"><span class="k">{{ data.signal.win }} 日变化</span>
             <span class="v" :class="pnlClass(data.signal.change)">{{ fmt(data.signal.change) }} 手</span></div>
-          <div class="kv"><span class="k">建议仓位强度</span><span class="v">{{ fmt(data.signal.suggested_position, 2) }}</span></div>
+          <!-- **别再叫「仓位强度」**(DEC-233):这里是**流向强度 z**(合计净持仓 5 日变化的
+               标准化值),而信号卡上的「仓位强度 18%」是 DEC-224 决定手数的那个权重 ——
+               两个数含义完全不同(一个无量纲、一个百分比),同名会看混。
+               而且**玻纯的进出场一个判据都不读它**,所以直接在标签上写明。 -->
+          <div class="kv"><span class="k">流向强度</span><span class="v">
+            {{ fmt(data.signal.suggested_position, 2) }}
+            <span v-if="isCost" class="gray">(仅展示,不参与判据)</span>
+          </span></div>
           <div class="kv">
             <span class="k">机构方向</span>
             <span class="v" :class="data.institution.side === 'net_long' ? 'red' : 'green'">
@@ -1096,8 +1105,10 @@ const bySide = computed(() => {
           </p>
           <p v-if="data.seat_level" class="note">
             **「X 仓」= 这家自己的水位**:当前净持仓 ÷ 它**自己**近
-            {{ data.seat_level.win }} 个交易日的最大净持仓。不是占全市场的比例,
-            也不是几家之间比大小 —— 每家的分母都是它自己。
+            {{ data.seat_level.win }} 个交易日内、**彼此至少隔 20 个交易日的最高 3 次的平均**。
+            不是占全市场的比例,也不是几家之间比大小 —— 每家的分母都是它自己。
+            (**为什么取 3 次的平均而不是单个最大值**:单日插针会把分母顶高、水位常年偏低;
+            **为什么要隔开**:不隔的话取到的是同一波建仓顶部的连续三天,平均下来等于没做。)
             <template v-if="data.seat_level.evidence">
               {{ data.seat_level.evidence }}
               **但这只是参考,不是交易信号**:命中率最低的一档只有 54%,
@@ -1867,7 +1878,8 @@ const bySide = computed(() => {
                  看的人先要知道进多少,再看什么时候成交。 -->
             <li v-if="data.sizing"><b>仓位(分数仓位,DEC-224)</b>:**不是满仓进场**。
               手数 = 总资金 × **仓位强度** ÷(结算价 × 点值),即名义敞口 = 总资金 × 强度,
-              满仓就是 1 倍杠杆。**仓位强度 = 整组合计净持仓占它自己近 500 个交易日最大值的比例**
+              满仓就是 1 倍杠杆。**仓位强度 = 整组合计净持仓 ÷ 它自己近 400 个交易日内、
+              彼此隔 ≥20 日的最高 3 次的平均**
               —— **是整组,不是某一家**:实测跟单一席位(永安)玻璃只有夏普 0.30、
               纯碱 **0.23**,纯碱上还不如同平均仓位的固定缩仓(0.60)。
               强度每天变,**手数跟着加减**,调仓成本按 2 元/手/边实扣(一手名义约 2 万元 ≈ 1 个基点,
