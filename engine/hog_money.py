@@ -471,12 +471,12 @@ VARIETIES = {
         # +43.1%/0.25/回撤 −33.2% → **+52.3%/0.60/−16.8%**,平均仓位 25%。
         # 等效缩仓到 25% 只有 0.25 —— 多出来的那一截是择时价值,不是缩仓。
         "sizing": True,
-        # **异见席位阻止门(DEC-227,运营者点名)**:一家反向且自身仓位 ≥60%、
-        # 多数派已卸到 9 个月高位的 50% 以下 → 不进场。
-        # **至今从未拦下过任何一笔**(纯碱 0/26、玻璃 0/108),回测逐字节不变;
-        # 机制检验两品种符号相反(纯碱后 10 日逆行 67%、玻璃仅 32%)。
-        # **知情选择上线,不是验证通过** —— 细节见 dissent_block 的 docstring。
-        "dissent_gate": True,
+        # **重仓翻向门(DEC-228,运营者选的方案丙)**:某席位在主力合约上翻向、
+        # 且新方向仓位 ≥ 自身 200 日高位的 60% → 不往它的反方向进场。
+        # 抓到了 2026-08 玻璃永安那次转向(连续 6 天,水位 61~67%);
+        # **但机制统计很弱**(方向对 42~55%),**玻璃回测略减分** +52.3%→+46.8%、纯碱不变。
+        # **知情选择上线** —— 细节见 flip_block 的 docstring。
+        "flip_gate": True,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -503,8 +503,9 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "分数仓位口径 +52.3%/夏普 0.60/回撤 −16.8%(平均仓位 25%,DEC-224);"
-                    "同一批 108 笔按满仓算是 +43.1%/0.25/−33.2%"
+        "backtest": "分数仓位口径 +46.8%/夏普 0.56/回撤 −16.8%(平均仓位 25%,DEC-224);"
+                    "**其中 −5.5pp 是 DEC-228 重仓翻向门挡掉两笔的代价**(挡之前 +52.3%/0.60);"
+                    "同一批按满仓算是 +43.1%/0.25/−33.2%"
                     "(2013-01 起,基准 −17.7%)。"
                     "**这里原先写的 120 笔 +218.1%/0.65/−31.6% 是 DEC-211 之前的数** ——"
                     "2026-09-05 换了本品种的散户反向名单(运营者知情破例,数据反对),"
@@ -749,12 +750,12 @@ VARIETIES = {
         # +118.9%/0.61/回撤 −40.9% → **+126.3%/1.25/−20.4%**,平均仓位 35%。
         # 核心闸门是「必须胜过等效缩仓」:同样压到 35%,固定缩仓只有 0.60。
         "sizing": True,
-        # **异见席位阻止门(DEC-227,运营者点名)**:一家反向且自身仓位 ≥60%、
-        # 多数派已卸到 9 个月高位的 50% 以下 → 不进场。
-        # **至今从未拦下过任何一笔**(纯碱 0/26、玻璃 0/108),回测逐字节不变;
-        # 机制检验两品种符号相反(纯碱后 10 日逆行 67%、玻璃仅 32%)。
-        # **知情选择上线,不是验证通过** —— 细节见 dissent_block 的 docstring。
-        "dissent_gate": True,
+        # **重仓翻向门(DEC-228,运营者选的方案丙)**:某席位在主力合约上翻向、
+        # 且新方向仓位 ≥ 自身 200 日高位的 60% → 不往它的反方向进场。
+        # 抓到了 2026-08 玻璃永安那次转向(连续 6 天,水位 61~67%);
+        # **但机制统计很弱**(方向对 42~55%),**玻璃回测略减分** +52.3%→+46.8%、纯碱不变。
+        # **知情选择上线** —— 细节见 flip_block 的 docstring。
+        "flip_gate": True,
         "exit_mode": "discipline",
         "max_hold": 60,
         "backtest": "分数仓位口径 +126.3%/夏普 1.25/回撤 −20.4%(平均仓位 35%,DEC-224);"
@@ -949,8 +950,8 @@ def use(code: str) -> dict:
     # 分数仓位(DEC-224):配了才开。**每轮都要写**,否则跑完玻璃再跑鸡蛋,
     # 鸡蛋会顶着玻璃的开关(retail_panel 那次栽过同一个坑)。
     RULES["sizing"] = bool(v.get("sizing", False))
-    # 异见席位阻止门(DEC-227):配了才开。**每轮都要写**,理由同 sizing。
-    RULES["dissent_gate"] = bool(v.get("dissent_gate", False))
+    # 重仓翻向门(DEC-228):配了才开。**每轮都要写**,理由同 sizing。
+    RULES["flip_gate"] = bool(v.get("flip_gate", False))
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -1807,78 +1808,77 @@ def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
     return pd.DataFrame({"cost_z": z, "cost_reason": reason})
 
 
-#: 异见席位阻止门(DEC-227,运营者 2026-09-06 指定的三个数)。
-DISSENT = {"lvl": 0.60, "trio_low": 0.50, "trio_win": 180}
+#: 重仓翻向门(DEC-228,运营者 2026-09-06 选的方案丙)。三个数都是他给的,`back` 是我定的。
+FLIP_GATE = {"lvl": 0.60, "lvl_win": 200, "back": 20}
 
 
-def dissent_block(seat: pd.DataFrame, groups: pd.Series,
-                  dates: pd.DatetimeIndex) -> pd.Series:
-    """逐日布尔:今天**不许进场**(不管往哪个方向)。
+def flip_block(seat: pd.DataFrame, groups: pd.Series, mkt: pd.DataFrame) -> pd.Series:
+    """逐日:−1 = 今天不许做空,+1 = 今天不许做多,0 = 不拦。
 
-    运营者原话:「任何一家席位和另外三家持仓相反,而且仓位达到自己最大仓位的 60%,
-    同时三家合计持仓低于 9 个月最大仓位的 50%,这就不能进场跟随三家的方向做,
-    这就代表反弹或者转向。」三条**同时**成立才拦:
-
-    ① 组内**恰好一家**与其余各家反向,且**全员在榜**
-       —— 掉榜是「不知道」不是「没有」(`PITFALLS` 第 4 条),**不因不知道而拦**。
-       「全员在榜」这个下限是实现时补的,运营者原话没说;
-    ② 那家少数派的**自身水位** ≥ 60%(`|净持仓| ÷ 自身近 500 日最大`,DEC-222 口径);
-    ③ **多数派合计** `|净持仓|` < 它们合计的近 180 个交易日(≈9 个月)最大值 × 50%。
+    运营者的规则(方案丙):**某一家在主力合约上从净空翻成净多(或反向),
+    且新方向仓位 ≥ 自身 200 日高位的 60%** → 不许往它的反方向进场。
 
     ------------------------------------------------------------------
-    **这道门至今从未拦下过任何一笔** —— 实测纯碱 0/26 笔、玻璃 0/108 笔,
-    加上它**回测逐字节不变**。也就是说:**回测既不能证明它有用,也不能证明它没用。**
+    **口径三处要点,都是踩过坑之后定的**:
 
-    **机制检验的结论是分裂的**(`REPORT_DISSENT_GATE_v1`),触发之后顺着多数派方向的收益:
+    1. **用主力合约的净持仓,不用全品种合计。** 2026-08 玻璃永安在 FG2701 上
+       净多 **94,903 手**(近 200 日最大 127,517 → 水位 **71%**),
+       而全品种合计只有 55,371 手 / 39% —— **主力上的九万手被其他月份的空单对冲掉了**。
+       运营者当场指出「应该算 FG2701 合约」,他记的数是对的,是旧口径错了;
+    2. **窗口 200 日,不是 500 日**(运营者:「近 200 日最大,不要近 500 日,时间太长了」);
+    3. **「翻向」= 今天的方向 ≠ `back` 个交易日前的方向**,不是单日符号变化 ——
+       净持仓在零附近天天抖,只看单日会被刷屏。`back = 20`(约一个月)**是我定的**,
+       依据是永安那次 07-22 −16,971 → 08-21 +94,903 跨约 37 个交易日,20 日窗口盖得住。
 
-    | | 纯碱(12 次) | 玻璃(19 次) |
-    |---|---|---|
-    | 后 10 日中位 | **−3.91%**(逆行 67%) | **+1.33%**(逆行仅 32%) |
-    | 后 20 日中位 | −2.87%(逆行 58%) | **+3.47%**(逆行仅 26%) |
+    **只挡与翻向者相反的那个方向**(永安翻多 → 挡做空),不是两边都挡:
+    运营者原话是「不能进场跟随三家的方向做」,而「三家」正是翻向者的对面。**这条也是我细化的。**
 
-    **纯碱支持运营者的判断,玻璃正好相反。** 且事件高度重叠
-    (纯碱 12 次里 4 次挤在 2021-05、玻璃 19 次里 9 次挤在 2020-06/07),
-    独立事件只有八九个。**这是知情选择上线,不是验证通过** —— 同 DEC-113/195/211。
-    真触发那天请回来看这段注释,别默认它拦对了。
+    ------------------------------------------------------------------
+    **证据形态要说清楚(REPORT_FLIP_GATE_v1)**:
+
+    * **它确实抓到了运营者关心的那次**:玻璃 2026-08-24~08-31 连续 6 天触发,
+      翻向者永安、主力 81,513~89,452 手、水位 61~67%,挡做空;
+    * **但机制统计很弱**:触发后顺翻向者方向的收益,玻璃 5/10/20 日方向对
+      54% / 48% / **42%**,纯碱 55% / 50% / 49% —— **和抛硬币差不多**;
+    * **回测上玻璃略减分**:108 笔 +52.3%/0.60 → 106 笔 **+46.8%/0.56**;纯碱**完全不变**。
+
+    **这是知情选择上线,不是验证通过**(同 DEC-113/195/211/227)。
     ------------------------------------------------------------------
     """
-    if seat.empty:
-        return pd.Series(False, index=dates)
+    idx = mkt.index
+    out = pd.Series(0, index=idx, dtype=int)
+    if seat.empty or "main" not in mkt:
+        return out
     members = sorted({m for grp in groups.dropna().unique() for m in grp})
-    cols = {}
+    off = seat.dropna(subset=["net_off"]).set_index(
+        ["member_key", "contract", "trade_date"])["net_off"]
+    main = mkt["main"]
+    MN = {}
     for m in members:
-        r = seat[seat["member_key"] == m]
-        if not r.empty:
-            off, _full = _pit_pair(r)
-            cols[m] = off.reindex(dates)
-    if not cols:
-        return pd.Series(False, index=dates)
-    P = pd.DataFrame(cols)
-    lv = {m: (P[m].abs() / P[m].abs().rolling(SEAT_LEVEL_WIN,
-              min_periods=SEAT_LEVEL_MIN).max()) for m in P.columns}
-
-    ok12, major = [], pd.Series(np.nan, index=dates)
-    for d in dates:
-        grp = groups.get(d)
-        cs = [m for m in (grp or ()) if m in P.columns]
-        row = P.loc[d, cs].dropna() if cs else pd.Series(dtype=float)
-        row = row[row != 0]
-        # 全员在榜才判;少于 3 家谈不上「一家对其余」
-        if not grp or len(row) != len(grp) or len(row) < 3:
-            ok12.append(False)
-            continue
-        cnt = np.sign(row).value_counts()
-        if len(cnt) != 2 or int(cnt.min()) != 1:
-            ok12.append(False)
-            continue
-        odd = np.sign(row)[np.sign(row) == cnt.idxmin()].index[0]
-        v = lv[odd].get(d, np.nan)
-        ok12.append(bool(np.isfinite(v) and v >= DISSENT["lvl"]))
-        major[d] = row[[m for m in row.index if m != odd]].sum()
-
-    mx = major.abs().rolling(DISSENT["trio_win"], min_periods=20).max()
-    c3 = (major.abs() / mx < DISSENT["trio_low"]).fillna(False)
-    return (pd.Series(ok12, index=dates) & c3).fillna(False)
+        MN[m] = pd.Series(
+            [float(off.get((m, main.get(d), d), np.nan))
+             if isinstance(main.get(d), str) else np.nan for d in idx], index=idx)
+    if not MN:
+        return out
+    MN = pd.DataFrame(MN)
+    win, mp = FLIP_GATE["lvl_win"], max(60, FLIP_GATE["lvl_win"] // 3)
+    lv = {m: (MN[m].abs() / MN[m].abs().rolling(win, min_periods=mp).max()) for m in MN.columns}
+    prev = {m: np.sign(MN[m]).shift(FLIP_GATE["back"]) for m in MN.columns}
+    for d in idx:
+        for m in (groups.get(d) or ()):
+            if m not in MN.columns:
+                continue
+            v, pv = MN[m].get(d, np.nan), prev[m].get(d, np.nan)
+            # 掉榜 / 刚好为零 → 该席位当天不判(掉榜是「不知道」不是「没有」)
+            if not (np.isfinite(v) and np.isfinite(pv)) or v == 0 or pv == 0:
+                continue
+            if np.sign(v) == pv:
+                continue
+            w = lv[m].get(d, np.nan)
+            if np.isfinite(w) and w >= FLIP_GATE["lvl"]:
+                out[d] = -1 if v > 0 else 1
+                break
+    return out
 
 
 def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
@@ -1891,14 +1891,16 @@ def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
                            unload.reindex(mkt.index), sig["chg"].reindex(mkt.index))
     cz = ext["cost_z"]
     reason = ext["cost_reason"]
-    # 异见席位阻止门(DEC-227):逐品种开关,不配的品种逐字节不变。
-    if RULES.get("dissent_gate"):
-        blocked = dissent_block(seat, groups, mkt.index)
-        cz = cz.where(~blocked, 0.0)
-        reason = reason.where(~blocked,
-                              f"有一家与其余各家反向且自身仓位 ≥{DISSENT['lvl']:.0%}、"
-                              f"多数派已卸到 9 个月高位的 {DISSENT['trio_low']:.0%} 以下"
-                              "——可能是反弹或转向,不跟")
+    # 重仓翻向门(DEC-228):逐品种开关,不配的品种逐字节不变。
+    # **只挡与翻向者相反的方向**:翻向者做多 → 挡做空(cz<0),反之亦然。
+    if RULES.get("flip_gate"):
+        fb = flip_block(seat, groups, mkt)
+        kill = ((fb == -1) & (cz < 0)) | ((fb == 1) & (cz > 0))
+        cz = cz.where(~kill, 0.0)
+        reason = reason.where(
+            ~kill, f"有席位在主力合约上重仓翻向(新方向仓位 ≥ 自身 "
+                   f"{FLIP_GATE['lvl_win']} 日高位的 {FLIP_GATE['lvl']:.0%})"
+                   "——可能是反弹或转向,不往它的反方向进")
     return sig.assign(cost_z=cz.reindex(sig.index),
                       cost_reason=reason.reindex(sig.index))
 

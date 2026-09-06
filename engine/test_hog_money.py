@@ -2342,75 +2342,75 @@ class Test已卸掉的两个口径:
         assert "unload_window" not in inspect.getsource(H.replay)
 
 
-class Test异见席位阻止门:
-    """DEC-227:一家反向且自身仓位重、多数派已卸掉大半 → 不进场。"""
+class Test重仓翻向门:
+    """DEC-228(方案丙):某席位在**主力合约**上重仓翻向 → 不往它的反方向进场。"""
 
-    def _mk(self, nets, n=200):
-        """nets: {席位: 末日净持仓},前 n-1 天都给一个固定的高位值好让水位算得出来。"""
+    def _mk(self, series, main="FG2701", n=260):
+        """series: {席位: [逐日主力净持仓]}(长度 n)。"""
         idx = bdays("2025-01-06", n)
-        rows = []
-        for m, (hist, last) in nets.items():
-            v = [hist] * (n - 1) + [last]
-            rows.append(pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+        rows, prows = [], []
+        for m, v in series.items():
+            rows.append(pd.DataFrame({"trade_date": list(idx), "contract": main,
                                       "member_key": m, "net": v, "net_off": v,
                                       "source": "akshare_v1"}))
         seat = pd.concat(rows, ignore_index=True)
-        grp = tuple(nets)
-        groups = pd.Series([grp] * n, index=idx, dtype=object)
-        return seat, groups, idx
+        mkt = pd.DataFrame({"main": [main] * n, "settle": [1000.0] * n}, index=idx)
+        groups = pd.Series([tuple(series)] * n, index=idx, dtype=object)
+        return seat, groups, mkt, idx
 
-    def test_三个数是运营者点的(self):
-        assert H.DISSENT == {"lvl": 0.60, "trio_low": 0.50, "trio_win": 180}
+    def test_三个数里两个是运营者给的(self):
+        assert H.FLIP_GATE["lvl"] == 0.60 and H.FLIP_GATE["lvl_win"] == 200
+        assert H.FLIP_GATE["back"] == 20      # 这个是实现时定的
 
-    def test_三条全中才拦(self):
-        # 甲反向且满仓(水位 100%);乙丙丁同向,末日合计从 -3000 卸到 -600(20% < 50%)
-        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -200),
-                                      "丙": (-1000, -200), "丁": (-1000, -200)})
-        b = H.dissent_block(seat, groups, idx)
-        assert bool(b.iloc[-1]) is True
+    def test_重仓翻多就挡做空(self):
+        # 前 240 天净空(峰值 -1000),末 20 天翻成净多 +700(水位 70%)
+        v = [-1000.0] * 240 + [700.0] * 20
+        seat, g, mkt, idx = self._mk({"甲": v, "乙": [-100.0] * 260})
+        b = H.flip_block(seat, g, mkt)
+        assert b.iloc[-1] == -1, "翻向者做多 → 挡做空"
 
-    def test_多数派没卸够就不拦(self):
-        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -900),
-                                      "丙": (-1000, -900), "丁": (-1000, -900)})
-        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+    def test_翻向了但仓位不够重就不挡(self):
+        v = [-1000.0] * 240 + [100.0] * 20     # 水位 10%
+        seat, g, mkt, idx = self._mk({"甲": v, "乙": [-100.0] * 260})
+        assert H.flip_block(seat, g, mkt).iloc[-1] == 0
 
-    def test_少数派仓位不重就不拦(self):
-        seat, groups, idx = self._mk({"甲": (1000, 100), "乙": (-1000, -200),
-                                      "丙": (-1000, -200), "丁": (-1000, -200)})
-        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+    def test_仓位重但没翻向就不挡(self):
+        v = [1000.0] * 260                     # 一直净多,水位 100% 但没翻
+        seat, g, mkt, idx = self._mk({"甲": v, "乙": [-100.0] * 260})
+        assert H.flip_block(seat, g, mkt).iloc[-1] == 0
 
-    def test_两家反向就不是一对三(self):
-        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (1000, 1000),
-                                      "丙": (-1000, -200), "丁": (-1000, -200)})
-        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
-
-    def test_掉榜不许当成没有(self):
-        """掉榜是「不知道」不是「没有」(PITFALLS 第 4 条),**不因不知道而拦**。"""
-        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -200),
-                                      "丙": (-1000, -200), "丁": (-1000, -200)})
-        seat = seat[~((seat["trade_date"] == idx[-1]) & (seat["member_key"] == "丁"))]
-        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+    def test_主力合约掉榜那天不判(self):
+        """掉榜是「不知道」不是「没有」(PITFALLS 第 4 条)。"""
+        v = [-1000.0] * 240 + [700.0] * 20
+        seat, g, mkt, idx = self._mk({"甲": v, "乙": [-100.0] * 260})
+        seat = seat[~((seat["trade_date"] == idx[-1]) & (seat["member_key"] == "甲"))]
+        assert H.flip_block(seat, g, mkt).iloc[-1] == 0
 
     def test_只有玻纯开了这个开关(self):
         for code in ("SA", "FG"):
             H.use(code)
-            assert H.RULES["dissent_gate"] is True, code
+            assert H.RULES["flip_gate"] is True, code
         for code in ("JD", "JM", "LH", "I"):
             H.use(code)
-            assert H.RULES["dissent_gate"] is False, code
+            assert H.RULES["flip_gate"] is False, code
 
-    def test_至今一笔都没拦到所以回测不许变(self, tmp_path):
-        """**这道门的现状就是「从未触发过任何一笔进场」**。
+    def test_只挡一个方向不是两边都挡(self):
+        """**运营者原话是「不能跟随三家的方向做」,三家 = 翻向者的对面。**
 
-        哪天这条测试红了,说明它开始真的拦单了 —— 那时请回去读
-        `dissent_block` 的 docstring:机制检验两品种符号相反,别默认它拦对了。
+        两边都挡会把翻向者自己那个方向也堵死,那不是他的意思。
         """
+        import inspect
+        src = inspect.getsource(H.attach_cost_signal)
+        assert "(fb == -1) & (cz < 0)" in src and "(fb == 1) & (cz > 0)" in src
+
+    def test_回测钉住现状(self, tmp_path):
+        """玻璃会被挡掉两笔(+52.3%→+46.8%),纯碱不变。红了就是口径变了。"""
         import os
         from pathlib import Path as _P
         d = _P(os.environ.get("CSV_DIR", "research/data"))
-        if not (d / "sa_price.csv.gz").exists():
+        if not (d / "fg_price.csv.gz").exists():
             pytest.skip("本机没有 research/data 快照")
-        for code, stem, want in (("SA", "sa", (26, 126.3)), ("FG", "fg", (108, 52.3))):
+        for code, stem, want in (("FG", "fg", (106, 46.8)), ("SA", "sa", (26, 126.3))):
             H.use(code)
             price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
             seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
