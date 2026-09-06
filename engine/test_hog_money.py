@@ -2307,3 +2307,36 @@ class Test分数仓位:
         assert card["strength"] == 0.5 and card["lots"] == 25
         assert card["lots_prev"] == 50 and card["lots_chg"] == -25
         assert card["leverage"] == 0.5 and card["margin_rate"] == 0.08
+
+
+class Test已卸掉的两个口径:
+    """DEC-225:展示按近 9 个月高位,判据仍按本轮峰值。**两个数有意并存。**"""
+
+    def test_窗口是九个月(self):
+        assert H.UNLOAD_VIEW_WIN == 180
+
+    def test_展示口径不受换组影响(self):
+        """这就是运营者指出的那个 bug:2026-09-04 剔掉瑞达之后,
+        判据那条把峰值重置成当天的值 → 显示「已卸掉 0%」,而机构其实卸了一大半。
+        """
+        idx = bdays("2025-01-06", 200)
+        net = pd.Series([-300000.0] * 150 + [-100000.0] * 50, index=idx)
+        v = H.unload_view(net)
+        assert v["pct"] == pytest.approx(1 - 100000 / 300000, abs=1e-3)
+        assert v["peak_net"] == -300000 and v["win"] == 180
+
+    def test_预热不足不给值(self):
+        net = pd.Series([-100.0] * 10, index=bdays("2025-01-06", 10))
+        assert H.unload_view(net)["pct"] is None
+
+    def test_不许拿它去改判据(self):
+        """实测滚动窗口当判据会把门大幅收紧(纯碱 26 笔 → 7 笔、+126.3% → +27.1%)。
+
+        `cost_entry_frame` 收的是调用方传进来的 `unload`,而生产的
+        `attach_cost_signal` 传的必须是 `unload_series`(本轮峰值)那一条。
+        """
+        import inspect
+        src = inspect.getsource(H.attach_cost_signal)
+        assert "unload_series" in src
+        assert "unload_window" not in src and "unload_view" not in src
+        assert "unload_window" not in inspect.getsource(H.replay)

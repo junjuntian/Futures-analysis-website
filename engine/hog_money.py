@@ -1639,6 +1639,42 @@ def sizing_card(w: pd.Series, settle: pd.Series, net: pd.Series,
     }
 
 
+#: 「已卸掉」展示口径的窗口(DEC-225):近 9 个月 ≈ 180 个交易日。
+UNLOAD_VIEW_WIN = 180
+
+
+def unload_window(net: pd.Series, win: int = UNLOAD_VIEW_WIN) -> pd.DataFrame:
+    """**展示用**的「已卸掉」:相对**近 `win` 个交易日最大净持仓**卸掉了多少。
+
+    与 `unload_series`(本轮 running peak)是**两个不同的数,有意并存**:
+
+    * `unload_series` **是判据**(进场要求「本轮已卸掉 ≤ 30%」)。它在**换组/翻向/归零**
+      时重来一轮 —— 那是刻意的,否则「换了一批人」会被读成「机构大幅出货」。
+    * 但那个设计有个副作用:**换组当天峰值被重置成当天的值,于是「已卸掉」显示 0%**。
+      2026-09-04 剔掉瑞达(DEC-219)之后线上就是这样,运营者当场指出「这个有问题」。
+    * 本函数按**固定回看窗口**算,不受换组影响,**只进展示**。
+
+    **判据为什么不跟着改**:实测把判据换成滚动窗口会大幅收紧 ——
+    纯碱 26 笔 → 7 笔、+126.3%/1.25 → +27.1%/0.64;玻璃 108 笔 → 29 笔。
+    分母跨了好几轮建仓被撑大,门就常年关着。**别再拿这条去改判据。**
+    """
+    mx = net.abs().rolling(win, min_periods=20).max()
+    pct = (1 - net.abs() / mx).clip(lower=0)
+    return pd.DataFrame({"pct": pct, "peak": mx * np.sign(net).replace(0, np.nan)})
+
+
+def unload_view(net: pd.Series, win: int = UNLOAD_VIEW_WIN) -> dict:
+    """`unload_window` 的最后一天,给页面用。"""
+    f = unload_window(net, win)
+    v = f["pct"].dropna()
+    if v.empty:
+        return {"pct": None, "peak_net": None, "win": win}
+    d = v.index[-1]
+    pk = f["peak"].get(d, np.nan)
+    return {"pct": round(float(v.iloc[-1]), 3),
+            "peak_net": int(pk) if np.isfinite(pk) else None, "win": win}
+
+
 def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
     """页面要的那一格:**最后一个算得出来的**那天的出货程度。
 
@@ -3009,6 +3045,9 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "long_signal_now": bool(np.isfinite(z) and z >= RULES["enter"]),
         # 机构卸了多少 —— **只显示,不进判据**,理由见 unload_state 的 docstring。
         "unload": unload_state(sig, seat, groups),
+        # 展示口径(DEC-225):相对近 9 个月高位。**与上面那个是两个数**,
+        # 上面那个是判据(本轮峰值,换组会重置),这个不受换组影响。
+        "unload_view": unload_view(sig["net"]),
     }
 
     # 进场方向:**用进场那一路的信号**。方案 C 下 z_in 是共振后的散户信号,

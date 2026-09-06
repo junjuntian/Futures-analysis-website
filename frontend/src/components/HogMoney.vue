@@ -135,6 +135,10 @@ interface HogPayload {
      * 五家掉两家会让合计净持仓下降而人家一手没动。实测这个混淆专门吃掉长窗口
      * (纯碱 20 日的表观效应几乎全由它贡献),所以界面必须把它说出来。
      */
+    /** 展示口径的「已卸掉」(DEC-225):相对**近 9 个月高位**,不受换组影响。
+     *  与下面 `unload`(判据用的本轮峰值)**是两个数**,页面两个都写、各自标清楚。
+     *  **可选**:旧 JSON 没有。 */
+    unload_view?: { pct: number | null; peak_net: number | null; win: number } | null
     unload: {
       /** 0~1;掉榜、刚建仓或刚换组时为 null。 */
       pct: number | null
@@ -781,6 +785,12 @@ const rolled = computed(() =>
  * 第一版只写了掉榜那一种,而生猪当前正好是反过来的(今日 5 家、峰值日 4 家),
  * 那句话对它是错的。
  */
+/** 展示口径的「已卸掉」(DEC-225)。没值就整行不出。 */
+const unloadView = computed<number | null>(() => {
+  const v = data.value?.institution.unload_view?.pct
+  return v == null || !Number.isFinite(v) ? null : v
+})
+
 const unloadMuddled = computed<'fewer' | 'more' | null>(() => {
   const u = data.value?.institution.unload
   if (!u || u.pct === null || u.legs_at_peak === null || u.legs_now === null) return null
@@ -999,14 +1009,33 @@ const bySide = computed(() => {
             </div>
           </div>
           <div class="kv"><span class="k">合计净持仓</span><span class="v">{{ fmt(data.signal.net) }} 手</span></div>
-          <div v-if="data.institution.unload && data.institution.unload.pct !== null" class="kv">
+          <!-- DEC-225:主数字改成「相对近 9 个月高位」(运营者 2026-09-06 指定)。
+               判据用的仍是「本轮峰值」,它在换组当天会重置成当天的值(于是显示 0%)——
+               2026-09-04 剔掉瑞达之后线上就是这样。**两个数都写出来,各自标清楚**,
+               不许只留一个:只留展示口径会让人以为门开着/关着,只留判据口径就是现在这个 bug。 -->
+          <div v-if="unloadView !== null" class="kv">
             <span class="k">已卸掉</span>
             <span class="v">
-              {{ (data.institution.unload.pct * 100).toFixed(0) }}%
-              <i class="peak">峰值 {{ fmt(data.institution.unload.peak_net) }} 手
+              {{ (unloadView * 100).toFixed(0) }}%
+              <i class="peak">近 9 个月高位
+                {{ fmt(data.institution.unload_view!.peak_net) }} 手</i>
+            </span>
+          </div>
+          <div v-if="data.institution.unload && data.institution.unload.pct !== null" class="kv">
+            <span class="k">进场条件按</span>
+            <span class="v">
+              本轮已卸掉 {{ (data.institution.unload.pct * 100).toFixed(0) }}%
+              <i class="peak">本轮峰值 {{ fmt(data.institution.unload.peak_net) }} 手
                 @{{ (data.institution.unload.peak_date || '').slice(5) }}</i>
             </span>
           </div>
+          <p v-if="unloadView !== null && data.institution.unload?.pct !== null" class="note">
+            **两个数不一样是正常的**:上面那个按**近 9 个月高位**算,不受换人影响;
+            下面那个是**判据**,它在**换组/翻向/归零**时重来一轮 ——
+            换人当天峰值会被重置成当天的值,于是显示 0%。
+            **判据没有改成滚动窗口**:实测那样会把门大幅收紧
+            (纯碱 26 笔 → 7 笔、+126.3% → +27.1%;玻璃 108 笔 → 29 笔)。
+          </p>
           <p v-if="unloadMuddled" class="unload-warn">
             峰值日在榜 {{ data.institution.unload!.legs_at_peak }} 家、今日
             {{ data.institution.unload!.legs_now }} 家 ——
