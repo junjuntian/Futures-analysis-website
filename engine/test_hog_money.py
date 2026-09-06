@@ -2588,6 +2588,25 @@ class Test跟随引擎分数仓位:
             cfg = H.RULES.get("follow_seat") or {}
             assert not cfg.get("sizing"), code
 
+    def test_第二引擎的note里不许写死年份加百分比(self):
+        """**这条是被抓过才有的**(运营者 2026-09-06:「刚刚第二引擎的策略改了,
+        目前回撤没有那么大了,你是不是搞错了?」)。
+
+        note 里原先挂着满仓年代的「2016 −34%、2022-23 连亏两年(−18%/−17%)、
+        回撤 −46%」,DEC-234 上了分数仓位之后真实是 2016 −2.7%、2022/2023
+        +1.5%/+5.3%、回撤 −26.7%,**文案原地不动地继续挂在生产页面上**。
+
+        根治办法不是「记得改」而是**不许写**:卡片上就渲染着实时算出来的
+        累计/夏普/回撤/逐年,弱年该去那儿看。这条禁止 note 里再出现
+        「四位年份 + 百分比」这种一改规则就过期的数。
+        """
+        import re
+        for code in ("FG", "JM", "I"):
+            H.use(code)
+            note = (H.RULES.get("follow_seat") or {}).get("note") or ""
+            bad = re.findall(r"(19|20)\d{2}[^。;;]{0,12}?[-−+]?\d+(\.\d+)?%", note)
+            assert not bad, f"{code} 的 follow_seat note 里写死了年份+百分比:{bad}"
+
     def test_窗口是二百日而且与主引擎有意不同(self):
         """跟随是短周期(约 15 次翻转/年),配短窗口;主引擎是 400 日。"""
         assert H.FOLLOW_SIZING_WIN == 200
