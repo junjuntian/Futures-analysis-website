@@ -110,6 +110,8 @@ def run(code, a=False, b=False, d=False, window=SINCE):
 
 # 自检:不加任何改动时必须与生产逐字节一致
 for code in ("SA", "FG"):
+    H.use(code)          # **必须先切品种**:cost_entry_frame 读 RULES(卸仓上限/轮龄/加仓),
+                         # 不切就是拿上一个品种的参数算这一个,自检本身就是错的。
     a = H.cost_entry_frame(C[code]["cc"], C[code]["raw"]["net"], C[code]["mkt"]["settle"],
                            C[code]["unl"], C[code]["raw"]["chg"].reindex(C[code]["mkt"].index))
     assert a["cost_z"].equals(C[code]["prod"]["cost_z"]), f"{code} 基线与生产不一致"
