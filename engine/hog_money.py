@@ -488,6 +488,14 @@ VARIETIES = {
         # **纯碱没配**:它赚钱的进场集中在极低与极高水位两头(22 笔里 22%/5%/15% 那几笔
         # 各赚 +28%/+24%/+19%,而 100%/75%/76% 那几笔也赚),加上限反而减分。
         "entry_level_max": 0.60,
+        # **散户反向出场的门槛 1.0 → 2.0(DEC-232,运营者按夏普拍板)**。
+        # 现行 71 笔 +43.8%/0.77/回撤 −6.8% → **46 笔 +74.2%/0.92/−10.3%**,中位持仓 8 → 20 天。
+        # **走前检验没过**:前半样本(2013~2019)按夏普会挑中 1.0(2.0 那档只有 0.15),
+        # 优势全部来自后半(2019-11 起 2.0 是 1.55、1.0 是 1.10)。
+        # 上线的依据是**台阶形状**:后半 2.0/2.5/3.0 挤在 1.55/1.55/1.58,
+        # 1.0/1.5 挤在 1.10/1.10 —— 是台阶不是尖峰,读作「散户反向出场在 2019 年之后基本失效」。
+        # **知情破例,不是验证通过**(同 DEC-113/195/211/228)。
+        "exit_retail_min": 2.0,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -514,7 +522,7 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "71 笔 +43.8%/夏普 0.77/回撤 −6.8%(DEC-224 分数仓位 + DEC-229 分母 + DEC-230 换组不清零 + DEC-231 进场水位 ≤60%);"
+        "backtest": "46 笔 +74.2%/夏普 0.92/回撤 −10.3%(DEC-224/229/230/231 + DEC-232 散户出场门槛 2.0);"
                     "**其中约 −6pp 是 DEC-228 重仓翻向门挡掉两笔的代价**;"
                     "同一批按满仓算是 +43.1%/0.25/−33.2%"
                     "(2013-01 起,基准 −17.7%)。"
@@ -971,6 +979,8 @@ def use(code: str) -> dict:
     RULES["unload_regroup_seed"] = bool(v.get("unload_regroup_seed", False))
     # 进场水位上限(DEC-231):配了才开(玻璃 0.60,纯碱不配)。**每轮都要写**。
     RULES["entry_level_max"] = v.get("entry_level_max")
+    # 散户反向出场的门槛(DEC-232):配了才抬高(玻璃 2.0,纯碱不适用)。**每轮都要写**。
+    RULES["exit_retail_min"] = v.get("exit_retail_min")
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -2130,7 +2140,13 @@ def entry_exit_signals(sig: pd.DataFrame, retail: pd.DataFrame) -> tuple[pd.Seri
             # 散户三家全缺席在现有品种上不会发生。真发生时宁可让反向/消退
             # 失效(只剩止损/持满/交割),也不能安静换一路出场口径。
             return sig["cost_z"], sig["cost_z"] * np.nan
-        return sig["cost_z"], retail["rz"]
+        rz = retail["rz"]
+        # **散户反向出场的门槛(DEC-232,只给玻璃)**:`|rz|` 低于门槛的日子置 NaN,
+        # 反向与消退两条都跳过(它们都要 `np.isfinite(z)`)。进场那一路是 cost_z,不受影响。
+        thr = RULES.get("exit_retail_min")
+        if thr:
+            rz = rz.where(rz.abs() >= float(thr), np.nan)
+        return sig["cost_z"], rz
     if RULES["signal_source"] != "resonance" or retail is None or retail.empty:
         return _apply_long_mode(sig["z"], sig), sig["z"]
     # 用**标准化后的 z** 判共振,不用原始 chg。

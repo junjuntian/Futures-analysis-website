@@ -2435,7 +2435,7 @@ class Test重仓翻向门:
         if not (d / "fg_price.csv.gz").exists():
             pytest.skip("本机没有 research/data 快照")
         # DEC-229 定稿(400 日 top3 隔 20)+ 数据拉到 2026-09-04 之后的数
-        for code, stem, want in (("FG", "fg", (71, 43.8)), ("SA", "sa", (22, 116.3))):
+        for code, stem, want in (("FG", "fg", (46, 74.2)), ("SA", "sa", (22, 116.3))):
             H.use(code)
             price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
             seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
@@ -2532,3 +2532,46 @@ class Test进场水位上限:
         H.use("SA")
         out2 = H.attach_cost_signal(sig, seat, mkt, groups)
         assert out2["cost_z"].iloc[-1] != 0.0
+
+
+class Test散户出场门槛:
+    """DEC-232:玻璃把散户反向出场的门槛从 1.0 抬到 2.0。**只给玻璃**。"""
+
+    def test_只有玻璃配了(self):
+        H.use("FG")
+        assert H.RULES["exit_retail_min"] == 2.0
+        # 纯碱是 discipline(散户整条不参与出场),配这个没意义;其余品种保持 1.0 的老行为
+        for code in ("SA", "JD", "JM", "LH", "I"):
+            H.use(code)
+            assert H.RULES["exit_retail_min"] is None, code
+
+    def test_门槛以下的散户信号被屏蔽而进场不受影响(self):
+        idx = bdays("2026-01-05", 6)
+        sig = pd.DataFrame({"cost_z": [1.5, -1.5, 0.0, 1.5, -1.5, 0.0],
+                            "z": 0.0, "net": 1.0, "chg": 1.0}, index=idx)
+        retail = pd.DataFrame({"net": 1.0, "chg": 1.0,
+                               "rz": [2.4, -1.2, 2.0, -0.5, 3.1, -2.6]}, index=idx)
+        H.use("FG")
+        z_in, z_out = H.entry_exit_signals(sig, retail)
+        assert z_in.equals(sig["cost_z"]), "进场那一路必须原样(玻璃进场走 cost_z)"
+        # |rz| < 2.0 的两天被屏蔽,其余原样
+        assert list(z_out.isna()) == [False, True, False, True, False, False]
+        assert z_out.iloc[0] == 2.4 and z_out.iloc[2] == 2.0
+        # 没配的品种照旧全给
+        H.use("JD")
+        _zi, zo = H.entry_exit_signals(sig, retail)
+        assert zo.equals(retail["rz"])
+
+    def test_走前检验没过这件事要留在代码里(self):
+        """**它是知情破例,不是验证通过。**
+
+        前半样本(2013~2019)按夏普会挑中 1.0,2.0 那档只有 0.15;优势全部来自后半。
+        上线依据是台阶形状(后半 2.0/2.5/3.0 = 1.55/1.55/1.58,1.0/1.5 = 1.10/1.10)。
+        这段话必须留在配置注释里 —— 哪天有人想复用这个数,先看见它是怎么来的。
+        """
+        src = H.VARIETIES["FG"].__repr__()
+        import inspect
+        code = inspect.getsource(H)
+        i = code.index('"exit_retail_min": 2.0')
+        near = code[max(0, i - 900):i]
+        assert "走前检验没过" in near and "知情破例" in near
