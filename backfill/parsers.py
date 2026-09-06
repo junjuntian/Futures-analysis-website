@@ -316,7 +316,10 @@ def shfe_market(path):
                 "turnover": str(float(turnover) * 10000) if turnover else "",
                 "open_interest": num(row.get("OPENINTEREST")),
                 "open_interest_change": num(row.get("OPENINTERESTCHG")),
-                "volume_basis": "double",
+                # **原来这里写死 "double",2020 起是错的**(2026-09-07 实测,见 `ine_market`
+                # 的说明:上期所黄金 2008–2019 前20多头一天都没超过公布持仓的一半,
+                # 2020 起频繁超过 —— 断点落在 2020,与郑商所同一天改制)。
+                "volume_basis": "single" if trade_date >= "2020-01-01" else "double",
                 "source": "shfe_official",
             }
         )
@@ -371,7 +374,19 @@ def ine_market(path):
                 "turnover": str(float(turnover) * 10000) if turnover else "",
                 "open_interest": num(row.get("OPENINTEREST")),
                 "open_interest_change": num(row.get("OPENINTERESTCHG")),
-                "volume_basis": "double",
+                # **2020-01-01 起单边**,与 `czce_market` 同一条规则。
+                #
+                # **判据不是「成交额 ÷ (成交量 × 结算价) = 点值」** —— 那条恒等式在
+                # 单边、双边下都成立(成交额与成交量同时翻倍,比值不变),分辨不了口径,
+                # 我第一次就是拿它下的结论,错的。
+                #
+                # 真正的判据是**前 20 会员多头合计 ≤ 真实持仓量**:若公布值是双边
+                # (= 2 × 真实),前20多头就永远不可能超过公布值的一半。拿上期所黄金
+                # 2008-2026 逐年实测(price_history × seat_history),断点干干净净落在 2020:
+                # 2008–2019 **一天都没超过一半**(均值比例 0.20~0.38),
+                # 2020 起频繁超过(2020 年 368 天、2024 年 981 天,均值 0.42→0.63)。
+                # 所以 ≤2019 双边、≥2020 单边,与郑商所同一天改制。
+                "volume_basis": "single" if trade_date >= "2020-01-01" else "double",
                 "source": "ine_official",
             }
         )
