@@ -1264,7 +1264,8 @@ class TestGroupOverrides:
         再有新的要连着这条一起改,别让某个品种悄悄多出一次换人。
         """
         expect = {
-            # 玻璃两条:DEC-129 华泰→国泰君安、DEC-196 海通→瑞达,都到 2026-10-01 失效。
+            # 玻璃四条(DEC-129/196/199 换人 + DEC-219 剔瑞达)。原本都到 2026-10-01 失效,
+            # DEC-220 把冻结日提前到 09-07 之后,冻住的就是换完人的那四家。
             # 玻璃四条:三条换人 + DEC-219 剔瑞达(09-07 生效),最终四家。
             "FG": [{"since": "2026-08-21", "replace": {"华泰期货": "国泰君安"}},
                    {"since": "2026-09-03", "replace": {"海通期货": "瑞达期货"}},
@@ -2071,22 +2072,42 @@ class Test关掉自动重选:
         assert c2 == ["2025-01-01"], c2      # ≥ 冻结日的都没了
 
     def test_冻结日在数据之后时不影响任何一天(self):
-        """当前正是这种情形:冻结日 2026-10-01,而数据到 09-04。"""
+        """当前正是这种情形:冻结日 2026-09-07,而研究快照到 09-02。"""
         idx, ser, cuts = self._g()
         g, _log, c2 = H.freeze_groups(ser, [], cuts, "2099-01-01")
         assert list(g) == list(ser), "未来冻结日不该改动任何一天的组"
         assert c2 == cuts, "但未来切点仍应保留(它们都早于冻结日)"
 
     def test_玻璃配了冻结而其它品种没有(self):
-        assert H.VARIETIES["FG"].get("freeze_since") == "2026-10-01"
+        assert H.VARIETIES["FG"].get("freeze_since") == "2026-09-07"
         for code in H.VARIETIES:
             if code != "FG":
                 assert not H.VARIETIES[code].get("freeze_since"), code
         # 且不许漏给下一个品种(RULES 是全局可变的)
         H.use("FG")
-        assert H.RULES["freeze_since"] == "2026-10-01"
+        assert H.RULES["freeze_since"] == "2026-09-07"
         H.use("SA")
         assert H.RULES["freeze_since"] is None
+
+    def test_冻结日不许落在重选切点上(self):
+        """DEC-220 的教训,值得一条独立的钉子。
+
+        冻结日原本写的是 2026-10-01,而那**正好是玻璃下一个重选切点**。
+        `apply_group_overrides` 在切点处失效、`freeze_groups` 又跑在它之后,
+        于是冻住的会是**失效之后滚动选出来的那 5 家** —— 点名换人三周后自己没了,
+        而且**不报错、不留痕**,只有翻日历才看得出来。
+
+        冻结日必须落在「想冻住的那个状态**已经成立**」的那天之后,
+        并且**早于**下一个切点。
+        """
+        H.use("FG")
+        fz = pd.Timestamp(H.RULES["freeze_since"])
+        sinces = [pd.Timestamp(o["since"]) for o in H.RULES["group_overrides"]]
+        assert fz >= max(sinces), "冻结日必须在最后一条点名换人生效之后"
+        # 冻结日之后不许还有切点落在它前面被漏掉:freeze_groups 会砍掉 ≥ 冻结日的切点,
+        # 所以这里只要求冻结日本身不等于任何一个已知切点。
+        assert H.RULES["freeze_since"] not in ("2026-10-01",), (
+            "冻结日不能等于重选切点 —— DEC-220 就是栽在这里")
 
     def test_玻璃没有改用固定名单(self):
         """固定名单会重写整段历史(+248.6% → +17.6%),这次有意不用它。"""
