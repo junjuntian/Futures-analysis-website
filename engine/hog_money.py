@@ -482,6 +482,12 @@ VARIETIES = {
         # 起因是 2026-09-03/04 连着两次换组把已卸到 54% 的那一轮清成 0%,门白开一次。
         # 代价可量化,见 DEC-230。**只给玻纯开**,别的品种一行不动。
         "unload_regroup_seed": True,
+        # **进场水位上限(DEC-231,运营者点名)**:机构已建到近 9 个月峰值的 60% 以上就不追。
+        # 实测 98 笔 +55.9%/0.55/回撤 −17.8% → **70 笔 +43.8%/0.77/−6.8%**
+        # —— 回撤少六成、夏普 0.55 → 0.77,是这一轮性价比最高的一个改动。
+        # **纯碱没配**:它赚钱的进场集中在极低与极高水位两头(22 笔里 22%/5%/15% 那几笔
+        # 各赚 +28%/+24%/+19%,而 100%/75%/76% 那几笔也赚),加上限反而减分。
+        "entry_level_max": 0.60,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -508,7 +514,7 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "98 笔 +55.9%/夏普 0.55/回撤 −17.8%(DEC-224 分数仓位 + DEC-229 分母 + DEC-230 换组不清零);"
+        "backtest": "71 笔 +43.8%/夏普 0.77/回撤 −6.8%(DEC-224 分数仓位 + DEC-229 分母 + DEC-230 换组不清零 + DEC-231 进场水位 ≤60%);"
                     "**其中约 −6pp 是 DEC-228 重仓翻向门挡掉两笔的代价**;"
                     "同一批按满仓算是 +43.1%/0.25/−33.2%"
                     "(2013-01 起,基准 −17.7%)。"
@@ -963,6 +969,8 @@ def use(code: str) -> dict:
     RULES["flip_gate"] = bool(v.get("flip_gate", False))
     # 换组时用同方向的近 9 个月高位当卸仓起点(DEC-230):配了才开。**每轮都要写**。
     RULES["unload_regroup_seed"] = bool(v.get("unload_regroup_seed", False))
+    # 进场水位上限(DEC-231):配了才开(玻璃 0.60,纯碱不配)。**每轮都要写**。
+    RULES["entry_level_max"] = v.get("entry_level_max")
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -1856,6 +1864,24 @@ def inst_cost_series(sig: pd.DataFrame, mkt: pd.DataFrame,
     return out
 
 
+#: 进场水位上限(DEC-231,只给玻璃开)。分母与「已卸掉」的展示口径同源(近 9 个月峰值)。
+ENTRY_LEVEL_WIN = UNLOAD_VIEW_WIN
+
+
+def entry_level(net: pd.Series, win: int = ENTRY_LEVEL_WIN) -> pd.Series:
+    """`|合计净持仓| ÷ 近 win 个交易日的最大 |合计净持仓|` —— 「机构建到几成了」。
+
+    与 `unload_window` 是同一个数的两面(那边给 `1 − 本值`,叫「已卸掉」),
+    **刻意共用同一个窗口**,否则页面上「已卸掉 80%」与「水位 20%」会加不到 100%。
+
+    运营者 2026-09-06 的模型:「正常震荡阶段会在总仓位的 40-60% 波动,
+    突然大规模加仓趋势就确定了,但必须在 40-50% 阶段入场,等到仓位 70% 就太迟了」。
+    实测**上限成立、下限不成立**(玻璃回撤 −17.8% → −6.8%;纯碱加任何一档都减分),
+    详见 DEC-231。
+    """
+    return net.abs() / net.abs().rolling(win, min_periods=20).max()
+
+
 def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
                      unload: pd.Series, chg: pd.Series | None = None) -> pd.DataFrame:
     """把成本状态翻成进出场能用的两列:cost_z(±(enter+0.5) / 0)与
@@ -1998,6 +2024,16 @@ def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
                            unload.reindex(mkt.index), sig["chg"].reindex(mkt.index))
     cz = ext["cost_z"]
     reason = ext["cost_reason"]
+    # 进场水位上限(DEC-231):机构已经建到近 9 个月峰值的 X% 以上就不追了。
+    # **只给玻璃开** —— 纯碱实测反向:它赚钱的进场集中在**极低水位与极高水位两头**,
+    # 加任何一档上限都在减分(≤60% 时 +116.3%/1.07 → +62.2%/0.81)。
+    lvmax = RULES.get("entry_level_max")
+    if lvmax:
+        over = (entry_level(sig["net"]).reindex(mkt.index) > float(lvmax)).fillna(False)
+        cz = cz.where(~over, 0.0)
+        reason = reason.where(
+            ~over,
+            f"机构已建到近 9 个月峰值的 {float(lvmax):.0%} 以上,进得太晚,不追")
     # 重仓翻向门(DEC-228):逐品种开关,不配的品种逐字节不变。
     # **只挡与翻向者相反的方向**:翻向者做多 → 挡做空(cz<0),反之亦然。
     if RULES.get("flip_gate"):

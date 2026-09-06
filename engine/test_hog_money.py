@@ -2435,7 +2435,7 @@ class Test重仓翻向门:
         if not (d / "fg_price.csv.gz").exists():
             pytest.skip("本机没有 research/data 快照")
         # DEC-229 定稿(400 日 top3 隔 20)+ 数据拉到 2026-09-04 之后的数
-        for code, stem, want in (("FG", "fg", (98, 55.9)), ("SA", "sa", (22, 116.3))):
+        for code, stem, want in (("FG", "fg", (71, 43.8)), ("SA", "sa", (22, 116.3))):
             H.use(code)
             price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
             seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
@@ -2492,3 +2492,44 @@ class Test换组不清零卸仓:
         # 老行为:换组当天峰值重置成当天的 100 → 已卸掉 0%
         assert u["pct"].iloc[-1] == 0.0
         assert u["peak_net"].iloc[-1] == -100
+
+
+class Test进场水位上限:
+    """DEC-231:机构已建到近 9 个月峰值的 60% 以上就不追。**只给玻璃**。"""
+
+    def test_只有玻璃配了(self):
+        H.use("FG")
+        assert H.RULES["entry_level_max"] == 0.60
+        # **纯碱有意不配**:它赚钱的进场集中在极低与极高水位两头,加上限反而减分
+        # (≤60% 时 +116.3%/1.07 → +62.2%/0.81)。别顺手给它开。
+        for code in ("SA", "JD", "JM", "LH", "I"):
+            H.use(code)
+            assert H.RULES["entry_level_max"] is None, code
+
+    def test_水位与已卸掉必须加得到一(self):
+        """两个数是同一件事的两面,窗口必须一致,否则页面上会自相矛盾。"""
+        assert H.ENTRY_LEVEL_WIN == H.UNLOAD_VIEW_WIN
+        net = pd.Series([-300.0] * 199 + [-120.0], index=bdays("2025-01-06", 200))
+        lv = H.entry_level(net).iloc[-1]
+        pct = H.unload_window(net)["pct"].iloc[-1]
+        assert lv == pytest.approx(0.4) and lv + pct == pytest.approx(1.0)
+
+    def test_超过上限就挡住而且给得出理由(self):
+        idx = bdays("2025-01-06", 200)
+        # 末日 |净持仓| = 270,近 180 日峰值 300 → 水位 90% > 60%,该挡
+        net = pd.Series([-300.0] * 199 + [-270.0], index=idx)
+        cc = pd.DataFrame({"side": -1.0, "cost": 1000.0, "age": 99.0}, index=idx)
+        mkt = pd.DataFrame({"settle": [1100.0] * 200, "main": "FG2701"}, index=idx)
+        seat = pd.DataFrame({"trade_date": list(idx), "contract": "FG2701",
+                             "member_key": "甲", "net": net.values,
+                             "net_off": net.values, "source": "akshare_v1"})
+        groups = pd.Series([("甲",)] * 200, index=idx, dtype=object)
+        sig = pd.DataFrame({"net": net, "chg": -1.0}, index=idx)
+        H.use("FG")
+        out = H.attach_cost_signal(sig, seat, mkt, groups)
+        assert out["cost_z"].iloc[-1] == 0.0
+        assert "进得太晚" in str(out["cost_reason"].iloc[-1])
+        # 关掉开关就该放行(纯碱口径)
+        H.use("SA")
+        out2 = H.attach_cost_signal(sig, seat, mkt, groups)
+        assert out2["cost_z"].iloc[-1] != 0.0
