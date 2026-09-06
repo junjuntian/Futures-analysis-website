@@ -2574,3 +2574,42 @@ class Test散户出场门槛:
         i = code.index('"exit_retail_min": 2.0')
         near = code[max(0, i - 900):i]
         assert "走前检验没过" in near and "知情破例" in near
+
+
+class Test跟随引擎分数仓位:
+    """DEC-234:玻璃的第二引擎(跟永安)按主力合约水位缩仓。**只给玻璃**。"""
+
+    def test_只有玻璃的第二引擎开了(self):
+        H.use("FG")
+        assert H.RULES["follow_seat"].get("sizing") is True
+        # 焦煤跟华泰、铁矿石跟永安都没开 —— 没测过就别开
+        for code in ("JM", "I"):
+            H.use(code)
+            cfg = H.RULES.get("follow_seat") or {}
+            assert not cfg.get("sizing"), code
+
+    def test_窗口是二百日而且与主引擎有意不同(self):
+        """跟随是短周期(约 15 次翻转/年),配短窗口;主引擎是 400 日。"""
+        assert H.FOLLOW_SIZING_WIN == 200
+        assert H.SEAT_LEVEL_WIN == 400
+
+    def test_权重必须来自主力合约那条腿(self):
+        """**口径不一致就白做**:实测用全品种合计只有夏普 0.61、整组水位 0.58,
+        都输给等效缩仓 0.73;主力合约 200 日是 0.81 才胜过它。
+
+        这条钉的是**实现**:`seat_follow_payload` 里算权重用的必须是 `sig`
+        (上面按主力合约 ffill 出来的那条),不是 `_pit_pair` 的全品种合计。
+        """
+        import inspect
+        src = inspect.getsource(H.seat_follow_payload)
+        i = src.index("w_follow = ")
+        seg = src[i:i + 260]
+        assert "sig.abs()" in seg, seg
+        assert "_pit_pair" not in seg
+
+    def test_没开开关时逐字节回到老行为(self):
+        """`cfg["sizing"]` 不为真时,净值那一行必须走原来的分支。"""
+        import inspect
+        src = inspect.getsource(H.seat_follow_payload)
+        assert "if w_follow is None:" in src
+        assert 'daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()' in src

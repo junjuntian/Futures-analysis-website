@@ -549,6 +549,50 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  /** 第二引擎的最小 fixture —— PAYLOAD 是生猪的,本来就没有 seat_follow。 */
+  const FOLLOW_BASE = {
+    member: '永安期货', side: 'long' as const, net: 36598,
+    run_days: 14, run_ret_pct: 5.09, entry_date: '2026-08-17', entry_px: 924,
+    flipped_today: false,
+    history: [{ date: '2026-08-17', side: 'long' as const, contract: 'FG2701',
+                entry_px: 924, hold_days: 14, ret_pct: 5.09, open: true }],
+    stats: { cum_pct: 319.0, sharpe: 0.81, max_dd_pct: -26.7, flips: 205,
+             yearly: { '2026': 49.4 } },
+    note: '第二引擎'
+  }
+
+  it('第二引擎卡要写合约、手数与加减;没配 sizing 的品种整段不出(DEC-234)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      seat_follow: {
+        ...FOLLOW_BASE, contract: 'FG2701',
+        sizing: { strength: 0.381, now: 36598, peak: 96130, win: 200,
+                  capital: 1000000, lots: 20, lots_prev: 27, lots_chg: -7,
+                  px: 971, notional: 388400, margin: null, leverage: 0.39 }
+      }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'FG' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('FG2701')
+    expect(t).toContain('20 手')
+    expect(t).toContain('减7')
+    expect(t).toContain('38%')                      // 仓位强度
+    expect(t).toContain('近 200 日 top3 峰值')      // 窗口与主引擎的 400 日有意不同
+    expect(t).toContain('必须用主力合约')            // 口径要点
+    expect(t).toContain('3/14')                     // 代价照写
+    w.unmount()
+  })
+
+  it('第二引擎没配分数仓位时不写手数(DEC-234)', async () => {
+    stubFetch({ ...PAYLOAD, seat_follow: { ...FOLLOW_BASE, contract: 'JM2701', sizing: null } })
+    const w = mount(HogMoney, { props: { instrument: 'JM' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w.text()).toContain('JM2701')            // 合约照写(所有品种都有)
+    expect(w.text()).not.toContain('必须用主力合约')
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',

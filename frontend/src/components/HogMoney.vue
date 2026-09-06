@@ -241,6 +241,15 @@ interface HogPayload {
     entry_date: string | null
     entry_px: number | null
     flipped_today: boolean
+    /** 当前跟的是哪个合约(DEC-234)。老 JSON 没有。 */
+    contract?: string | null
+    /** 分数仓位(DEC-234):**窗口 200 日**,与主引擎的 400 日有意不同 ——
+     *  跟随是短周期(约 15 次翻转/年)。没配这个开关的品种是 null。 */
+    sizing?: {
+      strength: number; now: number | null; peak: number | null; win: number
+      capital: number; lots: number | null; lots_prev: number | null; lots_chg: number | null
+      px: number; notional: number; margin: number | null; leverage: number | null
+    } | null
     history: Array<{ date: string; side: 'long' | 'short'; contract: string
       entry_px: number | null; hold_days: number; ret_pct: number; open: boolean
       /** DEC-150 二改:引擎给的出场日/出场价(=下一段翻向日的同一口开盘);老 JSON 没有。 */
@@ -480,6 +489,19 @@ onMounted(async () => {
  *   · 优劣 = 现价与锚比:做空现价 ≥ 锚 = 筹码优于机构(卖得比它贵),做多反之。
  * 成本取自净持仓引擎(DEC-143 口径),掉榜/不可知的家自动跳过。
  */
+/** 第二引擎的加减手数(DEC-234)。 */
+const followChg = computed(() => {
+  const c = data.value?.seat_follow?.sizing?.lots_chg
+  return c == null || c === 0 ? '' : (c > 0 ? `加${c}` : `减${-c}`)
+})
+/** 第二引擎跟的那个席位在当前主力合约上的推算成本(与逐合约小窗同一个来源)。 */
+const followCost = computed(() => {
+  const f = data.value?.seat_follow
+  if (!f?.contract) return ''
+  const t = memberCost(f.contract, f.member)
+  return t === '—' || t === '成本不可知' ? '' : t
+})
+
 /** 分数仓位的加减(DEC-224)。0 不显示 —— 「减0」是噪音。 */
 const sizingChg = computed(() => {
   const c = data.value?.sizing?.lots_chg
@@ -1131,8 +1153,33 @@ const bySide = computed(() => {
           <p v-if="data.seat_follow.flipped_today" class="caveat-box flip">
             <b>⚡ {{ data.seat_follow.member }} 已翻向 {{ sideText(data.seat_follow.side ?? 'short') }} —— 次日开盘反手(本引擎唯一的操作时点)。</b>
           </p>
+          <!-- 运营者 2026-09-06:「加上合约日期,以及后面推算的成本」——
+               成本走的是与逐合约小窗同一个来源(rust 的逐席位成本),不另算一套。 -->
           <div class="kv"><span class="k">{{ data.seat_follow.member }}净持仓</span>
-            <span class="v" :class="(data.seat_follow.net ?? 0) > 0 ? 'red' : 'green'">{{ fmt(data.seat_follow.net) }} 手</span></div>
+            <span class="v" :class="(data.seat_follow.net ?? 0) > 0 ? 'red' : 'green'">
+              {{ fmt(data.seat_follow.net) }} 手
+              <span v-if="data.seat_follow.contract" class="gray">· {{ data.seat_follow.contract }}</span>
+              <span v-if="followCost" class="gray">· 成本 @{{ followCost }}</span>
+            </span></div>
+          <template v-if="data.seat_follow.sizing">
+            <div class="kv"><span class="k">建议手数</span>
+              <span class="v">
+                <b>{{ data.seat_follow.sizing.lots }} 手</b>
+                <span v-if="followChg" class="lots-chg"
+                  :class="data.seat_follow.sizing.lots_chg! > 0 ? 'red' : 'green'">{{ followChg }}</span>
+              </span></div>
+            <div class="kv"><span class="k">仓位强度</span>
+              <span class="v">{{ Math.round(data.seat_follow.sizing.strength * 100) }}%
+                <span class="gray">({{ data.seat_follow.member }}主力今日
+                  {{ fmt(data.seat_follow.sizing.now ?? 0) }} 手 / 近
+                  {{ data.seat_follow.sizing.win }} 日 top3 峰值
+                  {{ fmt(data.seat_follow.sizing.peak ?? 0) }} 手)</span>
+              </span></div>
+            <div class="kv"><span class="k">名义</span>
+              <span class="v">{{ wan(data.seat_follow.sizing.notional) }}
+                <span class="gray">· 杠杆 {{ data.seat_follow.sizing.leverage }} 倍
+                  · 总资金 {{ wan(data.seat_follow.sizing.capital) }}</span></span></div>
+          </template>
           <div class="kv"><span class="k">本段进场</span>
             <span class="v">{{ data.seat_follow.entry_date }} @ {{ fmt(data.seat_follow.entry_px) }}</span></div>
           <div class="kv"><span class="k">本段浮动</span>
@@ -1145,6 +1192,16 @@ const bySide = computed(() => {
               <span v-for="(r, y) in data.seat_follow.stats.yearly" :key="y" class="chip">
                 {{ y }} <i :class="pnlClass(r)">{{ pct(r) }}</i></span>
             </span></div>
+          <p v-if="data.seat_follow.sizing" class="note">
+            **不是满仓跟随**(DEC-234):手数 = 总资金 × 仓位强度 ÷(结算价 × 点值)。
+            仓位强度 = {{ data.seat_follow.member }}在**当日主力合约**上的净持仓 ÷
+            它自己近 {{ data.seat_follow.sizing.win }} 个交易日内、彼此隔 ≥20 日的最高 3 次的平均。
+            **必须用主力合约,不能用全品种合计** —— 跟随的方向看的就是主力那条腿,
+            口径不一致就白做:实测用全品种合计只有夏普 0.61、用整组水位 0.58,
+            **都输给同等平均仓位的固定缩仓(0.73)**;主力合约 200 日是 **0.81**,才真的胜过它。
+            **代价照写**:逐年只有 3/14 年不差于满仓(2021 年 +93.2% → +39.5%)——
+            这是拿收益换风险,不是免费的。
+          </p>
           <div class="roll-hist">
             <span class="gray">最近翻转:</span>
             <span v-for="h in data.seat_follow.history.slice(-8)" :key="h.date" class="chip">

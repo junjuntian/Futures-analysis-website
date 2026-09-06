@@ -513,6 +513,15 @@ VARIETIES = {
         # 组合才压浅。
         "follow_seat": {
             "member": "永安期货",
+            # **分数仓位(DEC-234,运营者点名)**:权重 = 永安在**当日主力合约**上的净持仓
+            # 占其近 200 日 top3(隔 20 日)的比例。口径必须与跟随方向同源 ——
+            # 用全品种合计只有夏普 0.61、用整组水位 0.58,**都输给等效缩仓 0.73**;
+            # 主力合约 200 日是 **0.81**,才真的过了「必须胜过等效缩仓」这一关。
+            # 单跑 +768.5%/0.73/−46.5% → **+319.0%/0.81/−26.7%**(平均仓位 41%);
+            # 与主引擎 50/50 组合 +337.7%/0.84/−24.6% → **+179.4%/0.99/−13.9%**。
+            # **代价照写**:逐年只有 3/14 年不差于满仓(2021 +93.2% → +39.5%),
+            # 这是拿收益换风险,不是免费的。
+            "sizing": True,
             "note": ("第二引擎,与主引擎并列、各管各的仓位(实测两者日收益相关 +0.31,"
                      "50/50 组合夏普 0.84 高于任一台单跑,回撤反而更浅)。规则:永安在"
                      "当日主力的可见净持仓方向,翻转→次日开盘反手,约每月一次多点。"
@@ -1687,6 +1696,10 @@ def seat_levels(seat: pd.DataFrame, dates: pd.DatetimeIndex,
 #: 调仓费率用运营者给的真实值 2 元/手/边(DEC-203 的教训:上一版按名义×0.05% 算错了 5 倍)。
 SIZING_PLAN = {"capital": 1_000_000.0, "cap": 1.0, "fee": 2.0,
                "margin": {"FG": 0.09, "SA": 0.08}}
+#: 跟随引擎的分数仓位(DEC-234)。**窗口 200 日,与主引擎的 400 日有意不同** ——
+#: 跟随是短周期(约 15 次翻转/年),配短窗口;而且翻向门(DEC-228)用的也是 200 日。
+#: 实测 200 日夏普 0.81 > 400 日 0.76 > 等效缩仓 0.73(两格都过 G1,不是尖峰)。
+FOLLOW_SIZING_WIN = 200
 
 
 def sizing_weights(net: pd.Series) -> pd.Series:
@@ -3072,6 +3085,44 @@ def contracts_panel(seat: pd.DataFrame, grp: list, d: pd.Timestamp,
     return out
 
 
+def _follow_sizing_card(w, mkt: pd.DataFrame, sig: pd.Series, member: str) -> dict | None:
+    """跟随引擎那张卡要的数:今天该拿多少手、比昨天加减多少。口径同主引擎的 `sizing_card`。"""
+    if w is None:
+        return None
+    ww = w.dropna()
+    if ww.empty:
+        return None
+    d = ww.index[-1]
+    px = float(mkt["settle"].get(d, np.nan))
+    mult = float(RULES["multiplier"])
+    if not np.isfinite(px) or px <= 0:
+        return None
+    cap_money = SIZING_PLAN["capital"]
+
+    def _lots(day):
+        v, p = w.get(day, np.nan), mkt["settle"].get(day, np.nan)
+        if not (np.isfinite(v) and np.isfinite(p)) or p <= 0:
+            return None
+        return int(round(cap_money * float(v) / (p * mult)))
+
+    prev = ww.index[-2] if len(ww) > 1 else None
+    lots, lots_prev = _lots(d), (_lots(prev) if prev is not None else None)
+    peak = rolling_top_mean(sig, win=FOLLOW_SIZING_WIN, min_periods=60).get(d, np.nan)
+    rate = SIZING_PLAN["margin"].get(CURRENT.get("code"))
+    notional = (lots or 0) * px * mult
+    return {
+        "strength": round(float(ww.iloc[-1]), 3),
+        "now": None if not np.isfinite(sig.get(d, np.nan)) else int(abs(sig[d])),
+        "peak": int(peak) if np.isfinite(peak) else None,
+        "win": FOLLOW_SIZING_WIN,
+        "capital": cap_money, "lots": lots, "lots_prev": lots_prev,
+        "lots_chg": None if (lots is None or lots_prev is None) else lots - lots_prev,
+        "px": round(px, 2), "notional": round(notional),
+        "margin": None if rate is None else round(notional * rate),
+        "leverage": round(notional / cap_money, 2) if cap_money else None,
+    }
+
+
 def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dict:
     """单席位跟随第二引擎(DEC-139,焦煤跟华泰)。
 
@@ -3098,6 +3149,14 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
     pos = np.sign(sig)
     pos[pos == 0] = np.nan
     pos = pos.ffill()
+    # **分数仓位(DEC-234)**:权重 = 该席位在**当日主力合约**上的净持仓水位。
+    # **必须用主力合约,不能用全品种合计** —— 跟随的方向看的就是主力合约那条腿,
+    # 口径不一致就白做:实测全品种合计 夏普 0.61、整组水位 0.58,**都输给等效缩仓 0.73**;
+    # 换成主力合约(200 日)是 **0.81**,才真的胜过等效缩仓。
+    w_follow = None
+    if cfg.get("sizing"):
+        w_follow = (sig.abs() / rolling_top_mean(
+            sig, win=FOLLOW_SIZING_WIN, min_periods=60)).clip(upper=SIZING_PLAN["cap"])
     adjo = (1 + mkt["ret_open"].fillna(0)).cumprod()
     # 翻转与逐段
     flips = []       # (下标, 新方向)
@@ -3138,7 +3197,16 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
         runs[-1]["exit_date"] = runs[-1]["exit_px"] = None
     # 扣成本净值(单边 0.05%,翻转日双边)
     turn = (pos.shift(2) != pos.shift(3)).astype(float)
-    daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()
+    if w_follow is None:
+        daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()
+    else:
+        lag = w_follow.reindex(mkt.index).fillna(0.0).clip(0.0, 1.0).shift(2).fillna(0.0)
+        # 翻转的开平成本按当时的仓位缩放;分数仓位多出来的调仓另按 2 元/手/边扣。
+        expo = (pos * w_follow.reindex(mkt.index)).fillna(0.0)
+        extra = expo.diff().abs().fillna(expo.abs()).shift(2).fillna(0.0)
+        daily = (pos.shift(2) * mkt["ret_open"] * lag - turn * 0.001 * lag
+                 - extra * SIZING_PLAN["fee"]
+                 / (mkt["settle"].ffill() * float(RULES["multiplier"]))).dropna()
     eq = (1 + daily).cumprod()
     stats = {
         "cum_pct": round((float(eq.iloc[-1]) - 1) * 100, 1),
@@ -3154,6 +3222,11 @@ def seat_follow_payload(seat: pd.DataFrame, mkt: pd.DataFrame, cfg: dict) -> dic
         "member": member,
         "side": None if cur_side is None else ("long" if cur_side > 0 else "short"),
         "net": None if not np.isfinite(net_now_s.iloc[-1]) else int(net_now_s.iloc[-1]),
+        # 当前跟的是哪个合约(运营者 2026-09-06:「加上合约日期」)。
+        "contract": (str(mkt["main"].iloc[-1])
+                     if isinstance(mkt["main"].iloc[-1], str) else None),
+        # 分数仓位(DEC-234):没配就是 None,页面据此不画。
+        "sizing": _follow_sizing_card(w_follow, mkt, sig, member),
         "run_days": runs[-1]["hold_days"] if runs else None,
         "run_ret_pct": runs[-1]["ret_pct"] if runs else None,
         "entry_date": runs[-1]["date"] if runs else None,
