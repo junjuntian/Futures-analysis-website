@@ -45,6 +45,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+
 import numpy as np
 import pandas as pd
 
@@ -503,8 +504,8 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "分数仓位口径 +46.8%/夏普 0.56/回撤 −16.8%(平均仓位 25%,DEC-224);"
-                    "**其中 −5.5pp 是 DEC-228 重仓翻向门挡掉两笔的代价**(挡之前 +52.3%/0.60);"
+        "backtest": "分数仓位口径 +51.8%/夏普 0.52/回撤 −17.8%(DEC-224 分数仓位 + DEC-229 分母口径);"
+                    "**其中约 −6pp 是 DEC-228 重仓翻向门挡掉两笔的代价**;"
                     "同一批按满仓算是 +43.1%/0.25/−33.2%"
                     "(2013-01 起,基准 −17.7%)。"
                     "**这里原先写的 120 笔 +218.1%/0.65/−31.6% 是 DEC-211 之前的数** ——"
@@ -758,8 +759,8 @@ VARIETIES = {
         "flip_gate": True,
         "exit_mode": "discipline",
         "max_hold": 60,
-        "backtest": "分数仓位口径 +126.3%/夏普 1.25/回撤 −20.4%(平均仓位 35%,DEC-224);"
-                    "同一批 26 笔按满仓算是 +118.9%/0.61/−40.9%"
+        "backtest": "分数仓位口径 +149.3%/夏普 1.23/回撤 −21.1%(DEC-224 分数仓位 + DEC-229 分母口径);"
+                    "同一批 28 笔按满仓算是 +118.9%/0.61/−40.9%(该数按 2026-09-02 快照算)"
                     "(2020-06 起,基准 −17.5%)(2026-09-06 出场改为只留纪律,"
                     "见 REPORT_SA_EXIT_LONGER_v1 与 DEC-218;"
                     "改之前 90 笔 −44.8%/−0.33/−57.5%,八成仓由散户反向平掉、中位只持 4 天)",
@@ -1523,10 +1524,62 @@ def unload_series(sig: pd.DataFrame, seat: pd.DataFrame,
     return out
 
 
-#: 「几成仓」的回看窗与「高位」门槛(DEC-222)。测量见 `REPORT_ENTRY_POS_v1` 第四节。
-SEAT_LEVEL_WIN = 500
-SEAT_LEVEL_MIN = 120        # 预热不足就不给值,别拿三个月的最大值当「自身高位」
+#: 「几成仓」的回看窗与「高位」门槛(DEC-222 立,DEC-229 改口径)。
+#: 测量见 `REPORT_ENTRY_POS_v1` 第四节。
+SEAT_LEVEL_WIN = 400        # 运营者 2026-09-06 定:400 个交易日
+SEAT_LEVEL_MIN = 120        # 预热不足就不给值,别拿半年的最大值当「自身高位」
+SEAT_LEVEL_TOPK = 3         # 分母 = 窗口内最高 3 次的**平均**,不是单个最大值
+SEAT_LEVEL_GAP = 20         # **三个峰互相至少隔 20 个交易日** —— 否则取到的是同一波的连续三天
 SEAT_LEVEL_HOT = 0.60
+
+
+def rolling_top_mean(s: pd.Series, win: int = SEAT_LEVEL_WIN,
+                     k: int = SEAT_LEVEL_TOPK, gap: int = SEAT_LEVEL_GAP,
+                     min_periods: int = SEAT_LEVEL_MIN) -> pd.Series:
+    """滚动窗口内 `|s|` **最高 k 次的平均**(彼此至少相隔 `gap` 个交易日),
+    当作「这个席位/这一组的最大持仓」。
+
+    运营者 2026-09-06:「应该算 400 个交易日的峰值手数(不管是净多单还是净空单),
+    取最高的 3 次,加起来除以 3,大概才能等于这个席位的最大持仓数,不然这个百分比不准」;
+    「互相至少隔 20 个交易日」。
+
+    **`gap` 这一条是必须的**。不加的话实测取到的是**同一波建仓顶部的连续三天** ——
+    纯碱海通 2025-06-13/17/24、国泰君安 07-04/07/08、永安 08-07/11/13 ——
+    平均下来几乎等于单个最大值,「取三次」就白做了。加了间隔,三个峰才会落到不同的建仓轮次上。
+
+    **为什么不是单个最大值**:单日尖峰会把分母顶高、水位常年偏低,运营者据此说「百分比不准」。
+
+    实现:numpy 滑窗 + `argsort` 后按间隔贪心取 k 个。**不要用 `rolling.apply`** ——
+    玻璃 3300 天 × 十来个席位,Python 回调会慢一个量级,而这段每天都要跑。
+    """
+    a = s.abs().to_numpy(dtype=float)
+    n = len(a)
+    if n == 0:
+        return pd.Series(np.full(0, np.nan), index=s.index)
+    from numpy.lib.stride_tricks import sliding_window_view
+    pad = np.concatenate([np.full(win - 1, np.nan), a])
+    w = sliding_window_view(pad, win)                 # (n, win):第 i 行是截至 i 的窗口
+    cnt = np.isfinite(w).sum(axis=1)
+    filled = np.where(np.isfinite(w), w, -np.inf)
+    order = np.argsort(-filled, axis=1, kind="stable")   # 每行按值从大到小的列号
+    out = np.full(n, np.nan)
+    for i in range(n):
+        if cnt[i] < min_periods:
+            continue
+        picked, vals = [], []
+        row, ordi = filled[i], order[i]
+        for j in ordi:
+            v = row[j]
+            if not np.isfinite(v):
+                break
+            if all(abs(int(j) - q) >= gap for q in picked):
+                picked.append(int(j))
+                vals.append(v)
+                if len(vals) == k:
+                    break
+        if vals:
+            out[i] = float(np.mean(vals))
+    return pd.Series(out, index=s.index)
 
 
 def seat_levels(seat: pd.DataFrame, dates: pd.DatetimeIndex,
@@ -1555,7 +1608,8 @@ def seat_levels(seat: pd.DataFrame, dates: pd.DatetimeIndex,
             continue
         off, _full = _pit_pair(r)
         s = off.reindex(dates)
-        mx = s.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max()
+        # DEC-229:分母 = 近 200 日内 |净持仓| 最高 3 次的平均,不是单个最大值
+        mx = rolling_top_mean(s)
         cur, peak = s.iloc[-1] if len(s) else np.nan, mx.iloc[-1] if len(mx) else np.nan
         if not (np.isfinite(cur) and np.isfinite(peak)) or peak <= 0:
             continue
@@ -1582,8 +1636,11 @@ def sizing_weights(net: pd.Series) -> pd.Series:
     窗口沿用 `SEAT_LEVEL_WIN`/`SEAT_LEVEL_MIN`(DEC-222),**不另造一套**。
     预热不足给 NaN → 调用方按 0 仓处理(还不知道自身高位时不该开仓)。
     """
-    mx = net.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max()
-    return (net.abs() / mx).clip(upper=SIZING_PLAN["cap"])
+    # DEC-229:分母与「几成仓」同一个口径(近 200 日最高 3 次的平均)。
+    # **两处必须一致** —— 页面上「X% 仓」与「仓位强度」是同一个概念,
+    # 用两个分母会自相矛盾。代价:平均仓位变大,回撤跟着上去
+    # (纯碱 −20.4% → −24.9%、玻璃 −16.8% → −17.5%),细节见 DEC-229。
+    return (net.abs() / rolling_top_mean(net)).clip(upper=SIZING_PLAN["cap"])
 
 
 def apply_sizing(daily: pd.Series, pos: pd.Series, w: pd.Series,
@@ -1633,7 +1690,9 @@ def sizing_card(w: pd.Series, settle: pd.Series, net: pd.Series,
 
     prev = w.dropna().index[-2] if len(w.dropna()) > 1 else None
     lots, lots_prev = _lots(d), (_lots(prev) if prev is not None else None)
-    mx = net.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max().get(d, np.nan)
+    # DEC-229:与 sizing_weights 用同一个分母(400 日内最高 3 次、彼此隔 20 日的平均)。
+    # 这里写错就会出现「卡片上的峰值 ÷ 今日持仓 ≠ 卡片上的强度」,页面自相矛盾。
+    mx = rolling_top_mean(net).get(d, np.nan)
     margin_rate = SIZING_PLAN["margin"].get(code)
     notional = (lots or 0) * px * float(mult)
     return {
@@ -1861,8 +1920,9 @@ def flip_block(seat: pd.DataFrame, groups: pd.Series, mkt: pd.DataFrame) -> pd.S
     if not MN:
         return out
     MN = pd.DataFrame(MN)
-    win, mp = FLIP_GATE["lvl_win"], max(60, FLIP_GATE["lvl_win"] // 3)
-    lv = {m: (MN[m].abs() / MN[m].abs().rolling(win, min_periods=mp).max()) for m in MN.columns}
+    # DEC-229:分母同样换成「近 200 日最高 3 次的平均」,与另外两处保持一个口径。
+    lv = {m: (MN[m].abs() / rolling_top_mean(MN[m], win=FLIP_GATE["lvl_win"]))
+          for m in MN.columns}
     prev = {m: np.sign(MN[m]).shift(FLIP_GATE["back"]) for m in MN.columns}
     for d in idx:
         for m in (groups.get(d) or ()):

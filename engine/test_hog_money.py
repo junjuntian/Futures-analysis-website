@@ -2182,7 +2182,8 @@ class Test出场只留纪律:
         rdf, _ = H.retail_series(seat, mkt.index)
         sig = H.attach_cost_signal(H.signal_series(seat, g), seat, mkt, g)
         trades, _pos, _daily = H.replay(sig, mkt, rdf, op, st)
-        reasons = {t["exit_reason"] for t in trades}
+        # 未平仓那笔 exit_reason 是 None,不算出场原因(数据末日正好持仓中时会出现)
+        reasons = {t["exit_reason"] for t in trades if t["exit_reason"]}
         assert reasons <= {"止损", "持满", "临近交割"}, reasons
         assert max(t["hold_days"] for t in trades) <= H.RULES["max_hold"] + 3
 
@@ -2204,8 +2205,8 @@ class Test几成仓:
         assert out["甲"]["level"] == 0.6
 
     def test_预热不足不给值(self):
-        """min_periods=120。给三个月数据就算「自身高位」是骗人的。"""
-        seat, idx = self._seat(n=60)
+        """DEC-229 起窗口 200 日、min_periods 60。给两个月数据就算「自身高位」是骗人的。"""
+        seat, idx = self._seat(n=40)
         assert H.seat_levels(seat, idx, ["甲"]) == {}
 
     def test_用当日可见口径不用回榜反推(self):
@@ -2225,10 +2226,33 @@ class Test几成仓:
             assert k not in src, k
 
     def test_门槛与窗口是全站常量不许逐品种配(self):
-        assert (H.SEAT_LEVEL_WIN, H.SEAT_LEVEL_MIN, H.SEAT_LEVEL_HOT) == (500, 120, 0.60)
+        # DEC-229 定稿:400 日窗口、分母 = 最高 3 次的平均、三峰彼此至少隔 20 个交易日
+        assert (H.SEAT_LEVEL_WIN, H.SEAT_LEVEL_MIN, H.SEAT_LEVEL_HOT) == (400, 120, 0.60)
+        assert (H.SEAT_LEVEL_TOPK, H.SEAT_LEVEL_GAP) == (3, 20)
         for code in H.VARIETIES:
-            for k in ("seat_level_win", "seat_level_hot"):
+            for k in ("seat_level_win", "seat_level_hot", "seat_level_topk", "seat_level_gap"):
                 assert k not in H.VARIETIES[code], (code, k)
+
+    def test_分母是最高三次的平均不是单个最大值(self):
+        """DEC-229。单日尖峰会把分母顶高、水位常年偏低,运营者据此说「百分比不准」。"""
+        v = [100.0] * 399 + [1000.0]
+        s = pd.Series(v, index=bdays("2025-01-06", 400))
+        assert H.rolling_top_mean(s).iloc[-1] == pytest.approx(400.0)   # (1000+100+100)/3
+        assert s.abs().rolling(400, min_periods=120).max().iloc[-1] == 1000.0
+
+    def test_三个峰必须互相隔开(self):
+        """**不加间隔就等于没做平均**:实测取到的是同一波建仓顶部的连续三天
+        (纯碱海通 2025-06-13/17/24、国泰君安 07-04/07/08、永安 08-07/11/13),
+        平均下来几乎等于单个最大值。
+        """
+        v = [10.0] * 400
+        for i, x in ((399, 100.0), (398, 99.0), (397, 98.0), (300, 90.0), (200, 80.0)):
+            v[i] = x
+        s = pd.Series(v, index=bdays("2025-01-06", 400))
+        # 不隔开会取 100/99/98(同一波的连续三天)
+        assert H.rolling_top_mean(s, gap=1).iloc[-1] == pytest.approx(99.0)
+        # 隔 20 日就跳过 99/98,取到 100/90/80 三个不同的峰
+        assert H.rolling_top_mean(s).iloc[-1] == pytest.approx(90.0)
 
 
 class Test分数仓位:
@@ -2256,7 +2280,7 @@ class Test分数仓位:
         assert w.iloc[-1] == 0.4 and w.iloc[-2] == 1.0
 
     def test_预热不足不给权重(self):
-        net = pd.Series([100.0] * 60, index=bdays("2025-01-06", 60))
+        net = pd.Series([100.0] * 40, index=bdays("2025-01-06", 40))
         assert H.sizing_weights(net).isna().all()
 
     def test_上限一不许放大(self):
@@ -2410,7 +2434,8 @@ class Test重仓翻向门:
         d = _P(os.environ.get("CSV_DIR", "research/data"))
         if not (d / "fg_price.csv.gz").exists():
             pytest.skip("本机没有 research/data 快照")
-        for code, stem, want in (("FG", "fg", (106, 46.8)), ("SA", "sa", (26, 126.3))):
+        # DEC-229 定稿(400 日 top3 隔 20)+ 数据拉到 2026-09-04 之后的数
+        for code, stem, want in (("FG", "fg", (106, 51.8)), ("SA", "sa", (28, 149.3))):
             H.use(code)
             price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
             seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
