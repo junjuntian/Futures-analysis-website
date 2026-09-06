@@ -478,6 +478,10 @@ VARIETIES = {
         # **但机制统计很弱**(方向对 42~55%),**玻璃回测略减分** +52.3%→+46.8%、纯碱不变。
         # **知情选择上线** —— 细节见 flip_block 的 docstring。
         "flip_gate": True,
+        # **换组不清零卸仓(DEC-230,运营者点名)**:改用同方向的近 9 个月高位当起点。
+        # 起因是 2026-09-03/04 连着两次换组把已卸到 54% 的那一轮清成 0%,门白开一次。
+        # 代价可量化,见 DEC-230。**只给玻纯开**,别的品种一行不动。
+        "unload_regroup_seed": True,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -504,7 +508,7 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "分数仓位口径 +51.8%/夏普 0.52/回撤 −17.8%(DEC-224 分数仓位 + DEC-229 分母口径);"
+        "backtest": "98 笔 +55.9%/夏普 0.55/回撤 −17.8%(DEC-224 分数仓位 + DEC-229 分母 + DEC-230 换组不清零);"
                     "**其中约 −6pp 是 DEC-228 重仓翻向门挡掉两笔的代价**;"
                     "同一批按满仓算是 +43.1%/0.25/−33.2%"
                     "(2013-01 起,基准 −17.7%)。"
@@ -757,9 +761,13 @@ VARIETIES = {
         # **但机制统计很弱**(方向对 42~55%),**玻璃回测略减分** +52.3%→+46.8%、纯碱不变。
         # **知情选择上线** —— 细节见 flip_block 的 docstring。
         "flip_gate": True,
+        # **换组不清零卸仓(DEC-230,运营者点名)**:改用同方向的近 9 个月高位当起点。
+        # 起因是 2026-09-03/04 连着两次换组把已卸到 54% 的那一轮清成 0%,门白开一次。
+        # 代价可量化,见 DEC-230。**只给玻纯开**,别的品种一行不动。
+        "unload_regroup_seed": True,
         "exit_mode": "discipline",
         "max_hold": 60,
-        "backtest": "分数仓位口径 +149.3%/夏普 1.23/回撤 −21.1%(DEC-224 分数仓位 + DEC-229 分母口径);"
+        "backtest": "22 笔 +116.3%/夏普 1.07/回撤 −19.7%(DEC-224 分数仓位 + DEC-229 分母 + DEC-230 换组不清零);"
                     "同一批 28 笔按满仓算是 +118.9%/0.61/−40.9%(该数按 2026-09-02 快照算)"
                     "(2020-06 起,基准 −17.5%)(2026-09-06 出场改为只留纪律,"
                     "见 REPORT_SA_EXIT_LONGER_v1 与 DEC-218;"
@@ -953,6 +961,8 @@ def use(code: str) -> dict:
     RULES["sizing"] = bool(v.get("sizing", False))
     # 重仓翻向门(DEC-228):配了才开。**每轮都要写**,理由同 sizing。
     RULES["flip_gate"] = bool(v.get("flip_gate", False))
+    # 换组时用同方向的近 9 个月高位当卸仓起点(DEC-230):配了才开。**每轮都要写**。
+    RULES["unload_regroup_seed"] = bool(v.get("unload_regroup_seed", False))
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -1466,10 +1476,14 @@ def unload_series(sig: pd.DataFrame, seat: pd.DataFrame,
     页面只要最后一天(`unload_state`),研究要整条序列(拿它当出场判据做对照实验)。
     **两者共用这一个实现** —— 今天已经栽过好几次「同一件事两处实现,一处过期」。
 
-    三处必须重置,否则这个数会说谎:
+    三处要特殊处理,否则这个数会说谎:
 
-    1. **换组当天** —— 新旧两组持仓水平不同,不重置会把「换了一批人」读成
-       「机构大幅出货」。`signal_series` 算 `chg` 时为同一个理由分组算过一遍。
+    1. **换组当天(DEC-230 改)** —— 新旧两组持仓水平不同,直接续算会把「换了一批人」
+       读成「机构大幅出货」;但**清零**又会让换人当天的门必然打开
+       (2026-09-03/04 连着两次换组,把已经卸到 54% 的那一轮清成 0%,白送一次开门)。
+       现在改成:**用同方向的近 9 个月高位当新一轮的起点**,两头都不占。
+       **逐品种开关 `unload_regroup_seed`,只给玻纯开** —— 这条是全站共用的函数,
+       不设开关会连着改掉鸡蛋(实测 +66.5%/1.43 → +51.1%/1.13)、焦煤、生猪、铁矿石。
     2. **方向翻转 / 归零** —— 那一轮结束了,上一轮的峰值与新一轮无关。
     3. **掉榜那天冻结,不给值** —— 掉榜是「不知道」不是「卸完了」
        (`research/PITFALLS.md` 第 4 条)。研究脚本第一版在这里把整轮重置掉,
@@ -1487,29 +1501,62 @@ def unload_series(sig: pd.DataFrame, seat: pd.DataFrame,
         [len(set(g) & by_day.get(d, set())) if (g := groups.get(d)) else np.nan
          for d in net.index], index=net.index)
 
+    # **换组的起点(DEC-230)**:不再清零,改用「**同方向**的近 9 个月高位」。
+    # 逐日预算一张表,免得在循环里反复切片。
+    nv = net.to_numpy(dtype=float)
+    dates_arr = np.asarray(net.index)
+    win = UNLOAD_VIEW_WIN
+
+    def _seed(i: int, side: int):
+        """截至第 i 天、近 `win` 个交易日内,与 `side` 同号的 |净持仓| 最大值及其日期。"""
+        lo = max(0, i - win + 1)
+        seg = nv[lo:i + 1]
+        m = np.isfinite(seg) & (np.sign(seg) == side)
+        if not m.any():
+            return np.nan, None
+        j = int(np.argmax(np.where(m, np.abs(seg), -np.inf)))
+        return float(abs(seg[j])), pd.Timestamp(dates_arr[lo + j])
+
     rows = []
     peak = np.nan
     peak_at = None
     peak_legs = np.nan
     cur_side = 0
     cur_grp = None
-    for d in net.index:
+    fresh_group = False
+    for i, d in enumerate(net.index):
         n = net.get(d, np.nan)
         grp = groups.get(d)
-        if grp != cur_grp:                       # 换组:重来一轮
+        if grp != cur_grp:                       # 换组
             cur_grp, cur_side, peak, peak_at, peak_legs = grp, 0, np.nan, None, np.nan
+            fresh_group = True
         if not np.isfinite(n):
             rows.append((d, np.nan, None, None, np.nan, np.nan))
             continue                             # 掉榜=不知道:冻结,不给值
         if n == 0:
             cur_side, peak, peak_at, peak_legs = 0, np.nan, None, np.nan
+            fresh_group = False
             rows.append((d, np.nan, None, None, np.nan, np.nan))
             continue
         side = int(np.sign(n))
         if side != cur_side:
-            cur_side, peak, peak_at, peak_legs = side, abs(n), d, legs.get(d, np.nan)
+            if fresh_group and RULES.get("unload_regroup_seed"):
+                # **换组不清零**:拿同方向的近 9 个月高位当起点(运营者 2026-09-06 定)。
+                # 起因:2026-09-03/09-04 连着两次换组(DEC-195 瑞达生效、
+                # DEC-215/219 华泰→海通 + 剔瑞达),把已经卸到 54% 的那一轮直接清成 0%,
+                # **门白开了一次**。清零本意是「别把换人读成出货」,但代价是换人当天必然开门。
+                sp, sat = _seed(i, side)
+                if np.isfinite(sp) and sp >= abs(n):
+                    peak, peak_at = sp, sat
+                else:
+                    peak, peak_at = abs(n), d
+                peak_legs = legs.get(peak_at, np.nan) if peak_at is not None else np.nan
+            else:
+                peak, peak_at, peak_legs = abs(n), d, legs.get(d, np.nan)
+            cur_side = side
         elif abs(n) > peak:
             peak, peak_at, peak_legs = abs(n), d, legs.get(d, np.nan)
+        fresh_group = False
         rows.append((
             d,
             round(1.0 - abs(n) / peak, 3) if peak > 0 else np.nan,

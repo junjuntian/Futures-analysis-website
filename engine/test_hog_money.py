@@ -2435,7 +2435,7 @@ class Test重仓翻向门:
         if not (d / "fg_price.csv.gz").exists():
             pytest.skip("本机没有 research/data 快照")
         # DEC-229 定稿(400 日 top3 隔 20)+ 数据拉到 2026-09-04 之后的数
-        for code, stem, want in (("FG", "fg", (106, 51.8)), ("SA", "sa", (28, 149.3))):
+        for code, stem, want in (("FG", "fg", (98, 55.9)), ("SA", "sa", (22, 116.3))):
             H.use(code)
             price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
             seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
@@ -2453,3 +2453,42 @@ class Test重仓翻向门:
             sd = H.apply_sizing(daily, pos, H.sizing_weights(raw["net"]).reindex(mkt.index),
                                 mkt["settle"], H.RULES["multiplier"])
             assert (len(trades), H._perf(sd)["cum_pct"]) == want, code
+
+
+class Test换组不清零卸仓:
+    """DEC-230:换组时用同方向的近 9 个月高位当卸仓起点,不再清成 0%。"""
+
+    def test_只有玻纯开了这个开关(self):
+        for code in ("SA", "FG"):
+            H.use(code)
+            assert H.RULES["unload_regroup_seed"] is True, code
+        # **这是全站共用的函数**,不设开关会连着改掉别的品种
+        # (实测鸡蛋 +66.5%/1.43 → +51.1%/1.13)
+        for code in ("JD", "JM", "LH", "I"):
+            H.use(code)
+            assert H.RULES["unload_regroup_seed"] is False, code
+
+    def _run(self, code):
+        idx = bdays("2025-01-06", 260)
+        # 前 240 天净空,峰值 -300;后 20 天换一批人,净空只剩 -100
+        net = [-300.0] * 100 + [-200.0] * 140 + [-100.0] * 20
+        seat = pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+                             "member_key": "甲", "net": net, "net_off": net,
+                             "source": "akshare_v1"})
+        groups = pd.Series([("甲", "乙")] * 240 + [("甲", "丙")] * 20,
+                           index=idx, dtype=object)
+        sig = pd.DataFrame({"net": net}, index=idx)
+        H.use(code)
+        return H.unload_series(sig, seat, groups)
+
+    def test_开着的时候换组不清零(self):
+        u = self._run("SA")
+        # 换组那天(第 241 天)净空 -100,同方向近 180 日高位是 -300 → 已卸掉 67%
+        assert u["pct"].iloc[-1] == pytest.approx(1 - 100 / 300, abs=1e-3)
+        assert u["peak_net"].iloc[-1] == -300
+
+    def test_关着的时候还是老行为(self):
+        u = self._run("JD")
+        # 老行为:换组当天峰值重置成当天的 100 → 已卸掉 0%
+        assert u["pct"].iloc[-1] == 0.0
+        assert u["peak_net"].iloc[-1] == -100

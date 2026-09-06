@@ -506,6 +506,37 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('策略方案页要写出拦截门与卸仓口径(DEC-228/230)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      rules: { ...PAYLOAD.rules, signal_source: 'cost', exit_mode: 'discipline',
+               flip_gate: true, unload_regroup_seed: true, cost_unload_max: 0.3 }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[3].trigger('click')
+    const t = w.text()
+    expect(t).toContain('重仓翻向门')
+    expect(t).toContain('不往它的反方向进场')
+    expect(t).toContain('接近抛硬币')          // 证据形态必须一起写
+    expect(t).toContain('本轮峰值')            // 卸仓口径要讲清楚
+    expect(t).toContain('换组不清零')
+    w.unmount()
+  })
+
+  it('没开这两个开关的品种不写这两段(DEC-228/230)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      rules: { ...PAYLOAD.rules, flip_gate: false, unload_regroup_seed: false }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'JD' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await w.findAll('.tab')[3].trigger('click')
+    expect(w.text()).not.toContain('重仓翻向门')
+    expect(w.text()).not.toContain('换组不清零')
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',
