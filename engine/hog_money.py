@@ -471,6 +471,12 @@ VARIETIES = {
         # +43.1%/0.25/回撤 −33.2% → **+52.3%/0.60/−16.8%**,平均仓位 25%。
         # 等效缩仓到 25% 只有 0.25 —— 多出来的那一截是择时价值,不是缩仓。
         "sizing": True,
+        # **异见席位阻止门(DEC-227,运营者点名)**:一家反向且自身仓位 ≥60%、
+        # 多数派已卸到 9 个月高位的 50% 以下 → 不进场。
+        # **至今从未拦下过任何一笔**(纯碱 0/26、玻璃 0/108),回测逐字节不变;
+        # 机制检验两品种符号相反(纯碱后 10 日逆行 67%、玻璃仅 32%)。
+        # **知情选择上线,不是验证通过** —— 细节见 dissent_block 的 docstring。
+        "dissent_gate": True,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -743,6 +749,12 @@ VARIETIES = {
         # +118.9%/0.61/回撤 −40.9% → **+126.3%/1.25/−20.4%**,平均仓位 35%。
         # 核心闸门是「必须胜过等效缩仓」:同样压到 35%,固定缩仓只有 0.60。
         "sizing": True,
+        # **异见席位阻止门(DEC-227,运营者点名)**:一家反向且自身仓位 ≥60%、
+        # 多数派已卸到 9 个月高位的 50% 以下 → 不进场。
+        # **至今从未拦下过任何一笔**(纯碱 0/26、玻璃 0/108),回测逐字节不变;
+        # 机制检验两品种符号相反(纯碱后 10 日逆行 67%、玻璃仅 32%)。
+        # **知情选择上线,不是验证通过** —— 细节见 dissent_block 的 docstring。
+        "dissent_gate": True,
         "exit_mode": "discipline",
         "max_hold": 60,
         "backtest": "分数仓位口径 +126.3%/夏普 1.25/回撤 −20.4%(平均仓位 35%,DEC-224);"
@@ -937,6 +949,8 @@ def use(code: str) -> dict:
     # 分数仓位(DEC-224):配了才开。**每轮都要写**,否则跑完玻璃再跑鸡蛋,
     # 鸡蛋会顶着玻璃的开关(retail_panel 那次栽过同一个坑)。
     RULES["sizing"] = bool(v.get("sizing", False))
+    # 异见席位阻止门(DEC-227):配了才开。**每轮都要写**,理由同 sizing。
+    RULES["dissent_gate"] = bool(v.get("dissent_gate", False))
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -1793,6 +1807,80 @@ def cost_entry_frame(cc: pd.DataFrame, net: pd.Series, settle: pd.Series,
     return pd.DataFrame({"cost_z": z, "cost_reason": reason})
 
 
+#: 异见席位阻止门(DEC-227,运营者 2026-09-06 指定的三个数)。
+DISSENT = {"lvl": 0.60, "trio_low": 0.50, "trio_win": 180}
+
+
+def dissent_block(seat: pd.DataFrame, groups: pd.Series,
+                  dates: pd.DatetimeIndex) -> pd.Series:
+    """逐日布尔:今天**不许进场**(不管往哪个方向)。
+
+    运营者原话:「任何一家席位和另外三家持仓相反,而且仓位达到自己最大仓位的 60%,
+    同时三家合计持仓低于 9 个月最大仓位的 50%,这就不能进场跟随三家的方向做,
+    这就代表反弹或者转向。」三条**同时**成立才拦:
+
+    ① 组内**恰好一家**与其余各家反向,且**全员在榜**
+       —— 掉榜是「不知道」不是「没有」(`PITFALLS` 第 4 条),**不因不知道而拦**。
+       「全员在榜」这个下限是实现时补的,运营者原话没说;
+    ② 那家少数派的**自身水位** ≥ 60%(`|净持仓| ÷ 自身近 500 日最大`,DEC-222 口径);
+    ③ **多数派合计** `|净持仓|` < 它们合计的近 180 个交易日(≈9 个月)最大值 × 50%。
+
+    ------------------------------------------------------------------
+    **这道门至今从未拦下过任何一笔** —— 实测纯碱 0/26 笔、玻璃 0/108 笔,
+    加上它**回测逐字节不变**。也就是说:**回测既不能证明它有用,也不能证明它没用。**
+
+    **机制检验的结论是分裂的**(`REPORT_DISSENT_GATE_v1`),触发之后顺着多数派方向的收益:
+
+    | | 纯碱(12 次) | 玻璃(19 次) |
+    |---|---|---|
+    | 后 10 日中位 | **−3.91%**(逆行 67%) | **+1.33%**(逆行仅 32%) |
+    | 后 20 日中位 | −2.87%(逆行 58%) | **+3.47%**(逆行仅 26%) |
+
+    **纯碱支持运营者的判断,玻璃正好相反。** 且事件高度重叠
+    (纯碱 12 次里 4 次挤在 2021-05、玻璃 19 次里 9 次挤在 2020-06/07),
+    独立事件只有八九个。**这是知情选择上线,不是验证通过** —— 同 DEC-113/195/211。
+    真触发那天请回来看这段注释,别默认它拦对了。
+    ------------------------------------------------------------------
+    """
+    if seat.empty:
+        return pd.Series(False, index=dates)
+    members = sorted({m for grp in groups.dropna().unique() for m in grp})
+    cols = {}
+    for m in members:
+        r = seat[seat["member_key"] == m]
+        if not r.empty:
+            off, _full = _pit_pair(r)
+            cols[m] = off.reindex(dates)
+    if not cols:
+        return pd.Series(False, index=dates)
+    P = pd.DataFrame(cols)
+    lv = {m: (P[m].abs() / P[m].abs().rolling(SEAT_LEVEL_WIN,
+              min_periods=SEAT_LEVEL_MIN).max()) for m in P.columns}
+
+    ok12, major = [], pd.Series(np.nan, index=dates)
+    for d in dates:
+        grp = groups.get(d)
+        cs = [m for m in (grp or ()) if m in P.columns]
+        row = P.loc[d, cs].dropna() if cs else pd.Series(dtype=float)
+        row = row[row != 0]
+        # 全员在榜才判;少于 3 家谈不上「一家对其余」
+        if not grp or len(row) != len(grp) or len(row) < 3:
+            ok12.append(False)
+            continue
+        cnt = np.sign(row).value_counts()
+        if len(cnt) != 2 or int(cnt.min()) != 1:
+            ok12.append(False)
+            continue
+        odd = np.sign(row)[np.sign(row) == cnt.idxmin()].index[0]
+        v = lv[odd].get(d, np.nan)
+        ok12.append(bool(np.isfinite(v) and v >= DISSENT["lvl"]))
+        major[d] = row[[m for m in row.index if m != odd]].sum()
+
+    mx = major.abs().rolling(DISSENT["trio_win"], min_periods=20).max()
+    c3 = (major.abs() / mx < DISSENT["trio_low"]).fillna(False)
+    return (pd.Series(ok12, index=dates) & c3).fillna(False)
+
+
 def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
                        groups: pd.Series) -> pd.DataFrame:
     """把成本进场信号(cost_z / cost_reason)挂到 sig 上。cost 模式的品种
@@ -1801,8 +1889,18 @@ def attach_cost_signal(sig: pd.DataFrame, seat: pd.DataFrame, mkt: pd.DataFrame,
     cc = inst_cost_series(sig, mkt, groups)
     ext = cost_entry_frame(cc, sig["net"], mkt["settle"],
                            unload.reindex(mkt.index), sig["chg"].reindex(mkt.index))
-    return sig.assign(cost_z=ext["cost_z"].reindex(sig.index),
-                      cost_reason=ext["cost_reason"].reindex(sig.index))
+    cz = ext["cost_z"]
+    reason = ext["cost_reason"]
+    # 异见席位阻止门(DEC-227):逐品种开关,不配的品种逐字节不变。
+    if RULES.get("dissent_gate"):
+        blocked = dissent_block(seat, groups, mkt.index)
+        cz = cz.where(~blocked, 0.0)
+        reason = reason.where(~blocked,
+                              f"有一家与其余各家反向且自身仓位 ≥{DISSENT['lvl']:.0%}、"
+                              f"多数派已卸到 9 个月高位的 {DISSENT['trio_low']:.0%} 以下"
+                              "——可能是反弹或转向,不跟")
+    return sig.assign(cost_z=cz.reindex(sig.index),
+                      cost_reason=reason.reindex(sig.index))
 
 
 def inst_exit_flags(sig: pd.DataFrame, mkt: pd.DataFrame, groups: pd.Series,

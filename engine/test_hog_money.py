@@ -2340,3 +2340,91 @@ class Test已卸掉的两个口径:
         assert "unload_series" in src
         assert "unload_window" not in src and "unload_view" not in src
         assert "unload_window" not in inspect.getsource(H.replay)
+
+
+class Test异见席位阻止门:
+    """DEC-227:一家反向且自身仓位重、多数派已卸掉大半 → 不进场。"""
+
+    def _mk(self, nets, n=200):
+        """nets: {席位: 末日净持仓},前 n-1 天都给一个固定的高位值好让水位算得出来。"""
+        idx = bdays("2025-01-06", n)
+        rows = []
+        for m, (hist, last) in nets.items():
+            v = [hist] * (n - 1) + [last]
+            rows.append(pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+                                      "member_key": m, "net": v, "net_off": v,
+                                      "source": "akshare_v1"}))
+        seat = pd.concat(rows, ignore_index=True)
+        grp = tuple(nets)
+        groups = pd.Series([grp] * n, index=idx, dtype=object)
+        return seat, groups, idx
+
+    def test_三个数是运营者点的(self):
+        assert H.DISSENT == {"lvl": 0.60, "trio_low": 0.50, "trio_win": 180}
+
+    def test_三条全中才拦(self):
+        # 甲反向且满仓(水位 100%);乙丙丁同向,末日合计从 -3000 卸到 -600(20% < 50%)
+        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -200),
+                                      "丙": (-1000, -200), "丁": (-1000, -200)})
+        b = H.dissent_block(seat, groups, idx)
+        assert bool(b.iloc[-1]) is True
+
+    def test_多数派没卸够就不拦(self):
+        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -900),
+                                      "丙": (-1000, -900), "丁": (-1000, -900)})
+        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+
+    def test_少数派仓位不重就不拦(self):
+        seat, groups, idx = self._mk({"甲": (1000, 100), "乙": (-1000, -200),
+                                      "丙": (-1000, -200), "丁": (-1000, -200)})
+        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+
+    def test_两家反向就不是一对三(self):
+        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (1000, 1000),
+                                      "丙": (-1000, -200), "丁": (-1000, -200)})
+        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+
+    def test_掉榜不许当成没有(self):
+        """掉榜是「不知道」不是「没有」(PITFALLS 第 4 条),**不因不知道而拦**。"""
+        seat, groups, idx = self._mk({"甲": (1000, 1000), "乙": (-1000, -200),
+                                      "丙": (-1000, -200), "丁": (-1000, -200)})
+        seat = seat[~((seat["trade_date"] == idx[-1]) & (seat["member_key"] == "丁"))]
+        assert bool(H.dissent_block(seat, groups, idx).iloc[-1]) is False
+
+    def test_只有玻纯开了这个开关(self):
+        for code in ("SA", "FG"):
+            H.use(code)
+            assert H.RULES["dissent_gate"] is True, code
+        for code in ("JD", "JM", "LH", "I"):
+            H.use(code)
+            assert H.RULES["dissent_gate"] is False, code
+
+    def test_至今一笔都没拦到所以回测不许变(self, tmp_path):
+        """**这道门的现状就是「从未触发过任何一笔进场」**。
+
+        哪天这条测试红了,说明它开始真的拦单了 —— 那时请回去读
+        `dissent_block` 的 docstring:机制检验两品种符号相反,别默认它拦对了。
+        """
+        import os
+        from pathlib import Path as _P
+        d = _P(os.environ.get("CSV_DIR", "research/data"))
+        if not (d / "sa_price.csv.gz").exists():
+            pytest.skip("本机没有 research/data 快照")
+        for code, stem, want in (("SA", "sa", (26, 126.3)), ("FG", "fg", (108, 52.3))):
+            H.use(code)
+            price = H.clean_price(pd.read_csv(d / f"{stem}_price.csv.gz"))
+            seat = H.clean_seat(pd.read_csv(d / f"{stem}_seat.csv.gz"))
+            mkt = H.main_series(price)
+            op, st = H.contract_prices(price)
+            mkt = mkt[mkt.index >= pd.Timestamp(H.RULES["replay_start"])]
+            g, log, cuts = H.rolling_groups(seat, price, mkt.index)
+            g, log = H.apply_group_overrides(g, log, cuts, H.RULES["group_overrides"], seat, price)
+            if H.RULES.get("freeze_since"):
+                g, log, cuts = H.freeze_groups(g, log, cuts, H.RULES["freeze_since"])
+            rdf, _ = H.retail_series(seat, mkt.index)
+            raw = H.signal_series(seat, g)
+            sig = H.attach_cost_signal(raw, seat, mkt, g)
+            trades, pos, daily = H.replay(sig, mkt, rdf, op, st)
+            sd = H.apply_sizing(daily, pos, H.sizing_weights(raw["net"]).reindex(mkt.index),
+                                mkt["settle"], H.RULES["multiplier"])
+            assert (len(trades), H._perf(sd)["cum_pct"]) == want, code
