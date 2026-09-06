@@ -2229,3 +2229,81 @@ class Test几成仓:
         for code in H.VARIETIES:
             for k in ("seat_level_win", "seat_level_hot"):
                 assert k not in H.VARIETIES[code], (code, k)
+
+
+class Test分数仓位:
+    """DEC-224:按整组水位建仓,replay 一个字没改。"""
+
+    def test_只有玻纯开了这个开关(self):
+        for code in ("SA", "FG"):
+            H.use(code)
+            assert H.RULES["sizing"] is True, code
+        for code in ("JD", "JM", "LH", "I"):
+            H.use(code)
+            assert H.RULES["sizing"] is False, code
+
+    def test_权重是整组水位不是某一家(self):
+        """跟单一席位实测更差(纯碱 0.23,还不如固定缩仓 0.60)。
+
+        这条钉的是**入参**:`sizing_weights` 只接一条合计净持仓序列,
+        没有「跟谁」这个参数 —— 想改成跟某一家,得先改签名,改签名就会看到这条注释。
+        """
+        import inspect
+        sg = inspect.signature(H.sizing_weights)
+        assert list(sg.parameters) == ["net"]
+        net = pd.Series([100.0] * 200 + [40.0], index=bdays("2025-01-06", 201))
+        w = H.sizing_weights(net)
+        assert w.iloc[-1] == 0.4 and w.iloc[-2] == 1.0
+
+    def test_预热不足不给权重(self):
+        net = pd.Series([100.0] * 60, index=bdays("2025-01-06", 60))
+        assert H.sizing_weights(net).isna().all()
+
+    def test_上限一不许放大(self):
+        assert H.SIZING_PLAN["cap"] == 1.0
+        net = pd.Series([10.0] * 200 + [1e9], index=bdays("2025-01-06", 201))
+        assert H.sizing_weights(net).max() <= 1.0
+
+    def test_权重用前一日的值不许当天生效(self):
+        """当天的水位是当天收盘后才知道的,当天就用它 = 前视(DEC-090 同一条纪律)。"""
+        idx = bdays("2025-01-06", 4)
+        daily = pd.Series([0.10, 0.10, 0.10, 0.10], index=idx)
+        pos = pd.Series([1, 1, 1, 1], index=idx)
+        w = pd.Series([0.0, 0.0, 1.0, 1.0], index=idx)
+        settle = pd.Series([1000.0] * 4, index=idx)
+        out = H.apply_sizing(daily, pos, w, settle, 20.0, fee=0.0)
+        assert out.iloc[1] == 0.0, "第 2 天该用第 1 天的权重 0"
+        assert out.iloc[3] == pytest.approx(0.10), "第 4 天才吃到满权重"
+
+    def test_调仓成本按真实费率且很小(self):
+        """一手名义 = 结算价 × 点值 ≈ 2 万元,2 元/手/边 ≈ 1 个基点。
+
+        DEC-203 的教训:上一版按「名义 × 0.05%」算,错了 4.8~5.3 倍。
+        """
+        assert H.SIZING_PLAN["fee"] == 2.0
+        idx = bdays("2025-01-06", 3)
+        daily = pd.Series(0.0, index=idx)
+        pos = pd.Series([0, 1, 1], index=idx)
+        w = pd.Series([0.0, 1.0, 1.0], index=idx)      # 第 2 天从 0 加到满仓
+        settle = pd.Series([1000.0] * 3, index=idx)
+        out = H.apply_sizing(daily, pos, w, settle, 20.0)
+        assert out.iloc[1] == pytest.approx(-2.0 / (1000.0 * 20.0))   # 正好 1 个基点
+
+    def test_replay一个字都没改(self):
+        """分数仓位在汇总处加权,`replay` 仍按满仓记账 —— 源码里搜得到就是接错线。"""
+        import inspect
+        src = inspect.getsource(H.replay)
+        for k in ("sizing", "apply_sizing", "SIZING_PLAN"):
+            assert k not in src, k
+
+    def test_手数是名义敞口除以一手名义(self):
+        """满仓 = 名义敞口等于总资金(杠杆 1 倍),与运营者「上限 100%」对得上。"""
+        idx = bdays("2025-01-06", 200)
+        net = pd.Series([100.0] * 199 + [50.0], index=idx)
+        settle = pd.Series([1000.0] * 200, index=idx)
+        w = H.sizing_weights(net)
+        card = H.sizing_card(w, settle, net, "SA", 20.0, -1)
+        # 权重 0.5 × 100 万 = 50 万名义;一手 1000×20 = 2 万 → 25 手
+        assert card["strength"] == 0.5 and card["lots"] == 25
+        assert card["lots_prev"] == 50 and card["lots_chg"] == -25
+        assert card["leverage"] == 0.5 and card["margin_rate"] == 0.08

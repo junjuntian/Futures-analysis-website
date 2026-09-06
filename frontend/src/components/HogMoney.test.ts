@@ -439,6 +439,49 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('分数仓位:写手数与每日加减,没开的品种什么都不写(DEC-224)', async () => {
+    stubFetch({
+      ...PAYLOAD, position: null,
+      sizing: { strength: 0.35, now: 165391, peak: 429064, capital: 1000000, cap: 1,
+                lots: 18, lots_prev: 22, lots_chg: -4, side: null, px: 1067,
+                notional: 384120, margin: 30730, margin_rate: 0.08, leverage: 0.38 }
+    })
+    const w = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('18 手')
+    expect(t).toContain('减4')            // 每日加减,照跟随卡那套
+    expect(t).toContain('(若进场)')        // 空仓时说清这是「若现在进场」
+    expect(t).toContain('35%')            // 仓位强度
+    expect(t).toContain('杠杆 0.38 倍')
+    expect(t).toContain('是整组,不是某一家')  // 别被改成跟单一席位
+    w.unmount()
+  })
+
+  it('分数仓位:加减为 0 时不显示「减0」,没配的品种整段不出(DEC-224)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      sizing: { strength: 0.35, now: 1, peak: 3, capital: 1000000, cap: 1,
+                lots: 18, lots_prev: 18, lots_chg: 0, side: 'short', px: 1067,
+                notional: 384120, margin: 30730, margin_rate: 0.08, leverage: 0.38 }
+    })
+    const w1 = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    expect(w1.text()).toContain('18 手')
+    expect(w1.text()).not.toContain('减0')
+    expect(w1.text()).not.toContain('加0')
+    w1.unmount()
+    stubFetch({ ...PAYLOAD, sizing: null })
+    const w2 = mount(HogMoney, { props: { instrument: 'JD' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    // 注意别断言「仓位强度」——「机构合计流向」卡里本来就有「建议仓位强度」那一行,
+    // 会撞上。只断言分数仓位专属的文案。
+    expect(w2.text()).not.toContain('建议手数')
+    expect(w2.text()).not.toContain('杠杆')
+    expect(w2.text()).not.toContain('是整组,不是某一家')
+    w2.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',

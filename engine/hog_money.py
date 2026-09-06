@@ -467,6 +467,10 @@ VARIETIES = {
         # 生猪那次(DEC-126/199)已经证明固定名单弱的主因就是失去重选。
         #
         # 「暂时」= 想恢复自动重选,把这一行删掉即可,不留残留状态。
+        # **分数仓位(DEC-224)**:按整组水位建仓。实测全样本
+        # +43.1%/0.25/回撤 −33.2% → **+52.3%/0.60/−16.8%**,平均仓位 25%。
+        # 等效缩仓到 25% 只有 0.25 —— 多出来的那一截是择时价值,不是缩仓。
+        "sizing": True,
         "freeze_since": "2026-09-07",
         # 沉淀资金费率(DEC-151):18% 常规 / 临近交割 20%(交割月前约一个月),
         # 与运营者行情软件 2026-08-27 截图逐格对过(FG2701 52.47亿 等五格全中)。
@@ -493,10 +497,14 @@ VARIETIES = {
                      "单跑回撤 −46%,组合才浅。验收 REPORT_FGSA_MODEL_v1。"),
         },
         "out": "fg_signals.json",
-        "backtest": "120 笔 净 +218.1%/胜率 54.2%/回撤 −31.6%/夏普 0.65"
-                    "(2013-01 起,基准 −17.7%)(2026-08-22 换成本进场+还在加仓+轮龄≥2,"
-                    "六关全过但属事后假设复验,见 REPORT_FG_AGE_v1 与 DEC-114;"
-                    "流量信号时代 228 笔 +34.9%/0.21/−67.9% 见 DEC-111)",
+        "backtest": "分数仓位口径 +52.3%/夏普 0.60/回撤 −16.8%(平均仓位 25%,DEC-224);"
+                    "同一批 108 笔按满仓算是 +43.1%/0.25/−33.2%"
+                    "(2013-01 起,基准 −17.7%)。"
+                    "**这里原先写的 120 笔 +218.1%/0.65/−31.6% 是 DEC-211 之前的数** ——"
+                    "2026-09-05 换了本品种的散户反向名单(运营者知情破例,数据反对),"
+                    "同一套规则就掉到 +43.1%/0.25,那一次没有回头改这行,本次一并更正。"
+                    "进场仍是成本进场+还在加仓+轮龄≥2(六关全过但属事后假设复验,"
+                    "见 REPORT_FG_AGE_v1 与 DEC-114;流量信号时代 228 笔 +34.9%/0.21/−67.9% 见 DEC-111)",
     },
     "IH": {
         # **研究档(DEC-159 预备,2026-08-30 运营者:开始做 IH 跟随策略)**:
@@ -731,9 +739,14 @@ VARIETIES = {
         # 两个效应已分离:「去散户」+0.940 夏普、「放宽持满」+0.150 ——
         # 主因是前者。**只放宽持满一点用都没有**(臂0 与基线逐字节相同),
         # 因为散户出场让中位持仓只有 4 天,40 日的闸门根本碰不到。
+        # **分数仓位(DEC-224)**:按整组水位建仓,不再满仓。实测全样本
+        # +118.9%/0.61/回撤 −40.9% → **+126.3%/1.25/−20.4%**,平均仓位 35%。
+        # 核心闸门是「必须胜过等效缩仓」:同样压到 35%,固定缩仓只有 0.60。
+        "sizing": True,
         "exit_mode": "discipline",
         "max_hold": 60,
-        "backtest": "26 笔 净 +118.9%/胜率 50.0%/回撤 −40.9%/夏普 0.61"
+        "backtest": "分数仓位口径 +126.3%/夏普 1.25/回撤 −20.4%(平均仓位 35%,DEC-224);"
+                    "同一批 26 笔按满仓算是 +118.9%/0.61/−40.9%"
                     "(2020-06 起,基准 −17.5%)(2026-09-06 出场改为只留纪律,"
                     "见 REPORT_SA_EXIT_LONGER_v1 与 DEC-218;"
                     "改之前 90 笔 −44.8%/−0.33/−57.5%,八成仓由散户反向平掉、中位只持 4 天)",
@@ -921,6 +934,9 @@ def use(code: str) -> dict:
     RULES["cost_need_adding"] = v.get("cost_need_adding", False)
     RULES["cost_min_age"] = v.get("cost_min_age", 0)
     # 出场口径:"retail"(散户反向)/ "inst"(机构出场)/ "discipline"(只留纪律,DEC-218)。
+    # 分数仓位(DEC-224):配了才开。**每轮都要写**,否则跑完玻璃再跑鸡蛋,
+    # 鸡蛋会顶着玻璃的开关(retail_panel 那次栽过同一个坑)。
+    RULES["sizing"] = bool(v.get("sizing", False))
     RULES["exit_mode"] = v.get("exit_mode", "retail")
     # 持满天数按品种配(DEC-218 才加的加载:此前它只有全站默认,品种里写了也不生效)。
     RULES["max_hold"] = int(v.get("max_hold", DEFAULT_MAX_HOLD))
@@ -1530,6 +1546,97 @@ def seat_levels(seat: pd.DataFrame, dates: pd.DatetimeIndex,
             continue
         out[m] = {"level": round(min(1.0, abs(cur) / peak), 3), "peak": int(round(peak))}
     return out
+
+
+#: 分数仓位(DEC-224)。**满仓的定义 = 名义敞口等于总资金(杠杆 1 倍)**,
+#: 与运营者「上限 100%」对得上;`cap` 是权重上限,不是资金上限。
+#: 调仓费率用运营者给的真实值 2 元/手/边(DEC-203 的教训:上一版按名义×0.05% 算错了 5 倍)。
+SIZING_PLAN = {"capital": 1_000_000.0, "cap": 1.0, "fee": 2.0,
+               "margin": {"FG": 0.09, "SA": 0.08}}
+
+
+def sizing_weights(net: pd.Series) -> pd.Series:
+    """仓位权重 = **整组合计**净持仓的水位(`|net| ÷ 自身近 500 日最大`),上限 1.0。
+
+    **是整组,不是某一家。** `REPORT_FGSA_SIZING_v1` 实测:
+    跟单一席位(运营者点名的永安)玻璃只有夏普 0.30、纯碱 **0.23**
+    —— 纯碱上**还不如同平均仓位的固定缩仓(0.60)**;
+    而整组水位是 0.60 / **1.25**,对应回撤 −16.8% / −20.4%(基线 −33.2% / −40.9%)。
+    **别改成跟某一家**,那条路已经测过是差的。
+
+    窗口沿用 `SEAT_LEVEL_WIN`/`SEAT_LEVEL_MIN`(DEC-222),**不另造一套**。
+    预热不足给 NaN → 调用方按 0 仓处理(还不知道自身高位时不该开仓)。
+    """
+    mx = net.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max()
+    return (net.abs() / mx).clip(upper=SIZING_PLAN["cap"])
+
+
+def apply_sizing(daily: pd.Series, pos: pd.Series, w: pd.Series,
+                 settle: pd.Series, mult: float, fee: float | None = None) -> pd.Series:
+    """把满仓的日收益按权重缩放,并扣掉**因分数仓位多出来的调仓成本**。
+
+    `w` 用**前一日**收盘可见的值(次日生效,与 DEC-090 的成交口径一致)。
+    换手 = 有向敞口的日变化;每边成本占名义的比例 = `fee / (结算价 × 点值)`
+    —— 一手名义 ≈ 2 万元,2 元/手/边约 **1 个基点**,实测全样本只吃掉 1.0~1.2pp。
+
+    **进出场本身的 `COST` 不在这里重复扣** —— 那一份 `replay` 已经扣过,
+    两边口径一样,不影响「加权 vs 不加权」的差分。
+    """
+    fee = SIZING_PLAN["fee"] if fee is None else fee
+    idx = daily.index
+    ww = w.reindex(idx).fillna(0.0).clip(0.0, SIZING_PLAN["cap"])
+    out = daily.fillna(0.0) * ww.shift(1).fillna(0.0)
+    if fee:
+        expo = pos.reindex(idx).fillna(0.0) * ww
+        turn = expo.diff().abs().fillna(expo.abs())
+        px = settle.reindex(idx).ffill()
+        out = out - turn * fee / (px * float(mult))
+    return out
+
+
+def sizing_card(w: pd.Series, settle: pd.Series, net: pd.Series,
+                code: str, mult: float, side: int) -> dict | None:
+    """页面那张卡要的数:今天该拿多少手、比昨天加减多少。
+
+    手数 = `总资金 × 权重 ÷ (结算价 × 点值)` —— 即**名义敞口 = 总资金 × 仓位强度**。
+    `side` 是当前持仓方向(0 = 空仓),空仓时手数照算,当作「若现在进场该拿多少」。
+    """
+    if not len(w.dropna()):
+        return None
+    d = w.dropna().index[-1]
+    px = float(settle.get(d, np.nan))
+    if not np.isfinite(px) or px <= 0:
+        return None
+    cap_money = SIZING_PLAN["capital"]
+
+    def _lots(day):
+        v = w.get(day, np.nan)
+        p = settle.get(day, np.nan)
+        if not (np.isfinite(v) and np.isfinite(p)) or p <= 0:
+            return None
+        return int(round(cap_money * float(v) / (p * float(mult))))
+
+    prev = w.dropna().index[-2] if len(w.dropna()) > 1 else None
+    lots, lots_prev = _lots(d), (_lots(prev) if prev is not None else None)
+    mx = net.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max().get(d, np.nan)
+    margin_rate = SIZING_PLAN["margin"].get(code)
+    notional = (lots or 0) * px * float(mult)
+    return {
+        "strength": round(float(w[d]), 3),
+        "now": int(abs(net.get(d, 0)) or 0),
+        "peak": int(mx) if np.isfinite(mx) else None,
+        "capital": cap_money,
+        "cap": SIZING_PLAN["cap"],
+        "lots": lots,
+        "lots_prev": lots_prev,
+        "lots_chg": None if (lots is None or lots_prev is None) else lots - lots_prev,
+        "side": {-1: "short", 1: "long"}.get(int(side)) if side else None,
+        "px": round(px, 2),
+        "notional": round(notional),
+        "margin": None if margin_rate is None else round(notional * margin_rate),
+        "margin_rate": margin_rate,
+        "leverage": round(notional / cap_money, 2) if cap_money else None,
+    }
 
 
 def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
@@ -2943,7 +3050,20 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     # 逐日净值直接用 replay 产出的那条(DEC-090):它按结算价盯市、成交那两天算半天,
     # 连乘起来与逐笔记账完全相等。以前是在这里用 pos.shift(1)×结算价收益**另算**
     # 一条,两条对不上也没人会发现——夏普和回撤描述的是另一个策略。
-    strat_daily = daily
+    # **分数仓位(DEC-224)**:`replay` 一个字没改(它仍按满仓记账),
+    # 在这里把日收益按权重缩放并扣调仓成本 —— 于是 `compare.strategy`
+    # (夏普/回撤/累计)描述的是**真正会执行的那个策略**。
+    # `stats`(逐笔)保持满仓口径:那是「这一笔价格走了多少」,与仓位无关,
+    # 两者**有意不同**,`stats.note` 里写明了,别把它们对齐。
+    sizing_card_data = None
+    if RULES.get("sizing"):
+        _w = sizing_weights(sig["net"]).reindex(mkt.index)
+        strat_daily = apply_sizing(daily, pos, _w, mkt["settle"], RULES["multiplier"])
+        sizing_card_data = sizing_card(_w, mkt["settle"], sig["net"],
+                                       CURRENT["code"], RULES["multiplier"],
+                                       int(pos.iloc[-1]) if len(pos) else 0)
+    else:
+        strat_daily = daily
     bench_daily = -mkt["ret"].fillna(0)
     payload = {
         "instrument": CURRENT["code"],
@@ -3035,6 +3155,8 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "seat_follow": (seat_follow_payload(seat, mkt, RULES["follow_seat"])
                         if RULES.get("follow_seat") else None),
         "members": members,
+        # 分数仓位卡(DEC-224):今天该拿多少手、比昨天加减多少。没开就是 None。
+        "sizing": sizing_card_data,
         # 「几成仓」的口径与证据(DEC-222)。前端照这个渲染,别在前端另写一套数字。
         "seat_level": {
             "win": SEAT_LEVEL_WIN, "hot": SEAT_LEVEL_HOT,

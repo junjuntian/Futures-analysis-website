@@ -167,6 +167,15 @@ interface HogPayload {
     note: string
   }
   members: MemberLeg[]
+  /** 分数仓位(DEC-224):今天该拿多少手、比昨天加减多少。**可选**:没开这个开关的品种是 null。 */
+  sizing?: {
+    strength: number; now: number; peak: number | null
+    capital: number; cap: number
+    lots: number | null; lots_prev: number | null; lots_chg: number | null
+    side: 'short' | 'long' | null
+    px: number; notional: number
+    margin: number | null; margin_rate: number | null; leverage: number | null
+  } | null
   /** 「几成仓」的口径与证据(DEC-222)。**可选**:旧 JSON 没有。 */
   seat_level?: { win: number; hot: number; evidence: string | null }
   /** 一排合约小窗(DEC-134):近月起、组内还看得到持仓的 5 个合约,逐合约各家持仓。
@@ -464,6 +473,16 @@ onMounted(async () => {
  *   · 优劣 = 现价与锚比:做空现价 ≥ 锚 = 筹码优于机构(卖得比它贵),做多反之。
  * 成本取自净持仓引擎(DEC-143 口径),掉榜/不可知的家自动跳过。
  */
+/** 分数仓位的加减(DEC-224)。0 不显示 —— 「减0」是噪音。 */
+const sizingChg = computed(() => {
+  const c = data.value?.sizing?.lots_chg
+  return c == null || c === 0 ? '' : (c > 0 ? `加${c}` : `减${-c}`)
+})
+/** 元 → 万元,给保证金/名义/总资金用。 */
+function wan(v: number | null | undefined) {
+  return v == null ? '—' : `${(v / 10000).toFixed(1)} 万`
+}
+
 /** 「几成仓」(DEC-222)。没值就不显示 —— 预热不足时引擎给 null,别显示 "0 仓"。 */
 function levelPct(m: MemberLeg) {
   return m.level == null || !Number.isFinite(m.level)
@@ -898,6 +917,34 @@ const bySide = computed(() => {
           </div>
           <div v-else class="big gray">无持仓</div>
           <div class="kv"><span class="k">收盘价</span><span class="v">{{ fmt(data.price) }} · {{ data.contract }}</span></div>
+          <!-- 分数仓位(DEC-224):照跟随卡那套写「多少手 + 每日加减」。
+               有持仓时是「现在该拿多少手」,空仓时是「若现在进场该拿多少手」。 -->
+          <template v-if="data.sizing">
+            <div class="kv">
+              <span class="k">建议手数</span>
+              <span class="v">
+                <b>{{ data.sizing.lots }} 手</b>
+                <span v-if="sizingChg" class="lots-chg" :class="data.sizing.lots_chg! > 0 ? 'red' : 'green'">
+                  {{ sizingChg }}
+                </span>
+                <span v-if="!data.position" class="gray">(若进场)</span>
+              </span>
+            </div>
+            <div class="kv">
+              <span class="k">仓位强度</span>
+              <span class="v">{{ Math.round(data.sizing.strength * 100) }}%
+                <span class="gray">(整组今日 {{ fmt(data.sizing.now) }} 手 /
+                  近 500 日最大 {{ fmt(data.sizing.peak ?? 0) }} 手)</span>
+              </span>
+            </div>
+            <div class="kv">
+              <span class="k">保证金</span>
+              <span class="v">{{ wan(data.sizing.margin) }}
+                <span class="gray">· 名义 {{ wan(data.sizing.notional) }} · 杠杆
+                  {{ data.sizing.leverage }} 倍 · 总资金 {{ wan(data.sizing.capital) }}</span>
+              </span>
+            </div>
+          </template>
           <!-- 交割倒计时(2026-08-19 运营者要求)。2026-08-14 玻璃主力还是 FG2609、
                只剩 11 个交易日,页面对此只字不提 —— 差一天就撞线。 -->
           <div class="kv" v-if="data.delivery">
@@ -920,6 +967,13 @@ const bySide = computed(() => {
             {{ data.contract }} 的。**两个价格不在同一个合约上,不要相减**——
             收益按逐日累积算(换月日用新合约自己的前一日结算价),生猪各合约价差
             最大到 49%,相减会得出一个完全错误的数。
+          </p>
+          <p v-if="data.sizing" class="note">
+            **不是满仓进场**(DEC-224):手数 = 总资金 × 仓位强度 ÷(结算价 × 点值),
+            即**名义敞口 = 总资金 × 仓位强度**,满仓就是 1 倍杠杆。
+            仓位强度 = **整组合计**净持仓占它自己近 500 日最大值的比例 ——
+            **是整组,不是某一家**;跟单一席位实测更差(纯碱夏普 0.23,还不如固定缩仓 0.60)。
+            强度每天会变,**加减手数按上面那个数调**,调仓成本实测只吃 1pp 上下。
           </p>
           <div v-else-if="!data.position" class="kv">
             <span class="k">进场条件</span>
@@ -1785,6 +1839,7 @@ const bySide = computed(() => {
 .red { color: var(--tv-up); } .green { color: var(--tv-down); } .gray { color: var(--tv-text-muted); }
 /* 「几成仓」(DEC-222):平时是灰色小字,达门槛才加重 —— 它是参考不是信号,
    所以刻意不给红绿(红绿在本页一律表示方向/盈亏)。 */
+.lots-chg { margin-left: 6px; font-size: 13px; }
 .lvl { margin-left: 6px; font-size: 12px; color: var(--tv-text-muted); }
 .lvl.hot { font-weight: 600; color: var(--tv-text); }
 
