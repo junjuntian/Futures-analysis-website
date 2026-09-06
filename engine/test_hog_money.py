@@ -2569,7 +2569,6 @@ class Test散户出场门槛:
         上线依据是台阶形状(后半 2.0/2.5/3.0 = 1.55/1.55/1.58,1.0/1.5 = 1.10/1.10)。
         这段话必须留在配置注释里 —— 哪天有人想复用这个数,先看见它是怎么来的。
         """
-        src = H.VARIETIES["FG"].__repr__()
         import inspect
         code = inspect.getsource(H)
         i = code.index('"exit_retail_min": 2.0')
