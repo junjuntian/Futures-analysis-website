@@ -93,7 +93,9 @@ def seat_row(r):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--what", required=True, choices=["czce", "shfe", "sanhe", "all"])
+    ap.add_argument(
+        "--what", required=True, choices=["czce", "shfe", "ine", "sanhe", "all"]
+    )
     ap.add_argument("--limit", type=int, default=0)
     # 每日增量:只解析文件名日期 >= SINCE 的原始文件(文件名即 YYYYMMDD 戳)。
     # 全量回填不带此参,行为不变。
@@ -144,6 +146,9 @@ def main() -> int:
                 ("shfe/market", parsers.shfe_market, pw, price_row, "*.dat"),
                 ("shfe/seats", parsers.shfe_seats, sw, seat_row, "*.dat"),
             ]
+        # INE **只有行情**:原油没有逐会员持仓排名,任何来源都没有(见 parsers.ine_market)。
+        if args.what in ("ine", "all"):
+            jobs += [("ine/market", parsers.ine_market, pw, price_row, "*.dat")]
 
         for sub, fn, writer, shape, pattern in jobs:
             files = sorted(glob.glob(str(RAW / sub / pattern)))

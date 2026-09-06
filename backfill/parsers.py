@@ -323,6 +323,61 @@ def shfe_market(path):
     return rows
 
 
+# ---------------------------------------------------------------- INE 行情
+def ine_market(path):
+    """上期能源的日行情。文件结构与 SHFE 的 `kx` 一模一样,只是域名不同。
+
+    **为什么单独写一个而不复用 `shfe_market`**:`wanted_from` 拿交易所当第二判据
+    (SC 属 INE、不属 SHFE),复用就会被它自己挡掉 —— 而那正是它该做的事,
+    见 `wanted_from` 的说明。这里传 "INE",两边各收各的,SC 不会被写两份。
+
+    **只有行情,没有席位**:能源中心对原油从不公布逐会员持仓排名
+    (`pm{stamp}.dat` 里只有 lu/nr/bc/ec,自 SC 2018-03-26 上市起一天都没有过 sc;
+    DEC-158 已实证,2026-09-07 三源复核 —— 交易所、东财、三禾都没有)。
+
+    **老年份没有 `PRODUCTGROUPID`,只有 `PRODUCTID`**(2020 及以前),
+    只认新字段会让 2018–2020 那五年一行都取不到,而且不报错。
+    `TURNOVER` 老年份是 null,留空而不是编一个。
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    trade_date = _shfe_trade_date(path, payload)
+    if not trade_date:
+        return []
+    rows = []
+    for row in payload.get("o_curinstrument") or []:
+        product = str(row.get("PRODUCTID") or row.get("PRODUCTGROUPID") or "").strip()
+        month = str(row.get("DELIVERYMONTH") or "").strip()
+        # 与 SHFE 同:TAS(结算价交易)合约同代码同交割月但价格是基差,收下就撞身份键。
+        if product.endswith("_tas"):
+            continue
+        variety = re.sub(r"_.*$", "", product).upper()
+        if not wanted_from(variety, "INE") or not month.isdigit():
+            continue
+        turnover = num(row.get("TURNOVER"))
+        rows.append(
+            {
+                "exchange": "INE",
+                "instrument": variety,
+                "contract": f"{variety}{month}",
+                "trade_date": trade_date,
+                "prev_settlement": num(row.get("PRESETTLEMENTPRICE")),
+                "open": num(row.get("OPENPRICE")),
+                "high": num(row.get("HIGHESTPRICE")),
+                "low": num(row.get("LOWESTPRICE")),
+                "close": num(row.get("CLOSEPRICE")),
+                "settlement": num(row.get("SETTLEMENTPRICE")),
+                "volume": num(row.get("VOLUME")),
+                # 与 SHFE 同,公布单位是万元
+                "turnover": str(float(turnover) * 10000) if turnover else "",
+                "open_interest": num(row.get("OPENINTEREST")),
+                "open_interest_change": num(row.get("OPENINTERESTCHG")),
+                "volume_basis": "double",
+                "source": "ine_official",
+            }
+        )
+    return rows
+
+
 # ---------------------------------------------------------------- SHFE 席位
 def shfe_seats(path):
     payload = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
