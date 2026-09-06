@@ -584,6 +584,44 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('第二引擎的推算成本直接取下面下单方案卡的那个数(运营者 2026-09-06)', async () => {
+    // 运营者:「推算成本直接引用下面卡片的成本」。所以这里断言的是**同一个数**,
+    // 不是「有个成本」—— 两处各算一份迟早会对不上(PITFALLS #9)。
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString()
+      if (url.includes('/seats/net-position')) {
+        return { ok: true, status: 200, json: async () => ({
+          data: { latest_members: [
+            { member: '永安期货', long_lots: '36598', long_cost: '918.44',
+              long_cost_lots: '36598', short_lots: '0', short_cost: null,
+              short_cost_lots: '0', missing: false, inferred: false }
+          ] }, meta: { request_id: 'r1' }
+        }) } as Response
+      }
+      if (url.includes('pair_fgsa.json')) {
+        return { ok: true, status: 200, json: async () => ({ follow_plans: [{
+          state: 'single', member: '永安期货', capital: 1000000, use_pct: 35,
+          legs: [{ contract: 'FG2701', instrument: 'FG', side: 'long', lots: 7,
+                   px: 971, member_net: 36598, value_wan: 13.6, lots_chg: 0 }]
+        }] }) } as Response
+      }
+      return { ok: true, status: 200, json: async () => ({
+        ...PAYLOAD,
+        seat_follow: {
+          ...FOLLOW_BASE, contract: 'FG2701',
+          sizing: { strength: 0.381, now: 36598, peak: 96130, win: 200,
+                    capital: 1000000, lots: 20, lots_prev: 27, lots_chg: -7,
+                    px: 971, notional: 388400, margin: null, leverage: 0.39 }
+        }
+      }) } as Response
+    }))
+    const w = mount(HogMoney, { props: { instrument: 'FG' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    await flushPromises()                           // 成本是第二跳异步取的
+    expect(w.text()).toContain('成本 @918')
+    w.unmount()
+  })
+
   it('第二引擎没配分数仓位时不写手数(DEC-234)', async () => {
     stubFetch({ ...PAYLOAD, seat_follow: { ...FOLLOW_BASE, contract: 'JM2701', sizing: null } })
     const w = mount(HogMoney, { props: { instrument: 'JM' as const }, global: { plugins: [ElementPlus] } })

@@ -494,12 +494,17 @@ const followChg = computed(() => {
   const c = data.value?.seat_follow?.sizing?.lots_chg
   return c == null || c === 0 ? '' : (c > 0 ? `加${c}` : `减${-c}`)
 })
-/** 第二引擎跟的那个席位在当前主力合约上的推算成本(与逐合约小窗同一个来源)。 */
+/** 第二引擎的推算成本(运营者 2026-09-06:「直接引用下面卡片的成本」)。
+ *  **不另算一套**:直接取下面那张跟随下单方案卡已经取好的 `followCosts`
+ *  (它按腿的方向取多/空成本,是页面上真正显示的那个数)。取不到才退回
+ *  逐合约明细表的 `memberCost`。同一个概念两处各写一份迟早对不上(PITFALLS #9)。 */
 const followCost = computed(() => {
   const f = data.value?.seat_follow
   if (!f?.contract) return ''
+  const below = followCosts.value[costKey(f.member, f.contract)]
+  if (below) return below
   const t = memberCost(f.contract, f.member)
-  return t === '—' || t === '成本不可知' ? '' : t
+  return /^[0-9]/.test(t) ? t : ''
 })
 
 /** 分数仓位的加减(DEC-224)。0 不显示 —— 「减0」是噪音。 */
