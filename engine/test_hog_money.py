@@ -2518,7 +2518,6 @@ class Test进场水位上限:
         idx = bdays("2025-01-06", 200)
         # 末日 |净持仓| = 270,近 180 日峰值 300 → 水位 90% > 60%,该挡
         net = pd.Series([-300.0] * 199 + [-270.0], index=idx)
-        cc = pd.DataFrame({"side": -1.0, "cost": 1000.0, "age": 99.0}, index=idx)
         mkt = pd.DataFrame({"settle": [1100.0] * 200, "main": "FG2701"}, index=idx)
         seat = pd.DataFrame({"trade_date": list(idx), "contract": "FG2701",
                              "member_key": "甲", "net": net.values,
