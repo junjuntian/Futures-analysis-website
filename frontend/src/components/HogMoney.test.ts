@@ -397,6 +397,48 @@ describe('生猪机构资金', () => {
     w.unmount()
   })
 
+  it('「几成仓」只在有值时显示,达门槛才加重,没测过的品种不给结论(DEC-222)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      seat_level: { win: 500, hot: 0.6, evidence: null },
+      members: [
+        { member: '国泰君安', net: -11413, change: 3472, on_board: true, level: 0.62, peak: 168957 },
+        { member: '东证期货', net: -2533, change: -120, on_board: true, level: 0.12, peak: 126188 },
+        // 预热不足 → 引擎给 null。**不许显示成 "0% 仓"**,这条就是钉那个。
+        { member: '东吴期货', net: -1200, change: null, on_board: true, level: null, peak: null }
+      ]
+    })
+    const w = mount(HogMoney, { props: { instrument: 'LH' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const lv = w.findAll('.lvl')
+    expect(lv.length).toBe(2)                       // 第三家没值 → 一个字都不出
+    expect(lv[0].text()).toBe('62% 仓')
+    expect(lv[1].text()).toBe('12% 仓')
+    expect(lv[0].classes()).toContain('hot')        // ≥ hot 门槛才加重
+    expect(lv[1].classes()).not.toContain('hot')
+    const t = w.text()
+    expect(t).toContain('每家的分母都是它自己')      // 别被读成「占全市场」
+    expect(t).toContain('没有实测过')               // evidence=null 时不许下结论
+    expect(t).not.toContain('方向对')
+    w.unmount()
+  })
+
+  it('有实测证据的品种把证据与「这不是信号」一起写出来(DEC-222)', async () => {
+    stubFetch({
+      ...PAYLOAD,
+      seat_level: { win: 500, hot: 0.6, evidence: '纯碱实测:净多达六成后 20 日中位 +2.78%(方向对 61%)。' },
+      members: [{ member: '国泰君安', net: -11413, change: 3472, on_board: true, level: 0.62, peak: 168957 }]
+    })
+    const w = mount(HogMoney, { props: { instrument: 'SA' as const }, global: { plugins: [ElementPlus] } })
+    await flushPromises()
+    const t = w.text()
+    expect(t).toContain('方向对 61%')
+    // **证据与免责必须同时出现** —— 只报命中率不报「不是信号」是本仓最容易犯的错
+    expect(t).toContain('不是交易信号')
+    expect(t).toContain('54%')
+    w.unmount()
+  })
+
   it('固定名单(DEC-122)时席位组页写「固定名单」,不写重选与下次', async () => {
     stubFetch({
       ...PAYLOAD, group_mode: 'fixed',

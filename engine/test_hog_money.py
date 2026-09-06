@@ -2185,3 +2185,47 @@ class Test出场只留纪律:
         reasons = {t["exit_reason"] for t in trades}
         assert reasons <= {"止损", "持满", "临近交割"}, reasons
         assert max(t["hold_days"] for t in trades) <= H.RULES["max_hold"] + 3
+
+
+class Test几成仓:
+    """DEC-222:每家席位自己的仓位水位,只进展示。"""
+
+    def _seat(self, n=200, peak=1000, last=600):
+        idx = bdays("2025-01-06", n)
+        net = [peak] * (n - 1) + [last]
+        return pd.DataFrame({"trade_date": list(idx), "contract": "SA2701",
+                             "member_key": "甲", "net": net, "net_off": net,
+                             "source": "akshare_v1"}), idx
+
+    def test_水位是自己跟自己比(self):
+        seat, idx = self._seat()
+        out = H.seat_levels(seat, idx, ["甲"])
+        assert out["甲"]["peak"] == 1000
+        assert out["甲"]["level"] == 0.6
+
+    def test_预热不足不给值(self):
+        """min_periods=120。给三个月数据就算「自身高位」是骗人的。"""
+        seat, idx = self._seat(n=60)
+        assert H.seat_levels(seat, idx, ["甲"]) == {}
+
+    def test_用当日可见口径不用回榜反推(self):
+        """反推值是**回榜日**倒推出来的,当天并不可见 —— 用它就是前视
+        (REPORT_PIT_LOOKAHEAD_v1)。`seat_levels` 走 `_pit_pair` 的第一条。
+        """
+        seat, idx = self._seat()
+        seat.loc[seat.index[-1], "net_off"] = np.nan      # 末日掉榜:只有反推值
+        out = H.seat_levels(seat, idx, ["甲"])
+        assert out == {}, "掉榜日不许拿反推值凑出一个水位"
+
+    def test_不进任何判据(self):
+        """`replay` 一个字都不读它 —— 源码里搜得到就是接错了线。"""
+        import inspect
+        src = inspect.getsource(H.replay)
+        for k in ("seat_levels", "SEAT_LEVEL_HOT", '"level"'):
+            assert k not in src, k
+
+    def test_门槛与窗口是全站常量不许逐品种配(self):
+        assert (H.SEAT_LEVEL_WIN, H.SEAT_LEVEL_MIN, H.SEAT_LEVEL_HOT) == (500, 120, 0.60)
+        for code in H.VARIETIES:
+            for k in ("seat_level_win", "seat_level_hot"):
+                assert k not in H.VARIETIES[code], (code, k)

@@ -39,6 +39,11 @@ interface MemberLeg {
   change_long?: number | null
   change_short?: number | null
   on_board: boolean
+  /** 「几成仓」(DEC-222):该席位当前 |净持仓| ÷ 它**自己**近 500 日最大 |净持仓|。
+   *  只作展示,引擎一个判据都不读它。预热不足(<120 天)时为 null。老 JSON 没有。 */
+  level?: number | null
+  /** 上面那个比例的分母,即该席位自身近 500 日的最大净持仓(手)。 */
+  peak?: number | null
 }
 
 /** 五窗与组内各家的括号文案(DEC-149,2026-08-26 二改):**单数字、随席位方向表述**——
@@ -162,6 +167,8 @@ interface HogPayload {
     note: string
   }
   members: MemberLeg[]
+  /** 「几成仓」的口径与证据(DEC-222)。**可选**:旧 JSON 没有。 */
+  seat_level?: { win: number; hot: number; evidence: string | null }
   /** 一排合约小窗(DEC-134):近月起、组内还看得到持仓的 5 个合约,逐合约各家持仓。
    *  到期/看不到持仓自动滑出,新合约自动补上。**可选**:旧 JSON 没有。 */
   contracts_panel?: Array<{
@@ -457,6 +464,23 @@ onMounted(async () => {
  *   · 优劣 = 现价与锚比:做空现价 ≥ 锚 = 筹码优于机构(卖得比它贵),做多反之。
  * 成本取自净持仓引擎(DEC-143 口径),掉榜/不可知的家自动跳过。
  */
+/** 「几成仓」(DEC-222)。没值就不显示 —— 预热不足时引擎给 null,别显示 "0 仓"。 */
+function levelPct(m: MemberLeg) {
+  return m.level == null || !Number.isFinite(m.level)
+    ? '' : `${Math.round(m.level * 100)}%`
+}
+function isHotLevel(m: MemberLeg) {
+  const hot = data.value?.seat_level?.hot
+  return m.level != null && hot != null && m.level >= hot
+}
+function levelTip(m: MemberLeg) {
+  if (m.level == null) return ''
+  const win = data.value?.seat_level?.win ?? 500
+  const peak = m.peak == null ? '' : `,自身高位 ${fmt(m.peak)} 手`
+  return `${m.member}当前净持仓是它自己近 ${win} 个交易日最大净持仓的 `
+    + `${Math.round(m.level * 100)}%${peak}。只作参考,引擎不读这个数。`
+}
+
 function chipAnchor(contract: string, members: MemberLeg[], side: 'short' | 'long') {
   let best: { member: string; cost: number } | null = null
   for (const m of members) {
@@ -971,6 +995,9 @@ const bySide = computed(() => {
                 <span v-if="panelChg(m)" :class="pnlClass(m.change ?? 0)">
                   ({{ panelChg(m) }})
                 </span>
+                <!-- 「几成仓」(DEC-222)。只显示数,达门槛才加重 —— 它不是交易信号。 -->
+                <span v-if="levelPct(m)" class="lvl" :class="{ hot: isHotLevel(m) }"
+                  :title="levelTip(m)">{{ levelPct(m) }} 仓</span>
               </template>
               <span v-else class="gray">当日未上榜</span>
             </span>
@@ -981,6 +1008,17 @@ const bySide = computed(() => {
             这是**全品种合约合计**;括号=**较昨日**变化
             (净多+X=净多增了 X,净空+X=净空增了 X;与下面那排小窗同口径)。
             逐合约的持仓与成本看下面那排小窗(多合约开战,按合约看)。
+          </p>
+          <p v-if="data.seat_level" class="note">
+            **「X 仓」= 这家自己的水位**:当前净持仓 ÷ 它**自己**近
+            {{ data.seat_level.win }} 个交易日的最大净持仓。不是占全市场的比例,
+            也不是几家之间比大小 —— 每家的分母都是它自己。
+            <template v-if="data.seat_level.evidence">
+              {{ data.seat_level.evidence }}
+              **但这只是参考,不是交易信号**:命中率最低的一档只有 54%,
+              且未过安慰剂检验,引擎一个判据都不读它。
+            </template>
+            <template v-else>本品种**没有实测过**这个数的预测力,只作观察。</template>
           </p>
         </div>
       </div>
@@ -1745,6 +1783,10 @@ const bySide = computed(() => {
 .err { padding: 20px; background: var(--tv-up-bg); border: 1px solid var(--tv-up);
   border-radius: 6px; color: var(--tv-up); }
 .red { color: var(--tv-up); } .green { color: var(--tv-down); } .gray { color: var(--tv-text-muted); }
+/* 「几成仓」(DEC-222):平时是灰色小字,达门槛才加重 —— 它是参考不是信号,
+   所以刻意不给红绿(红绿在本页一律表示方向/盈亏)。 */
+.lvl { margin-left: 6px; font-size: 12px; color: var(--tv-text-muted); }
+.lvl.hot { font-weight: 600; color: var(--tv-text); }
 
 .symbol-strip {
   position: sticky; top: 0; z-index: 10;

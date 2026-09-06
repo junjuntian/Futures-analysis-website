@@ -1492,6 +1492,46 @@ def unload_series(sig: pd.DataFrame, seat: pd.DataFrame,
     return out
 
 
+#: 「几成仓」的回看窗与「高位」门槛(DEC-222)。测量见 `REPORT_ENTRY_POS_v1` 第四节。
+SEAT_LEVEL_WIN = 500
+SEAT_LEVEL_MIN = 120        # 预热不足就不给值,别拿三个月的最大值当「自身高位」
+SEAT_LEVEL_HOT = 0.60
+
+
+def seat_levels(seat: pd.DataFrame, dates: pd.DatetimeIndex,
+                members: list) -> dict:
+    """每个席位**自己**的仓位水位:当前 |净持仓| ÷ 近 `SEAT_LEVEL_WIN` 日最大 |净持仓|。
+
+    运营者 2026-09-06 的原话:「永安玻璃提前建了多单…永安玻璃一般最多也就 15 万手,
+    达到了建仓比例的 6 成…纯碱的海通也是,提前建了 2 万多手净多,纯碱上面一般最高
+    持仓也就 3 万手,果然 9.3 日纯碱就暴涨。」这个函数就是把那句话变成逐日可读的数。
+
+    **只作展示,不进任何判据**(`replay` 一个字都不读它)。实测支持它有方向性、
+    但没到能当扳机的强度:纯碱净多达六成后 20 日中位 +2.78%(方向对 61%)、
+    净空 −2.40%(60%);玻璃 +1.75%(62%) / −0.55%(54%)。
+    十二个格子全部 >50%,**最低也只有 54%** —— 当决策辅助够用,当自动信号不够
+    (`REPORT_ENTRY_POS_v1` 第四节;事件相关、无安慰剂、未成规则)。
+
+    口径:用**当日可见**的 `net_off`(`_pit_pair` 的第一条),不用回榜反推值 ——
+    否则是前视(`REPORT_PIT_LOOKAHEAD_v1`)。分母是同一条线的滚动最大值,
+    所以「头寸整体膨胀」不会让这个数虚高:运营者指出这四家的最大净头寸
+    从 2023 年的 20 万涨到 2025 年的 37 万,分子分母一起涨,比例不受影响。
+    """
+    out = {}
+    for m in members:
+        r = seat[seat["member_key"] == m]
+        if r.empty:
+            continue
+        off, _full = _pit_pair(r)
+        s = off.reindex(dates)
+        mx = s.abs().rolling(SEAT_LEVEL_WIN, min_periods=SEAT_LEVEL_MIN).max()
+        cur, peak = s.iloc[-1] if len(s) else np.nan, mx.iloc[-1] if len(mx) else np.nan
+        if not (np.isfinite(cur) and np.isfinite(peak)) or peak <= 0:
+            continue
+        out[m] = {"level": round(min(1.0, abs(cur) / peak), 3), "peak": int(round(peak))}
+    return out
+
+
 def unload_state(sig: pd.DataFrame, seat: pd.DataFrame, groups: pd.Series) -> dict:
     """页面要的那一格:**最后一个算得出来的**那天的出货程度。
 
@@ -2784,15 +2824,21 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
     grp = list(groups.get(d) or ())
     today = seat[(seat["trade_date"] == d) & (seat["member_key"].isin(grp))]
     prev = seat[(seat["trade_date"] == prev_d) & (seat["member_key"].isin(grp))] if prev_d is not None else None
+    lv = seat_levels(seat, mkt.index, grp)
     members = []
     for m in grp:
         now = float(today[today["member_key"] == m]["net"].sum()) if len(today) else 0.0
         was = float(prev[prev["member_key"] == m]["net"].sum()) if prev is not None and len(prev) else np.nan
+        one = lv.get(m) or {}
         members.append({
             "member": m,
             "net": round(now),
             "change": None if not np.isfinite(was) else round(now - was),
             "on_board": bool(len(today[today["member_key"] == m])),
+            # 「几成仓」(DEC-222):该席位当前净持仓占**它自己**近 SEAT_LEVEL_WIN 日
+            # 最大净持仓的比例。只作展示,**不进任何判据**。
+            "level": one.get("level"),
+            "peak": one.get("peak"),
         })
 
     # —— 散户反向维度 ——
@@ -2989,6 +3035,17 @@ def build_payload(sig: pd.DataFrame, mkt: pd.DataFrame, seat: pd.DataFrame,
         "seat_follow": (seat_follow_payload(seat, mkt, RULES["follow_seat"])
                         if RULES.get("follow_seat") else None),
         "members": members,
+        # 「几成仓」的口径与证据(DEC-222)。前端照这个渲染,别在前端另写一套数字。
+        "seat_level": {
+            "win": SEAT_LEVEL_WIN, "hot": SEAT_LEVEL_HOT,
+            # 只有实测过的品种给证据串;没测过的给 None,前端就只显示数、不下结论。
+            "evidence": {
+                "SA": "纯碱实测:某席位净多达自身近 500 日高位六成后,20 日中位 +2.78%"
+                      "(方向对 61%);净空达六成后 −2.40%(60%)。",
+                "FG": "玻璃实测:净多达六成后 20 日中位 +1.75%(方向对 62%);"
+                      "净空 −0.55%(54%)。",
+            }.get(CURRENT.get("code")),
+        },
         # 合约小窗(DEC-134→146→151):全部活跃合约开窗,机构 vs 五大散户对照,
         # 窗头沉淀资金;括号变化=较上一交易日(DEC-146),「组内各家」摘要卡仍是
         # sig_win 日口径,两卡口径**有意不同**。
