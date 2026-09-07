@@ -91,7 +91,8 @@ on conflict (workspace_id, exchange_id, code) do update set
 update instruments set price_multiplier = spec.m, updated_at = now()
   from (values ('I', 100::numeric),      -- 铁矿石 100 吨/手
                ('IH', 300::numeric),     -- 上证50 300 元/点
-               ('SC', 1000::numeric)     -- 原油 1000 桶/手
+               ('SC', 1000::numeric),    -- 原油 1000 桶/手
+               ('FU', 10::numeric)       -- 燃料油 10 吨/手
        ) as spec(code, m)
  where upper(instruments.code) = spec.code and instruments.price_multiplier is null;
 

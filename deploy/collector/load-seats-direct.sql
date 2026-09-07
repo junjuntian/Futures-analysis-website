@@ -120,7 +120,11 @@ select
    -- sina-dce-daily.py 的 WANT(行情)与 instruments.price_multiplier(点值),
    -- 三处齐了才有完整的一个品种 —— 只加这里的话席位有数、图上没有价。
    and upper(regexp_replace(s.contract_code, '[0-9]+$', ''))
-       in ('AU','AG','JD','LH','JM','AP','FG','SA','I','IH')
+       in ('AU','AG','JD','LH','JM','AP','FG','SA','I','IH','FU')
+   -- FU 燃料油(2026-09-07):上期所品种,**日更席位其实走的是官方直灌那条路**
+   -- (engine/run-official-seats.sh → parsers.WANT),不经过本文件。这里一并加上
+   -- 是为了「白名单 = 本平台收哪些品种」这句话在两处都成立 —— 哪天东财兜底真的
+   -- 接了上期所,不会因为这里漏一行而静默丢掉燃料油。
    -- SC 原油**有意不在**:能源中心不公布原油逐会员持仓排名(东财 2026-08-28
    -- 全市场榜 INE 只有 nr/lu/bc),SC 是行情-only 品种,只进套利页。
    -- 合约代码必须是四位月份的规范形状,否则不属于这张表。
