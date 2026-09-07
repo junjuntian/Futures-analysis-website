@@ -91,8 +91,10 @@ describe('SmartMoneyView 历史信号分页', () => {
     const wrapper = mount(SmartMoneyView, { global: { plugins: [ElementPlus] } })
     await flushPromises()
     const labels = wrapper.findAll('.variety').map((b) => b.text())
+    // **燃油在纯碱后面**(2026-09-07 运营者指定的位置)。顺序也钉住:
+    // 他是按自己的看盘习惯排的,别人「顺手按字母排一下」会把它挪走。
     expect(labels).toEqual(
-      ['黄金白银', '生猪', '鸡蛋', '焦煤', '玻璃', '纯碱', '铁矿石', '上证50'])
+      ['黄金白银', '生猪', '鸡蛋', '焦煤', '玻璃', '纯碱', '燃油', '铁矿石', '上证50'])
     wrapper.unmount()
   })
 

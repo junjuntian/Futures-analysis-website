@@ -125,6 +125,9 @@ const FLOW: Array<{ code: FlowCode; label: string }> = [
   { code: 'JM', label: '焦煤' },
   { code: 'FG', label: '玻璃' },
   { code: 'SA', label: '纯碱' },
+  // 燃油(2026-09-07 运营者:「燃油也做个引擎,**放到纯碱后面**」)。
+  // **它的回测是亏的**(全样本 −45.8%,同期买入持有 +63.9%),页面靠 notice 顶格挂着。
+  { code: 'FU', label: '燃油' },
   // 铁矿石(DEC-178 二版):运营者要「跟焦煤生猪一样的界面」,所以它走
   // 与其余五个品种完全相同的 run_one/HogMoney 那条路,不再是单独一张卡。
   { code: 'I', label: '铁矿石' }

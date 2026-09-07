@@ -1742,8 +1742,13 @@ def test_retail_seed_只有玻璃纯碱可以覆盖():
     2026-09-05 运营者点名给玻璃与纯碱各配一份(DEC-211,知情破例,
     预注册 `PLAN_RETAIL_RESELECT_v1` 的 G1/G2 都没过),**守卫不删,改成白名单**:
     这两个品种是运营者明确拍板的,其余品种要配仍必须先立项。
+
+    2026-09-07 燃油 FU 进白名单:运营者建这台引擎时**直接点名**散户两家
+    (东方财富、中银期货),已立项 `PLAN_FU_ENGINE_v1`。
+    实测这两家在 FU 上确实是亏钱方(全样本盯市 −10.22 亿 / −7.23 亿),
+    反向取用的前提成立 —— **但整台引擎回测是亏的**,见 VARIETIES["FU"] 的 notice。
     """
-    allowed = {"FG", "SA"}
+    allowed = {"FG", "SA", "FU"}
     for code in H.VARIETIES:
         if code in allowed:
             continue
