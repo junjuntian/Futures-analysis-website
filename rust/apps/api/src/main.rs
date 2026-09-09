@@ -218,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         provider: Arc::new(infrastructure::sanhe_spread::SanheSpreadSeriesProvider::new()),
         report_cache: Default::default(),
         net_position_cache: Default::default(),
+        seat_meta_cache: Default::default(),
     });
     if std::env::args().any(|arg| arg == "--warm-spread-cache") {
         let summary = spread_warm::warm_spread_cache(spread_state).await?;

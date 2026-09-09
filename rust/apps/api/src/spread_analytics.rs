@@ -63,6 +63,18 @@ pub struct SpreadAnalyticsState {
     /// 与 report_cache 同一设计(DEC-078):版本查询毫秒级,保护的是逐「席位×合约」
     /// 的成本推算。键含完整查询参数——五窗/品种页每天敲的是同一批键,天然全命中。
     pub net_position_cache: NetPositionCache,
+    /// 席位「下拉选项」缓存(2026-09-09)。**保护的不是成本推算,是两条元数据查询**:
+    /// `seat_members`(全部会员,跳跃扫描)与 `seat_member_contracts`(某家持有过的合约)。
+    ///
+    /// 为什么单独加:2026-09-09 生产日志实测,机构资金页的逐合约小窗一次开五个窗、
+    /// 并发打同一个端点,慢查询告警里满屏是这两条 —— `seat_members` **2.19~2.27 秒**
+    /// (代码注释里记的「生产实测 235 毫秒」是 2026-08 的事,席位表这半个月长了
+    /// 燃油等新品种,会员数到 307),`select distinct contract` 1.53 秒,
+    /// 再叠上连接池等待 2.2 秒。**这两条与成本一点关系都没有,纯粹是喂下拉框的**,
+    /// 却在每次未命中时按「每家一条」重跑。
+    ///
+    /// 口径与另外两个缓存一致:**版本一变就失效,版本没变就一直用**。
+    pub seat_meta_cache: SeatMetaCache,
 }
 
 /// 报告表缓存的类型拆名(clippy type-complexity):键=(工作区, 交易日),
@@ -76,9 +88,71 @@ type ReportCache =
 type NetPositionCache =
     Arc<tokio::sync::RwLock<HashMap<(Uuid, String), (Option<OffsetDateTime>, serde_json::Value)>>>;
 
+/// 席位元数据缓存:键=(工作区, "members|品种" 或 "contracts|品种|会员"),
+/// 值=(算这份时的数据版本, 结果列表)。条目数 = 品种数 × (1 + 会员数),量级几百。
+type SeatMetaCache =
+    Arc<tokio::sync::RwLock<HashMap<(Uuid, String), (Option<OffsetDateTime>, Vec<String>)>>>;
+
 /// 后台预热的巡检间隔。每次只做一条 `report_data_version` 轻查询,
 /// **版本没变就什么都不做**——所以间隔短不等于费 CPU。
 const REPORT_WARM_INTERVAL: Duration = Duration::from_secs(180);
+
+/// 带版本缓存的「全部会员」。见 `SeatMetaCache` 的说明:它喂的是下拉框,
+/// 与成本推算无关,但在生产上是逐合约小窗最慢的一条(2.2 秒)。
+async fn cached_seat_members(
+    state: &Arc<SpreadAnalyticsState>,
+    workspace: Uuid,
+    instrument: &str,
+    version: Option<OffsetDateTime>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let key = (workspace, format!("members|{instrument}"));
+    if version.is_some()
+        && let Some((cached, value)) = state.seat_meta_cache.read().await.get(&key)
+        && *cached == version
+    {
+        return Ok(value.clone());
+    }
+    let fresh =
+        database::spread_analytics::seat_members(&state.auth.pool, workspace, Some(instrument))
+            .await?;
+    state
+        .seat_meta_cache
+        .write()
+        .await
+        .insert(key, (version, fresh.clone()));
+    Ok(fresh)
+}
+
+/// 带版本缓存的「某家持有过的合约」。同上,逐会员各一条 `select distinct contract`,
+/// 生产实测单条 1.5 秒,而小窗一次要问八九家 × 五个窗。
+async fn cached_seat_member_contracts(
+    state: &Arc<SpreadAnalyticsState>,
+    workspace: Uuid,
+    member: &str,
+    instrument: &str,
+    version: Option<OffsetDateTime>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let key = (workspace, format!("contracts|{instrument}|{member}"));
+    if version.is_some()
+        && let Some((cached, value)) = state.seat_meta_cache.read().await.get(&key)
+        && *cached == version
+    {
+        return Ok(value.clone());
+    }
+    let fresh = database::spread_analytics::seat_member_contracts(
+        &state.auth.pool,
+        workspace,
+        member,
+        instrument,
+    )
+    .await?;
+    state
+        .seat_meta_cache
+        .write()
+        .await
+        .insert(key, (version, fresh.clone()));
+    Ok(fresh)
+}
 
 /// 报告表后台预热:让「打开就是算好的」成为常态。
 ///
@@ -1569,6 +1643,7 @@ pub async fn query_seat_net_position(
         .map_err(|_| SpreadApiError::Internal(request_id))?,
         None => None,
     };
+    let started = Instant::now();
     if version.is_some()
         && let Some((cached_version, value)) = state
             .net_position_cache
@@ -1577,25 +1652,31 @@ pub async fn query_seat_net_position(
             .get(&(context.workspace_id(), cache_key.clone()))
         && *cached_version == version
     {
+        // **命中也记一行**:没有它,「缓存到底生没生效」只能靠翻慢查询日志反推 ——
+        // 2026-09-09 运营者问「之前改的没生效吗」,我就是这么反推的,花了半小时。
+        tracing::debug!(
+            key = %cache_key,
+            elapsed_ms = %started.elapsed().as_millis(),
+            "net-position cache hit"
+        );
         return Ok(Json(ApiResponse::new(value.clone(), request_id)).into_response());
     }
+    tracing::info!(key = %cache_key, version = ?version, "net-position cache miss; computing");
 
-    let all_members = database::spread_analytics::seat_members(
-        &state.auth.pool,
-        context.workspace_id(),
-        Some(instrument.as_str()),
-    )
-    .await
-    .map_err(|_| SpreadApiError::Internal(request_id))?;
+    let all_members =
+        cached_seat_members(&state, context.workspace_id(), instrument.as_str(), version)
+            .await
+            .map_err(|_| SpreadApiError::Internal(request_id))?;
 
     // 合约选项取所选席位的并集：有的合约只有其中一家持有过，只列交集会让它消失。
     let mut contracts: Vec<String> = Vec::new();
     for member in &members {
-        let owned = database::spread_analytics::seat_member_contracts(
-            &state.auth.pool,
+        let owned = cached_seat_member_contracts(
+            &state,
             context.workspace_id(),
             member,
             &instrument,
+            version,
         )
         .await
         .map_err(|_| SpreadApiError::Internal(request_id))?;
@@ -1898,8 +1979,13 @@ pub async fn query_seat_net_position(
     match serde_json::to_value(&response) {
         Ok(value) => {
             state.net_position_cache.write().await.insert(
-                (context.workspace_id(), cache_key),
+                (context.workspace_id(), cache_key.clone()),
                 (version, value.clone()),
+            );
+            tracing::info!(
+                key = %cache_key,
+                elapsed_ms = %started.elapsed().as_millis(),
+                "net-position computed and cached"
             );
             Ok(Json(ApiResponse::new(value, request_id)).into_response())
         }
