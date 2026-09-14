@@ -40,8 +40,24 @@ for offset in $(seq 0 7); do
   rm -f exchange-raw/czce/market/*"$stamp"* exchange-raw/czce/seats/*"$stamp"* \
         exchange-raw/shfe/market/*"$stamp"* exchange-raw/shfe/seats/*"$stamp"*
 done
-python3 fetch_exchange.py czce "$SINCE" "$TODAY"
-python3 fetch_exchange.py shfe "$SINCE" "$TODAY"
+# **抓取失败不许中止整个脚本**(2026-09-14 修)。
+#
+# 事故:郑商所一个行情文件 ReadTimeout,`fetch_exchange.py` 按设计返回退出码 1
+# (它的注释写着「失败只记日志不重试,下一轮巡检自然会再试」),而这里 `set -e`
+# 把那句设计意图当场作废 —— **脚本在 czce 那行就死了,上期所根本没抓**,
+# 后面的解析、灌库、回榜反推、akshare 冗余清理**全段没跑**。
+# 于是当天上期所(金银燃油)与郑商所(苹果玻璃纯碱)的席位数据一起停更,
+# 而大商所/中金所走另一条链路照常更新 —— **半边库是新的、半边是旧的,
+# 页面上完全看不出来**,是运营者第二天问「采集正常吗」才发现的。
+#
+# 部分成功的文件已经落盘,解析与灌库照样该跑;真缺的那天下一轮会补。
+# 所以这里只告警不中止。**但仅限抓取这一步** —— 解析与灌库失败仍然中止,
+# 那是数据正确性问题,不是网络抖动。
+for ex in czce shfe; do
+  if ! python3 fetch_exchange.py "$ex" "$SINCE" "$TODAY"; then
+    echo "[official-seats] ⚠ $ex 抓取有失败项(明细见上一行),继续往下走 —— 下一轮会补" >&2
+  fi
+done
 
 echo "[official-seats] 解析增量"
 python3 to_csv.py --what czce --since "$SINCE"
