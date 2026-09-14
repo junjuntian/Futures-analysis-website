@@ -16,12 +16,27 @@ services:
       retries: 5
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # 并行查询要的共享内存。**Docker 默认只给 /dev/shm 64MB**,而 Postgres 的
+    # parallel worker 在那里开段;撑满之后报的是
+    # `could not resize shared memory segment ... No space left on device`,
+    # 查询直接失败 —— 在页面上表现为 500,而且**只在并发时出现**。
+    #
+    # 2026-09-14 实测:席位页一次并发四个 pnl-breakdown,四个全 500
+    # (延迟 11.8~13.9 秒,不是任何一个超时值 —— 那正是「不是超时、是查询失败」的信号),
+    # 重试一次就全 200。当天库里这条错出现 4 次,与那 4 个 500 一一对应。
+    #
+    # 256m 不是拍脑袋:错误里要的段是 2MB,64MB 在四路并发下会被撑满;
+    # 而这台机器**总共只有 1.9GB 内存**,shm 是 tmpfs、计入容器的内存限额,
+    # 所以不能像常见建议那样写 1g。256m 是上限不是预留,平时按需占用。
+    shm_size: 256m
     networks:
       - backend
     deploy:
       resources:
         limits:
-          memory: 512M
+          # 512M 已经用到 370M(72%),再给 shm 留出余量就不够了。
+          # 机器 1.9G、可用 1.1G,api 只用 100M,提到 768M 仍有富余。
+          memory: 768M
 
   api:
     build:

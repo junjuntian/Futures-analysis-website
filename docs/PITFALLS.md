@@ -1343,3 +1343,30 @@ FG 一手名义 ≈ 20 × 953 = 19,060 元,0.05% = **9.5 元** —— **是真�
    `select instrument, is_variety_total, max(trade_date) ... group by 1,2`
    一条就能把两层分开。
 
+## Docker 里的 Postgres:`/dev/shm` 默认只有 64MB,并行查询会在那里撞墙
+
+2026-09-14。席位页一次并发四个 `pnl-breakdown`,**四个全 500**,重试就好。
+延迟 11779 / 11782 / 11800 / 13873 ms。
+
+**第一条线索是「这些数字谁也对不上」**:连接池 `acquire_timeout` 是 15 秒、
+`statement_timeout` 是 0、`lock_timeout` 是 0。既然不等于任何一个超时值,
+**那就不是超时,是查询本身失败了** —— 于是去翻 Postgres 自己的日志:
+
+```
+ERROR: could not resize shared memory segment ... to 2097152 bytes: No space left on device
+FATAL: terminating background worker "parallel worker" due to administrator command
+```
+
+Docker 默认给容器 `/dev/shm` **64MB**,Postgres 的 parallel worker 在那里开段;
+四路并发撑满之后,查询直接失败。**单发不会复现,只在并发时出现** —— 这是它难查的原因。
+
+**三条要记住**:
+
+1. **500 的延迟数字对得上某个超时值 → 是超时;对不上 → 去看下游自己的日志。**
+   DEC-246 那次是 5064~5066 ms 正好等于 acquire_timeout,一眼定性;这次对不上,
+   真答案在数据库日志里;
+2. **容器化的 Postgres 一定要显式配 `shm_size`**,默认值只够单线程玩;
+3. **shm 是 tmpfs,计入容器内存限额**。别照抄网上的 `shm_size: 1g` ——
+   这台机器总共 1.9GB,postgres 限额 512M 已用 72%,直接加 1g 会把它 OOM 掉。
+   先看 `free -h` 和 `docker stats`,再定数。
+

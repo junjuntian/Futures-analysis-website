@@ -8898,3 +8898,54 @@ collector 的 `CFFEX seat_positions_v1` 主源与东财兜底都报 `ValueError`
 反推和汇总都读 `seat_history`、都挂在 collector、都被 official-seats 的写入时刻甩在后面
 —— 一样的形状,当初只修了看得见的那个。已入 `PITFALLS`。
 
+
+## DEC-249
+
+**2026-09-14 · 席位页并发 500 的真因:Postgres 容器的 `/dev/shm` 只有 64MB**
+
+运营者:「怎么界面都打不开?」(截图机构资金页卡在「正在读取信号数据…」)。
+
+### 先说那张截图:没能复现,服务端各项正常
+
+- `signals.json` 从他浏览器发出的请求 **200 / 150748 字节**(nginx 日志可查),
+  文件本身合法、`data_date = 2026-09-14`;
+- 带/不带 gzip 拉取字节一致、16 毫秒、`cache-control: no-store`;
+- **他 11:40 起已在席位页正常操作**(positions 全 200、燃油净持仓 09-14 也 200)。
+
+那次卡住发生在 nginx 刚被部署重启后的几分钟内,**属于一次性现象,没有留下可查的服务端证据**。
+**不编原因**:若再出现,需要 F12 控制台的报错才能定位。
+
+### 但顺着日志查出一个真问题
+
+同一时段 `seats/pnl-breakdown` **连着 4 次 500**,重试后全部 200。
+延迟 **11779 / 11782 / 11800 / 13873 ms** —— **不等于任何一个超时值**
+(连接池 15 秒、statement_timeout 是 0),这本身就是「不是超时、是查询失败」的信号。
+
+Postgres 日志给出答案:
+
+```
+ERROR: could not resize shared memory segment "/PostgreSQL.3355278110"
+       to 2097152 bytes: No space left on device
+FATAL: terminating background worker "parallel worker" due to administrator command
+```
+
+**Docker 默认只给容器的 `/dev/shm` 64MB**,而 Postgres 的 parallel worker 在那里开段。
+席位页一次并发四个 pnl-breakdown,四路并行把 64MB 撑满 → 查询失败 → 500。
+当天库里这条错**正好 4 次**,与那 4 个 500 一一对应。
+
+### 改法与它的约束
+
+`docker-compose.yml` 的 postgres 加 `shm_size: 256m`,内存限额 512M → 768M。
+
+**为什么不是常见建议的 1g**:这台机器**总共只有 1.9GB 内存**、可用 1.1GB,
+而 shm 是 tmpfs、**计入容器的内存限额**。postgres 当时已用 370M/512M(72%),
+再塞 shm 就不够了。256m 是上限不是预留,平时按需占用;
+限额提到 768M 之后,机器仍有富余(api 只用 100M)。
+
+### 教训
+
+**延迟数字对不对得上某个超时值,是判断「超时」还是「失败」的第一条线索。**
+DEC-246 那次三条 500 都是 5064~5066 ms、正好等于 `acquire_timeout`,所以是连接池;
+这次 11.8~13.9 秒**谁也对不上**,就必须去翻数据库自己的日志 —— 而答案果然在那儿。
+已入 `PITFALLS`。
+
