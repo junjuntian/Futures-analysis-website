@@ -129,6 +129,34 @@ union all
 select 'seat 残留 akshare 行', count(*) from seat_history where source='akshare_v1';
 EOF
 
+# 品种汇总（2026-09-14 补）——与下面的反推是**同一个时序问题**，当初漏了。
+#
+# `compute-seat-totals.sql` 也只挂在 collector 里（16:00 / 17:30），而上期所与
+# 郑商所当天的席位行是**本脚本** 16:25 / 17:55 才写进去的。于是 collector 算汇总
+# 时那些行还不存在，汇总就少一天；本脚本写完又不算汇总，要等下一轮 collector 才补。
+#
+# 2026-09-14 实测坐实：当天 official-seats 第一趟因郑商所一个文件超时中止（DEC-247），
+# 等补跑完已是 09:42 UTC，而 collector 的汇总在 09:39 就算过了。结果
+# **上期所逐合约行到 09-14、品种汇总行停在 09-11**（郑商所/大商所因为走别的链路正常）。
+# 净持仓页在「合约汇总」模式下读的恰恰是汇总行（`is_variety_total = true`），
+# 于是燃油那页只显示到 09-11 —— 而逐合约数据明明是全的，**看上去像采集断了**。
+#
+# SQL 幂等（重算最近 window_days 天再 upsert），与 collector 那趟重复执行没有副作用。
+# 放在反推之前，与 collector 里的先后一致（反推行被排除在汇总之外，见
+# compute-seat-totals.sql 的说明，两者先后其实无关，只为日志好读）。
+SEAT_TOTALS=""
+if [ -r /var/lib/futures-platform/deployments/stable.env ]; then
+  # shellcheck disable=SC1091
+  . /var/lib/futures-platform/deployments/stable.env
+  SEAT_TOTALS="${previous_release_dir:-}/deploy/collector/compute-seat-totals.sql"
+fi
+if [ -n "$SEAT_TOTALS" ] && [ -r "$SEAT_TOTALS" ]; then
+  echo "[official-seats] 重算品种汇总"
+  docker exec -i "$PG" psql -U futures_app -d futures_platform     -v ON_ERROR_STOP=1 -v window_days=10 < "$SEAT_TOTALS"
+else
+  echo "[official-seats] SEAT_TOTALS_SKIPPED ${SEAT_TOTALS:-<stable.env 不可读>}" >&2
+fi
+
 # 反推掉榜席位（DEC-064）——必须在官方席位入库之后再跑一次。
 #
 # 反推也挂在 collector 里（16:00 / 17:30），但那时上期所与郑商所当天的席位行
