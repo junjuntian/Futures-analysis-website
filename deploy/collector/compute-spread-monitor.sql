@@ -226,6 +226,11 @@ select w.*,
                        -- 脏数据上,清洗后证据消失)。JM 不受那次污染,保持 0.20。
                        when z.c1 like 'JM%' then 0.20
                        when z.c1 like 'JD%' then 0.05
+                       -- FU 2026-09-15 定档 0.05:机制与 JD 同源(早进不受罚,
+                       -- 5% 档早进组中位 +12.2 仍为正),全样本 132~135 笔逐档
+                       -- 单调无翻转。丑话(逐年一致性 5/9、样本只有标准三分之一)
+                       -- 见 API turn_retreat() 的注释。
+                       when z.c1 like 'FU%' then 0.05
                        else 0.10
                      end as line) r) w;
 
