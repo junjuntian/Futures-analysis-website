@@ -211,11 +211,29 @@ def czce_market(path):
 CZCE_SEG = re.compile(r"^(品种|合约)[：:]\s*(\S+?)\s+日期[：:]\s*(\d{4}-\d{2}-\d{2})")
 
 
+def _czce_ambiguous_totals(text):
+    """老格式里靠中文名认不出来的品种汇总段，认错比丢掉贵得多。
+
+    2014-07 ~ 2015-05 郑商所**同一天发两个 `品种：甲醇`**：一个是旧代码 ME
+    (50 吨/手)，一个是新代码 MA(10 吨/手)。2015-11 之前的段头只有中文名
+    (`品种：甲醇`，不带代码)，两段逐字节同构——没有任何字段能把它们分开。
+
+    认错的代价是把 50 吨/手的持仓当成 10 吨/手记进 MA，整段盈亏差五倍，
+    而且页面上看不出任何异常。所以**这几个月的甲醇品种汇总一行都不要**，
+    缺口由 `compute-seat-totals.sql` 从逐合约行自算补回(DEC-250 那条通道)。
+
+    判据是**这个文件里还有没有 ME 合约段**：还有就是歧义期，没有就只剩 MA。
+    """
+    return {"MA"} if re.search(r"合约[：:]\s*ME\d", text) else set()
+
+
 def czce_seats(path):
     rows = []
     contract = instrument = trade_date = None
     is_total = False
-    for line in _read_text(path).splitlines():
+    text = _read_text(path)
+    ambiguous = _czce_ambiguous_totals(text)
+    for line in text.splitlines():
         header = CZCE_SEG.match(line.strip())
         if header:
             kind, label, trade_date = header.groups()
@@ -230,6 +248,8 @@ def czce_seats(path):
                     if tail
                     else VARIETY_BY_NAME.get(label.strip())
                 )
+                if instrument in ambiguous:
+                    instrument = None
                 contract = None
             else:
                 contract = (
