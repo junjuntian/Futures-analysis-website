@@ -24,7 +24,7 @@ create temp table monitor_scope (instrument text primary key);
 -- **有意不给它配 main_month**:下面那段的规矩是「只列运营者点名的品种,
 -- 没说就不限制」—— 猜一个主力月清单去悄悄删掉人家的组合,比多报几组糟得多。
 insert into monitor_scope values ('JD'), ('LH'), ('JM'), ('AP'), ('FG'), ('SA'),
-                                 ('I'), ('IH'), ('SC'), ('FU');
+                                 ('I'), ('IH'), ('SC'), ('FU'), ('MA');
 
 -- 主力月份。运营者 2026-08-12 明确：玻璃、纯碱、焦煤的主力合约是 1、5、9 月。
 -- 非主力月份的合约成交稀疏，价差是几手撮出来的，报出来也没法交易。

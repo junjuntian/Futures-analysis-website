@@ -92,7 +92,11 @@ update instruments set price_multiplier = spec.m, updated_at = now()
   from (values ('I', 100::numeric),      -- 铁矿石 100 吨/手
                ('IH', 300::numeric),     -- 上证50 300 元/点
                ('SC', 1000::numeric),    -- 原油 1000 桶/手
-               ('FU', 10::numeric)       -- 燃料油 10 吨/手
+               ('FU', 10::numeric),      -- 燃料油 10 吨/手
+               -- 甲醇 10 吨/手。**是算出来的不是抄的**:2026-09-14 郑商所行情里
+               -- MA610/611/612/701 四根合约,成交额÷(成交量×结算价) 逐根都得 10.00。
+               -- 注意老代码 ME 是 50 吨/手,我们不收 ME(见 parsers 的说明)。
+               ('MA', 10::numeric)       -- 甲醇 10 吨/手
        ) as spec(code, m)
  where upper(instruments.code) = spec.code and instruments.price_multiplier is null;
 
