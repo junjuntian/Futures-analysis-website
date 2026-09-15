@@ -2870,7 +2870,17 @@ pub async fn load_seat_net_positions(
 /// 停发——那些天库里**任何**席位都没有这个合约的行。净持仓页靠这个集合把
 /// 「交易所未公布」与「这家掉出前二十」分开说:前者整张榜不存在,后者榜在、人不在。
 /// 只看多空榜(成交量榜不算,与 seat_net_positions_sql 同一条纪律);按交易日去重,
-/// 不区分来源。选了具体合约看逐合约行,没选看品种汇总行。
+/// 不区分来源。
+///
+/// **一律看逐合约行,不看品种汇总行**(2026-09-15 修)。原来是「选了合约看逐合约、
+/// 没选看汇总」,那是拿**我们自己算的东西**去判断**交易所发没发**:
+/// 上期所与大商所压根没有官方汇总,汇总行全由 `compute-seat-totals.sql` 自算,
+/// 而它日更只回算最近 10 天。于是新加的品种(燃油 2026-09-07 接入)只有最近
+/// 十几天有汇总,页面就报「另有 **1964 天**交易所没有公布这个合约的持仓排名」——
+/// **交易所明明逐合约都发了,是我们没算**。运营者看到的是净持仓曲线只剩右边一小段。
+///
+/// 改成看逐合约行之后,判据与「交易所发没发」真正对齐:品种档下只要当天**任何**
+/// 合约有排名行,就算发过;大商所 LH2607 那种整张榜停发的情形仍然照常识别。
 pub async fn seat_published_dates(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -2883,7 +2893,8 @@ pub async fn seat_published_dates(
         "select distinct trade_date from seat_history
           where workspace_id = $1 and instrument = $2
             and ($3::text is null or contract = $3)
-            and is_variety_total = ($3::text is null)
+            -- 一律看逐合约行:汇总行是我们自算的,不能拿来判断交易所发没发。
+            and not is_variety_total
             and rank_type in ('long', 'short')
           order by trade_date",
     )

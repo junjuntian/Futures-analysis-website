@@ -16,6 +16,18 @@
 -- 汇总，再叠一份自算的等于同一个事实两种数字。
 
 \set ON_ERROR_STOP on
+-- 可选:只算某一个品种(`-v only_instrument=FU`)。不传就是全部,与从前一字不差。
+--
+-- 为什么需要它:**新接的品种历史汇总是空的**。回填只灌逐合约行,汇总由本脚本自算,
+-- 而日更只给 `window_days=10` —— 于是燃油(2026-09-07 接入)在 2026-09-15 时
+-- 逐合约有 1976 天、汇总只有 **12 天**,净持仓页的「合约汇总」档只画得出最右边一小段。
+-- 补的办法是对那个品种跑一次全史(不传 window_days,默认 7000),但**不该为此重算
+-- 所有品种**:上期所黄金一路到 2008 年,全表删重建是四十多万行、一个长事务,
+-- 2026-09-14 刚因为长事务与部署的 owner 迁移死锁过一次。加这个参数就是为了只动一个品种。
+\if :{?only_instrument}
+\else
+  \set only_instrument ''
+\endif
 -- 默认窗口要罩住最深的历史：上期所自 2008 年起，18 年 ≈ 6600 天。第一次回填时
 -- 这里写了 3700 还自称「覆盖全史」，结果 2008–2016 的汇总整段缺失——拿想当然
 -- 当了事实，没对着数据最早日期算。
@@ -32,7 +44,8 @@ begin;
 delete from seat_history
  where is_variety_total
    and variety_total_is_computed
-   and trade_date >= current_date - :window_days;
+   and trade_date >= current_date - :window_days
+   and (:'only_instrument' = '' or instrument = :'only_instrument');
 
 insert into seat_history (
     id, workspace_id, exchange, instrument, contract, is_variety_total,
@@ -48,6 +61,7 @@ select gen_random_uuid(), s.workspace_id, s.exchange, s.instrument,
        s.source
   from seat_history s
  where not s.is_variety_total
+   and (:'only_instrument' = '' or s.instrument = :'only_instrument')
    -- 反推出来的行（infer-offboard-seats.sql）不进品种汇总。
    --
    -- 它们只覆盖「掉榜前一日」那一天，某会员某合约有、别的合约没有。把它们算进
