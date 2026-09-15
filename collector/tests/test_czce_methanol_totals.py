@@ -27,9 +27,7 @@ def load():
 
 def row(rank, qty):
     """一行三榜：成交量/持买单量/持卖单量,各自一家会员。"""
-    return (
-        f"{rank},甲席位{rank},{qty},10,乙席位{rank},{qty},10,丙席位{rank},{qty},10"
-    )
+    return f"{rank},甲席位{rank},{qty},10,乙席位{rank},{qty},10,丙席位{rank},{qty},10"
 
 
 def write(tmp_path, name, body):
