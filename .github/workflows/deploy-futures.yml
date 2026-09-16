@@ -209,6 +209,10 @@ jobs:
             "${RELEASE_BUNDLE}/deploy/collector/fetch-spot-basis.py"
           install -m 600 deploy/collector/load-spot-basis.sql \
             "${RELEASE_BUNDLE}/deploy/collector/load-spot-basis.sql"
+          install -m 600 deploy/collector/fetch-overseas.py \
+            "${RELEASE_BUNDLE}/deploy/collector/fetch-overseas.py"
+          install -m 600 deploy/collector/load-overseas.sql \
+            "${RELEASE_BUNDLE}/deploy/collector/load-overseas.sql"
           install -m 600 deploy/collector/fix-sanhe-fabricated-zeros.sql \
             "${RELEASE_BUNDLE}/deploy/collector/fix-sanhe-fabricated-zeros.sql"
           install -m 600 deploy/collector/fix-sanhe-fabricated-changes.sql \
@@ -288,6 +292,7 @@ jobs:
             rust/migrations/202608300002_history_exchange_cffex_ine.sql \
             rust/migrations/202609070001_scope_fu.sql \
             rust/migrations/202609150001_scope_ma.sql \
+            rust/migrations/202609160001_overseas_price.sql \
             "${RELEASE_BUNDLE}/migrations/"
           # The list above is explicit so a release always ships a reviewed set
           # of migrations, and it deliberately omits the pre-Phase-3D baseline

@@ -332,6 +332,41 @@ else
   echo "SPOT_BASIS_SKIPPED missing $SPOT_BASIS_FETCH or $SPOT_BASIS_LOAD" >&2
 fi
 
+# 外盘原油主连：布伦特 OIL / WTI CL（迁移 202609160001）。
+# 只为算 SC/FU 对外盘的相关性与 beta，**不进套利监控、不进引擎、不进席位**。
+# 跟在基差后面，让「外部源」这几步在日志里挨着；与基差同理，
+# **失败不阻断后面的步骤** —— 它是背景数据，拿不到不该让监控快照跟着不跑。
+#
+# `--since` 给 30 天：上游每次都返回全部历史（实测 OIL 2585 行 / CL 7690 行），
+# 全量 upsert 也是幂等的，只是没必要每天重灌一万行。
+# **首次回填要把这个参数去掉**，让它把 2016/1996 以来的历史一次性灌进来。
+OVERSEAS_FETCH="$previous_release_dir/deploy/collector/fetch-overseas.py"
+OVERSEAS_LOAD="$previous_release_dir/deploy/collector/load-overseas.sql"
+if [ -r "$OVERSEAS_FETCH" ] && [ -r "$OVERSEAS_LOAD" ]; then
+  rm -f /opt/futures-platform/load/overseas.csv
+  if "${COMPOSE[@]}" run --rm --no-deps \
+       -v "$OVERSEAS_FETCH":/tmp/fetch-overseas.py:ro \
+       -v /opt/futures-platform/load:/tmp/load \
+       --entrypoint python collector /tmp/fetch-overseas.py \
+       --out /tmp/load/overseas.csv \
+       --since "$(date -u -d '30 days ago' +%Y-%m-%d)"; then
+    if [ -s /opt/futures-platform/load/overseas.csv ]; then
+      postgres_id=$("${COMPOSE[@]}" ps -q postgres)
+      docker cp /opt/futures-platform/load/overseas.csv "$postgres_id":/tmp/overseas.csv
+      "${COMPOSE[@]}" exec -T postgres \
+        psql -U futures_app -d futures_platform -v ON_ERROR_STOP=1 \
+        < "$OVERSEAS_LOAD" \
+        || echo "OVERSEAS_LOAD_FAILED 装载没成功，外盘今天不前进" >&2
+    else
+      echo "OVERSEAS_NO_CSV 采集没写出文件，跳过装载" >&2
+    fi
+  else
+    echo "OVERSEAS_FETCH_FAILED 外盘今天不前进，后面的步骤照常" >&2
+  fi
+else
+  echo "OVERSEAS_SKIPPED missing $OVERSEAS_FETCH or $OVERSEAS_LOAD" >&2
+fi
+
 # 套利监控快照。必须排在投影之后：它读的是 price_history，而那张表由投影填。
 # 生产实测约 77 秒（瓶颈是历年百分位那一步，见 SQL 里的注释）。
 # window_days=3 只重算最近三天：日更只需覆盖新落库的一两天，兜一点补采余量。
