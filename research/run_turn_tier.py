@@ -220,10 +220,10 @@ def main() -> int:
           f"{min(df['trade_date'])} ~ {max(df['trade_date'])}")
 
     live = 0.05 if code == "FU" else DEFAULT_TIER
-    h, l, n = verify_crosses(df, live)
+    hi_ok, lo_ok, n = verify_crosses(df, live)
     print(f"\n[口径自证] 按该品种线上档位 {live:.0%} 重算穿线计数,对库里存的 "
-          f"turn_crosses:high {h:.4%} / low {l:.4%} 一致({n} 行)")
-    if min(h, l) < 1.0:
+          f"turn_crosses:high {hi_ok:.4%} / low {lo_ok:.4%} 一致({n} 行)")
+    if min(hi_ok, lo_ok) < 1.0:
         print("  ⚠ 没有 100%,说明拐头三层里有一层抄错了,下面的数不要信")
 
     per_tier = {x: scan(df, x) for x in TIERS}
@@ -254,7 +254,7 @@ def main() -> int:
     # ---- 逐年 ----
     print("\n[逐年] 每年的最优档(中位幅度最高者)与该年 10% 的中位")
     years = sorted({y for t in per_tier.values() if not t.empty for y in t["year"]})
-    best_by_year, hit = {}, 0
+    best_by_year = {}
     for y in years:
         meds = {x: (t[t["year"] == y]["pnl"].median() if not t.empty and (t["year"] == y).any()
                     else np.nan) for x, t in per_tier.items()}
