@@ -1541,3 +1541,72 @@ DECISIONS 里留下的是**结论与几个数字**,而「幅度=占区间宽度�
   都是 **100.0000%**,而拿错档位掉到 80.96% / 90.19%,
   **说明这个参照物有分辨力,不是碰巧全对**;
 - **数据源不幂等的,把用到的样本清单一起存**(本次存了 312 个组合)。
+
+## 加品种会把**已有的查询**推下缓存悬崖
+
+2026-09-20,运营者「网站刷不出来」。席位页卡死,nginx 一条 499。
+api 日志:同一条 `select distinct instrument … member = any($2)` **11.78 秒**,
+而**两天前还是 1.6 秒**。
+
+中间发生的唯一的事:**甲醇 09-15 接入,一次灌进 126 万行(约 483 MB)**,
+`seat_history` 从 2.8 GB 涨到 **3.29 GB / 878 万行**。
+机器总共 1.9 GB、postgres 容器限额 768 MB、`shared_buffers` 128 MB ——
+那张表的缓存命中率实测掉到 **63%**(健康值 >99%)。
+
+**没有任何一行代码改过,没有任何一条查询改过。** 只是数据多了 14%,
+热路径就从「基本在内存里」变成「大半要读盘」,于是 1.6 秒变 11.8 秒。
+
+**三条**:
+
+1. **加品种前先看那张表现在多大、机器能缓存多少。**
+   「六处配置 + 一步数据」(DEC-250)之外还有第三件事:**容量**。
+   新品种的行数要和现有体量、容器内存限额、`shared_buffers` 放在一起看;
+2. **慢十倍但没人改过代码 → 先怀疑缓存命中率,别先怀疑锁和连接池。**
+   排查顺序:`pg_statio_user_tables` 的命中率 → `explain (analyze, buffers)`
+   里的 `read=` → 才轮到 `pg_stat_activity`。
+   **`read=60633` 就是 474 MB 磁盘 I/O,这个数字比任何猜测都直接**;
+3. **同一个页面第三次出问题了,每次根因都不同** ——
+   DEC-246 是连接池 5 条被打满、DEC-249 是 `/dev/shm` 只有 64MB、
+   这次是缓存悬崖。**「上次是 X」不构成这次也是 X 的证据。**
+
+## 索引缺的是**过滤列**,不是排序列
+
+同一次。`seat_history_by_member` 是 `(workspace_id, member, instrument, trade_date)`,
+而查询是:
+
+```sql
+select distinct instrument from seat_history
+ where workspace_id = $1 and member = any($2)
+   and not is_variety_total and rank_type in ('long','short')
+   and source <> 'reboard_inferred'
+```
+
+索引把 `workspace_id` / `member` / `instrument` 全带上了,**看起来完全够用** ——
+但三个过滤列一个都不在索引里,于是每条候选都要回表。
+**取 12 行读了 474 MB。**
+
+把过滤条件写成**部分索引的 WHERE**(不是加到索引列里),变成 Index Only Scan:
+
+```sql
+create index … on seat_history (workspace_id, member, instrument)
+ where not is_variety_total and rank_type in ('long','short')
+   and source <> 'reboard_inferred';
+```
+
+**`read=60633` → `read=0`,11.8 秒 → 29 毫秒,索引只有 28 MB**
+(部分索引只收真正会被查的那部分,比把列加进索引便宜得多)。
+
+**判据**:`explain (analyze, buffers)` 里看见 `Rows Removed by Filter` 很大
+且 `read=` 很大,就是这个形状 —— 索引定位对了,代价全在回表验证过滤条件。
+
+## 默认的 `effective_cache_size` 在小机器上是**假话**
+
+同一次顺带查出来的:`effective_cache_size = 4GB`,而这台机器**总共 1.9GB**、
+postgres 容器限额 **768M**。
+
+它不分配任何内存,只告诉规划器「缓存有多大」,规划器据此估算随机 I/O 会不会命中。
+报 4GB = 告诉它「整张表都在内存里」,于是**低估回表代价,专挑要回表的计划**。
+
+**容器化的数据库,这个值要照容器限额写,不是照宿主机内存写,更不能留默认。**
+(`shared_buffers` 是另一回事 —— 那个**真分配内存**,在限额紧张的机器上别乱调,
+而且 shm 也计入同一个限额,见 DEC-249。)
