@@ -32,6 +32,12 @@
 -- 与 `seat_meta_cache`(DEC-245)不冲突:那个缓存挡的是重复请求,
 -- 这条治的是**缓存未命中那一次**——而每天数据一进来版本就变、缓存就空,
 -- 运营者晚上第一次开页面撞的正是这一次。
+-- 用普通 `create index`(不是 concurrently):concurrently 不能在事务块里跑,
+-- 而本仓库的迁移一律要求 begin/commit(断言失败时不留半应用的 schema)。
+-- 生产上这条索引已经用 concurrently 建好了,`if not exists` 在那边是空操作;
+-- 这段是给全新库和验收环境用的,那时表是空的,拿不拿锁都无所谓。
+begin;
+
 create index if not exists seat_history_member_instrument_live
     on seat_history (workspace_id, member, instrument)
  where not is_variety_total
@@ -56,3 +62,5 @@ insert into schema_versions (version, description)
 values ('202609210001',
         'Partial index for per-member instrument lookup; tighter autoanalyze on seat_history')
 on conflict (version) do nothing;
+
+commit;
