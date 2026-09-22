@@ -72,6 +72,14 @@ def main() -> int:
                 failed += 1
                 continue
             if frame is None or frame.empty:
+                # **当天的空不是节假日的空**(2026-09-22,DEC-257):中金所月度 zip
+                # 北京 16:06 才更新,collector 16:00 那轮走到这里是 16:05,拿到的
+                # 是还没带今天的旧包。原来这里静默跳过,日志里一个字没有,
+                # 「数据到齐了吗」就挂一个半小时「有缺口」,查的人得去翻 Last-Modified。
+                # 现在明说 —— 仍不算失败:官方席位那条链 16:25 会再取一次。
+                if back == 0:
+                    print(f"PENDING {day}: 当日文件交易所尚未发布(约北京 16:06),"
+                          "稍后一轮会补", file=sys.stderr, flush=True)
                 continue
             for _, bar in frame.iterrows():
                 symbol = str(bar.get("symbol") or "").upper().replace(" ", "")

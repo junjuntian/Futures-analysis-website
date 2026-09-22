@@ -129,6 +129,46 @@ union all
 select 'seat 残留 akshare 行', count(*) from seat_history where source='akshare_v1';
 EOF
 
+# 中金所行情补一趟(2026-09-22 补,DEC-257)——与郑商所/上期所同一个时序问题。
+#
+# 中金所行情本来只挂在 collector 那条链上(`run-collector.sh`,北京 16:00 / 17:30 / 21:30)。
+# 而中金所的月度 zip **北京 16:06 才更新**(2026-09-22 实测 Last-Modified: 08:06:00 GMT),
+# collector 16:00 那轮走到这一步是 **16:05** —— 差一分钟,拿到的是还没带今天的旧包。
+# `cffex-daily.py` 对「当天没数据」的处理是静默跳过(节假日本来就没有),
+# 于是 16:05 ~ 17:30 这一个半小时里「数据到齐了吗」挂着「有缺口」:
+# 中金所席位 09-22、行情 09-21。**不是抓失败,是去早了**,而且每天都在赌那一分钟。
+#
+# 本脚本 16:25 跑,正好在中金所发布之后 20 分钟 —— 郑商所上期所那 16:26 的晚发布
+# 当初也是靠它兜住的。补在这里一趟,幂等(upsert),与 collector 那趟重复执行无副作用。
+# **失败只告警不中止**(DEC-247 的教训:一个交易所的问题不许让半边库停更)。
+if [ -r /var/lib/futures-platform/deployments/stable.env ]; then
+  # shellcheck disable=SC1091
+  . /var/lib/futures-platform/deployments/stable.env
+fi
+CFFEX_SCRIPT="${previous_release_dir:-}/deploy/collector/cffex-daily.py"
+CFFEX_LOAD="${previous_release_dir:-}/deploy/collector/load-dce-daily.sql"
+# 与 run-smart-money 同一个取法:awk 读完整个流再输出首个匹配,
+# 不用 head -1(pipefail 下 SIGPIPE 会判死整个脚本,2026-08-11 踩过)。
+COLLECTOR_IMAGE=$(docker images --format '{{.ID}} {{.Repository}}' | awk '/collector/{if(!f){print $1;f=1}}')
+if [ -r "$CFFEX_SCRIPT" ] && [ -r "$CFFEX_LOAD" ] && [ -n "$COLLECTOR_IMAGE" ]; then
+  echo "[official-seats] 中金所行情"
+  if docker run --rm \
+       -v "$CFFEX_SCRIPT":/tmp/cffex-daily.py:ro \
+       -v /opt/futures-platform/load:/tmp/load \
+       --entrypoint python "$COLLECTOR_IMAGE" /tmp/cffex-daily.py \
+       --out /tmp/load/price_cffex_daily.csv; then
+    # cp 与装载串成一条:任何一步失败都落到告警,不让 set -e 掐掉后面的汇总与反推。
+    docker cp load/price_cffex_daily.csv "$PG":/tmp/price_dce_daily.csv \
+      && docker exec -i "$PG" psql -U futures_app -d futures_platform \
+           -v ON_ERROR_STOP=1 < "$CFFEX_LOAD" \
+      || echo "[official-seats] ⚠ 中金所行情装载失败,collector 下一轮会补" >&2
+  else
+    echo "[official-seats] ⚠ 中金所行情抓取失败,collector 下一轮会补" >&2
+  fi
+else
+  echo "[official-seats] CFFEX_DAILY_SKIPPED 脚本/装载 SQL/collector 镜像缺一样" >&2
+fi
+
 # 品种汇总（2026-09-14 补）——与下面的反推是**同一个时序问题**，当初漏了。
 #
 # `compute-seat-totals.sql` 也只挂在 collector 里（16:00 / 17:30），而上期所与
