@@ -53,7 +53,7 @@ echo "[smart-money] $(date '+%F %T') 导出数据…"
 # 由 hog_money.main() 末尾单独取数、单独写 ih_signals.json。但它照样从 CSV 读,
 # 所以**必须在这里导出** —— 2026-09-01 首次上线就是漏了这一行,引擎报
 # 「/work/tmp/ih_price.csv[.gz] 都不存在」,产物根本没生成。
-for INST in AU AG LH FG SA JD JM IH I FU; do
+for INST in AU AG LH FG SA JD JM IH I FU AP; do
   low=$(echo "$INST" | tr 'A-Z' 'a-z')
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -q -c \
     "\copy (select exchange,instrument,contract,trade_date,open_price,high_price,low_price,close_price,settlement_price,volume,open_interest,source from price_history where instrument='$INST') to '/tmp/${low}_price.csv' with (format csv, header true)"
@@ -93,12 +93,12 @@ fi
 # 隔离——它们挂了不该让金银信号跟着不更新,所以这一段不带 set -e 的传染性,
 # 失败只告警并保留上一版 JSON。引擎内部也按品种各跑各的:一个品种挂了不影响其余。
 if [ -f "$ROOT/hog_money.py" ]; then
-  echo "[flow] 计算生猪/玻璃/纯碱/鸡蛋/焦煤/铁矿石/燃油信号…"
-  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM,I,FU       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
+  echo "[flow] 计算生猪/玻璃/纯碱/鸡蛋/焦煤/铁矿石/燃油/苹果信号…"
+  if docker run --rm       -v "$ROOT:/work"       -e ENGINE_SOURCE=csv       -e CSV_DIR=/work/tmp       -e FLOW_OUT_DIR=/work/tmp       -e FLOW_CODES=LH,FG,SA,JD,JM,I,FU,AP       -e PYTHONIOENCODING=utf-8       --entrypoint python "$IMAGE" /work/hog_money.py; then
     # ih_signals.json / i_signals.json 同样要拷:它们由同一次运行产出
     # (DEC-172 / DEC-178),漏了的话页面读到 404。**这份清单与上面那个导出循环
     # 是同一件事的两半,加品种必须同时改**。
-    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json i_signals.json fu_signals.json pair_fgsa.json ih_signals.json; do
+    for f in hog_signals.json fg_signals.json sa_signals.json jd_signals.json jm_signals.json i_signals.json fu_signals.json ap_signals.json pair_fgsa.json ih_signals.json; do
       if [ -s "$TMP/$f" ]; then
         # 同上:模式写死,不靠继承的 umask。
         install -m 644 "$TMP/$f" "$WEB/$f.new"
