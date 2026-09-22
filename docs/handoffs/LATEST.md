@@ -9,9 +9,9 @@
 
 ## 当前生产状态
 
-- **生产 = `adae114`**(2026-09-16,DEC-253 接外盘原油行情;同日更早一版 `cfa0cc1` 是 DEC-252 燃油拐头档改 5%),站点 `https://shejimao.trade`,服务器别名 `qh`。
+- **生产 = `5739601`**(2026-09-16,DEC-253 接外盘原油行情;同日更早一版 `cfa0cc1` 是 DEC-252 燃油拐头档改 5%),站点 `https://shejimao.trade`,服务器别名 `qh`。
   这一行写的是**上一次成功部署的 SHA**,**SHA 由部署流水线自动补提交**(`docs: LATEST 记为已部署的 xxx`),
-  但**括号里的说明它不会改**,要人工跟上 —— 2026-09-16 接手时发现 SHA 已是 adae114、说明还停在 09-06。
+  但**括号里的说明它不会改**,要人工跟上 —— 2026-09-16 接手时发现 SHA 已是 5739601、说明还停在 09-06。
   preflight 有门禁盯着这条等式(DEC-100),对不上就红。
 - 发布照 `docs/RELEASE_PROCESS.md`,必跑 `ops/preflight-deploy.sh --dispatch`。
 - 引擎产物:`{hog,jm,fg,jd,sa,fu}_signals.json`、`signals.json`(金银)、`pair_fgsa.json`。
