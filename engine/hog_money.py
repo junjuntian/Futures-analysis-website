@@ -75,6 +75,9 @@ RULES = {
     "reselect_months": 12,
     "warmup_days": 250,      # 首次选组前的最少历史
     "member_min_days": 120,  # 一家至少在榜这么多天才参与排名
+    # 这个天数按「**近一个重选周期**」算而不是「累计」(DEC-258)。逐品种可关,
+    # 目前只有玻璃关着 —— 见 VARIETIES["FG"]["group_active_gate"]。
+    "group_active_gate": True,   # 见 RULES_DEFAULT_GATE(守卫测试钉住这个默认值)
     # —— 信号 ——
     "sig_win": 5,            # 合计净持仓的变化窗口。20 日窗会混入动量(相关 +0.317)
     "z_win": 120,            # 无量纲化的滚动窗。2026 年机构净空是 2024 年的四倍,
@@ -377,6 +380,18 @@ VARIETIES = {
     "FG": {
         "name": "玻璃 FG", "unit": "元/吨", "multiplier": 20.0,
         "replay_start": "2013-01-01",   # 郑商所席位 2012-12 起,留一个月预热
+        # **在榜率门槛这一条,玻璃关掉**(DEC-258,预注册 G2 判的)。
+        #
+        # 门槛本身在玻璃上干的是对的:它从 2014-10 起把 **中证期货** 剔出组 ——
+        # 那家 2014 年前后更名成中信期货,更名之后自然不再上榜,正是这条门槛
+        # 该抓的那种「靠老本占位」。但代价超过了预注册写死的红线:
+        # **复利净值 +74.2% → +59.1%(−15.1pp)、夏普 0.92 → 0.80(−0.12)**,
+        # 两项都超 G2 的 10pp / 0.10。按预注册「不要求变好,但不许变坏」,**这个品种不上**。
+        #
+        # 差异全部落在 2014-10 ~ 2018-09 那段历史,而玻璃现役阵容自 2026-09-07
+        # 已 `freeze_since` 冻结 —— **所以开不开它都不改变今天的信号,只改回测数字**。
+        # 这也是它值得单独留一条的原因:别人看见「玻璃没跟上」以为是漏了。
+        "group_active_gate": False,
         "long_enabled": True,
         # 实测带 dip 反而差:228 笔 夏普 0.21 → 168 笔 0.14
         # (2026-08-21 DEC-111 口径;旧的「207 笔 0.58 → 158 笔 0.40」是 DEC-090
@@ -1038,25 +1053,30 @@ VARIETIES = {
         # 没人点名就不该用。散户走平台默认选法,不配 retail_seed。
         # sizing / flip_gate / 第二引擎 / 换月接力一律不配,那些都是逐品种验过才开的。
         "out": "ap_signals.json",
-        "backtest": "126 笔 复利净 +76.6%/夏普 0.43/回撤 −31.1%/胜率 50.0%"
+        "backtest": "125 笔 复利净 +92.1%/夏普 0.48/回撤 −30.7%/胜率 51.2%"
                     "(2019-03 起,滚动重选要先攒一年数据;同期主力买入持有 −6.2%、"
                     "恒定满仓做空 −45.0% —— **两个基准都跑赢了**)。"
-                    "做多腿 61 笔 +51.6%、做空腿 65 笔 +35.3%,**两腿都是赚的**(燃油是做空腿亏)。"
-                    "**丑话**:单笔均值 t=1.65(<2),统计上还没证明成立;"
+                    "做多腿 61 笔 +51.8%、做空腿 64 笔 +43.4%,**两腿都是赚的**(燃油是做空腿亏)。"
+                    "**丑话**:单笔均值 t=1.82(<2),统计上还没证明成立;"
                     "**8 年里 4 年亏,而且最近两年(2025、2026)都是亏的**;"
-                    "126 笔里 99 笔被「散户反向」轰出场(79%),出场太碎;"
-                    "信号后第一天的超额 **105% 落在隔夜跳空**,日内只有 −0.01% —— 准的那段拿不到。"
-                    "**B 格(成本进场,玻纯同款)**90 笔 +87.4%/夏普 0.52/回撤 −29.8%、"
-                    "8 年 2 年亏,看起来更好,但 t=1.87 同样不显著、两格之差在噪音内,"
-                    "**按预注册只报不换**,由运营者拍板。"
+                    "125 笔里 99 笔被「散户反向」轰出场(79%),出场太碎;"
+                    "信号后第一天的超额 **107% 落在隔夜跳空**,日内只有 −0.01% —— 准的那段拿不到。"
+                    "**B 格(成本进场,玻纯同款)**89 笔 +74.9%/夏普 0.48/回撤 −29.8%,"
+                    "与 A 格夏普持平、净值更低,**按预注册只报不换**。"
                     "席位为平台默认按年滚动重选(运营者未点名),**不是固定名单,没有 DEC-214 那 +40pp 前视**。"
-                    "验收见 REPORT_AP_ENGINE_v1",
+                    "**2026-09-23 起这个品种的选人多一道在榜率门槛**(DEC-258):"
+                    "兴证期货(近一年在榜 36 天)与东航期货(83 天)因此被换成华泰、宏源 —— "
+                    "上面的数字已经是加了门槛之后的(加之前是 126 笔 +76.6%/0.43/−31.1%)。"
+                    "验收见 REPORT_AP_ENGINE_v1 与 REPORT_GROUP_ACTIVE_GATE_v1",
     },
 }
 
 
 #: `retail_panel` 的全站默认。`use()` 每轮都要用它回落 —— RULES 是全局可变的,
 #: 上一个品种覆盖过之后不写回来,下一个品种就会继承别人的名单(CURRENT 那个坑的同款)。
+#: 在榜率门槛的**全局默认**(DEC-258)。单独拎出来是给守卫测试钉的 ——
+#: `RULES` 是全局可变的,跑完一个关着门槛的品种(玻璃)之后直接读 `RULES` 会读到 False。
+RULES_DEFAULT_GATE = RULES["group_active_gate"]
 DEFAULT_RETAIL_PANEL = list(RULES["retail_panel"])
 #: `retail_seed` 的全站默认(2021 年定死的那三家,六年样本外验证见
 #: `research/REPORT_RETAIL_CROSS_v1.md`)。`use()` 每轮都要用它回落。
@@ -1126,6 +1146,10 @@ def use(code: str) -> dict:
     # 从这天起不再重选(2026-09-04)。**每轮都要写**,理由同 retail_panel:
     # RULES 是全局可变的,只在「品种配了」时赋值,下一个品种会顶着上一个的冻结日。
     RULES["freeze_since"] = v.get("freeze_since")
+    # 在榜率门槛(DEC-258):默认开 —— 选人的资格门按「近一个重选周期在榜够
+    # member_min_days 天」判,而不是累计。**玻璃显式关掉**,理由见 VARIETIES["FG"]。
+    # **每轮都要写**,理由同 retail_panel:RULES 是全局可变的。
+    RULES["group_active_gate"] = v.get("group_active_gate", True)
     # 散户反向名单(2026-09-05 起**可逐品种覆盖**,只给玻璃与纯碱配)。
     # **每轮都要写**,理由同上:没配的品种必须回落到全站默认那三家,
     # 不能顶着上一个品种的名单跑。
@@ -1385,7 +1409,7 @@ def main_series(price: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------- 席位组
 
 def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp,
-               lo: pd.Timestamp | None = None) -> pd.Series:
+               lo: pd.Timestamp | None = None, gate: bool = True) -> pd.Series:
     """截至 hi(不含)每家的择时收益 alpha = 实际盈亏 − 恒定仓位能赚到的钱。
 
     **绝不许看 hi 之后的数据**——滚动重选的全部意义就在这里。
@@ -1413,7 +1437,37 @@ def alpha_upto(seat: pd.DataFrame, price: pd.DataFrame, hi: pd.Timestamp,
     pnl = grp.apply(lambda s: (s["dpx"] * s["prev_net"]).sum(), include_groups=False)
     beta = grp.apply(lambda s: (s["dpx"] * s["prev_net"].mean()).sum(), include_groups=False)
     days = grp["trade_date"].nunique()
-    return (pnl - beta)[days >= RULES["member_min_days"]].sort_values(ascending=False)
+    # 资格门:**近一个重选周期内**在榜够 `member_min_days` 天(DEC-258)。
+    #
+    # 原来判的是**累计**在榜天数(就是上面那个 `days`),而累计只增不减 ——
+    # **一家多年前活跃过的席位,能靠老本永远占着位置**。实测:苹果 2025-11-01 选出的
+    # 五家里,兴证期货近一年只在榜 **36 天**、末次上榜 2026-09-11(页面显示「当日未上榜」),
+    # 东航 83 天;而兴证**八次重选全是第一名**,因为它 2018~2021 攒下的 6.36 亿
+    # 累计择时收益,最近一年只涨了 0.01 亿。跟一个已经不在这个品种里的席位,
+    # 信号是断断续续的 —— DEC-195 当年否掉招商、中信建投用的就是同一条判据。
+    #
+    # **排序口径不变**(仍是「有史以来累计」),只把资格门换成近期的:
+    # 运营者 2026-09-23 要的是「留任门槛」,不是换排序,两件事分开。
+    # **不引入新参数**:120 天与 12 个月都是 RULES 里现成的,
+    # 120/一年 ≈ 在榜率 50%。凑一个新阈值就是在样本内挑参数。
+    #
+    # `gate=False` 只给 `rolling_groups` 的兜底用(通过门槛的不足 5 家时补人),
+    # **不是给外面绕过门槛的口子** —— 兜底补进来的人在 group_log 里会标出来。
+    alpha = pnl - beta
+    if not gate:
+        return alpha.sort_values(ascending=False)
+    _env = os.environ.get("GROUP_ACTIVE_GATE")
+    # `force` = 不管逐品种开关一律按新口径跑,给 DEC-258 的新旧对照用 ——
+    # 否则玻璃那一格(它自己关着)会显示「没差别」,把要报的差异藏起来。
+    if _env != "force" and (not RULES.get("group_active_gate", True) or _env == "off"):
+        # **研究开关**:回到改这条门槛之前的旧口径(按累计在榜天数判)。
+        # DEC-258 的新旧对照必须用**同一份代码**跑两遍,否则比的是两份代码
+        # 而不是这条门槛本身。**生产不设这个变量**,默认走下面的近窗口口径。
+        return alpha[days >= RULES["member_min_days"]].sort_values(ascending=False)
+    recent_lo = hi - pd.DateOffset(months=RULES["reselect_months"])
+    active = (d[d["trade_date"] >= recent_lo].groupby("member_key")["trade_date"]
+              .nunique().reindex(days.index).fillna(0))
+    return alpha[active >= RULES["member_min_days"]].sort_values(ascending=False)
 
 
 def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
@@ -1429,12 +1483,24 @@ def rolling_groups(seat: pd.DataFrame, price: pd.DataFrame,
     picks, log, cur = {}, [], None
     for cut in cuts:
         a = alpha_upto(seat, price, cut)
+        # 兜底(DEC-258):过了在榜率门槛的不足 5 家时,用**没过门槛的里面累计最高的**
+        # 补足。为什么补而不是让组变小或沿用上一年:后者会让「重选跑过但没换人」
+        # 与「重选根本没选出来」在界面上分不清,而那正是 2026-08-19 加 cuts 要解决的事。
+        topped = []
+        if len(a) < RULES["group_k"]:
+            full = alpha_upto(seat, price, cut, gate=False)
+            extra = full[~full.index.isin(a.index)].head(RULES["group_k"] - len(a))
+            topped = list(extra.index)
+            a = pd.concat([a, extra])
         if len(a) >= RULES["group_k"]:
             new = tuple(a.head(RULES["group_k"]).index)
             if new != cur:
-                log.append({"date": cut.strftime("%Y-%m-%d"), "members": list(new),
-                            "alpha": {m: round(float(a[m]) / 1e8, 2)
-                                      for m in new}})
+                entry = {"date": cut.strftime("%Y-%m-%d"), "members": list(new),
+                         "alpha": {m: round(float(a[m]) / 1e8, 2) for m in new}}
+                # 只在真有补人时才写这个键,免得给每条历史记录都加一个空字段。
+                if any(m in topped for m in new):
+                    entry["topped_up"] = [m for m in new if m in topped]
+                log.append(entry)
             cur = new
         picks[cut] = cur
     ser = pd.Series(index=dates, dtype=object)

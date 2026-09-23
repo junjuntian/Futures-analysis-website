@@ -2637,3 +2637,59 @@ class Test跟随引擎分数仓位:
         src = inspect.getsource(H.seat_follow_payload)
         assert "if w_follow is None:" in src
         assert 'daily = (pos.shift(2) * mkt["ret_open"] - turn * 0.001).dropna()' in src
+
+
+def test_在榜率门槛默认开_只有玻璃关着():
+    """留任的在榜率门槛(DEC-258)默认全局开,**只有玻璃是例外**。
+
+    运营者 2026-09-23:「给留任加一条在榜率门槛」。病灶是资格门
+    `member_min_days` 判的是**累计**在榜天数,累计只增不减 —— 苹果 2025-11-01
+    选出的五家里,兴证期货近一年只在榜 36 天却八次重选全是第一名。
+
+    玻璃关掉是预注册 `PLAN_GROUP_ACTIVE_GATE_v1` 的 G2 判的:门槛在玻璃上
+    干的是对的(把 2014 年更名成中信的**中证期货**剔出组),但代价
+    **净值 −15.1pp、夏普 −0.12**,两项都超红线。
+    **再有品种要关,必须先立项** —— 否则这条门槛会被一个个关成摆设。
+    """
+    allowed = {"FG"}
+    for code, v in H.VARIETIES.items():
+        if code in allowed:
+            assert v.get("group_active_gate") is False, f"{code} 应当显式关着"
+            continue
+        assert "group_active_gate" not in v, (
+            f"{code} 擅自配了 group_active_gate —— 关掉这条门槛要先立项,"
+            "理由写进 VARIETIES 的注释与 DECISIONS")
+    assert H.RULES_DEFAULT_GATE is True, "全局默认必须是开"
+
+
+def test_在榜率门槛判的是近窗口而不是累计():
+    """门槛必须按「近一个重选周期」算,不是「有史以来累计」。
+
+    这条守的是 DEC-258 最容易被改回去的地方:两种写法都跑得出数、都不报错,
+    只有一家「多年前活跃、现在不上榜」的席位能把它们区分开。
+    造一家这样的席位:前三年天天在榜,最近一年一天都没有。
+    """
+    import pandas as pd
+
+    H.use("AP")
+    days = pd.bdate_range("2021-01-04", "2024-12-31")   # 老将:早年天天在
+    recent = pd.bdate_range("2024-01-02", "2024-12-31")  # 新秀:只有最近一年
+    rows = []
+    for d in days:
+        rows.append({"trade_date": d, "member_key": "老将期货", "contract": "AP2501",
+                     "net": 100, "is_variety_total": False})
+    for d in recent:
+        rows.append({"trade_date": d, "member_key": "新秀期货", "contract": "AP2501",
+                     "net": 100, "is_variety_total": False})
+    seat = pd.DataFrame(rows)
+    px = pd.DataFrame({"contract": "AP2501",
+                       "trade_date": pd.bdate_range("2021-01-04", "2025-12-31")})
+    px["settle"] = [1000.0 + i for i in range(len(px))]
+    hi = pd.Timestamp("2025-12-31")
+
+    cumulative = H.alpha_upto(seat, px, hi, gate=False)
+    assert "老将期货" in cumulative.index, "关掉门槛时老将必须还在(否则这个用例没意义)"
+
+    gated = H.alpha_upto(seat, px, hi)
+    assert "老将期货" not in gated.index, (
+        "老将近一年一天没上榜,却通过了资格门 —— 门槛又按累计天数在判了")
