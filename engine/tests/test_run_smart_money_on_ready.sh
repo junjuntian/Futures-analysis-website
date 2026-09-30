@@ -10,7 +10,7 @@ cat >"$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"$TEST_WORK/sql-call"
 if [[ "${MOCK_DB_FAIL:-0}" == 1 ]]; then exit 1; fi
-if [[ "${MOCK_READY:-0}" == 1 ]]; then printf '1\n'; fi
+if [[ "${MOCK_READY:-0}" == 1 ]]; then printf '%s\n' "${MOCK_FINGERPRINT:-ws:LH00}"; fi
 EOF
 cat >"$work/bin/systemd-run" <<'EOF'
 #!/usr/bin/env bash
@@ -49,6 +49,9 @@ grep -q -- "--run $today" "$work/dispatches"
 grep -q "count(distinct exchange)" "$work/sql-call"
 grep -q "workspace_id" "$work/sql-call"
 grep -q "reboard_inferred" "$work/sql-call"
+grep -q "settlement_price > 0" "$work/sql-call"
+grep -q "open_interest is not null" "$work/sql-call"
+grep -q "('LH')" "$work/sql-call"
 
 if MOCK_READY=1 MOCK_RUN_FAIL=1 bash "$SMART_MONEY_READY_SCRIPT" --run "$today"; then
   echo "failed engine was marked successful" >&2
@@ -59,7 +62,17 @@ MOCK_READY=1 bash "$SMART_MONEY_READY_SCRIPT" --run "$today"
 MOCK_READY=1 bash "$SMART_MONEY_READY_SCRIPT" --run "$today"
 test "$(wc -l <"$work/runs")" -eq 2
 test -e "$SMART_MONEY_READY_STATE_DIR/$today.done"
+test "$(<"$SMART_MONEY_READY_STATE_DIR/$today.done")" == 'ws:LH00'
 MOCK_READY=1 bash "$SMART_MONEY_READY_SCRIPT" --dispatch "$today"
 test "$(wc -l <"$work/dispatches")" -eq 1
+
+# 同一天稍后补齐生猪行情/席位，应重新触发；相同输入不重复计算。
+MOCK_READY=1 MOCK_FINGERPRINT=ws:LH11 bash "$SMART_MONEY_READY_SCRIPT" --dispatch "$today"
+test "$(wc -l <"$work/dispatches")" -eq 2
+MOCK_READY=1 MOCK_FINGERPRINT=ws:LH11 bash "$SMART_MONEY_READY_SCRIPT" --run "$today"
+test "$(<"$SMART_MONEY_READY_STATE_DIR/$today.done")" == 'ws:LH11'
+MOCK_READY=1 MOCK_FINGERPRINT=ws:LH11 bash "$SMART_MONEY_READY_SCRIPT" --dispatch "$today"
+test "$(wc -l <"$work/dispatches")" -eq 2
+test "$(wc -l <"$work/runs")" -eq 3
 
 echo "smart-money ready trigger OK"
