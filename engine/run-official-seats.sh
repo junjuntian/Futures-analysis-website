@@ -225,3 +225,11 @@ else
 fi
 
 echo "[official-seats] 完成"
+# 本轮官方席位/行情可能是当天第五家。查询真实入库状态后立即启动独立引擎；
+# systemd 作业不继承本脚本的维护锁。失败不影响采集，固定 cron 仍会补跑。
+if [ -x /usr/local/sbin/run-smart-money-on-ready ]; then
+  /usr/local/sbin/run-smart-money-on-ready --dispatch "$TODAY" ||
+    echo "[official-seats] ⚠ 机构资金即时触发失败，固定 cron 将补跑" >&2
+else
+  echo "[official-seats] 机构资金即时触发脚本未安装" >&2
+fi

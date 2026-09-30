@@ -228,6 +228,12 @@ SHA(自指)。2026-08-20 我按「即将部署」的写法做了两轮,每轮都
 | 每日 15:40 | 23:40 | `run-futures-offsite-backup` —— 整库备份推 ssp,只留最新一份 |
 
 **顺序是硬要求**:引擎读的是席位表的增减量,跑在官方席位之前就会算在旧数据上。
+两条采集链在当日席位与行情入库、品种汇总和反推完成后，调用
+`run-smart-money-on-ready --dispatch YYYY-MM-DD`。同一 workspace 的 CFFEX/CZCE/DCE/SHFE
+真实逐合约席位和 CFFEX/CZCE/DCE/INE/SHFE 行情全部到齐，即由 systemd 独立启动
+机构资金引擎；同日重复采集由锁及完成标记去重。固定时刻的 `run-smart-money`
+仍保留，用于后续修订和即时触发失败时补跑。运行日志仍在
+`/var/log/futures-smart-money.log`。
 三套 cron 文件都在 `deploy/collector/`,随发布包下发——2026-08-13 迁新机时才发现
 后两套长期只存在于服务器上、靠手工安装,换机器没有任何东西保证它们会被带过去。
 

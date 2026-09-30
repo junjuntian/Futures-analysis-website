@@ -295,6 +295,16 @@ else
   echo "INFER_OFFBOARD_SKIPPED missing $INFER_OFFBOARD" >&2
 fi
 
+# 席位与行情都已入库、汇总和反推已完成。此刻若五所齐，马上让独立的
+# systemd 作业计算机构资金；不要等 16:40/18:10 的固定 cron，也不要让
+# 6~8 分钟的计算阻塞后面的基差与套利监控。异常只告警，原 cron 继续兜底。
+if [ -x /usr/local/sbin/run-smart-money-on-ready ]; then
+  /usr/local/sbin/run-smart-money-on-ready --dispatch "$COLLECTION_DATE" ||
+    echo "SMART_MONEY_READY_FAILED $COLLECTION_DATE，固定 cron 将补跑" >&2
+else
+  echo "SMART_MONEY_READY_SKIPPED 触发脚本未安装" >&2
+fi
+
 # 现货价与基差(DEC-074)。生意社数据经 akshare,跑在 collector 镜像里。
 #
 # 排在套利监控之前只是让日志顺序好读:基差与监控快照互不依赖(监控读期货价,

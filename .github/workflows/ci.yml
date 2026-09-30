@@ -67,7 +67,10 @@ jobs:
         # 抓到过好几处）。shellcheck 是它们唯一的门禁。
         # ubuntu-latest 镜像预装 shellcheck，不必自己装。
         # -S warning：info 级噪音多（大量风格建议），warning 起步才值得挡构建。
-        run: shellcheck -S warning deploy/collector/*.sh ops/*.sh rust/tests/phase_*_e2e.sh
+        run: shellcheck -S warning deploy/collector/*.sh ops/*.sh rust/tests/phase_*_e2e.sh engine/run-smart-money-on-ready.sh engine/tests/*.sh
+
+      - name: Smart-money ready trigger
+        run: bash engine/tests/test_run_smart_money_on_ready.sh
 
       - name: Rust format
         working-directory: rust

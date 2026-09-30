@@ -9,11 +9,12 @@
 
 ## 当前生产状态
 
-- **生产 = `f65925d`**(2026-09-16,DEC-253 接外盘原油行情;同日更早一版 `cfa0cc1` 是 DEC-252 燃油拐头档改 5%),站点 `https://shejimao.trade`,服务器别名 `qh`。
+- **生产 = `f65925d`**(2026-09-23,DEC-258 席位组在榜率门槛;五所齐即时触发尚待本次发布),站点 `https://shejimao.trade`,服务器别名 `qh`。
   这一行写的是**上一次成功部署的 SHA**,**SHA 由部署流水线自动补提交**(`docs: LATEST 记为已部署的 xxx`),
-  但**括号里的说明它不会改**,要人工跟上 —— 2026-09-16 接手时发现 SHA 已是 f65925d、说明还停在 09-06。
+  但**括号里的说明它不会改**,要人工跟上（2026-09-30 已核对）。
   preflight 有门禁盯着这条等式(DEC-100),对不上就红。
 - 发布照 `docs/RELEASE_PROCESS.md`,必跑 `ops/preflight-deploy.sh --dispatch`。
+- **五所齐即时计算**(DEC-259,2026-09-30)：collector / official-seats 关键入库后检查当日同空间四所席位、五所行情；齐备即独立启动机构资金引擎，重复采集去重，原固定 cron 保留补跑。
 - 引擎产物:`{hog,jm,fg,jd,sa,fu,ap}_signals.json`、`signals.json`(金银)、`pair_fgsa.json`。
 - **品种共 13 个**(`product_instrument_scope`):AU/AG/AP/FG/SA/**MA**/I/IH/JD/JM/LH/FU/SC。
   其中 **MA(甲醇)与 SC(原油)只有数据、没有引擎**;FU 有引擎但回测是亏的(页面顶格挂着警告);**AP(苹果)2026-09-22 上机构资金页**,回测跑赢基准但未证明。
