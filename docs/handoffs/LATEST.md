@@ -15,6 +15,7 @@
   preflight 有门禁盯着这条等式(DEC-100),对不上就红。
 - 发布照 `docs/RELEASE_PROCESS.md`,必跑 `ops/preflight-deploy.sh --dispatch`。
 - **五所齐即时计算**(DEC-259/260,2026-09-30)：collector / official-seats 关键入库后检查当日同空间四所席位、五所行情；齐备即独立启动机构资金引擎。交易所齐不代表生猪等每个品种齐，后续品种的可用行情或席位补齐会改变输入指纹并立即重算；原固定 cron 保留处理数值修订。
+- **金银席位展示口径**(DEC-261,待发布)：机构资金事件是已公布合约的官方增减，黄金白银报告表的昨/今以榜内可见仓位为基础（昨仓可含反推）；部分合约掉榜时二者不可直接对比。只改文案，信号规则不变。
 - 引擎产物:`{hog,jm,fg,jd,sa,fu,ap}_signals.json`、`signals.json`(金银)、`pair_fgsa.json`。
 - **品种共 13 个**(`product_instrument_scope`):AU/AG/AP/FG/SA/**MA**/I/IH/JD/JM/LH/FU/SC。
   其中 **MA(甲醇)与 SC(原油)只有数据、没有引擎**;FU 有引擎但回测是亏的(页面顶格挂着警告);**AP(苹果)2026-09-22 上机构资金页**,回测跑赢基准但未证明。

@@ -543,11 +543,11 @@ onMounted(async () => {
 
         <div class="section">
           <h2>七席位近期动态</h2>
-          <div class="desc">最近两周的有效增多事件(权重为当年生效值)。</div>
+          <div class="desc">最近两周按交易所已公布合约的增减识别的事件(权重为当年生效值)。合约掉出前 20 后，其当日增减不可见；下表手数不等于该席位全品种总仓变化。</div>
           <div class="scroll-x">
             <table>
               <thead>
-                <tr><th>日期</th><th>席位</th><th>品种</th><th>动作</th><th>强度</th><th>权重</th><th>单日净增</th></tr>
+                <tr><th>日期</th><th>席位</th><th>品种</th><th>动作</th><th>强度</th><th>权重</th><th>已公布合约净增</th></tr>
               </thead>
               <tbody>
                 <tr v-for="(row, index) in recentActivity" :key="index">
