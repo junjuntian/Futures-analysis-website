@@ -14,6 +14,7 @@ volume_basis=single:中金所自 2020 起单边计量。
 
 import argparse
 import csv
+import signal
 import sys
 import time
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,25 @@ COLUMNS = [
 ]
 # 交易所官网文件,一天一个请求;akshare 内部自己会失败重试,这里只按秒歇一下。
 PACE = 1.0
+REQUEST_TIMEOUT_SECONDS = 40
+
+
+def _raise_request_timeout(signum, frame):
+    raise TimeoutError("CFFEX daily request exceeded its deadline")
+
+
+def fetch_daily(day):
+    """Bound each official request so a stalled archive cannot hold the shared lock."""
+    if not hasattr(signal, "SIGALRM"):
+        raise RuntimeError("CFFEX daily collection requires a POSIX signal alarm")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _raise_request_timeout)
+    signal.alarm(REQUEST_TIMEOUT_SECONDS)
+    try:
+        return akshare.get_cffex_daily(date=day.strftime("%Y%m%d"))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def instrument_of(symbol: str) -> str:
@@ -66,7 +86,7 @@ def main() -> int:
                 continue
             time.sleep(PACE)
             try:
-                frame = akshare.get_cffex_daily(date=day.strftime("%Y%m%d"))
+                frame = fetch_daily(day)
             except Exception as error:  # noqa: BLE001 - 节假日没有文件,如实报继续
                 print(f"FAIL {day}: {type(error).__name__}", file=sys.stderr, flush=True)
                 failed += 1
